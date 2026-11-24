@@ -22,7 +22,8 @@ namespace ACE.Server.ThreadDungeons
     ///   * BODY-PART DAMAGE and ARMOUR - a RATIO against the creature's own maximum, applied to every part, so
     ///     the creature's authored part profile keeps its shape.
     /// HEALTH is deliberately absent: callers floor health to BandMedianHealth themselves, before their
-    /// multiplier. SPELLS (DungeonSpellTier.Raise) are a Threads-only axis scaled by the caller.
+    /// multiplier. SPELLS (DungeonSpellTier.Raise) are scaled by the caller (Threads, and World Events with
+    /// world_events_threads_uplift on).
     /// </summary>
     public static class BandUplift
     {
@@ -58,10 +59,11 @@ namespace ACE.Server.ThreadDungeons
 
         // ---- Threads-only attribute uplift (dynamic_dungeons_uplift_attributes) -------------------------------
         //
-        // World Events share Apply above and must not change, so everything below is a SEPARATE entry point that
-        // only ThreadDungeonSpawner calls. Two steps because the spawner's ORDER matters (see the call sites):
-        // RaiseAttributes runs BEFORE the health block (Endurance feeds max health), TopUpEffectiveSkills runs
-        // AFTER Apply (it measures against the creature's final InitLevels).
+        // World Events share Apply above and it must not change, so everything below is a SEPARATE entry point,
+        // called by ThreadDungeonSpawner and - with world_events_threads_uplift on - by WorldEventSpawner.ApplyBandUplift.
+        // Two steps because the spawner's ORDER matters (see the call sites): RaiseAttributes runs BEFORE the
+        // health write (Endurance feeds max health), TopUpEffectiveSkills runs AFTER Apply (it measures against
+        // the creature's final InitLevels).
 
         /// <summary>The six primary attributes, in the order Creature builds its wrappers.</summary>
         internal static readonly ACE.Entity.Enum.Properties.PropertyAttribute[] PrimaryAttributes =

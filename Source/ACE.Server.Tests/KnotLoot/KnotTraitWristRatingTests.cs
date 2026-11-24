@@ -233,7 +233,7 @@ namespace ACE.Server.Tests.KnotLoot
                 ("public int GetDamageRating()", "Damage",
                     "return damageRating + equipment + knotWrist + enchantments - weaknessRating + augBonus + lumAugBonus + classAbilityBonus + healBoostConversion + critDamageConversion;"),
                 ("public int GetDamageResistRating(CombatType? combatType = null, bool directDamage = true)", "DamageResist",
-                    "return damageResistRating + equipment + knotWrist + enchantments - netherDotDamageRating + augBonus + lumAugBonus + specBonus + classAbilityBonus;"),
+                    "return damageResistRating + equipment + knotWrist + enchantments - netherDotDamageRating + augBonus + lumAugBonus + specBonus + classAbilityBonus + critResistConversion;"),
             })
             {
                 var body = Flat(Code(PooledLootSourceText.MethodBody(source, signature)));

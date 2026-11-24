@@ -55,10 +55,16 @@ namespace ACE.Server.ClassAbilities.Abilities
         // Flat 1/1/1 (user, 2026-07-18), matching the Enhanced skill/attribute/vital family.
         private static readonly int[] BundleCost = { 1, 1, 1 };
 
+        /// <summary>"A", "A and B", "A, B and C": commas, then "and" before the last item.</summary>
+        private static string JoinSkills(IReadOnlyList<string> names) =>
+            names.Count <= 1
+                ? string.Concat(names)
+                : string.Join(", ", names.Take(names.Count - 1)) + " and " + names[names.Count - 1];
+
         private static BundleStatAbility Make(ClassAbilityId id, ClassAbilityClass abilityClass, int tier, string name,
             string displayName, Skill[] skills)
         {
-            var list = string.Join(", ", skills.Select(s => s.ToSentence()));
+            var list = JoinSkills(skills.Select(s => s.ToSentence()).ToList());
             var definition = new ClassAbilityDefinition
             {
                 Id = id,
@@ -66,7 +72,11 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Tier = tier,
                 Name = name,
                 DisplayName = displayName,
-                Description = $"Adds +10, then +25, then +50 at ranks 1-3 to your base {list}. Counts toward wield requirements.",
+                DescriptionTemplate = $"Raises your base {list}. Counts toward wield requirements.",
+                // One tail per rank, from the same TierBonus table the bonus is applied from.
+                RankTailTemplate = Enumerable.Range(1, EnhancedStatAbility.MaxTier)
+                    .Select(rank => $"+{EnhancedStatAbility.BonusForRank(rank)} to each")
+                    .ToArray(),
                 MaxRank = EnhancedStatAbility.MaxTier,
                 CostPerRank = BundleCost,
                 Implemented = true,

@@ -97,7 +97,10 @@ namespace ACE.Server.Entity
             var slots = DuoSlotsHook(gem);
 
             if (slots.Count == 0)
+            {
                 sb.AppendLine("Absorbs two summoning items into one.");
+                sb.AppendLine("Without Summon 2x, only the first absorbed summon is called.");
+            }
 
             var n = 1;
             foreach (var slot in slots)
@@ -110,6 +113,10 @@ namespace ACE.Server.Entity
             var element = (UiEffects?)gem.GetProperty(PropertyInt.UiEffects);
             if (slots.Count > 0)
                 AppendElement(sb, element, "");
+
+            // a gem with one slot filled cannot summon at all (PetDevice refuses fewer than two sources), so only a full gem says this
+            if (slots.Count >= 2)
+                sb.AppendLine("Without Summon 2x, only Summon 1 is called.");
 
             return sb.ToString().TrimEnd('\n');
         }
@@ -145,7 +152,15 @@ namespace ACE.Server.Entity
 
                 sb.AppendLine($"{indent}Spell 1: {SpellText(source.BoundSpell1)}");
                 sb.AppendLine($"{indent}Spell 2: {SpellText(source.BoundSpell2)}");
+
+                var manaRush = ManaRushText(weenie);
+                if (manaRush != null)
+                    sb.AppendLine($"{indent}{manaRush}");
             }
+
+            var taunt = TauntText(weenie);
+            if (taunt != null)
+                sb.AppendLine($"{indent}{taunt}");
 
             if (element.HasValue)
                 AppendElement(sb, element, indent);
@@ -181,6 +196,63 @@ namespace ACE.Server.Entity
         private static string SpellText(uint? spellId)
         {
             return spellId.HasValue ? SpellNameLookup(spellId.Value) : "unbound slot";
+        }
+
+        /// <summary>
+        /// The Mana Rush line for a caster pet whose MonsterCombatEffects carries a "ramp axis=castspeed on=cast" record
+        /// (the Revenant Lich), read from the authored numbers so a retune of the content string retunes the text; null
+        /// when the pet carries none. The figures are the authored per= and max= (the server's
+        /// monster_effect_ramp_stack_cap and monster_effect_speed_cap can only lower them). The fade is a range, not a
+        /// point: RampEffect.OnHeartbeat drops the pool on the first heartbeat at or after window= seconds with no cast,
+        /// and the heartbeat runs every HeartbeatInterval seconds (WorldObject.InitializeHeartbeats: 5 when unset), so
+        /// the bonus fades between window and window + HeartbeatInterval seconds after the last cast.
+        /// </summary>
+        internal static string ManaRushText(Weenie weenie)
+        {
+            if (weenie?.PropertiesString == null || !weenie.PropertiesString.TryGetValue(PropertyString.MonsterCombatEffects, out var effects) || string.IsNullOrWhiteSpace(effects))
+                return null;
+
+            MonsterEffects.MonsterEffectParser.Parse(effects, out var specs, out _);
+
+            foreach (var spec in specs)
+            {
+                if (spec.Kind != "ramp" || !string.Equals(spec.GetString("axis"), "castspeed", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (!spec.GetFlags("on", MonsterEffects.MonsterEffectTrigger.Hit).HasFlag(MonsterEffects.MonsterEffectTrigger.Cast))
+                    continue;
+
+                var per = spec.GetDouble("per", 0.0);
+                var max = spec.GetInt("max", 0);
+                var window = spec.GetDouble("window", 0.0);
+
+                if (per <= 0.0 || max <= 0)
+                    continue;
+
+                var inv = System.Globalization.CultureInfo.InvariantCulture;
+
+                var heartbeat = 5.0;
+                if (weenie.PropertiesFloat != null && weenie.PropertiesFloat.TryGetValue(PropertyFloat.HeartbeatInterval, out var hb) && hb > 0.0)
+                    heartbeat = hb;
+
+                return $"Mana Rush: each spell it casts speeds its casting by {(per * 100.0).ToString("0.#", inv)}%, up to {max} times (+{(per * max * 100.0).ToString("0.#", inv)}%), and the bonus fades {window.ToString("0.#", inv)}-{(window + heartbeat).ToString("0.#", inv)} s after its last cast";
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// The Taunt line for a Tank pet whose weenie carries SummonTauntInterval (PropertyFloat 9021) above zero, built
+        /// from the authored interval and CombatPet.MaxTauntTargets; null for a pet without the property.
+        /// </summary>
+        internal static string TauntText(Weenie weenie)
+        {
+            if (weenie?.PropertiesFloat == null || !weenie.PropertiesFloat.TryGetValue(PropertyFloat.SummonTauntInterval, out var interval) || interval <= 0.0)
+                return null;
+
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+
+            return $"Taunt: every {interval.ToString("0.#", inv)} s, draws up to {ACE.Server.WorldObjects.CombatPet.MaxTauntTargets} enemies within {ACE.Server.WorldObjects.CombatPet.TauntPulseRadius.ToString("0.#", inv)} m that are already fighting you or your summons onto itself";
         }
 
         private static uint MagicSkillOf(Weenie weenie)

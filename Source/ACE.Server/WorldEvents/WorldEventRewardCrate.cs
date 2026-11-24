@@ -40,6 +40,26 @@ namespace ACE.Server.WorldEvents
         /// <summary>Hard ceiling on the objects one opening may create (m tops out at 2, so a real roll is far below it).</summary>
         public const int MaxObjects = 60;
 
+        /// <summary>The loaded rewards.json profile named <paramref name="id"/>, or null when the store is not loaded or has no such row.</summary>
+        public static RewardDef TryGetProfile(string id)
+        {
+            var rewards = WorldEventManager.Store?.Rewards;
+            return id != null && rewards != null && rewards.TryGetValue(id, out var def) ? def : null;
+        }
+
+        /// <summary>True when the axis store (and so rewards.json) is loaded.</summary>
+        public static bool ProfileStoreLoaded => WorldEventManager.Store != null;
+
+        /// <summary>
+        /// Stamps a crate with the profile and multiplier <see cref="Open"/> reads (PropertyString.WorldEventRewardProfile,
+        /// PropertyFloat.WorldEventRewardMultiplier). Stamp BEFORE the crate is given.
+        /// </summary>
+        public static void Stamp(WorldObject crate, string profile, double multiplier)
+        {
+            crate.SetProperty(PropertyFloat.WorldEventRewardMultiplier, multiplier);
+            crate.SetProperty(PropertyString.WorldEventRewardProfile, profile);
+        }
+
         /// <returns>true when this was an event reward crate (opened or refused); false when UseGem should continue.</returns>
         public static bool TryHandleUse(WorldObject crate, Player player)
         {

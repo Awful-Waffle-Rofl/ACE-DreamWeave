@@ -377,7 +377,7 @@ namespace ACE.Server.WorldEvents.Objectives
             {
                 o.Run.PulsePortals(o.evt.Spawner.LiveSceneObjects);
 
-                WorldEventAnnouncer.Local(o.evt, o.WaveStartText(waveNumber));
+                o.evt.AnnounceLocal(o.WaveStartText(waveNumber));
 
                 o.AnnounceWave(plan, waveNumber, target);
             }
@@ -772,7 +772,7 @@ namespace ACE.Server.WorldEvents.Objectives
 
             public void Announce(string line) => worldEvent.AnnounceInRun(line);
 
-            public void AnnounceLocal(string line) => WorldEventAnnouncer.Local(worldEvent, line);
+            public void AnnounceLocal(string line) => worldEvent.AnnounceLocal(line);
         }
     }
 }

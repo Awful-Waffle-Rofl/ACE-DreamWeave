@@ -133,6 +133,22 @@ namespace ACE.Server.Entity.Facets
             return skills != null;
         }
 
+        /// <summary>
+        /// The skills_Json value of a RESET MARKER row (/facet reset). It is a JSON OBJECT, not the array every
+        /// real build stores, so <see cref="TryDeserializeSkills"/> reads it as unparseable and returns false:
+        /// any code path that forgets to test <see cref="IsResetMarker"/> first lands on the existing
+        /// "Contact staff" refusal in Player.TrySwitchFacet and never applies an empty build. The marker fails
+        /// SAFE by construction, not by every reader remembering it.
+        /// </summary>
+        public const string ResetMarkerSkillsJson = "{\"facetReset\":1}";
+
+        /// <summary>
+        /// True when <paramref name="skillsJson"/> is exactly <see cref="ResetMarkerSkillsJson"/> (ordinal
+        /// compare, no trimming or case folding - the writer is this server and nothing else).
+        /// </summary>
+        public static bool IsResetMarker(string skillsJson)
+            => string.Equals(skillsJson, ResetMarkerSkillsJson, StringComparison.Ordinal);
+
         public static string SerializeAbilities(IReadOnlyDictionary<string, int> abilities)
             => JsonSerializer.Serialize(abilities ?? new Dictionary<string, int>(), Options);
 

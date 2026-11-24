@@ -83,7 +83,8 @@ namespace ACE.Server.WorldEvents
         /// <summary>
         /// A World Event line during the run (waves, progress, the objective's own lines): world-wide, or only to the players
         /// within <see cref="EffectiveParticipantRadius"/> when <see cref="ObjectiveAnnouncesLocally"/>. The teaser, start,
-        /// outcome and time-left lines never come here; they stay world-wide. World thread.
+        /// outcome and time-left lines never come here; they stay world-wide. A private Avatar run sends these to its allegiance
+        /// instead (plus the people around the anchor when it was bought announced). World thread.
         /// </summary>
         public void AnnounceInRun(string line)
         {
@@ -91,9 +92,9 @@ namespace ACE.Server.WorldEvents
                 return;
 
             if (ObjectiveAnnouncesLocally)
-                WorldEventAnnouncer.Local(this, line);
+                AnnounceLocal(line);
             else
-                WorldEventAnnouncer.Broadcast(line);
+                AnnounceInRunWide(line);
         }
 
         /// <summary>The objective's <see cref="Objectives.IWorldEventObjective.CountsStaffTowardAudience"/>; false without one and when it throws (logged).</summary>
@@ -107,6 +108,22 @@ namespace ACE.Server.WorldEvents
             {
                 log.Error($"[WORLDEVENT] run={RunId} objective CountsStaffTowardAudience threw; staff do not count", ex);
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Tells the objective a source is about to enter the world (<see cref="Objectives.IWorldEventObjective.OnSourceSpawning"/>).
+        /// A throwing hook is logged and read as its no-op default; the source still spawns. World thread.
+        /// </summary>
+        internal void NotifyObjectiveSourceSpawning(WorldObjects.Creature source)
+        {
+            try
+            {
+                Objective?.OnSourceSpawning(source);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} objective OnSourceSpawning threw; the source spawns unguarded", ex);
             }
         }
 

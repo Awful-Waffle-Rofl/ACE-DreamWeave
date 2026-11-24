@@ -726,6 +726,22 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // Cloak Mantle / Proc Amplifier gems: stamp a cloak and are consumed. Keyed on the property the gem
+            // carries, not on a wcid. UseObjectOnTarget sends the use-done event on every exit.
+            if (CloakMantleApplicator.IsMantle(this) || CloakMantleApplicator.IsAmplifier(this))
+            {
+                CloakMantleApplicator.UseObjectOnTarget(player, this, target);
+                return;
+            }
+
+            // Jewelers Aspect Gem: gives an unaspected ring, bracelet or necklace its first aspect and is consumed. Keyed on the
+            // PropertyBool the gem carries, not on a wcid. UseObjectOnTarget sends the use-done event on every exit.
+            if (JewelryAspectApplicator.IsAspectGem(this))
+            {
+                JewelryAspectApplicator.UseObjectOnTarget(player, this, target);
+                return;
+            }
+
             // Mule Form Token: used ON a creature to attune it. Keyed on the PropertyBool, not on the
             // wcid the two neighbours above key on, so a second token weenie is pure content.
             //

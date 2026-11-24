@@ -35,10 +35,10 @@ namespace ACE.Server.Tests
         private const float Tolerance = 1e-5f;
 
         private const string ExpectedDescription =
-            "Any weapon attack you land marks the target for 10 seconds. A marked creature takes 2/4/6/8/10% more " +
-            "damage (by rank) from every source and damage type, including your fellows and pets. The mark is its " +
-            "own debuff: it stacks with Vulnerability, Imperil and rending weapons. If several archers mark a " +
-            "target, the strongest mark applies. Higher Assess Creature multiplies the bonus.";
+            "Any weapon hit you land marks the target for 10 seconds. A marked creature takes more damage from " +
+            "every source and damage type, including your fellows and pets. The mark is its own debuff, so it " +
+            "stacks with Vulnerability, Imperil and rending weapons. When several archers mark one target, only " +
+            "the strongest mark counts.";
 
         private static uint nextCasterGuid = 0x70000500;
 
@@ -565,7 +565,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void Description_IsTheRulingText()
         {
-            Assert.AreEqual(ExpectedDescription, new HuntersMarkAbility().Definition.Description);
+            Assert.AreEqual(ExpectedDescription, ClassAbilityText.Describe(new HuntersMarkAbility().Definition, ClassAbilityText.Defaults));
         }
     }
 }

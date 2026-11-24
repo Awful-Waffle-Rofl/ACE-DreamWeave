@@ -202,6 +202,22 @@ namespace ACE.Server.Tests.Pinnacles
         }
 
         [TestMethod]
+        public void HelpText_ListsEveryHarbingerOverrideKey_AndNamesBothKinds()
+        {
+            var attribute = System.Reflection.CustomAttributeExtensions.GetCustomAttributes<ACE.Server.Command.CommandHandlerAttribute>(
+                typeof(PinnacleCommands).GetMethod(nameof(PinnacleCommands.HandlePinnacle))).Single(a => a.Command == "pinnacle");
+            var help = attribute.Usage;
+            var words = new System.Collections.Generic.HashSet<string>(System.Text.RegularExpressions.Regex.Split(help, @"[^a-z0-9_]+"), StringComparer.Ordinal);
+
+            Assert.IsTrue(ACE.Server.Pinnacles.Harbinger.HarbingerOverrides.Keys.Count > 0);
+            foreach (var key in ACE.Server.Pinnacles.Harbinger.HarbingerOverrides.Keys)
+                Assert.IsTrue(words.Contains(key), $"the /pinnacle help text names {key}");
+
+            StringAssert.Contains(help, "(matron and harbinger)");
+            Assert.IsFalse(help.Contains("(matron only)"));
+        }
+
+        [TestMethod]
         public void Empty_Null_Unknown_Refused()
         {
             Assert.IsFalse(PinnacleCommandRequest.Parse(null).IsValid);

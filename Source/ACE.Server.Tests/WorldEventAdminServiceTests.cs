@@ -431,9 +431,135 @@ namespace ACE.Server.Tests
         private static List<string> GoalIds(JsonElement catalog) =>
             catalog.GetProperty("goals").EnumerateArray().Select(g => g.GetProperty("id").GetString()).ToList();
 
+        private static WorldEventAxisStore ShippedStore()
+        {
+            var dir = new DirectoryInfo(AppContext.BaseDirectory);
+
+            while (dir != null && !File.Exists(Path.Combine(dir.FullName, "Content", "events", "axes", "goals.json")))
+                dir = dir.Parent;
+
+            Assert.IsNotNull(dir, $"Could not find Content/events/axes/goals.json by walking up from {AppContext.BaseDirectory}");
+
+            return WorldEventAxisStore.Load(Path.Combine(dir.FullName, "Content", "events", "axes"));
+        }
+
+        /// <summary>
+        /// The web Admin panel offers World Events Hold through the shipped envoy_muster source, and only while
+        /// world_events_hold_enabled is on: off, both the source (it offers nothing else) and defend_envoys are left out.
+        /// </summary>
+        [TestMethod]
+        public void Catalog_OffersEnvoyMusterAndDefendEnvoys_OnlyWhileHoldIsOn()
+        {
+            var store = ShippedStore();
+            var saved = WorldEventComposer.HoldEnabledReader;
+
+            try
+            {
+                WorldEventManager.InitializeWith(() => (store, Catalog()));
+
+                WorldEventComposer.HoldEnabledReader = _ => true;
+                var on = Parse(Service().Catalog().Body);
+
+                CollectionAssert.Contains(SourceIds(on), "envoy_muster");
+                CollectionAssert.Contains(GoalIds(on), "defend_envoys");
+
+                var muster = on.GetProperty("sources").EnumerateArray().Single(s => s.GetProperty("id").GetString() == "envoy_muster");
+                CollectionAssert.AreEqual(new[] { "defend_envoys" },
+                    muster.GetProperty("compatible_goals").EnumerateArray().Select(g => g.GetString()).ToArray());
+                Assert.AreEqual(0.0, muster.GetProperty("clearance_radius").GetDouble(), "a Hold run places its own scene; the source claims no room");
+
+                WorldEventComposer.HoldEnabledReader = _ => false;
+                var off = Parse(Service().Catalog().Body);
+
+                CollectionAssert.DoesNotContain(SourceIds(off), "envoy_muster");
+                CollectionAssert.DoesNotContain(GoalIds(off), "defend_envoys");
+                CollectionAssert.Contains(SourceIds(off), "rift", "the switch hides Hold only");
+                CollectionAssert.Contains(GoalIds(off), "kill_count", "the switch hides Hold only");
+            }
+            finally
+            {
+                WorldEventComposer.HoldEnabledReader = saved;
+            }
+        }
+
+        /// <summary>
+        /// A source offering a Hold goal AND another goal stays in the catalog while the switch is off, listing only the
+        /// other goal (no shipped web source is mixed; the shipped store is loaded fresh and rift given defend_envoys here).
+        /// </summary>
+        [TestMethod]
+        public void Catalog_MixedSource_SwitchOff_KeepsTheSource_WithoutTheHoldGoal()
+        {
+            var store = ShippedStore();
+            store.Sources["rift"].CompatibleGoals.Add("defend_envoys");
+            var saved = WorldEventComposer.HoldEnabledReader;
+
+            try
+            {
+                WorldEventManager.InitializeWith(() => (store, Catalog()));
+                WorldEventComposer.HoldEnabledReader = _ => false;
+
+                var rift = Parse(Service().Catalog().Body).GetProperty("sources").EnumerateArray()
+                    .Single(s => s.GetProperty("id").GetString() == "rift");
+                var goals = rift.GetProperty("compatible_goals").EnumerateArray().Select(g => g.GetString()).ToList();
+
+                CollectionAssert.DoesNotContain(goals, "defend_envoys");
+                CollectionAssert.Contains(goals, "destroy_source");
+            }
+            finally
+            {
+                WorldEventComposer.HoldEnabledReader = saved;
+            }
+        }
+
+        /// <summary>A web start pinned to a Hold goal refuses a pinned boss (Hold brings its own finale boss); none or blank is accepted.</summary>
+        [TestMethod]
+        public void HoldGoal_RefusesAPinnedBoss_AcceptsNoneOrBlank()
+        {
+            var store = ShippedStore();
+
+            foreach (var boss in new[] { "family_champion", "auto" })
+            {
+                var refused = WorldEventAdminService.TryBuildRequest(Body(source: "envoy_muster", goal: "defend_envoys", boss: boss), store,
+                    RealmZeroOnly, 180, "t", out _, out _);
+
+                Assert.AreEqual(MarketError.WorldEventRefused, refused?.Error, boss);
+                StringAssert.Contains(refused.Reason, "finale boss", boss);
+            }
+
+            foreach (var boss in new[] { null, "none" })
+            {
+                var accepted = WorldEventAdminService.TryBuildRequest(Body(source: "envoy_muster", goal: "defend_envoys", boss: boss), store,
+                    RealmZeroOnly, 180, "t", out _, out _);
+
+                Assert.IsNull(accepted, $"{boss ?? "blank"}: {accepted?.Reason}");
+            }
+        }
+
+        /// <summary>
+        /// envoy_muster is web-startable and fits at a spot too close to the landblock edge for ambush (whose 45 m edges
+        /// geometry is why ambush stays off the web): the Hold start-spot rule, not the source, picks where the run stands.
+        /// </summary>
+        [TestMethod]
+        public void EnvoyMuster_IsWebStartable_AndFitsWhereAmbushDoesNot()
+        {
+            var store = ShippedStore();
+            var muster = store.Sources["envoy_muster"];
+            var x = WorldEventAdminService.EdgeMarginFor(muster) + 0.01;
+
+            Assert.IsTrue(muster.WebStartable);
+            Assert.IsFalse(store.Sources["ambush"].WebStartable, "ambush stays off the web");
+            Assert.IsFalse(WorldEventAdminService.SourceFits(x, 96, store.Sources["ambush"]), "precondition: ambush cannot stand here");
+
+            var accepted = WorldEventAdminService.TryBuildRequest(Body(source: "envoy_muster", goal: "defend_envoys", location: Location(x: x)), store,
+                RealmZeroOnly, 180, "t", out var request, out _);
+
+            Assert.IsNull(accepted, accepted?.Reason);
+            CollectionAssert.Contains(request.AllowedSourceIds.ToList(), "envoy_muster");
+        }
+
         /// <summary>
         /// World Events Hold H6: the catalog's goals are the goals its (web-startable) sources offer, so a goal listed only by
-        /// a non-web source (defend_envoys, on ambush) is never a dead choice in the panel.
+        /// a non-web source is never a dead choice in the panel.
         /// </summary>
         [TestMethod]
         public void Catalog_ListsOnlyTheGoalsItsSourcesOffer()
@@ -1294,6 +1420,75 @@ namespace ACE.Server.Tests
 
             Assert.AreEqual($"Zaikhal ({position.GetMapCoordStr()})", WorldEventTownIndex.DescribeLabeled("Zaikhal", position));
             Assert.AreEqual(WorldEventTownIndex.Describe(position), WorldEventTownIndex.DescribeLabeled("  ", position));
+        }
+
+        // ---- weighted random: the web filter renormalizes (TECH-DESIGN 5.3) ----
+
+        [TestMethod]
+        public void Random_WebFilter_RenormalizesTheWeightedShares()
+        {
+            // Web-startable sources are everything but ambush; rift weighs 0. envoy_muster (the panel's door to defend_envoys,
+            // #2112) is its own bucket, so with Hold ON the web roll is 4 buckets at 25% each; with Hold OFF it has no
+            // candidate (its only goal is Hold-gated) and the other three renormalize to a third each.
+            var on = WebRollShares(holdEnabled: true);
+            CollectionAssert.AreEquivalent(new[] { "portal", "sky_rift", "weave_spiral", "envoy_muster" }, on.Keys.ToList(), "hold on");
+
+            foreach (var kv in on)
+                Assert.AreEqual(0.25, kv.Value, 0.03, "hold on: " + kv.Key);
+
+            var off = WebRollShares(holdEnabled: false);
+            CollectionAssert.AreEquivalent(new[] { "portal", "sky_rift", "weave_spiral" }, off.Keys.ToList(), "hold off: envoy_muster has no candidate");
+
+            foreach (var kv in off)
+                Assert.AreEqual(1.0 / 3.0, kv.Value, 0.03, "hold off: " + kv.Key);
+        }
+
+        private static Dictionary<string, double> WebRollShares(bool holdEnabled)
+        {
+            var dir = new DirectoryInfo(AppContext.BaseDirectory);
+
+            while (dir != null && !File.Exists(Path.Combine(dir.FullName, "Content", "events", "axes", "goals.json")))
+                dir = dir.Parent;
+
+            Assert.IsNotNull(dir, $"could not find Content/events/axes by walking up from {AppContext.BaseDirectory}");
+
+            var store = WorldEventAxisStore.Load(Path.Combine(dir.FullName, "Content", "events", "axes"));
+            var catalog = WorldEventHoldComposerGateTests.CatalogFor(store.Families.Keys.OrderBy(k => k, StringComparer.Ordinal).First());
+            var saved = WorldEventComposer.HoldEnabledReader;
+            var counts = new Dictionary<string, int>();
+            const int rolls = 4000;
+            var rng = new Random(20261116);
+
+            try
+            {
+                WorldEventComposer.HoldEnabledReader = _ => holdEnabled;
+
+                // What the web path hands the composer: every web-startable source that fits (here: not ambush, not rift).
+                var request = new WorldEventRequest
+                {
+                    Random = true,
+                    AllowedSourceIds = store.Sources.Values.Where(s => s.WebStartable && s.Id != "rift").Select(s => s.Id).ToList(),
+                    AnchorPosition = new ACE.Entity.Position(0x016C019E, 10f, 10f, 0f, 0f, 0f, 0f, 1f, 0),
+                    AnchorLabel = "the test anchor",
+                    Invoker = "test"
+                };
+
+                for (var i = 0; i < rolls; i++)
+                {
+                    Assert.IsTrue(WorldEventComposer.TryCompose(store, catalog, request, out var composition, out var error, rng), error);
+
+                    var bucket = composition.Source.RandomGroup ?? composition.Source.Id;
+                    counts[bucket] = counts.GetValueOrDefault(bucket) + 1;
+                }
+            }
+            finally
+            {
+                WorldEventComposer.HoldEnabledReader = saved;
+            }
+
+            Console.WriteLine($"web roll shares (hold {holdEnabled}): " + string.Join(", ", counts.OrderBy(k => k.Key).Select(kv => $"{kv.Key}={kv.Value / (double)rolls:P1}")));
+
+            return counts.ToDictionary(kv => kv.Key, kv => kv.Value / (double)rolls);
         }
     }
 }

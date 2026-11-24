@@ -10,9 +10,11 @@ using ACE.Server.WorldObjects;
 namespace ACE.Server.Entity
 {
     /// <summary>
-    /// Marketplace "Tinkerer's Inspiration" pedestal - a free, no-cooldown static prop (wcid 1002761).
+    /// Marketplace "Tinkerer's Inspiration" buff - a free, no-cooldown pedestal prop (wcid 1002761) and its hookable inventory twin (wcid 1002770).
     /// Use-dispatched from <see cref="WorldObjects.GenericObject.ActOnUse"/>, gated on
     /// <see cref="PropertyBool.TinkerersInspiration"/> (9037) being true on the station.
+    /// Also dispatched from <see cref="WorldObjects.Hooker.ActOnUse"/> for the hookable variant (wcid 1002770),
+    /// a type-64 Hooker that can hang on a house floor or yard hook and be used there.
     ///
     /// On use, it lays down five buffs on the player for 60 seconds: retail Brilliance (2348, +50 Focus, value
     /// untouched - only the duration is ours) and the four level-8 "Incantation of ... Tinkering Expertise Self"
@@ -33,6 +35,13 @@ namespace ACE.Server.Entity
     ///    player's own cast (caster = the player). The player's own entry is therefore never touched: it
     ///    keeps ticking its own clock as an independent layer for the same (category, spell id), and simply
     ///    resumes being the visible top layer once our higher-power entry expires.
+    ///
+    /// That last part holds on the SERVER only by itself. The client keeps one timed entry per spell id, so our
+    /// layer overwrites the player's own cast there (CEnchantmentRegistry::AttemptToReplaceSpellInList), and when
+    /// ours expires the client would be left with nothing for the spell. <see cref="Managers.EnchantmentManager.Remove"/>
+    /// re-sends the surviving timed layer after every removal to cover that
+    /// (<see cref="Managers.EnchantmentManager.GetTimedSurvivorToResend"/>), so the player's own cast reappears when
+    /// the minute is up.
     /// </summary>
     public static class TinkerersInspiration
     {

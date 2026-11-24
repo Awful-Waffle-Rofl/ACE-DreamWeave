@@ -109,6 +109,26 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         [TestMethod]
+        public void ApplyCore_RemovesAnAuthoredCritDamageRatingAndLeavesTheOtherRatingsAlone()
+        {
+            var f = new Fake();
+            f.Ints[PropertyInt.CritDamageRating] = 40;
+            f.Ints[PropertyInt.CritRating] = 25;
+            f.Ints[PropertyInt.DamageRating] = 30;
+
+            var changes = CombatTraitGuard.ApplyCore(f.Target(), Dials, DungeonBandStandard.Empty, isBoss: true);
+
+            Assert.IsFalse(f.Ints.ContainsKey(PropertyInt.CritDamageRating));
+            Assert.AreEqual(25, f.Ints[PropertyInt.CritRating], "base crit chance is not a crippling-blow style amplifier");
+            Assert.AreEqual(30, f.Ints[PropertyInt.DamageRating]);
+            CollectionAssert.Contains(changes, "CritDamageRating");
+
+            var zero = new Fake();
+            zero.Ints[PropertyInt.CritDamageRating] = 0;
+            Assert.IsFalse(CombatTraitGuard.ApplyCore(zero.Target(), Dials, DungeonBandStandard.Empty, isBoss: true).Contains("CritDamageRating"), "an authored 0 is no amplifier");
+        }
+
+        [TestMethod]
         public void ApplyCore_LeavesAFalseBypassBoolAlone()
         {
             var f = new Fake();

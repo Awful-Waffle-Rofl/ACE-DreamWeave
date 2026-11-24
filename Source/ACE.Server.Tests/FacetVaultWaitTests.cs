@@ -173,6 +173,150 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0, probe.Calls);
         }
 
+        // ---- the gate, with the facet vault deposit ------------------------------------------------
+
+        private static readonly List<FacetEquipEntry> AllLocal = new List<FacetEquipEntry> { Entry(0x80000011, 100) };
+        private static readonly HashSet<uint> AllLocalGuids = new HashSet<uint> { 0x80000011 };
+
+        /// <summary>CATCHES: the toggle being off still starting a vault load on every switch.</summary>
+        [TestMethod]
+        public void Gate_DepositOff_IncomingLocal_NeverProbes()
+        {
+            var probe = new CountingProbe(Loading);
+
+            var outcome = Player.DecideFacetVaultGate(AllLocal, AllLocalGuids, false, probe.Probe, out var refusal);
+
+            Assert.AreEqual(Player.FacetVaultGateOutcome.Proceed, outcome);
+            Assert.IsNull(refusal);
+            Assert.AreEqual(0, probe.Calls, "with the deposit off and every incoming item local, nothing needs the vault");
+        }
+
+        /// <summary>CATCHES: a cold vault silently skipping the deposit instead of waiting for it.</summary>
+        [TestMethod]
+        public void Gate_DepositOn_IncomingLocal_StillLoading_AwaitsTheVault()
+        {
+            var probe = new CountingProbe(Loading);
+
+            var outcome = Player.DecideFacetVaultGate(AllLocal, AllLocalGuids, true, probe.Probe, out var refusal);
+
+            Assert.AreEqual(Player.FacetVaultGateOutcome.AwaitVault, outcome);
+            Assert.IsNull(refusal);
+            Assert.AreEqual(1, probe.Calls);
+        }
+
+        [TestMethod]
+        public void Gate_DepositOn_IncomingLocal_Ready_Proceeds()
+        {
+            var probe = new CountingProbe(Player.FacetVaultStatus.ReadyStore);
+
+            Assert.AreEqual(Player.FacetVaultGateOutcome.Proceed, Player.DecideFacetVaultGate(AllLocal, AllLocalGuids, true, probe.Probe, out _));
+            Assert.AreEqual(1, probe.Calls);
+        }
+
+        /// <summary>
+        /// CATCHES: the deposit, a convenience, blocking a switch. Any failure other than still-loading proceeds:
+        /// the deposit is skipped after the commit with one chat line.
+        /// </summary>
+        [TestMethod]
+        public void Gate_DepositOn_IncomingLocal_Unavailable_ProceedsAndNeverRefuses()
+        {
+            var unavailable = new CountingProbe(Player.FacetVaultStatus.NotReady(AccountVaultStore.UnavailableMessage));
+            var unknown = new CountingProbe(Player.FacetVaultStatus.NotReady("something nobody planned for"));
+            var noStore = new CountingProbe(Player.FacetVaultStatus.NoStore);
+
+            foreach (var probe in new[] { unavailable, unknown, noStore })
+            {
+                var outcome = Player.DecideFacetVaultGate(AllLocal, AllLocalGuids, true, probe.Probe, out var refusal);
+
+                Assert.AreEqual(Player.FacetVaultGateOutcome.Proceed, outcome);
+                Assert.IsNull(refusal, "the deposit must never refuse a switch");
+            }
+        }
+
+        /// <summary>CATCHES: the deposit flag weakening the existing rule for incoming vault-held gear.</summary>
+        [TestMethod]
+        public void Gate_DepositOn_IncomingNeedsVault_Unavailable_StillRefuses()
+        {
+            var probe = new CountingProbe(Player.FacetVaultStatus.NotReady(AccountVaultStore.UnavailableMessage));
+            var entries = new List<FacetEquipEntry> { Entry(0x80000021, 100) };
+
+            var outcome = Player.DecideFacetVaultGate(entries, new HashSet<uint>(), true, probe.Probe, out var refusal);
+
+            Assert.AreEqual(Player.FacetVaultGateOutcome.Refuse, outcome);
+            StringAssert.Contains(refusal, AccountVaultStore.UnavailableMessage);
+        }
+
+        // ---- an expired wait: deposit-only resumes, incoming need gives up (review F2) ---------------
+
+        /// <summary>
+        /// Ruling: the deposit must never block a switch. CATCHES a deposit-only wait that expires being turned into
+        /// the "your facet was not changed" give-up, and the resumed switch probing the vault again.
+        /// </summary>
+        [TestMethod]
+        public void Poll_DepositOnly_Timeout_ResumesWithoutTheDeposit_AndTheSwitchProceeds()
+        {
+            var action = FacetCommands.DecideVaultPoll(true, 1, 1, () => Loading, FacetCommands.VaultMaxWaitSeconds, depositOnly: true);
+
+            Assert.AreEqual(FacetCommands.VaultPollAction.ResumeWithoutDeposit, action);
+            Assert.AreEqual(FacetCommands.VaultPollAction.ResumeWithoutDeposit, FacetCommands.ExpiredVaultWaitAction(true),
+                "the re-entry path that finds the budget already spent decides the same way");
+
+            // The resumed call runs with the deposit skipped, i.e. outgoingWantsVault false; with the incoming gear
+            // all local the gate then proceeds without even probing the still-loading vault.
+            var probe = new CountingProbe(Loading);
+            var outcome = Player.DecideFacetVaultGate(AllLocal, AllLocalGuids, false, probe.Probe, out var refusal);
+
+            Assert.AreEqual(Player.FacetVaultGateOutcome.Proceed, outcome, "the resumed switch goes ahead");
+            Assert.IsNull(refusal);
+            Assert.AreEqual(0, probe.Calls);
+
+            foreach (var c in Player.FacetVaultDepositSkippedLine)
+                Assert.IsTrue(c >= 0x20 && c < 0x7F, $"non-ASCII in {Player.FacetVaultDepositSkippedLine}");
+            StringAssert.Contains(Player.FacetVaultDepositSkippedLine, "gear left in your pack");
+        }
+
+        [TestMethod]
+        public void Poll_IncomingNeed_Timeout_StillGivesUp()
+        {
+            Assert.AreEqual(FacetCommands.VaultPollAction.GiveUp,
+                FacetCommands.DecideVaultPoll(true, 1, 1, () => Loading, FacetCommands.VaultMaxWaitSeconds, depositOnly: false));
+            Assert.AreEqual(FacetCommands.VaultPollAction.GiveUp,
+                FacetCommands.DecideVaultPoll(true, 1, 1, () => Loading, FacetCommands.VaultMaxWaitSeconds), "the default is the incoming-need rule");
+            Assert.AreEqual(FacetCommands.VaultPollAction.GiveUp, FacetCommands.ExpiredVaultWaitAction(false));
+
+            // Within budget a deposit-only wait still keeps waiting: a cold vault is a wait, not a skip.
+            Assert.AreEqual(FacetCommands.VaultPollAction.KeepWaiting,
+                FacetCommands.DecideVaultPoll(true, 1, 1, () => Loading, FacetCommands.VaultPollSeconds, depositOnly: true));
+        }
+
+        /// <summary>
+        /// PROXY for the F2 wiring: TrySwitchFacet records whether the wait was deposit-only, both expiry paths resume
+        /// with skipVaultDeposit, HandleSwitch passes it through, and the skipped switch tells the player.
+        /// </summary>
+        [TestMethod]
+        public void Wiring_DepositOnlyExpiry_ResumesTheSwitchWithTheDepositSkipped()
+        {
+            var facets = ReadServerFile("WorldObjects", "Player_Facets.cs");
+            var sw = MethodBody(facets, "public bool TrySwitchFacet(");
+
+            StringAssert.Contains(sw, "FacetVaultWaitIsDepositOnly = !FacetEquipNeedsVault(incomingEquip, facetLocalGuids);");
+            StringAssert.Contains(sw, "summary.Append(\" \" + FacetVaultDepositSkippedLine);");
+
+            var commands = ReadServerFile("Command", "Handlers", "FacetCommands.cs");
+
+            var handle = MethodBody(commands, "private static void HandleSwitch(");
+            StringAssert.Contains(handle, "out var awaitingVault, skipVaultDeposit))");
+            StringAssert.Contains(handle, "AwaitVaultThenResume(session, player, targetSlot, confirmed, trim, requestGeneration, vaultWaitedSeconds, player.FacetVaultWaitIsDepositOnly)");
+
+            var poll = MethodBody(commands, "private static void ScheduleVaultPoll(");
+            StringAssert.Contains(poll, "case VaultPollAction.ResumeWithoutDeposit:");
+            StringAssert.Contains(poll, "HandleSwitch(session, player, targetSlot, confirmed, trim, requestGeneration, waited, skipVaultDeposit: true)");
+            StringAssert.Contains(poll, "ScheduleVaultPoll(session, player, targetSlot, confirmed, trim, requestGeneration, waited, depositOnly)", "the flag survives each re-arm");
+
+            var await_ = MethodBody(commands, "private static void AwaitVaultThenResume(");
+            StringAssert.Contains(await_, "HandleSwitch(session, player, targetSlot, confirmed, trim, requestGeneration, vaultWaitedSeconds, skipVaultDeposit: true)");
+        }
+
         // ---- the poll ------------------------------------------------------------------------------
 
         [TestMethod]

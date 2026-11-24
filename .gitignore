@@ -338,3 +338,6 @@ Source/.claude/settings.local.json
 Docs/VERIFY-QUEUE.md
 # World Events settings presets exported by /worldevent settings export (local admin state)
 Content/events/settings-presets/
+
+# Build output of the vendored Dereth.Network mod (its Directory.Build.props targets ../../target/ace-mod)
+third_party/dereth/target/

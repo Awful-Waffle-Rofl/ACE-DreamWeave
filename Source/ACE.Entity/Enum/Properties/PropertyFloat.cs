@@ -248,14 +248,14 @@ namespace ACE.Entity.Enum.Properties
          * combat time by a hand-wired hook - see ACE.Server.WeaponMods.WeaponModRegistry for the
          * one-row-per-modifier table and each row's HOOK comment for its exact call site.
          *
-         * Focus and Execution (8025/8026) were ALSO blocked in the original v3 pass, for a different
+         * Precision and Execution (8025/8026) were ALSO blocked in the original v3 pass, for a different
          * reason: they were proposed to write PropertyFloat.CriticalFrequency 147 / CriticalMultiplier 136
          * directly, which collides head-on with the HARD invariant in WeaponModRegistry.cs ("CRIT ROUTES
          * THROUGH RATINGS, NEVER THE RETAIL PROPERTIES") - both retail crit properties are consumed with
          * Math.Max against the Critical Strike / Crippling Blow imbues rather than summed
          * (WorldObject_Weapon.cs:351-356, :412-423), so a rolled value there would be silently swallowed
          * on exactly the imbued weapons a player is likeliest to care about. As Tier B rows neither writes
-         * that native either: Focus adds to the LIVE crit-chance calculation AFTER the Math.Max, alongside
+         * that native either: Precision adds to the LIVE crit-chance calculation AFTER the Math.Max, alongside
          * the rating term, and Execution MULTIPLIES the final crit-damage multiplier after
          * GetWeaponCritDamageMod returns, rather than writing into it. Both invariants - crit routes
          * through ratings, and no Tier A/native collision with a layer 1 material - stand unchanged; this
@@ -366,6 +366,10 @@ namespace ACE.Entity.Enum.Properties
         GearModProvoke                 = 8166,
         GearModBellow                  = 8167,
         GearModShieldWall              = 8168,
+
+        /* Equipment mod for the returned Elemental Rend (WaffleACE, 2026-11-03): proc-chance machinery mod for
+         * ClassAbilityId.ElementalRendVuln. 8122 (GearModElementalRend) is the Elemental Proficiency amplifier. */
+        GearModElementalRendVuln       = 8169,
 
         /* Weapon mods (WaffleACE) - Tier A special modifiers, split out of the 8100-8199 band.
          *
@@ -535,5 +539,15 @@ namespace ACE.Entity.Enum.Properties
 
         // Custom Summons: on a Tank summon pet, the interval in seconds between its taunt pulses.
         SummonTauntInterval             = 9021,
+
+        // Cloak Mantle: on a cloak (or the Amplifier gem that stamps it), the fraction its existing proc's MAGNITUDE is
+        // raised by (0.25 = +25%, factor 1 + value); never chance or cooldown. PvE only.
+        CloakProcAmplifier              = 9022,
+
+        // Knot treasure tables (ACE.Server.KnotLoot): Harbinger's Guard trait position u in [0,1] on the Harbinger wands and heavy weapons.
+        KnotTraitHarbingerGuard         = 9023,
+
+        // Knot treasure tables (ACE.Server.KnotLoot): Harbinger Celerity trait position u in [0,1] on the Arm Guard of the Harbinger.
+        KnotTraitHarbingerCelerity      = 9024,
     }
 }

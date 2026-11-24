@@ -28,7 +28,7 @@ namespace ACE.Server.ClassAbilities.Abilities
     ///    Bloodstone Bolt), through this handler's <see cref="OnSpellHit"/>. The spell-hit dispatch
     ///    (SpellProjectile.OnCollideObject -> Player.ApplySpellHitClassAbilities) runs after the hit's damage
     ///    is applied and fires for every projectile that lands, so Spell AOE children, Cascade children and
-    ///    Echo Cast recasts all reach the roll - but a creature that already rolled during this cast
+    ///    Echo Cast wisp casts all reach the roll - but a creature that already rolled during this cast
     ///    (MagicState.CastNum) draws no further roll, however many of the cast's projectiles strike it
     ///    (WeakenedBloodCastRollLedger). Three Raven Fury projectiles on one large monster are one roll,
     ///    not three.
@@ -69,25 +69,47 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "weakened_blood",
             DisplayName = "Weakened Blood",
-            Description = "Each target your damaging Life Magic strikes - Harm, Drain, and life projectiles " +
-                          "such as Martyr's Hecatomb, Curse of Raven Fury and Bloodstone Bolt - has a " +
-                          "25/35/50% chance (by rank) to fester with Weakened Blood for 20 seconds. While it " +
-                          "holds, every Health-damage spell except Drain that strikes that target, from any " +
-                          "caster and not only you, resolves against a life resistance of 2.00/2.50/3.10 by " +
-                          "rank, and the target attacks and casts 10/20/30% slower. Higher Creature " +
-                          "Enchantment multiplies the slow, up to half the target's speed. It shares one axis with " +
-                          "weapon resistance cleaving: the stronger applies, never both.",
+            // Live text. Proc chance, resistance and slow per rank: WeakenedBloodAbility.cs ~129-141 and ~159-161; duration:
+            // Player_WeakenedBlood.cs ~90. The resistance ladder (2.00/2.50/3.10) is the f2 formatter.
+            DescriptionTemplate = "Your damaging Life Magic (Harm, Drain, and projectiles such as Martyr's Hecatomb, Curse of Raven " +
+                          "Fury and Bloodstone Bolt) can make each target it hits fester with Weakened Blood for " +
+                          "{v:class_ability_weakenedblood_duration_seconds|num} seconds. While it lasts, every Health-damage spell " +
+                          "except Drain that hits the target, from any caster, meets a lower life resistance, and the target " +
+                          "attacks and casts slower. The slow can reach {fn:max_slow@max|pct}% of the target's speed. It shares one " +
+                          "slot with weapon resistance cleaving, and only the stronger applies.",
+            RankTailTemplate = "{ranks:class_ability_weakenedblood_proc_chance_r|pct}% chance, life resistance " +
+                          "{ranks:class_ability_weakenedblood_resist_r|f2}, {fn:slow|pct}% slow",
+            // The slow is 1 - WeakenedBloodMath.SpeedFactor(values, rank, 1.0): the speed factor Player.ComputeWeakenedBloodSpeedFactor applies
+            // (it passes the Creature Enchantment affinity where the text uses the neutral 1.0), so the clamp to slow_floor is exact and a
+            // retune past it shows what the mechanic grants. max_slow is the same method at a slow of 1.0, which leaves exactly the floor.
+            TextFormulas = new Dictionary<string, TextFormula>
+            {
+                ["slow"] = new TextFormula(
+                    (values, rank) => 1.0 - WeakenedBloodMath.SpeedFactor(values, rank, 1.0),
+                    "class_ability_weakenedblood_slow_r1",
+                    "class_ability_weakenedblood_slow_r2",
+                    "class_ability_weakenedblood_slow_r3",
+                    "class_ability_weakenedblood_slow_floor"),
+                ["max_slow"] = new TextFormula(
+                    (values, rank) => WeakenedBloodMath.MaxSlow(values),
+                    "class_ability_weakenedblood_slow_floor"),
+            },
+            TunableSourceFiles = new[] { "WorldObjects/Player_WeakenedBlood.cs", "ClassAbilities/WeakenedBloodMath.cs" },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
             AffinitySkill = Skill.CreatureEnchantment,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "slowfloor", Bounds = CeilingBounds.Total, Source = CeilingSource.Constant, ConstantValueFor = (v, rank) => WeakenedBloodMath.MaxSlow(v), ConstantRef = "WeakenedBloodMath.MaxSlow", Label = "max attack and cast slow", Format = "pct" },
+            },
         };
 
         /// <summary>
         /// A landed Health-damage Life Magic projectile rolls for the mark on the creature it struck. The
         /// dispatch already guarantees a damaging landed hit on a non-player Creature by a player caster
         /// (Player.ApplySpellHitClassAbilities refuses a Player target); the Player test is repeated here so
-        /// the gate is whole in one place. Fires on Spell AOE / Cascade children and Echo Cast recasts by
+        /// the gate is whole in one place. Fires on Spell AOE / Cascade children and Echo Cast wisp casts by
         /// design - it spawns no projectile, so it carries no cascade risk.
         /// </summary>
         public void OnSpellHit(Player caster, int rank, Creature primaryTarget, SpellProjectile projectile)
@@ -134,6 +156,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             var effective = WeakenedBloodMath.ResistanceMod(rank, r1, r2, r3, gearMod);
 
             var secondaries = new List<ClassAbilityReadout>();
+            var slowReading = 0.0;
 
             var chance = WeakenedBloodMath.ProcChance(rank,
                 PropertyManager.GetDouble("class_ability_weakenedblood_proc_chance_r1").Item,
@@ -155,19 +178,17 @@ namespace ACE.Server.ClassAbilities.Abilities
                     CapNote = null,
                 });
 
-                var rankSlow = WeakenedBloodMath.RankSlow(rank,
-                    PropertyManager.GetDouble("class_ability_weakenedblood_slow_r1").Item,
-                    PropertyManager.GetDouble("class_ability_weakenedblood_slow_r2").Item,
-                    PropertyManager.GetDouble("class_ability_weakenedblood_slow_r3").Item);
+                var rankSlow = WeakenedBloodMath.RankSlow(ClassAbilityText.Live, rank);
 
                 var multiplier = player?.GetClassAbilityAffinityMultiplier(Skill.CreatureEnchantment) ?? 1.0;
 
                 var slow = rankSlow * multiplier;
 
-                var factor = WeakenedBloodMath.SpeedFactor(slow, PropertyManager.GetDouble("class_ability_weakenedblood_slow_floor").Item);
+                var factor = WeakenedBloodMath.SpeedFactor(ClassAbilityText.Live, rank, multiplier);
 
                 var effectiveSlow = (1.0 - factor) * 100.0;
                 var totalSlow = slow * 100.0;
+                slowReading = totalSlow;
 
                 if (rankSlow > 0.0)
                 {
@@ -198,6 +219,8 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Per = null,
                 CapNote = null,
                 Secondary = secondaries.Count > 0 ? secondaries : null,
+                // the raw slow (rank slow x affinity) is what reaches the speed floor, so it is the pre-clamp reading
+                Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "slowfloor", slowReading, rank, ClassAbilityText.Live) },
             };
         }
     }

@@ -6,7 +6,7 @@ using ACE.Server.WorldObjects;
 namespace ACE.Server.ClassAbilities.Abilities
 {
     /// <summary>
-    /// Rogue T3: a critical hit grants an Opening for 8 seconds, stacking up to 3, and each Opening is worth
+    /// Rogue T2: a critical hit grants an Opening for 8 seconds, stacking up to 3, and each Opening is worth
     /// 4/7/10% critical damage by rank plus a flat 2% critical chance. A landed Sneak Attack grants an
     /// Opening whether or not it crits, which is the entry's second route into the stack and the reason the
     /// affinity is Sneak Attack on both halves.
@@ -49,17 +49,26 @@ namespace ACE.Server.ClassAbilities.Abilities
         {
             Id = ClassAbilityId.KillerInstinct,
             AbilityClass = ClassAbilityClass.Rogue,
-            Tier = 3,
+            Tier = 2,
             Name = "killer_instinct",
             DisplayName = "Killer Instinct",
-            Description = "Every critical hit grants an Opening for 8 seconds, stacking up to 3. Each " +
-                          "Opening adds 4/7/10% critical damage (by rank) and 2% critical chance. A landed " +
-                          "Sneak Attack grants an Opening whether or not it crits. Higher Sneak Attack " +
-                          "multiplies the critical damage.",
+            // Live text: the critical-damage ladder is critdamage_base + (rank - 1) * critdamage_step (PerOpeningCritDamage in this file); the Opening length, stack cap and flat crit chance are read in Player_ClassAbilityBuffs.
+            DescriptionTemplate = "Each critical hit gives you an Opening for " +
+                          "{v:class_ability_killerinstinct_opening_duration_seconds|num} seconds, stacking up to " +
+                          "{v:class_ability_killerinstinct_max_stacks|int}. Each Opening adds critical damage and " +
+                          "{v:class_ability_killerinstinct_critchance_per_stack|pct}% critical chance. A Sneak Attack that lands " +
+                          "gives an Opening even without a critical.",
+            RankTailTemplate = "+{ladder:class_ability_killerinstinct_critdamage_base,class_ability_killerinstinct_critdamage_step|pct}% " +
+                          "critical damage per Opening",
+            TunableSourceFiles = new[] { "WorldObjects/Player_ClassAbilityBuffs.cs" },
             MaxRank = 3,
             CostPerRank = new[] { 2, 2, 2 },
             Implemented = true,
             AffinitySkill = Skill.SneakAttack,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "stacks", Bounds = CeilingBounds.Stacks, Source = CeilingSource.Tunable, Key = "class_ability_killerinstinct_max_stacks", Label = "max stacks", Format = "int", ZeroIsLimit = true },
+            },
         };
 
         /// <summary>
@@ -154,6 +163,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "crit dmg",
                 Per = "/opening",
                 CapNote = null,
+                Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "stacks", player.GetKillerInstinctStacks(), rank, ClassAbilityText.Live) },
             };
         }
     }

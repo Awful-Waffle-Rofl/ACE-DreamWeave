@@ -990,6 +990,34 @@ namespace ACE.Server.WorldObjects
             }
         }
 
+        /// <summary>
+        /// Every physics-state accessor below that PERSISTS, as the (PropertyBool, PhysicsState) pair
+        /// its setter hands to <see cref="SetPhysicsPropertyState"/>. CalculatedPhysicsState
+        /// (WorldObject_Networking.cs), run from InitPhysicsObj whenever an object enters a landblock,
+        /// writes each of these bools to true when its flag is in the default PhysicsState and the bool
+        /// is still null, and the write lands in the biota. The accessors that only touch
+        /// PhysicsObj.State (Static, Missile, Pushable, ...) persist nothing and are not listed.
+        ///
+        /// Read by VaultCollapse to tell a bool the object derived from its own PhysicsState apart from
+        /// a real modification. VaultCollapseTests pins this table against the accessor bodies and the
+        /// CalculatedPhysicsState chain in source, so adding or rewiring an accessor without updating
+        /// it fails the build's tests rather than silently changing what collapses.
+        /// </summary>
+        internal static readonly IReadOnlyList<KeyValuePair<PropertyBool, PhysicsState>> PersistedPhysicsStateBools = Array.AsReadOnly(new[]
+        {
+            new KeyValuePair<PropertyBool, PhysicsState>(PropertyBool.Ethereal, PhysicsState.Ethereal),
+            new KeyValuePair<PropertyBool, PhysicsState>(PropertyBool.ReportCollisions, PhysicsState.ReportCollisions),
+            new KeyValuePair<PropertyBool, PhysicsState>(PropertyBool.IgnoreCollisions, PhysicsState.IgnoreCollisions),
+            new KeyValuePair<PropertyBool, PhysicsState>(PropertyBool.NoDraw, PhysicsState.NoDraw),
+            new KeyValuePair<PropertyBool, PhysicsState>(PropertyBool.GravityStatus, PhysicsState.Gravity),
+            new KeyValuePair<PropertyBool, PhysicsState>(PropertyBool.LightsStatus, PhysicsState.LightingOn),
+            new KeyValuePair<PropertyBool, PhysicsState>(PropertyBool.ScriptedCollision, PhysicsState.ScriptedCollision),
+            new KeyValuePair<PropertyBool, PhysicsState>(PropertyBool.Inelastic, PhysicsState.Inelastic),
+            new KeyValuePair<PropertyBool, PhysicsState>(PropertyBool.ReportCollisionsAsEnvironment, PhysicsState.ReportCollisionsAsEnvironment),
+            new KeyValuePair<PropertyBool, PhysicsState>(PropertyBool.AllowEdgeSlide, PhysicsState.EdgeSlide),
+            new KeyValuePair<PropertyBool, PhysicsState>(PropertyBool.IsFrozen, PhysicsState.Frozen),
+        });
+
         public void SetPhysicsPropertyState(PropertyBool property, PhysicsState state, bool? value)
         {
             if (value.HasValue)
@@ -3424,6 +3452,21 @@ namespace ACE.Server.WorldObjects
             get => GetProperty(PropertyBool.IgnoreInitialClamp) ?? false;
             set { if (!value) RemoveProperty(PropertyBool.IgnoreInitialClamp); else SetProperty(PropertyBool.IgnoreInitialClamp, value); }
         }
+
+        /// <summary>
+        /// WaffleACE fork (PropertyBool 9091): keep PhysicsState.Static on this object's physics body. Without it
+        /// InitPhysicsObj always drops Static (the <see cref="Static"/> accessor reads PhysicsObj, which does not exist yet
+        /// when CalculatedPhysicsState runs), so a weenie's PhysicsState Static bit never reaches the body. Read once in
+        /// InitPhysicsObj, and honoured only on a non-Creature (see ForcedPhysicsStatic).
+        /// </summary>
+        public bool ForcePhysicsStatic
+        {
+            get => GetProperty(PropertyBool.ForcePhysicsStatic) ?? false;
+            set { if (!value) RemoveProperty(PropertyBool.ForcePhysicsStatic); else SetProperty(PropertyBool.ForcePhysicsStatic, value); }
+        }
+
+        /// <summary>True when the object opts in (<see cref="ForcePhysicsStatic"/>) and is not a Creature.</summary>
+        public bool ForcedPhysicsStatic => ForcePhysicsStatic && !(this is Creature);
 
         /// <summary>
         /// WaffleACE fork (PropertyBool 9069): spawn at exactly the authored position, with no placement

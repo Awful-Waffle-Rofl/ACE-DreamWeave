@@ -3,6 +3,7 @@ using System.Linq;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 using ACE.Entity.Models;
+using ACE.Server.Managers;
 using ACE.Server.Managers.Market;
 
 namespace ACE.Server.Tests
@@ -369,6 +370,152 @@ namespace ACE.Server.Tests
             Assert.AreEqual("Test Item 92002; Damage Rating: -1; Critical Damage Rating: +2", ItemTextSearch.SearchText(item));
         }
 
+        // ---- mod names (WorldObject overload) ----
+
+        private static uint modGuid = 0x7F5A0000;
+
+        [ClassInitialize]
+        public static void ModTestSetup(TestContext context)
+        {
+            // the mod projection reads weapon_mod_magnitude_scale / equipment_mod_potency_scale
+            DefaultPropertyManager.LoadDefaultProperties();
+        }
+
+        private static ACE.Server.WorldObjects.WorldObject ModSword(string name = "Sword of Searching")
+            => new ACE.Server.WorldObjects.MeleeWeapon(new Weenie
+            {
+                WeenieClassId = 1001920,
+                WeenieType = ACE.Entity.Enum.WeenieType.MeleeWeapon,
+                PropertiesString = new System.Collections.Generic.Dictionary<ACE.Entity.Enum.Properties.PropertyString, string> { { ACE.Entity.Enum.Properties.PropertyString.Name, name } },
+                PropertiesInt = new System.Collections.Generic.Dictionary<ACE.Entity.Enum.Properties.PropertyInt, int>
+                {
+                    { ACE.Entity.Enum.Properties.PropertyInt.ItemType, (int)ACE.Entity.Enum.ItemType.MeleeWeapon },
+                    { ACE.Entity.Enum.Properties.PropertyInt.ItemWorkmanship, 10 },
+                    { ACE.Entity.Enum.Properties.PropertyInt.EncumbranceVal, 100 },
+                    { ACE.Entity.Enum.Properties.PropertyInt.Value, 500 },
+                },
+            }, new ACE.Entity.ObjectGuid(modGuid++));
+
+        private static ACE.Server.WorldObjects.WorldObject ModBreastplate()
+            => new ACE.Server.WorldObjects.Clothing(new Weenie
+            {
+                WeenieClassId = 1001921,
+                WeenieType = ACE.Entity.Enum.WeenieType.Clothing,
+                PropertiesString = new System.Collections.Generic.Dictionary<ACE.Entity.Enum.Properties.PropertyString, string> { { ACE.Entity.Enum.Properties.PropertyString.Name, "Breastplate of Searching" } },
+                PropertiesInt = new System.Collections.Generic.Dictionary<ACE.Entity.Enum.Properties.PropertyInt, int>
+                {
+                    { ACE.Entity.Enum.Properties.PropertyInt.ItemType, (int)ACE.Entity.Enum.ItemType.Armor },
+                    { ACE.Entity.Enum.Properties.PropertyInt.ValidLocations, (int)ACE.Entity.Enum.EquipMask.ChestArmor },
+                    { ACE.Entity.Enum.Properties.PropertyInt.ItemWorkmanship, 10 },
+                    { ACE.Entity.Enum.Properties.PropertyInt.EncumbranceVal, 100 },
+                    { ACE.Entity.Enum.Properties.PropertyInt.Value, 500 },
+                },
+            }, new ACE.Entity.ObjectGuid(modGuid++));
+
+        /// <summary>The reported case: /mule search defensive must find a weapon carrying Defensive Weapon.</summary>
+        [TestMethod]
+        public void SearchText_WorldObject_WeaponWithDefensiveWeapon_MatchesDefensive()
+        {
+            var sword = ModSword();
+            var definition = ACE.Server.WeaponMods.WeaponModRegistry.Get(ACE.Server.WeaponMods.WeaponModId.DefensiveWeapon);
+            ACE.Server.WeaponMods.WeaponModTinkerSet.ApplySpecial(sword, definition, ACE.Server.WeaponMods.WeaponModValue.MaxMagnitude(definition));
+
+            var text = ItemTextSearch.SearchText(sword);
+
+            Assert.AreEqual("Sword of Searching; Defensive Weapon", text);
+            Assert.IsTrue(ItemTextSearch.TryCompile("defensive", out var regex, out _));
+            Assert.IsTrue(ItemTextSearch.IsMatch(regex, text), $"expected a match against '{text}'");
+        }
+
+        [TestMethod]
+        public void SearchText_WorldObject_ArmorWithAnEquipmentMod_MatchesThatModsName()
+        {
+            var plate = ModBreastplate();
+            var definition = ACE.Server.EquipmentMods.EquipmentModRegistry.Get(ACE.Server.EquipmentMods.EquipmentModId.Deadeye);
+            plate.SetProperty(definition.Property, 0.83);
+            plate.SetProperty(ACE.Entity.Enum.Properties.PropertyInt.GearModCapacity, 2);
+
+            var text = ItemTextSearch.SearchText(plate);
+
+            Assert.AreEqual("Breastplate of Searching; " + definition.DisplayName, text);
+            Assert.IsTrue(ItemTextSearch.TryCompile(definition.DisplayName, out var regex, out _));
+            Assert.IsTrue(ItemTextSearch.IsMatch(regex, text), $"expected a match against '{text}'");
+        }
+
+        /// <summary>Mod names land between the set parts and the ratings, the web app's position.</summary>
+        [TestMethod]
+        public void SearchText_ModNames_SitBetweenTheSetPartsAndTheRatings()
+        {
+            Assert.AreEqual(
+                "Ring; Spell A; Defender's; Defenders; Weak Point; Deadeye; Damage Rating: +1",
+                ItemTextSearch.SearchText("Ring", new[] { "Spell A" }, "Defender's", "Defenders",
+                    new[] { "Weak Point", null, "", "Deadeye" }, new[] { "Damage Rating: +1" }));
+        }
+
+        /// <summary>Regression pin: an item with no mods produces exactly the pre-change string.</summary>
+        [TestMethod]
+        public void SearchText_WorldObject_WithNoMods_IsExactlyTheOldString()
+        {
+            var sword = ModSword();
+
+            Assert.AreEqual("Sword of Searching", ItemTextSearch.SearchText(sword));
+
+            sword.SetProperty(ACE.Entity.Enum.Properties.PropertyInt.GearCritDamage, 2);
+
+            Assert.AreEqual("Sword of Searching; Critical Damage Rating: +2", ItemTextSearch.SearchText(sword));
+            Assert.AreEqual(
+                ItemTextSearch.SearchText("Ring", null, null, null, new[] { "Damage Rating: +1" }),
+                ItemTextSearch.SearchText("Ring", null, null, null, null, new[] { "Damage Rating: +1" }));
+        }
+
+        /// <summary>weapon_mods_enabled off: the same gate the web projection honours, so no weapon-mod name leaks into the text.</summary>
+        [TestMethod]
+        public void SearchText_WorldObject_WeaponModsSwitchedOff_IsExactlyTheNoModString()
+        {
+            var sword = ModSword();
+            var definition = ACE.Server.WeaponMods.WeaponModRegistry.Get(ACE.Server.WeaponMods.WeaponModId.DefensiveWeapon);
+            ACE.Server.WeaponMods.WeaponModTinkerSet.ApplySpecial(sword, definition, ACE.Server.WeaponMods.WeaponModValue.MaxMagnitude(definition));
+
+            Assert.AreEqual("Sword of Searching; Defensive Weapon", ItemTextSearch.SearchText(sword), "control: the mod is present with the switch on");
+
+            var saved = MarketItemMods.WeaponModsEnabledSource;
+
+            try
+            {
+                MarketItemMods.WeaponModsEnabledSource = () => false;
+
+                Assert.AreEqual("Sword of Searching", ItemTextSearch.SearchText(sword));
+            }
+            finally
+            {
+                MarketItemMods.WeaponModsEnabledSource = saved;
+            }
+        }
+
+        /// <summary>equipment_mods_enabled off: no equipment-mod name leaks into the text.</summary>
+        [TestMethod]
+        public void SearchText_WorldObject_EquipmentModsSwitchedOff_IsExactlyTheNoModString()
+        {
+            var plate = ModBreastplate();
+            var definition = ACE.Server.EquipmentMods.EquipmentModRegistry.Get(ACE.Server.EquipmentMods.EquipmentModId.Deadeye);
+            plate.SetProperty(definition.Property, 0.83);
+            plate.SetProperty(ACE.Entity.Enum.Properties.PropertyInt.GearModCapacity, 2);
+
+            Assert.AreEqual("Breastplate of Searching; " + definition.DisplayName, ItemTextSearch.SearchText(plate), "control: the mod is present with the switch on");
+
+            var saved = MarketItemMods.EquipmentModsEnabledSource;
+
+            try
+            {
+                MarketItemMods.EquipmentModsEnabledSource = () => false;
+
+                Assert.AreEqual("Breastplate of Searching", ItemTextSearch.SearchText(plate));
+            }
+            finally
+            {
+                MarketItemMods.EquipmentModsEnabledSource = saved;
+            }
+        }
         [TestMethod]
         public void SearchText_Weenie_WithOnlyZeroRatings_IsJustTheName()
         {

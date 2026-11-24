@@ -292,5 +292,8 @@ namespace ACE.Entity.Enum.Properties
 
         // Custom Summons: on a Duo Summon Gem, the stored state of the second absorbed summon item.
         DuoSummonSlotB                     = 9033,
+
+        // Balance Trials: on a trial master character, v1|<archetypeSha256>|<calibrationSha256> of the files it was built from.
+        TrialArchetypeStamp                = 9034,
     }
 }

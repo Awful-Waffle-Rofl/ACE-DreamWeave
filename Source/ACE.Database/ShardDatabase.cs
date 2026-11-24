@@ -821,9 +821,31 @@ namespace ACE.Database
         ///
         /// Note that character has no foreign key to biota, so this does not remove the player's
         /// biota. Callers wanting both must also call RemoveBiota.
+        ///
+        /// After the delete commits, every <see cref="CharacterContexts"/> entry for this id is
+        /// evicted. Without that, GetCharacterList keeps handing out the deleted row's tracked
+        /// Character object (it prefers a cached object with the same Id over the row it just read),
+        /// so a caller that reuses the guid reads the OLD occupant's quest registry and the rest of
+        /// its child collections back instead of the new row's. A failed delete evicts nothing: the
+        /// row is still there, and the cached object still describes it.
+        ///
+        /// The delete and the eviction run under the WRITE side of <see cref="CharacterRemovalLock"/>, so a
+        /// GetCharacterList that read the row before the delete cannot re-cache it after the eviction (it holds
+        /// the read side from its query to its cache write), and an evicted object is tombstoned so a later
+        /// SaveCharacter of it cannot re-insert the deleted row (see <see cref="RemovedCharacters"/>).
         /// </summary>
         public virtual bool RemoveCharacter(uint id)
         {
+            // Bounded: this runs on the world thread (PurgeSlot), which must never wait forever on a stuck reader. A timeout is a
+            // failed removal, which PurgeSlot already reports as a failed purge. The release runs only if the lock was taken.
+            using var removalWriteLock = TryEnterCharacterRemovalWriteLock(CharacterRemovalLockTimeout);
+
+            if (!removalWriteLock.Acquired)
+            {
+                log.Error($"[DATABASE] RemoveCharacter 0x{id:X8} gave up: the character removal lock was not free within {CharacterRemovalLockTimeout.TotalSeconds:0.#} s (a character read is stuck); nothing was deleted");
+                return false;
+            }
+
             using (var context = new ShardDbContext())
             {
                 try
@@ -839,6 +861,8 @@ namespace ACE.Database
                         }
                     });
 
+                    EvictCharacterContexts(CharacterContexts, RemovedCharacters, id);
+
                     return true;
                 }
                 catch (Exception ex)
@@ -849,6 +873,33 @@ namespace ACE.Database
             }
         }
 
+
+        /// <summary>
+        /// Deletes every stored Player Facet row for one character guid. character_facet has no foreign
+        /// key to character (see CharacterFacetPartial), so neither RemoveCharacter nor RemoveBiota
+        /// reaches these rows: a caller that reuses a guid, such as tester roster seeding, must clear
+        /// them itself or the next occupant inherits the previous occupant's builds. A guid with no rows
+        /// is a successful no-op.
+        /// </summary>
+        public virtual bool RemoveCharacterFacets(uint characterId)
+        {
+            using (var context = new ShardDbContext())
+            {
+                try
+                {
+                    // A single set-based DELETE is its own implicit transaction, so it is unaffected by the
+                    // execution strategy (unlike an explicit BeginTransaction).
+                    context.CharacterFacet.Where(r => r.CharacterId == characterId).ExecuteDelete();
+
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[DATABASE] RemoveCharacterFacets 0x{characterId:X8} failed: {ex.GetFullMessage()}");
+                    return false;
+                }
+            }
+        }
 
         public virtual PossessedBiotas GetPossessedBiotasInParallel(uint id)
         {
@@ -1042,6 +1093,97 @@ namespace ACE.Database
 
         private static readonly ConditionalWeakTable<Character, ShardDbContext> CharacterContexts = new ConditionalWeakTable<Character, ShardDbContext>();
 
+        /// <summary>
+        /// Character objects RemoveCharacter evicted. Their rows are gone, so SaveCharacter and RenameCharacter refuse
+        /// them: without this an evicted object is no longer found in <see cref="CharacterContexts"/>, so a save of it
+        /// takes the insert path and would re-insert the deleted row with the old occupant's data (before eviction
+        /// existed, the same save failed on its cached context instead, as a zero-row UPDATE). Weak, like
+        /// CharacterContexts: an entry goes when nothing holds the object any more.
+        /// </summary>
+        private static readonly ConditionalWeakTable<Character, object> RemovedCharacters = new ConditionalWeakTable<Character, object>();
+
+        private static readonly object Tombstone = new object();
+
+        /// <summary>
+        /// Orders a character removal against every reader and writer of <see cref="CharacterContexts"/> that could
+        /// race it. RemoveCharacter holds the WRITE side across its delete and its eviction. GetCharacterList holds the
+        /// READ side from its query to its last cache write, so a read that saw the row before the delete cannot cache
+        /// that object after the eviction. The insert paths of SaveCharacter and RenameCharacter hold the READ side
+        /// across their tombstone check and their INSERT, so a removal cannot slip between the two. Readers never
+        /// block each other. Not recursive: none of these methods calls another while holding it.
+        /// </summary>
+        private static readonly ReaderWriterLockSlim CharacterRemovalLock = new ReaderWriterLockSlim(LockRecursionPolicy.NoRecursion);
+
+        private readonly struct RemovalReadRelease : IDisposable
+        {
+            public void Dispose() => CharacterRemovalLock.ExitReadLock();
+        }
+
+        private readonly struct RemovalWriteRelease : IDisposable
+        {
+            public RemovalWriteRelease(bool acquired) => Acquired = acquired;
+
+            public bool Acquired { get; }
+
+            public void Dispose()
+            {
+                if (Acquired)
+                    CharacterRemovalLock.ExitWriteLock();
+            }
+        }
+
+        /// <summary>How long RemoveCharacter waits for the write side before it gives up and returns false. Settable by tests.</summary>
+        internal static TimeSpan CharacterRemovalLockTimeout = TimeSpan.FromSeconds(10);
+
+        /// <summary>Test seam: holds the READ side on the calling thread (a stuck reader), so a test can prove RemoveCharacter times out.</summary>
+        internal static void EnterCharacterRemovalReadLockForTests() => CharacterRemovalLock.EnterReadLock();
+
+        internal static void ExitCharacterRemovalReadLockForTests() => CharacterRemovalLock.ExitReadLock();
+
+        private static RemovalReadRelease EnterCharacterRemovalReadLock()
+        {
+            CharacterRemovalLock.EnterReadLock();
+            return default;
+        }
+
+        private static RemovalWriteRelease TryEnterCharacterRemovalWriteLock(TimeSpan timeout)
+            => new RemovalWriteRelease(CharacterRemovalLock.TryEnterWriteLock(timeout));
+
+        /// <summary>
+        /// Removes every entry whose key's Id is <paramref name="characterId"/>, tombstones each removed key in
+        /// <paramref name="tombstones"/>, and returns how many were removed. More than one can exist: a guid reused
+        /// without eviction leaves the old occupant's object cached alongside the new one SaveCharacter adds.
+        ///
+        /// ConditionalWeakTable synchronizes its own reads and writes; the ordering against concurrent readers comes
+        /// from <see cref="CharacterRemovalLock"/>, which the caller holds. The keys are snapshotted before removal so
+        /// the count is exact. The evicted context is NOT disposed: a holder of the old Character could still be
+        /// mid-save on it, and the table never disposed contexts before this either (an entry's context is reclaimed
+        /// with its key).
+        ///
+        /// Generic over the value type so a test can exercise it without constructing a DbContext.
+        /// </summary>
+        internal static int EvictCharacterContexts<TContext>(ConditionalWeakTable<Character, TContext> table, ConditionalWeakTable<Character, object> tombstones, uint characterId) where TContext : class
+        {
+            var stale = table.Where(r => r.Key.Id == characterId).Select(r => r.Key).ToList();
+
+            var evicted = 0;
+
+            foreach (var character in stale)
+            {
+                if (table.Remove(character))
+                {
+                    tombstones.AddOrUpdate(character, Tombstone);
+                    evicted++;
+                }
+            }
+
+            return evicted;
+        }
+
+        /// <summary>True when <paramref name="character"/> was evicted by RemoveCharacter, so its row no longer exists.</summary>
+        internal static bool IsRemovedCharacter(ConditionalWeakTable<Character, object> tombstones, Character character)
+            => tombstones.TryGetValue(character, out _);
+
         public List<Character> GetCharacters(uint accountId, bool includeDeleted)
         {
             return GetCharacterList(accountId, includeDeleted);
@@ -1054,6 +1196,9 @@ namespace ACE.Database
 
         private static List<Character> GetCharacterList(uint accountID, bool includeDeleted, uint characterID = 0)
         {
+            // From the query to the last cache write: a removal cannot evict between them (CharacterRemovalLock).
+            using var removalReadLock = EnterCharacterRemovalReadLock();
+
             var context = new ShardDbContext();
 
             IQueryable<Character> query;
@@ -1179,6 +1324,15 @@ namespace ACE.Database
                 {
                     rwLock.ExitReadLock();
                 }
+            }
+
+            // The insert path. Held across the tombstone check and the INSERT (CharacterRemovalLock).
+            using var removalReadLock = EnterCharacterRemovalReadLock();
+
+            if (IsRemovedCharacter(RemovedCharacters, character))
+            {
+                log.Warn($"[DATABASE] SaveCharacter 0x{character.Id:X8}:{character.Name} refused: this object's row was removed by RemoveCharacter, and saving it would re-insert the old row");
+                return false;
             }
 
             var context = new ShardDbContext();
@@ -1321,6 +1475,15 @@ namespace ACE.Database
                 {
                     rwLock.ExitReadLock();
                 }
+            }
+
+            // The insert path. Held across the tombstone check and the INSERT (CharacterRemovalLock).
+            using var removalReadLock = EnterCharacterRemovalReadLock();
+
+            if (IsRemovedCharacter(RemovedCharacters, character))
+            {
+                log.Warn($"[DATABASE] RenameCharacter 0x{character.Id:X8}:{character.Name} refused: this object's row was removed by RemoveCharacter, and saving it would re-insert the old row");
+                return false;
             }
 
             character.Name = newName;

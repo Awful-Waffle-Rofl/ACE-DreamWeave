@@ -12,8 +12,8 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 namespace ACE.Server.Tests
 {
     /// <summary>
-    /// Content pins for the two Drift Matron rare batons (Hive Stinger Baton 1007603, Hive Nether Baton
-    /// 1007604). The two are meant to be identical except for DamageType, WieldSkillType, the extra
+    /// Content pins for the three Drift Matron rare batons (Hive Stinger Baton 1007603, Hive Nether Baton
+    /// 1007604, Hive Ichor Baton 1007605). The three are meant to be identical except for DamageType, WieldSkillType, the extra
     /// mastery spell and the look/description, so the shared rows are pinned for both and the
     /// differing rows per baton. Also pins the ABSENCE of Bonded/Attuned (tradeable), the PvE-only and
     /// self-ivory style bools, and the drop-time stamp rows (9020/9093/9029) that code writes later.
@@ -24,6 +24,7 @@ namespace ACE.Server.Tests
     {
         private const int Stinger = 1007603;
         private const int Nether = 1007604;
+        private const int Ichor = 1007605;
         private const int Voidclaw = 1007600;
 
         private const string ExpectedSpec = "v1|f29=1.15:1.25:0.01";
@@ -48,6 +49,7 @@ namespace ACE.Server.Tests
         {
             (Stinger, "ace1007603-hivestingerbaton", "Hive Stinger Baton", 2, 34, 4638, 4, 2048, "0x02001492", "0x06006090"),
             (Nether, "ace1007604-hivenetherbaton", "Hive Nether Baton", 1024, 43, 5418, 39, 4096, "0x02001A30", "0x0600608D"),
+            (Ichor, "ace1007605-hiveichorbaton", "Hive Ichor Baton", 128, 33, 4582, 14, 1, "0x02001493", "0x0600608D"),
         };
 
         [TestMethod]
@@ -215,11 +217,14 @@ namespace ACE.Server.Tests
         {
             var stinger = ParseNumeric(Stinger, "weenie_properties_int");
             var nether = ParseNumeric(Nether, "weenie_properties_int");
+            var ichor = ParseNumeric(Ichor, "weenie_properties_int");
 
             Assert.AreEqual(2, (int)stinger[45], "Stinger DamageType Pierce.");
             Assert.AreEqual(34, (int)stinger[159], "Stinger WieldSkillType War Magic.");
             Assert.AreEqual(1024, (int)nether[45], "Nether DamageType Nether.");
             Assert.AreEqual(43, (int)nether[159], "Nether WieldSkillType Void Magic.");
+            Assert.AreEqual(128, (int)ichor[45], "Ichor DamageType Health.");
+            Assert.AreEqual(33, (int)ichor[159], "Ichor WieldSkillType Life Magic.");
         }
 
         [TestMethod]

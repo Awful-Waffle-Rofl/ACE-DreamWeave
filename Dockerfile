@@ -12,7 +12,13 @@ WORKDIR /Source
 # ACE.Content.Tools.Tests), each time because a commit added a project to the .sln and did not
 # touch this file. The build-test workflow now runs a "Dockerfile covers every ACE.sln project"
 # step that fails the PR instead of the deploy - if you change this list, keep that check green.
+#
+# MSBuild-wide files (Directory.Build.props and friends) must be copied here too, BEFORE the restore:
+# csprojs read properties from them at restore time. Source/Directory.Build.props supplies
+# $(MSTestVersion) to every test project (#2159); without it the version is empty and restore fails
+# with NU1015 (stage deploy run 44365868046). The same CI step checks these files as well.
 COPY ./Source/*.sln ./
+COPY ./Source/Directory.Build.props ./
 COPY ./Source/ACE.Adapter/*.csproj ./ACE.Adapter/
 COPY ./Source/ACE.Common/*.csproj ./ACE.Common/
 COPY ./Source/ACE.Content.Tools/*.csproj ./ACE.Content.Tools/

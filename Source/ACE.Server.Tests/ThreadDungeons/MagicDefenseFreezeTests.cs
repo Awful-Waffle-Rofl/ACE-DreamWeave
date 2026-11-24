@@ -62,16 +62,16 @@ namespace ACE.Server.Tests.ThreadDungeons
         {
             foreach (var axis in new[] { DungeonStatAxis.MeleeDefense, DungeonStatAxis.MissileDefense })
             {
-                var reference = DungeonStatCurve.Ratio(axis, 326, 410, 0.5, 0.5, 1.0, 326);
-                Assert.AreEqual(reference, DungeonStatCurve.Ratio(axis, 326, 410, 0.5, 0.0, 1.0, 326), 1e-15, $"{axis}: magic dial 0 does not move it");
-                Assert.AreEqual(reference, DungeonStatCurve.Ratio(axis, 326, 410, 0.5, 1.0, 1.0, 326), 1e-15, $"{axis}: magic dial 1 does not move it");
-                Assert.AreNotEqual(reference, DungeonStatCurve.Ratio(axis, 326, 410, 0.0, 0.5, 1.0, 326), $"{axis}: positive control, its own dial moves it");
+                var reference = DungeonStatCurve.Ratio(axis, 326, 410, 0.5, 0.5, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400);
+                Assert.AreEqual(reference, DungeonStatCurve.Ratio(axis, 326, 410, 0.5, 0.0, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400), 1e-15, $"{axis}: magic dial 0 does not move it");
+                Assert.AreEqual(reference, DungeonStatCurve.Ratio(axis, 326, 410, 0.5, 1.0, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400), 1e-15, $"{axis}: magic dial 1 does not move it");
+                Assert.AreNotEqual(reference, DungeonStatCurve.Ratio(axis, 326, 410, 0.0, 0.5, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400), $"{axis}: positive control, its own dial moves it");
             }
 
-            var magic = DungeonStatCurve.Ratio(DungeonStatAxis.MagicDefense, 326, 410, 0.5, 0.0, 1.0, 326);
+            var magic = DungeonStatCurve.Ratio(DungeonStatAxis.MagicDefense, 326, 410, 0.5, 0.0, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400);
             Assert.AreEqual(1.0, magic, 1e-12, "magic frozen: 326 and 410 are both above 300, so the ratio is 1");
-            Assert.AreEqual(magic, DungeonStatCurve.Ratio(DungeonStatAxis.MagicDefense, 326, 410, 1.0, 0.0, 1.0, 326), 1e-15, "the melee dial does not move magic");
-            Assert.AreEqual(PreSplit(410) / PreSplit(326), DungeonStatCurve.Ratio(DungeonStatAxis.MagicDefense, 326, 410, 0.0, 0.5, 1.0, 326), 1e-12,
+            Assert.AreEqual(magic, DungeonStatCurve.Ratio(DungeonStatAxis.MagicDefense, 326, 410, 1.0, 0.0, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400), 1e-15, "the melee dial does not move magic");
+            Assert.AreEqual(PreSplit(410) / PreSplit(326), DungeonStatCurve.Ratio(DungeonStatAxis.MagicDefense, 326, 410, 0.0, 0.5, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400), 1e-12,
                 "magic at 0.5 is the pre-split ratio whatever the melee dial is");
         }
 
@@ -90,8 +90,8 @@ namespace ACE.Server.Tests.ThreadDungeons
         public void Extrapolate_moves_only_magic_defense_with_the_magic_dial()
         {
             var anchor = DefenseAnchor();
-            var frozen = DungeonStatCurve.Extrapolate(anchor, 326, 410, 0.5, 0.0, 1.0);
-            var half = DungeonStatCurve.Extrapolate(anchor, 326, 410, 0.5, 0.5, 1.0);
+            var frozen = DungeonStatCurve.Extrapolate(anchor, 326, 410, 0.5, 0.0, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400);
+            var half = DungeonStatCurve.Extrapolate(anchor, 326, 410, 0.5, 0.5, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400);
 
             Assert.AreEqual(520u, frozen.EffectiveSkillMedianFor(Skill.MagicDefense), "frozen magic D at 410");
             Assert.AreEqual(520u, frozen.MedianFor(Skill.MagicDefense));
@@ -106,7 +106,7 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             foreach (var level in AboveLevels)
             {
-                var curve = new DungeonStatCurve.Anchored(anchor, 326, 0.5, 0.0, 1.0);
+                var curve = new DungeonStatCurve.Anchored(anchor, 326, 0.5, 0.0, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400);
                 Assert.AreEqual(520u, curve.StandardAt(level).EffectiveSkillMedianFor(Skill.MagicDefense), $"Anchored, frozen at {level}");
             }
         }
@@ -120,8 +120,8 @@ namespace ACE.Server.Tests.ThreadDungeons
                 DungeonStatCurve.WithRetailMagicDefense(anchor, 500, 0.5).EffectiveSkillMedianFor(Skill.MagicDefense));
 
             var axes = new ArchetypeAxes(anchor, 1000, 0, 0, 0, 0, 0, 100000, 20, 1.0);
-            var frozen = DungeonArchetypeStandards.Extrapolate(axes, 326, 500, 0.5, 0.0, 1.0);
-            var half = DungeonArchetypeStandards.Extrapolate(axes, 326, 500, 0.5, 0.5, 1.0);
+            var frozen = DungeonArchetypeStandards.Extrapolate(axes, 326, 500, 0.5, 0.0, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400);
+            var half = DungeonArchetypeStandards.Extrapolate(axes, 326, 500, 0.5, 0.5, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400);
             Assert.AreEqual(520u, frozen.Core.EffectiveSkillMedianFor(Skill.MagicDefense));
             Assert.AreNotEqual(520u, half.Core.EffectiveSkillMedianFor(Skill.MagicDefense), "discriminating: 0.5 grows");
             Assert.AreEqual(half.Core.EffectiveSkillMedianFor(Skill.MeleeDefense), frozen.Core.EffectiveSkillMedianFor(Skill.MeleeDefense));

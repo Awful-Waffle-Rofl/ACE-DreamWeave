@@ -61,7 +61,7 @@ namespace ACE.Server.WorldObjects
         ///
         /// THORNS ANSWERS A BOUNCE (owner ruling 2026-10-22), synchronously at the bounce, for a DirectHit
         /// only. <paramref name="origin"/> is REQUIRED, not defaulted, so a dropped argument cannot quietly let
-        /// a Secondary spell projectile (proc, Cascade hop, AOE splash, Echo copy) trigger Thorns: a missile
+        /// a Secondary spell projectile (proc, Cascade hop, AOE splash) trigger Thorns: a missile
         /// is always DirectHit, a spell projectile passes its own IncomingDamageOrigin.
         /// </summary>
         public bool TryReflectProjectile(Creature firer, CombatType combatType, DamageType damageType, float damage, IncomingDamageOrigin origin)
@@ -102,21 +102,31 @@ namespace ACE.Server.WorldObjects
             // bounce, and OUTSIDE any latch (owner ruling 2026-10-23): it reaches the firer through its ordinary
             // TakeDamage as Secondary damage, so a ward absorbs it and an immune boss ignores it, and a monster
             // reflect effect, which answers a DirectHit only, cannot answer it. A Secondary spell projectile
-            // (proc, Cascade hop, AOE splash, Echo copy) is refused exactly as ApplyThornsOnMagicHit refuses it.
+            // (proc, Cascade hop, AOE splash) is refused exactly as ApplyThornsOnMagicHit refuses it.
             // The close-range gate and the dead check are inside ApplyThornsReflect.
-            if (origin == IncomingDamageOrigin.DirectHit)
-                ApplyThornsReflect(firer, combatType == CombatType.Magic ? GetThornsMagicReflectDamageType(damageType) : damageType, 1.0);
+            //
+            // The cloak roll below is made FIRST (Vanguard pass 2026-11-06), so the Thorns answer to this bounce
+            // sees the Critical Thorns window a successful roll opens.
 
             // The bounce skips this player's TakeDamage / DamageTarget (the caller returns on TRUE before
             // either runs), so the cloak spell proc those sites roll would otherwise never see a reflected
-            // hit. Rolled here instead, synchronously at the bounce like the Thorns answer above (not at the
+            // hit. Rolled here instead, synchronously at the bounce like the Thorns answer below (not at the
             // cosmetic's arrival), on the damage this player would have taken as a fraction of max health. Same single
             // entry point as every other site, so cooldown, item-level gate, the Cloaked in Power floor and
             // the Taunt hook apply unchanged.
+            //
+            // THREE STEPS, IN THIS ORDER: roll the proc, reflect, THEN cast it, so the proc spell can neither
+            // land ahead of Thorns nor kill the firer before it.
             var reflectCloak = EquippedCloak;
 
-            if (reflectCloak != null && Cloak.HasProcSpell(reflectCloak))
-                Cloak.TryProcSpell(this, firer, reflectCloak, damage / Health.MaxValue);
+            var bounceProcRolled = reflectCloak != null && Cloak.HasProcSpell(reflectCloak)
+                && Cloak.RollSpellProc(this, reflectCloak, damage / Health.MaxValue);
+
+            if (origin == IncomingDamageOrigin.DirectHit)
+                ApplyThornsReflect(firer, combatType == CombatType.Magic ? GetThornsMagicReflectDamageType(damageType) : damageType, 1.0);
+
+            if (bounceProcRolled)
+                Cloak.CompleteSpellProc(this, firer, reflectCloak);
 
             return true;
         }

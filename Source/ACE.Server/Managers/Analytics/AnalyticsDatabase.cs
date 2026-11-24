@@ -386,6 +386,197 @@ namespace ACE.Server.Managers.Analytics
             public string AttemptId;
         }
 
+        /// <summary>Matches trial_run.run_key / trial_uuid / trial_event.run_key CHAR(32) in ace_analytics.sql. Keep in sync.</summary>
+        internal const int TrialKeyMaxLength = 32;
+
+        /// <summary>Matches trial_run.scenario_hash, archetype_checksum and state_digest CHAR(64). Keep in sync.</summary>
+        internal const int TrialHashMaxLength = 64;
+
+        /// <summary>Matches trial_run.scenario_id, archetype_id and driver VARCHAR(64). Keep in sync.</summary>
+        internal const int TrialIdMaxLength = 64;
+
+        /// <summary>Matches trial_run.dungeon_id VARCHAR(32). Keep in sync.</summary>
+        internal const int TrialDungeonIdMaxLength = 32;
+
+        /// <summary>Matches trial_run.family VARCHAR(32). Keep in sync.</summary>
+        internal const int TrialFamilyMaxLength = 32;
+
+        /// <summary>Matches trial_run.mods_json VARCHAR(1024). Keep in sync.</summary>
+        internal const int TrialModsJsonMaxLength = 1024;
+
+        /// <summary>Matches trial_run.end_state VARCHAR(8). Keep in sync.</summary>
+        internal const int TrialEndStateMaxLength = 8;
+
+        /// <summary>Matches trial_event.kind VARCHAR(12). Keep in sync.</summary>
+        internal const int TrialEventKindMaxLength = 12;
+
+        /// <summary>Matches trial_event.dir VARCHAR(3). Keep in sync.</summary>
+        internal const int TrialEventDirMaxLength = 3;
+
+        /// <summary>Matches trial_event.actor_role and combat_type VARCHAR(8). Keep in sync.</summary>
+        internal const int TrialEventRoleMaxLength = 8;
+
+        /// <summary>Matches trial_event.damage_type VARCHAR(16). Keep in sync.</summary>
+        internal const int TrialEventDamageTypeMaxLength = 16;
+
+        /// <summary>Matches trial_event.pred_json VARCHAR(1024). Keep in sync.</summary>
+        internal const int TrialEventPredJsonMaxLength = 1024;
+
+        /// <summary>
+        /// One Balance Trials run (one rep of one character). Every value is captured by the recorder before this
+        /// object is queued: it holds no live object. Nullable members are written as DBNull - NULL means not
+        /// applicable or not measurable, never 0. See ace_analytics.sql.
+        /// </summary>
+        public sealed class TrialRunRow
+        {
+            public string RunKey;
+            public string TrialUuid;
+            public int Rep;
+            public string ScenarioId;
+            public string ScenarioHash;
+            public string ArchetypeId;
+            public string ArchetypeChecksum;
+            public string StateDigest;
+            public bool DigestDrift;
+            public string Driver;
+            public int ClientCount;
+            public uint CharacterId;
+            public int CharLevel;
+            public int GemLevel;
+            public int? GemLevelPressed;
+            public int Tier;
+            public string DungeonId;
+            public string Family;
+            public int Seed;
+            public string ModsJson;
+            public DateTime StartedUtc;
+            public DateTime EndedUtc;
+            public string EndState;
+            public double EngagedSecs;
+            public double IdleSecs;
+            public double? TtkTrashAvg;
+            public double? TtkEliteAvg;
+            public double? TtkBoss;
+            public int KillsTrash;
+            public int KillsElite;
+            public bool BossKilled;
+            public int Deaths;
+            public long DmgDealt;
+            public long DmgTaken;
+            public int HitsOut;
+            public int MissesOut;
+            public int ResistedOut;
+            public int HitsIn;
+            public int EvadedIn;
+            public int ResistedIn;
+            public long XpEarned;
+            public long LumEarned;
+            public double? XpPerHour;
+            public double? LumPerHour;
+            public double? XpPerEngagedHour;
+            public double? LumPerEngagedHour;
+            public double XpMultiplier;
+            public double BossXpMultiplier;
+            public double LumMultiplier;
+            public double? HpLowPct;
+            public double? StamLowPct;
+            public double? ManaLowPct;
+            public int ConsumablesUsed;
+            public int AbilityProcs;
+            public double? PredPlayerHitsToKillBoss;
+            public double? PredBossHitsToKillPlayer;
+            public double? PredBossHitChance;
+        }
+
+        /// <summary>
+        /// One Balance Trials combat or economy event. Same capture rules as <see cref="TrialRunRow"/>. Tied to its
+        /// run by <see cref="RunKey"/>, minted in memory (no auto-increment id exists when it is queued).
+        /// </summary>
+        public sealed class TrialEventRow
+        {
+            public string RunKey;
+            public int TMs;
+            public string Kind;
+            public string Dir;
+            public uint? ActorWcid;
+            public uint? TargetWcid;
+            public string ActorRole;
+            public string DamageType;
+            public long? Amount;
+            public bool? Crit;
+            public string CombatType;
+            public uint? SpellId;
+            public uint? ItemWcid;
+            public string PredJson;
+            public long? Xp;
+            public long? Lum;
+        }
+
+        /// <summary>Matches player_death_event.name and killer_name VARCHAR(64) in ace_analytics.sql. Keep in sync.</summary>
+        internal const int DeathNameMaxLength = 64;
+
+        /// <summary>Matches player_death_event.attack_kind VARCHAR(8). Keep in sync.</summary>
+        internal const int DeathAttackKindMaxLength = 8;
+
+        /// <summary>Matches player_death_event.damage_type VARCHAR(32). Keep in sync.</summary>
+        internal const int DeathDamageTypeMaxLength = 32;
+
+        /// <summary>Matches player_death_event.element VARCHAR(8). Keep in sync.</summary>
+        internal const int DeathElementMaxLength = 8;
+
+        /// <summary>Matches player_death_event.thread_start_group CHAR(32). Keep in sync.</summary>
+        internal const int DeathStartGroupMaxLength = 32;
+
+        /// <summary>Matches player_death_event.thread_dungeon_id VARCHAR(32). Keep in sync.</summary>
+        internal const int DeathDungeonIdMaxLength = 32;
+
+        /// <summary>Matches player_death_event.message VARCHAR(512). Keep in sync.</summary>
+        internal const int DeathMessageMaxLength = 512;
+
+        /// <summary>
+        /// One player death (player_death_event). Built by DeathTelemetry from the killing DamageHistoryEntry and the dying
+        /// player before this object is queued: it holds no live object. Nullable members are written as DBNull - NULL means
+        /// not known or not applicable, never 0. See ace_analytics.sql.
+        /// </summary>
+        public sealed class PlayerDeathRow
+        {
+            public DateTime TsUtc;
+            public uint CharacterId;
+            public string Name;
+            public int? Level;
+            public int Landblock;
+            public uint? InstanceId;
+            public uint MaxHealth;
+            public bool KillingBlowKnown;
+            public uint? Thrown;
+            public uint? HealthBefore;
+            public string AttackKind;
+            public string DamageType;
+            public bool? IsCritical;
+            public uint? SpellId;
+            public uint? KillerGuid;
+            public uint? KillerWcid;
+            public string KillerName;
+            public int? KillerLevel;
+            public bool? KillerIsPlayer;
+            public string Element;
+            public bool? HadVulnerability;
+            public uint? VulnerabilitySpellId;
+            public bool? HadImperil;
+            public uint? ImperilSpellId;
+            public bool? HadElementProtection;
+            public uint? ElementProtectionSpellId;
+            public bool? HadArmorSelf;
+            public uint? ArmorSelfSpellId;
+            public float? ProtResistMod;
+            public float? VulnResistMod;
+            public int? BodyArmorMod;
+            public string ThreadStartGroup;
+            public string ThreadDungeonId;
+            public int? ThreadGemLevel;
+            public string Message;
+        }
+
         /// <summary>
         /// Creates the database if needed and applies the (idempotent) schema. Throws on failure so
         /// the caller can disable analytics rather than run half-initialized.
@@ -968,6 +1159,250 @@ namespace ACE.Server.Managers.Analytics
 
         private static object KnotDb(string value, int maxLength, string column)
             => value == null ? DBNull.Value : (object)Truncate(value, maxLength, column);
+
+        /// <summary>
+        /// Appends Balance Trials run rows in ONE multi-row INSERT, in their own connection like knot_event: a bad
+        /// trial row must never roll back another writer's transaction. The caller (AnalyticsManager.DrainTrialRuns)
+        /// caps a batch at 500 rows, so 57 parameters a row stays far under the protocol limit. Strings are clamped
+        /// to their column width (Truncate), never rejected, because one overlong value would otherwise take the
+        /// whole batch down. A ux_run_key duplicate is NOT swallowed: it fails the batch, because two runs sharing
+        /// a key would corrupt the event join.
+        /// </summary>
+        public static void WriteTrialRuns(IReadOnlyList<TrialRunRow> rows)
+        {
+            if (rows == null || rows.Count == 0)
+                return;
+
+            const string insertHead =
+                "INSERT INTO `trial_run` (`run_key`,`trial_uuid`,`rep`,`scenario_id`,`scenario_hash`,`archetype_id`,`archetype_checksum`,`state_digest`,`digest_drift`," +
+                "`driver`,`client_count`,`character_id`,`char_level`,`gem_level`,`gem_level_pressed`,`tier`,`dungeon_id`,`family`,`seed`," +
+                "`mods_json`,`started_utc`,`ended_utc`,`end_state`,`engaged_secs`,`idle_secs`,`ttk_trash_avg`,`ttk_elite_avg`,`ttk_boss`," +
+                "`kills_trash`,`kills_elite`,`boss_killed`,`deaths`,`dmg_dealt`,`dmg_taken`,`hits_out`,`misses_out`,`resisted_out`," +
+                "`hits_in`,`evaded_in`,`resisted_in`,`xp_earned`,`lum_earned`,`xp_per_hour`,`lum_per_hour`,`xp_per_engaged_hour`," +
+                "`lum_per_engaged_hour`,`xp_multiplier`,`boss_xp_multiplier`,`lum_multiplier`,`hp_low_pct`,`stam_low_pct`,`mana_low_pct`," +
+                "`consumables_used`,`ability_procs`,`pred_player_hits_to_kill_boss`,`pred_boss_hits_to_kill_player`,`pred_boss_hit_chance`) VALUES ";
+
+            using var conn = new MySqlConnection(connectionString);
+            conn.Open();
+
+            var sb = new StringBuilder(insertHead);
+            using var cmd = conn.CreateCommand();
+
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var r = rows[i];
+                var values = new object[]
+                {
+                    Truncate(r.RunKey ?? string.Empty, TrialKeyMaxLength, "trial_run.run_key"),
+                    Truncate(r.TrialUuid ?? string.Empty, TrialKeyMaxLength, "trial_run.trial_uuid"),
+                    r.Rep,
+                    Truncate(r.ScenarioId ?? string.Empty, TrialIdMaxLength, "trial_run.scenario_id"),
+                    Truncate(r.ScenarioHash ?? string.Empty, TrialHashMaxLength, "trial_run.scenario_hash"),
+                    Truncate(r.ArchetypeId ?? string.Empty, TrialIdMaxLength, "trial_run.archetype_id"),
+                    Truncate(r.ArchetypeChecksum ?? string.Empty, TrialHashMaxLength, "trial_run.archetype_checksum"),
+                    KnotDb(r.StateDigest, TrialHashMaxLength, "trial_run.state_digest"),
+                    r.DigestDrift ? 1 : 0,
+                    Truncate(r.Driver ?? string.Empty, TrialIdMaxLength, "trial_run.driver"),
+                    r.ClientCount,
+                    r.CharacterId,
+                    r.CharLevel,
+                    r.GemLevel,
+                    KnotDb(r.GemLevelPressed),
+                    r.Tier,
+                    Truncate(r.DungeonId ?? string.Empty, TrialDungeonIdMaxLength, "trial_run.dungeon_id"),
+                    Truncate(r.Family ?? string.Empty, TrialFamilyMaxLength, "trial_run.family"),
+                    r.Seed,
+                    Truncate(r.ModsJson ?? string.Empty, TrialModsJsonMaxLength, "trial_run.mods_json"),
+                    r.StartedUtc,
+                    r.EndedUtc,
+                    Truncate(r.EndState ?? string.Empty, TrialEndStateMaxLength, "trial_run.end_state"),
+                    r.EngagedSecs,
+                    r.IdleSecs,
+                    KnotDb(r.TtkTrashAvg),
+                    KnotDb(r.TtkEliteAvg),
+                    KnotDb(r.TtkBoss),
+                    r.KillsTrash,
+                    r.KillsElite,
+                    r.BossKilled ? 1 : 0,
+                    r.Deaths,
+                    r.DmgDealt,
+                    r.DmgTaken,
+                    r.HitsOut,
+                    r.MissesOut,
+                    r.ResistedOut,
+                    r.HitsIn,
+                    r.EvadedIn,
+                    r.ResistedIn,
+                    r.XpEarned,
+                    r.LumEarned,
+                    KnotDb(r.XpPerHour),
+                    KnotDb(r.LumPerHour),
+                    KnotDb(r.XpPerEngagedHour),
+                    KnotDb(r.LumPerEngagedHour),
+                    r.XpMultiplier,
+                    r.BossXpMultiplier,
+                    r.LumMultiplier,
+                    KnotDb(r.HpLowPct),
+                    KnotDb(r.StamLowPct),
+                    KnotDb(r.ManaLowPct),
+                    r.ConsumablesUsed,
+                    r.AbilityProcs,
+                    KnotDb(r.PredPlayerHitsToKillBoss),
+                    KnotDb(r.PredBossHitsToKillPlayer),
+                    KnotDb(r.PredBossHitChance),
+                };
+
+                AppendTrialTuple(sb, cmd, i, values, InsertColumnCount(insertHead));
+            }
+
+            cmd.CommandText = sb.ToString();
+            cmd.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Appends Balance Trials event rows in ONE multi-row INSERT, same rules as <see cref="WriteTrialRuns"/>. The
+        /// caller (AnalyticsManager.DrainTrialEvents) caps a batch at 1000 rows, 16 parameters a row.
+        /// </summary>
+        public static void WriteTrialEvents(IReadOnlyList<TrialEventRow> rows)
+        {
+            if (rows == null || rows.Count == 0)
+                return;
+
+            const string insertHead =
+                "INSERT INTO `trial_event` (`run_key`,`t_ms`,`kind`,`dir`,`actor_wcid`,`target_wcid`,`actor_role`,`damage_type`,`amount`,`crit`,`combat_type`," +
+                "`spell_id`,`item_wcid`,`pred_json`,`xp`,`lum`) VALUES ";
+
+            using var conn = new MySqlConnection(connectionString);
+            conn.Open();
+
+            var sb = new StringBuilder(insertHead);
+            using var cmd = conn.CreateCommand();
+
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var r = rows[i];
+                var values = new object[]
+                {
+                    Truncate(r.RunKey ?? string.Empty, TrialKeyMaxLength, "trial_event.run_key"),
+                    r.TMs,
+                    Truncate(r.Kind ?? string.Empty, TrialEventKindMaxLength, "trial_event.kind"),
+                    KnotDb(r.Dir, TrialEventDirMaxLength, "trial_event.dir"),
+                    KnotDb(r.ActorWcid),
+                    KnotDb(r.TargetWcid),
+                    KnotDb(r.ActorRole, TrialEventRoleMaxLength, "trial_event.actor_role"),
+                    KnotDb(r.DamageType, TrialEventDamageTypeMaxLength, "trial_event.damage_type"),
+                    KnotDb(r.Amount),
+                    r.Crit.HasValue ? (object)(r.Crit.Value ? 1 : 0) : DBNull.Value,
+                    KnotDb(r.CombatType, TrialEventRoleMaxLength, "trial_event.combat_type"),
+                    KnotDb(r.SpellId),
+                    KnotDb(r.ItemWcid),
+                    KnotDb(r.PredJson, TrialEventPredJsonMaxLength, "trial_event.pred_json"),
+                    KnotDb(r.Xp),
+                    KnotDb(r.Lum),
+                };
+
+                AppendTrialTuple(sb, cmd, i, values, InsertColumnCount(insertHead));
+            }
+
+            cmd.CommandText = sb.ToString();
+            cmd.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Appends player_death_event rows in ONE multi-row INSERT, in their own connection like knot_event: a bad death row
+        /// must never roll back another writer's transaction. The caller (AnalyticsManager.DrainPlayerDeaths) caps a batch
+        /// at 500 rows, 35 parameters a row. Strings are clamped to their column width (Truncate), never rejected.
+        /// </summary>
+        public static void WritePlayerDeaths(IReadOnlyList<PlayerDeathRow> rows)
+        {
+            if (rows == null || rows.Count == 0)
+                return;
+
+            const string insertHead =
+                "INSERT INTO `player_death_event` (`ts_utc`,`character_id`,`name`,`level`,`landblock`,`instance_id`,`max_health`,`killing_blow_known`," +
+                "`thrown`,`health_before`,`attack_kind`,`damage_type`,`is_critical`,`spell_id`,`killer_guid`,`killer_wcid`,`killer_name`,`killer_level`," +
+                "`killer_is_player`,`element`,`had_vulnerability`,`vulnerability_spell_id`,`had_imperil`,`imperil_spell_id`,`had_element_protection`," +
+                "`element_protection_spell_id`,`had_armor_self`,`armor_self_spell_id`,`prot_resist_mod`,`vuln_resist_mod`,`body_armor_mod`," +
+                "`thread_start_group`,`thread_dungeon_id`,`thread_gem_level`,`message`) VALUES ";
+
+            using var conn = new MySqlConnection(connectionString);
+            conn.Open();
+
+            var sb = new StringBuilder(insertHead);
+            using var cmd = conn.CreateCommand();
+
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var r = rows[i];
+                var values = new object[]
+                {
+                    r.TsUtc,
+                    r.CharacterId,
+                    Truncate(r.Name ?? string.Empty, DeathNameMaxLength, "player_death_event.name"),
+                    KnotDb(r.Level),
+                    r.Landblock,
+                    KnotDb(r.InstanceId),
+                    r.MaxHealth,
+                    r.KillingBlowKnown ? 1 : 0,
+                    KnotDb(r.Thrown),
+                    KnotDb(r.HealthBefore),
+                    KnotDb(r.AttackKind, DeathAttackKindMaxLength, "player_death_event.attack_kind"),
+                    KnotDb(r.DamageType, DeathDamageTypeMaxLength, "player_death_event.damage_type"),
+                    DbBool(r.IsCritical),
+                    KnotDb(r.SpellId),
+                    KnotDb(r.KillerGuid),
+                    KnotDb(r.KillerWcid),
+                    KnotDb(r.KillerName, DeathNameMaxLength, "player_death_event.killer_name"),
+                    KnotDb(r.KillerLevel),
+                    DbBool(r.KillerIsPlayer),
+                    KnotDb(r.Element, DeathElementMaxLength, "player_death_event.element"),
+                    DbBool(r.HadVulnerability),
+                    KnotDb(r.VulnerabilitySpellId),
+                    DbBool(r.HadImperil),
+                    KnotDb(r.ImperilSpellId),
+                    DbBool(r.HadElementProtection),
+                    KnotDb(r.ElementProtectionSpellId),
+                    DbBool(r.HadArmorSelf),
+                    KnotDb(r.ArmorSelfSpellId),
+                    KnotDb(r.ProtResistMod),
+                    KnotDb(r.VulnResistMod),
+                    KnotDb(r.BodyArmorMod),
+                    KnotDb(r.ThreadStartGroup, DeathStartGroupMaxLength, "player_death_event.thread_start_group"),
+                    KnotDb(r.ThreadDungeonId, DeathDungeonIdMaxLength, "player_death_event.thread_dungeon_id"),
+                    KnotDb(r.ThreadGemLevel),
+                    Truncate(r.Message ?? string.Empty, DeathMessageMaxLength, "player_death_event.message"),
+                };
+
+                AppendTrialTuple(sb, cmd, i, values, InsertColumnCount(insertHead));
+            }
+
+            cmd.CommandText = sb.ToString();
+            cmd.ExecuteNonQuery();
+        }
+
+        private static object DbBool(bool? value) => value.HasValue ? (object)(value.Value ? 1 : 0) : DBNull.Value;
+
+        /// <summary>The column count of an INSERT head: its backtick-quoted names, less the table name.</summary>
+        private static int InsertColumnCount(string insertHead) => System.Linq.Enumerable.Count(insertHead, c => c == (char)96) / 2 - 1;
+
+        /// <summary>Appends one "(@p{row}_0,@p{row}_1,...)" tuple and binds its values, in column order.</summary>
+        private static void AppendTrialTuple(StringBuilder sb, MySqlCommand cmd, int row, object[] values, int columnCount)
+        {
+            if (values.Length != columnCount)
+                throw new InvalidOperationException($"trial INSERT names {columnCount} columns but the row supplies {values.Length} values.");
+
+            if (row > 0) sb.Append(',');
+            sb.Append('(');
+            for (int j = 0; j < values.Length; j++)
+            {
+                if (j > 0) sb.Append(',');
+                var name = $"@p{row}_{j}";
+                sb.Append(name);
+                cmd.Parameters.AddWithValue(name, values[j]);
+            }
+
+            sb.Append(')');
+        }
 
         // --- session_event (IP integrity; see SessionEvents.cs and Docs/Monitoring/IP-INTEGRITY-DESIGN.md) ---
 

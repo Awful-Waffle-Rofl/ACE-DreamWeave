@@ -90,6 +90,13 @@ namespace ACE.Server.WorldObjects.Managers
             ClearCache();
         }
 
+        public override void RemoveAllEnchantmentsExcept(IEnumerable<int> spellsToKeep)
+        {
+            base.RemoveAllEnchantmentsExcept(spellsToKeep);
+
+            ClearCache();
+        }
+
         /// <summary>
         /// Removes all enchantments except for beneficial enchantments, vitae and enchantments from items
         /// Called on player death

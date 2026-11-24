@@ -39,10 +39,15 @@ namespace ACE.Server.CombatSimulator
 
         public static float ShieldMod(DefenderProfile profile, AttackerSpec spec)
         {
-            // the angle check is a pure binary gate: outside the 180 degree frontal arc the
-            // engine returns 1.0 immediately and the angle value is used for nothing else
-            if (!spec.WithinShieldArc || spec.IgnoreAllArmor)
+            // phantom weapons ignore all armor and shields, in both arcs
+            if (spec.IgnoreAllArmor)
                 return 1.0f;
+
+            // the angle check is a pure binary gate: outside the 180 degree frontal arc no shield
+            // or virtual shield counts, and Creature.GetShieldMod hands a Player's rear hit to
+            // Player.GetCloakRearGuardMod - the Mantle rear guard, PvE only
+            if (!spec.WithinShieldArc)
+                return RearGuardMod(profile, spec);
 
             var key = new ShieldKey(spec.DamageType, spec.IgnoreMagicArmor);
 
@@ -54,6 +59,18 @@ namespace ACE.Server.CombatSimulator
             var effectiveLevel = row.CappedEffectiveLevel * spec.IgnoreShieldMod;
 
             return SkillFormula.CalcArmorMod(effectiveLevel);
+        }
+
+        /// <summary>
+        /// The rear arc: Player.GetCloakRearGuardMod's arithmetic on the stored armor level - 1.0 for a player attacker
+        /// (PvpClassifier.IsPvp, which RearGuardArmorLevel turns into 0) or no Mantle, else CloakMantleMath.RearGuardMod.
+        /// </summary>
+        public static float RearGuardMod(DefenderProfile profile, AttackerSpec spec)
+        {
+            if (spec.IgnoreAllArmor || spec.AttackerIsPlayer || profile.RearGuardArmorLevel <= 0.0)
+                return 1.0f;
+
+            return CloakMantleMath.RearGuardMod(profile.RearGuardArmorLevel, spec.IgnoreShieldMod);
         }
 
         public static float ResistanceMod(DefenderProfile profile, AttackerSpec spec)

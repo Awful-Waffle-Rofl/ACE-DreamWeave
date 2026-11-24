@@ -100,5 +100,9 @@ namespace ACE.Server.EquipmentMods
         Provoke          = 47,
         Bellow           = 48,
         ShieldWall       = 49,
+
+        // Archmage, 2026-11-03: the returned Elemental Rend (vulnerability proc). ElementalRend = 23 above is
+        // the Elemental Proficiency amplifier and keeps its id, property and name.
+        ElementalRendVuln = 50,
     }
 }

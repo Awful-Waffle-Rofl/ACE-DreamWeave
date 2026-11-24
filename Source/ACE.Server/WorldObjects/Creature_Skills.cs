@@ -40,6 +40,37 @@ namespace ACE.Server.WorldObjects
             => MagicAttackSkillCeiling.HasValue && ACE.Server.ThreadDungeons.DungeonCombatNormalizer.IsMagicAttackSkill(skill) ? MagicAttackSkillCeiling : (uint?)null;
 
         /// <summary>
+        /// Non-persisted per-instance ceiling on this creature's pre-enchantment MISSILE DEFENSE skill. Written only by
+        /// ThreadDungeonSpawner.PrepareForPlacement for a Thread run creature, from dynamic_dungeons_missile_defense_skill_cap;
+        /// never set for a Player or for a World Events or Pinnacle creature. Null means no ceiling. Kept apart from
+        /// <see cref="DefenseSkillCeilings"/> (the effective ceiling is the lower of the two) so the uplift code that reads the
+        /// defense ceilings is unaffected. Read by CreatureSkill.Base/Current via <see cref="GetMissileDefenseSkillCeiling"/>.
+        /// </summary>
+        public uint? MissileDefenseSkillCeiling;
+
+        /// <summary>This creature's missile defense ceiling for <paramref name="skill"/>: the ceiling for Missile Defense only, null for every other skill.</summary>
+        public uint? GetMissileDefenseSkillCeiling(Skill skill)
+            => MissileDefenseSkillCeiling.HasValue && skill == Skill.MissileDefense ? MissileDefenseSkillCeiling : (uint?)null;
+
+        /// <summary>
+        /// Non-persisted per-instance Threads band cap on this creature's MELEE DEFENSE (the band's effective median plus
+        /// dynamic_dungeons_defense_skill_cap_offset), recorded for EVERY non-boss Thread run creature whether or not its own
+        /// skill exceeds the cap. Written only by ThreadDungeonSpawner.ApplyMeleeDefenseBandCap; never set for a Player, a
+        /// boss, or a World Events or Pinnacle creature. Null means no band cap. It does NOT clamp the skill (that is
+        /// <see cref="DefenseSkillCeilings"/>' job, and the uplift code reads and counts those): it only bounds the wielded
+        /// weapon's melee defense lift, through <see cref="GetMeleeDefenseWeaponBound"/>.
+        /// </summary>
+        public uint? MeleeDefenseBandCap;
+
+        /// <summary>
+        /// The value the wielded weapon's melee defense modifier may not lift this creature above (together with Current; see
+        /// DungeonCombatNormalizer.BoundWeaponLiftedDefense): the melee defense ceiling when one is set, else the Threads band
+        /// cap, else null (no bound - every creature outside a Thread run).
+        /// </summary>
+        public uint? GetMeleeDefenseWeaponBound()
+            => GetDefenseSkillCeiling(Skill.MeleeDefense) ?? MeleeDefenseBandCap;
+
+        /// <summary>
         /// This will get a CreatureSkill wrapper around the BiotaPropertiesSkill record for this player.
         /// If the skill doesn't exist for this Biota, one will be created with a status of Untrained.
         /// </summary>

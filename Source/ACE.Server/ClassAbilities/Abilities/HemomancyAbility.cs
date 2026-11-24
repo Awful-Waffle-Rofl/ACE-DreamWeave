@@ -44,10 +44,14 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "hemomancy",
             DisplayName = "Hemomancy",
-            Description = "Being healed for at least 5% of your maximum health at once - or leeching that much " +
-                          "within 2 seconds through Drain, Transfusion or Bloodlust - makes your attacks and " +
-                          "spells (except Drain) deal 2/4/6/8/10% more damage by rank for 8 seconds. Healing " +
-                          "again refreshes the timer. Higher Healing multiplies the bonus.",
+            // Live text. Per-rank bonus is rank * class_ability_hemomancy_damage_percent_per_rank (HemomancyAbility.cs ~96 GetReadout);
+            // threshold, leech window and duration are read at Player_Hemomancy.cs ~68-70.
+            DescriptionTemplate = "A big heal (at least {v:class_ability_hemomancy_heal_threshold_fraction|pct}% of your maximum " +
+                          "health at once, or that much leeched within {v:class_ability_hemomancy_leech_window_seconds|num} seconds " +
+                          "through Drain, Transfusion or Bloodlust) makes your attacks and spells, except Drain, deal more damage " +
+                          "for {v:class_ability_hemomancy_duration_seconds|num} seconds. Healing again restarts the timer.",
+            RankTailTemplate = "+{per:class_ability_hemomancy_damage_percent_per_rank|pct}% damage",
+            TunableSourceFiles = new[] { "WorldObjects/Player_Hemomancy.cs" },
             MaxRank = 5,
             CostPerRank = new[] { 1, 1, 1, 1, 1 },
             Implemented = true,

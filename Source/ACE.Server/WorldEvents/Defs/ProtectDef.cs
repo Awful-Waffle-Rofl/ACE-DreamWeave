@@ -66,6 +66,13 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("targetDecor")]
         public List<DecorDef> TargetDecor { get; set; }
 
+        /// <summary>
+        /// Optional: a row of small wisps floating above each target's start spot that shows its health (4 above 75%, 3 above 50%,
+        /// 2 above 25%, 1 above 0, none when it dies), for goals whose health bar is hidden. Null or absent (the default) is off.
+        /// </summary>
+        [JsonPropertyName("healthWisps")]
+        public HealthWispsDef HealthWisps { get; set; }
+
         /// <summary>How many targets to place, resolved once from the audience when the run goes Active.</summary>
         [JsonPropertyName("count")]
         public ScaledCount Count { get; set; }
@@ -140,6 +147,37 @@ namespace ACE.Server.WorldEvents.Defs
         /// </summary>
         [JsonPropertyName("minDeathSeconds")]
         public double MinDeathSeconds { get; set; }
+
+        /// <summary>
+        /// Optional: how much more durable the targets get for every participant beyond the first (0 to 1; 0.12 = +12% each).
+        /// <see cref="Durability"/> multiplies undefendedSeconds, minDeathSeconds and bossMinKillSeconds, so a bigger group
+        /// is not met with more fragile targets, and divides the passive heal shares (shrine, rescue, clear regen, between waves,
+        /// corrupted kill) so the sturdier targets are not also healed more strongly. 0 (the default) keeps one durability for every group size.
+        /// </summary>
+        [JsonPropertyName("durabilityPerParticipant")]
+        public double DurabilityPerParticipant { get; set; }
+
+        /// <summary>The most <see cref="Durability"/> can reach (1 to 10, default 1 = never above 1).</summary>
+        [JsonPropertyName("durabilityCap")]
+        public double DurabilityCap { get; set; } = 1;
+
+        /// <summary>
+        /// The durability multiplier for <paramref name="participants"/> players (pure): 1 plus <see cref="DurabilityPerParticipant"/>
+        /// per player beyond the first, capped at <see cref="DurabilityCap"/>, never below 1. A solo staff test counts as one.
+        /// </summary>
+        public double Durability(int participants) => Durability(DurabilityPerParticipant, DurabilityCap, participants);
+
+        /// <summary>The same rule from raw numbers (the Live settings feed this directly).</summary>
+        public static double Durability(double perParticipant, double cap, int participants)
+        {
+            if (double.IsNaN(perParticipant) || double.IsNaN(cap))
+                return 1;
+
+            var extra = Math.Max(0, Math.Max(1, participants) - 1);
+            var d = 1 + Math.Max(0, perParticipant) * extra;
+
+            return Math.Min(Math.Max(1, cap), Math.Max(1, d));
+        }
 
         public const double DefaultMinSeconds = 180;
         public const double DefaultMaxHealPerTenSeconds = 0.10;

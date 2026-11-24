@@ -184,7 +184,9 @@ namespace ACE.Server.HazardMechanics
                     WispsMissed++;
             }
 
-            port.Say($"The {s.Element} is rising.");
+            // quiet=1: a host starting many small fills says nothing per run (FillSettings.Quiet)
+            if (!s.Quiet)
+                port.Say($"The {s.Element} is rising.");
             Refresh(now);
         }
 

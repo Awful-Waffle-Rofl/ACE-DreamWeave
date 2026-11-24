@@ -64,16 +64,20 @@ namespace ACE.Server.ClassAbilities
         /// is the same retail-identical path as failing this gate. Keeping the two parameters at the same
         /// granularity is what lets this stay a pure predicate over cheap facts.
         ///
+        ///  - hasHoldKnight: a protected envoy (World Events Hold knight) that accepts player heals stands in
+        ///    reach (WorldEventHooks.HoldTransfusionKnights). Another presence fact, so a caster with no fellowship
+        ///    and no summon still qualifies beside a hurt envoy. Optional and false by default.
+        ///
         /// hasSummon must mean the CASTER'S OWN summons only. A fellow's pet is not a recipient - the call
         /// site reads Player.CurrentActivePet / Player.SecondaryActivePet off the caster and nobody else.
         /// </summary>
-        public static bool CasterQualifies(bool casterIsPlayer, bool casterIsTransferDestination, bool targetIsEligibleVictim, int transfusionRank, bool hasFellowship, bool hasSummon)
+        public static bool CasterQualifies(bool casterIsPlayer, bool casterIsTransferDestination, bool targetIsEligibleVictim, int transfusionRank, bool hasFellowship, bool hasSummon, bool hasHoldKnight = false)
         {
             return casterIsPlayer
                 && casterIsTransferDestination
                 && targetIsEligibleVictim
                 && transfusionRank >= 1
-                && (hasFellowship || hasSummon);
+                && (hasFellowship || hasSummon || hasHoldKnight);
         }
     }
 }

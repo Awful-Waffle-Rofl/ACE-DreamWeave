@@ -739,47 +739,23 @@ namespace ACE.Server.Tests
             CollectionAssert.AreEqual(expected, bucket.Skip(1).Select(h => h.Definition.Id).ToList());
         }
 
-        // ---- Round 2: life-projectile echoes ----
+        // ---- Round 2: the Blood Charge grant, one per cast ----
 
         /// <summary>
-        /// The Blood Charge grant is one per CAST: only the aimed projectile of the original cast grants it,
-        /// never a ring side-projectile, and never an Echo Cast recast (which copies a cast whose aimed bolt
-        /// already earned it).
+        /// The Blood Charge grant is one per CAST: only the aimed projectile of the cast grants it, never a ring
+        /// side-projectile, and never an Echo Cast wisp cast (wisp casts build no pool).
         /// </summary>
         [TestMethod]
-        public void LifeProjectile_BloodChargeGrant_OnePerCast_NeverFromAnEcho()
+        public void LifeProjectile_BloodChargeGrant_OnePerCast_NeverFromAWisp()
         {
-            Assert.IsTrue(SpellProjectile.GrantsLifeProjectileCharge(hasProjectileTarget: true, isEchoCopy: false));
-            Assert.IsFalse(SpellProjectile.GrantsLifeProjectileCharge(hasProjectileTarget: false, isEchoCopy: false));
-            Assert.IsFalse(SpellProjectile.GrantsLifeProjectileCharge(hasProjectileTarget: true, isEchoCopy: true));
-            Assert.IsFalse(SpellProjectile.GrantsLifeProjectileCharge(hasProjectileTarget: false, isEchoCopy: true));
+            Assert.IsTrue(SpellProjectile.GrantsLifeProjectileCharge(hasProjectileTarget: true, isEchoWispCast: false));
+            Assert.IsFalse(SpellProjectile.GrantsLifeProjectileCharge(hasProjectileTarget: false, isEchoWispCast: false));
+            Assert.IsFalse(SpellProjectile.GrantsLifeProjectileCharge(hasProjectileTarget: true, isEchoWispCast: true));
+            Assert.IsFalse(SpellProjectile.GrantsLifeProjectileCharge(hasProjectileTarget: false, isEchoWispCast: true));
         }
 
         /// <summary>
-        /// An echo inherits the parent cast's life-projectile damage basis (it used to land for 0), its
-        /// Spellweave capture, and the IsEchoCopy flag - and does NOT take IsClassAbilitySpawned, so Spell AOE
-        /// still radiates off it.
-        /// </summary>
-        [TestMethod]
-        public void EchoCast_StampEchoCopy_InheritsTheParentsPerCastValues()
-        {
-            var parent = NewProjectile();
-            parent.LifeProjectileDamage = 420;
-            parent.SpellweaveDamageMod = 1.25f;
-
-            var echo = NewProjectile();
-            Assert.AreEqual(0u, echo.LifeProjectileDamage, "precondition: a fresh projectile carries no basis");
-
-            EchoCastAbility.StampEchoCopy(echo, parent);
-
-            Assert.AreEqual(420u, echo.LifeProjectileDamage);
-            Assert.AreEqual(1.25f, echo.SpellweaveDamageMod);
-            Assert.IsTrue(echo.IsEchoCopy);
-            Assert.IsFalse(echo.IsClassAbilitySpawned);
-        }
-
-        /// <summary>
-        /// The shared helper every child-spawn site (Echo Cast, Spell AOE, Cascade) calls to inherit the
+        /// The shared helper every child-spawn site (Spell AOE, Cascade) calls to inherit the
         /// parent's per-cast stamps. Without it, a Spell AOE splash child or a Cascade child carries the
         /// projectile default (LifeProjectileDamage = 0) and a life-projectile spell like Martyr's Hecatomb
         /// lands for 0 damage on every splash/chain hit.
@@ -801,11 +777,11 @@ namespace ACE.Server.Tests
 
             Assert.AreEqual(420u, child.LifeProjectileDamage);
             Assert.AreEqual(1.25f, child.SpellweaveDamageMod);
-            Assert.AreEqual(0.49f, child.ProcDamageScale, "a Cascade / Echo / AOE child of a Nether proc keeps the parent's parity scale");
+            Assert.AreEqual(0.49f, child.ProcDamageScale, "a Cascade / AOE child of a Nether proc keeps the parent's parity scale");
             Assert.AreEqual(parent.LifeProjectileStamp.DamageMultiplier, child.LifeProjectileStamp.DamageMultiplier);
             Assert.AreEqual(parent.LifeProjectileStamp.Bursts, child.LifeProjectileStamp.Bursts);
             Assert.AreEqual(parent.LifeProjectileStamp.GrantsCharge, child.LifeProjectileStamp.GrantsCharge);
-            Assert.IsFalse(child.IsEchoCopy, "CopyPerCastStamps must not set the Echo-only flag");
+            Assert.IsFalse(child.IsEchoWispCast, "CopyPerCastStamps must not set the wisp mark (InheritEchoWispMark owns that)");
         }
 
         // ---- Round 3: the Blood Mage per-cast stamp rides the projectile (PR #1271 review) ----
@@ -843,30 +819,6 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// An echo carries its PARENT's stamp, not whatever CreateSpellProjectiles captured from the live player
-        /// fields when the echo launched (which may already belong to a later Exsanguinate).
-        /// </summary>
-        [TestMethod]
-        public void EchoCast_StampEchoCopy_TakesTheParentsLifeProjectileStamp_NotALaterCasts()
-        {
-            var parent = NewProjectile();
-            parent.LifeProjectileStamp = new LifeProjectileCastStamp(1.1f, 1.14f, BloodChargeCastOutcome.Accrue);
-
-            var echo = NewProjectile();
-            // What LaunchSpellProjectiles would have captured had a burst cast landed in between.
-            echo.LifeProjectileStamp = new LifeProjectileCastStamp(1.3f, 2.05f, BloodChargeCastOutcome.Burst);
-
-            EchoCastAbility.StampEchoCopy(echo, parent);
-
-            Assert.AreEqual(1.1f, echo.LifeProjectileStamp.BloodPriceMod);
-            Assert.AreEqual(1.14f, echo.LifeProjectileStamp.ChargeMod);
-            Assert.AreEqual(BloodChargeCastOutcome.Accrue, echo.LifeProjectileStamp.Outcome);
-            Assert.IsFalse(echo.LifeProjectileStamp.Bursts, "the echo must not inherit a later cast's burst");
-            Assert.IsFalse(SpellProjectile.GrantsLifeProjectileCharge(hasProjectileTarget: true, echo.IsEchoCopy),
-                "the grant rule is unchanged: an echo never grants, even with an accruing stamp");
-        }
-
-        /// <summary>
         /// An unstamped projectile (a non-player caster, or any path that never snapshots) is neutral: no
         /// multiplier, no burst - and the default struct, whose multipliers are 0, reads as 1.0, not as 0.
         /// </summary>
@@ -888,55 +840,21 @@ namespace ACE.Server.Tests
             return new SpellProjectile(weenie, new ACE.Entity.ObjectGuid(0x7F100000 + nextProjectileWcid));
         }
 
-        // ---- Echo Cast full recast (2026-09-21): recursion guards as pure functions ----
-        //
-        // The flag states below are the ones the live code stamps: a normal cast carries neither flag; an
-        // echo is stamped IsEchoCopy only (EchoCastAbility.OnSpellHit); a Spell AOE child is stamped
-        // IsClassAbilitySpawned and inherits the parent's IsEchoCopy (SpellProjectile.SpawnClassAbilityAoeChild).
+        // ---- Echo Cast wisp rework (2026-11-22): the spell-hit recast is gone ----
 
+        /// <summary>
+        /// Echo Cast no longer hooks landed spell hits (its OnSpellHit / StampEchoCopy / CanEcho recast is retired), so
+        /// no projectile, AOE child or Cascade child can spawn a wisp. Spell AOE still radiates off an Arc that is not a
+        /// spawned copy, a wisp's Arc included (a wisp cast is a first-hand cast), and Cascade still never fires off a
+        /// non-proc projectile.
+        /// </summary>
         [TestMethod]
-        public void EchoCast_NormalCast_IsEligibleForEchoAndAoe()
+        public void EchoCast_IsNotASpellHitHandler_AndTheOtherNoCascadeInvariantsHold()
         {
-            Assert.IsTrue(EchoCastAbility.CanEcho(isClassAbilitySpawned: false, isEchoCopy: false));
+            Assert.IsFalse(ClassAbilityRegistry.SpellHitAbilities.Any(h => h is EchoCastAbility), "Echo Cast must not react to landed spell hits");
+            Assert.IsFalse(typeof(ISpellHitAbility).IsAssignableFrom(typeof(EchoCastAbility)));
+
             Assert.IsTrue(SpellAoeAbility.CanRadiate(isClassAbilitySpawned: false, ProjectileSpellType.Arc));
-        }
-
-        /// <summary>
-        /// The owner ruling: an echo is a full second cast, so Spell AOE radiates off an echoed Arc - but an
-        /// echo never echoes again.
-        /// </summary>
-        [TestMethod]
-        public void EchoCast_EchoCopy_IsEligibleForAoe_NotForEcho()
-        {
-            Assert.IsTrue(SpellAoeAbility.CanRadiate(isClassAbilitySpawned: false, ProjectileSpellType.Arc),
-                "an echoed Arc must radiate Spell AOE like a normal cast");
-            Assert.IsFalse(EchoCastAbility.CanEcho(isClassAbilitySpawned: false, isEchoCopy: true),
-                "an echo must never echo again");
-        }
-
-        /// <summary>
-        /// An AOE child radiated off an echo (IsClassAbilitySpawned + inherited IsEchoCopy) neither echoes nor
-        /// radiates further. Both guard fields refuse the echo independently.
-        /// </summary>
-        [TestMethod]
-        public void EchoCast_AoeChildOfEcho_IsEligibleForNeither()
-        {
-            Assert.IsFalse(EchoCastAbility.CanEcho(isClassAbilitySpawned: true, isEchoCopy: true));
-            Assert.IsFalse(SpellAoeAbility.CanRadiate(isClassAbilitySpawned: true, ProjectileSpellType.Arc));
-
-            // either field alone is enough to stop the echo
-            Assert.IsFalse(EchoCastAbility.CanEcho(isClassAbilitySpawned: true, isEchoCopy: false));
-        }
-
-        /// <summary>
-        /// Unchanged invariants: an AOE child of a normal cast still neither echoes nor radiates; Spell AOE is
-        /// still Arc-only on every projectile; and Cascade still never fires off an echo, because an echo is
-        /// built through the normal cast path and is not a class-ability proc.
-        /// </summary>
-        [TestMethod]
-        public void EchoCast_ExistingNoCascadeInvariants_Unchanged()
-        {
-            Assert.IsFalse(EchoCastAbility.CanEcho(isClassAbilitySpawned: true, isEchoCopy: false));
             Assert.IsFalse(SpellAoeAbility.CanRadiate(isClassAbilitySpawned: true, ProjectileSpellType.Arc));
 
             foreach (var type in new[] { ProjectileSpellType.Bolt, ProjectileSpellType.Blast, ProjectileSpellType.Volley,
@@ -946,35 +864,61 @@ namespace ACE.Server.Tests
             }
 
             Assert.IsFalse(CascadeAbility.CanCascade(isClassAbilityProc: false, generation: 0, maxGeneration: 1),
-                "an echo is not a class-ability proc, so it can never cascade");
+                "a wisp cast is not a class-ability proc, so it can never cascade");
         }
 
         [TestMethod]
-        public void BattleHardened_ReducesByPointZeroFivePercentPerStrength_AndCaps()
+        public void BattleHardened_ReducesBy025_050_075PercentPerStrengthByRank_AndCaps()
         {
-            var perPoint = PropertyManager.GetDouble("class_ability_battlehardened_reduction_per_strength").Item;
+            var perRank = PropertyManager.GetDouble("class_ability_battlehardened_reduction_per_strength_per_rank").Item;
             var maxReduction = PropertyManager.GetDouble("class_ability_battlehardened_max_reduction").Item;
 
-            // spec: 0.05% reduction per point of Strength
-            Assert.AreEqual(0.0005, perPoint, 1e-9);
+            // Vanguard pass 2026-11-06: 0.025% per point per rank, so 0.025% / 0.05% / 0.075% at ranks 1-3
+            Assert.AreEqual(0.00025, perRank, 1e-12);
+            Assert.AreEqual(0.0, BattleHardenedAbility.ReductionPerStrength(0, perRank), 1e-12, "rank 0 contributes nothing");
+            Assert.AreEqual(0.00025, BattleHardenedAbility.ReductionPerStrength(1, perRank), 1e-12);
+            Assert.AreEqual(0.0005, BattleHardenedAbility.ReductionPerStrength(2, perRank), 1e-12, "rank 2 is the old single rank's 0.05%");
+            Assert.AreEqual(0.00075, BattleHardenedAbility.ReductionPerStrength(3, perRank), 1e-12);
+            Assert.AreEqual(0.00075, BattleHardenedAbility.ReductionPerStrength(9, perRank), 1e-12, "above the ladder clamps");
+            Assert.AreEqual(0.0, BattleHardenedAbility.ReductionPerStrength(3, 0.0), 1e-12, "a zeroed rate contributes nothing");
 
-            // 0 Strength -> no reduction
-            Assert.AreEqual(1.0f, BattleHardenedAbility.GetDamageResistMod(0, perPoint, maxReduction), 1e-6f);
+            // 0 Strength -> no reduction at any rank
+            Assert.AreEqual(1.0f, BattleHardenedAbility.GetDamageResistMod(0, BattleHardenedAbility.ReductionPerStrength(3, perRank), maxReduction), 1e-6f);
 
-            // 200 Strength -> 200 * 0.0005 = 0.10 reduction -> 0.90 damage multiplier
-            Assert.AreEqual(0.90f, BattleHardenedAbility.GetDamageResistMod(200, perPoint, maxReduction), 1e-5f);
+            // 200 Strength: rank 1 -> 0.05 reduction (0.95), rank 2 -> 0.10 (0.90), rank 3 -> 0.15 (0.85)
+            Assert.AreEqual(0.95f, BattleHardenedAbility.GetDamageResistMod(200, BattleHardenedAbility.ReductionPerStrength(1, perRank), maxReduction), 1e-5f);
+            Assert.AreEqual(0.90f, BattleHardenedAbility.GetDamageResistMod(200, BattleHardenedAbility.ReductionPerStrength(2, perRank), maxReduction), 1e-5f);
+            Assert.AreEqual(0.85f, BattleHardenedAbility.GetDamageResistMod(200, BattleHardenedAbility.ReductionPerStrength(3, perRank), maxReduction), 1e-5f);
 
             // a lower multiplier means less damage taken as Strength rises
-            var atFifty = BattleHardenedAbility.GetDamageResistMod(50, perPoint, maxReduction);
-            var atThreeHundred = BattleHardenedAbility.GetDamageResistMod(300, perPoint, maxReduction);
+            var rate3 = BattleHardenedAbility.ReductionPerStrength(3, perRank);
+            var atFifty = BattleHardenedAbility.GetDamageResistMod(50, rate3, maxReduction);
+            var atThreeHundred = BattleHardenedAbility.GetDamageResistMod(300, rate3, maxReduction);
             Assert.IsTrue(atThreeHundred < atFifty && atFifty < 1.0f);
 
             // reduction is capped regardless of extreme Strength (never inverts to zero/negative damage)
-            var capped = BattleHardenedAbility.GetDamageResistMod(100000, perPoint, maxReduction);
+            var capped = BattleHardenedAbility.GetDamageResistMod(100000, rate3, maxReduction);
             Assert.AreEqual((float)(1.0 - maxReduction), capped, 1e-5f);
             Assert.IsTrue(capped > 0f);
+
+            // the Bulwark mod still sums with the Strength term under the SAME cap: 200 Str at rank 3 is 0.15,
+            // plus a 0.01 mod -> 0.84; a huge mod is held to the cap
+            Assert.AreEqual(0.84f, BattleHardenedAbility.GetDamageResistMod(200, rate3, maxReduction, 0.01), 1e-5f);
+            Assert.AreEqual((float)(1.0 - maxReduction), BattleHardenedAbility.GetDamageResistMod(200, rate3, maxReduction, 5.0), 1e-5f);
         }
 
+        [TestMethod]
+        public void BattleHardened_IsThreeRanksAtOneCapEach_AndTheOldKeyIsRetiredButStillRegistered()
+        {
+            var def = ClassAbilityRegistry.Get(ClassAbilityId.BattleHardened);
+
+            Assert.AreEqual(3, def.MaxRank);
+            CollectionAssert.AreEqual(new[] { 1, 1, 1 }, def.CostPerRank);
+
+            // the retired key stays registered (so a stage/prod override row does not orphan) and says so; nothing reads it
+            Assert.IsTrue(DefaultPropertyManager.DefaultDoubleProperties.TryGetValue("class_ability_battlehardened_reduction_per_strength", out var old));
+            StringAssert.StartsWith(old.Description, "RETIRED 2026-11-06");
+        }
         [TestMethod]
         public void Frenzy_StackCap_Is6_12_20_ByRank()
         {
@@ -1189,10 +1133,10 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0.15, ParryAbility.ParryChance(3, 0.05, 1.0), 1e-9);
             Assert.AreEqual(0.0, ParryAbility.ParryChance(0, 0.05, 1.5), 1e-9);
 
-            // Shield Block 8/14/20% by rank (base 0.08 step 0.06)
-            Assert.AreEqual(0.08, ShieldBlockAbility.BlockChance(1, 0.08, 0.06, 1.0), 1e-9);
-            Assert.AreEqual(0.14, ShieldBlockAbility.BlockChance(2, 0.08, 0.06, 1.0), 1e-9);
-            Assert.AreEqual(0.20, ShieldBlockAbility.BlockChance(3, 0.08, 0.06, 1.0), 1e-9);
+            // Shield Block 8/16/24% by rank (base 0.08 step 0.08)
+            Assert.AreEqual(0.08, ShieldBlockAbility.BlockChance(1, 0.08, 0.08, 1.0), 1e-9);
+            Assert.AreEqual(0.16, ShieldBlockAbility.BlockChance(2, 0.08, 0.08, 1.0), 1e-9);
+            Assert.AreEqual(0.24, ShieldBlockAbility.BlockChance(3, 0.08, 0.08, 1.0), 1e-9);
 
             // Riposte 40/70/100% by rank (base 0.4 step 0.3). Shield Check shared this curve until the
             // 2026-09-12 class ability overhaul retired it.

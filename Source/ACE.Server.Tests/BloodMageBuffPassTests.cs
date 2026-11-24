@@ -152,7 +152,8 @@ namespace ACE.Server.Tests
             var body = MethodBody(text, "public float ApplyBloodChargeDamage(", "public float GetExsanguinateResistanceIgnoreMod(");
 
             Assert.IsFalse(body.Contains("ClearBloodChargeStacks"), "the burst must no longer empty the pool");
-            StringAssert.Contains(body, "ExsanguinateMath.ChargesKept(");
+            StringAssert.Contains(body, "ExsanguinateMath.ChargesKept(ClassAbilityText.Live,");
+            Assert.IsFalse(body.Contains("GetLong(\"class_ability_exsanguinate_charges_kept_r"), "the burst must read the kept tunables through ChargesKept, not inline");
             StringAssert.Contains(body, "SetBloodChargeStacks(kept)");
 
             // the old clearing method is gone outright, so nothing can call it by mistake
@@ -198,6 +199,22 @@ namespace ACE.Server.Tests
                 "Sanguine Reserve's affinity must reach the Exsanguinate readout through a Player helper, never a direct call in this file");
 
             StringAssert.Contains(text, "GetBloodChargePerStackValue()");
+        }
+
+        [TestMethod]
+        public void ExsanguinateReadout_ReadsKeptChargesAndTheStackCap_ThroughTheSharedHelpers()
+        {
+            var text = File.ReadAllText(Path.Combine(ClassAbilityAffinityDeclarationTests.RepoRoot(),
+                "Source", "ACE.Server", "ClassAbilities", "Abilities", "ExsanguinateAbility.cs"));
+
+            var start = text.IndexOf("public ClassAbilityReadout GetReadout(", StringComparison.Ordinal);
+            Assert.IsTrue(start >= 0, "could not find GetReadout");
+            var body = text.Substring(start);
+
+            StringAssert.Contains(body, "ExsanguinateMath.ChargesKept(ClassAbilityText.Live,");
+            StringAssert.Contains(body, "BloodChargeMath.StackCap(ClassAbilityText.Live,");
+            Assert.IsFalse(body.Contains("PropertyManager.GetLong(\"class_ability_exsanguinate_charges_kept_r"), "no inline kept-charge reads");
+            Assert.IsFalse(body.Contains("PropertyManager.GetLong(\"class_ability_bloodmage_charge_stack_cap_r"), "no inline stack-cap reads");
         }
 
         // ---- helpers -------------------------------------------------------------------------------

@@ -17,9 +17,14 @@ namespace ACE.Server.WorldObjects
     {
         private float _accuracyLevel;
 
+        /// <summary>
+        /// The 0-1 missile accuracy bar. While one of this player's Hunter's Echo arrows is resolving
+        /// (<see cref="DamageTargetAsHuntersEcho"/>), it reads the bar that arrow was fired with instead, so the Echo hit
+        /// never takes whatever the owner's own bar (or exhaustion) is at the moment it lands. The setter is unchanged.
+        /// </summary>
         public float AccuracyLevel
         {
-            get => IsExhausted ? 0.0f : _accuracyLevel;
+            get => huntersEchoAccuracyOverride ?? (IsExhausted ? 0.0f : _accuracyLevel);
             set => _accuracyLevel = value;
         }
 
@@ -337,6 +342,10 @@ namespace ACE.Server.WorldObjects
 
             // reload animation
             var animSpeed = GetAnimSpeed();
+
+            // Hunter's Echo: this shot's bar and reload speed are what the Echo shoots with (Player_ClassAbilityHuntersEcho)
+            RecordMissileShotForHuntersEcho(AccuracyLevel, animSpeed);
+
             var reloadTime = EnqueueMotionPersist(actionChain, stance, MotionCommand.Reload, animSpeed);
 
             // reset for next projectile

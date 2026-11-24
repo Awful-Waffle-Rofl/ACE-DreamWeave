@@ -411,7 +411,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         // ---- the archetype uplift's maps -------------------------------------------------------------------
 
         private static DungeonSpawnPlan ArchetypePlan(IReadOnlyDictionary<string, SpeciesTableDef> species, DungeonEntryDef dungeon,
-            DungeonPopulationLimits limits, ThreadPlanMemo memo)
+            DungeonPopulationLimits limits, ThreadPlanMemo memo, string family = "any")
         {
             Func<uint, int> levelOf = Levels;
             Func<uint, uint> healthOf = HealthOf;
@@ -426,7 +426,7 @@ namespace ACE.Server.Tests.ThreadDungeons
                 archetypeProfileOf = memo.ArchetypeProfileOf;
             }
 
-            return DungeonPopulationBuilder.Build(Spec(), dungeon, Store(), species, levelOf, healthOf,
+            return DungeonPopulationBuilder.Build(Spec(family), dungeon, Store(), species, levelOf, healthOf,
                 limits, new Random(7), profileOf, null, memo, archetypeProfileOf: archetypeProfileOf);
         }
 
@@ -444,13 +444,14 @@ namespace ACE.Server.Tests.ThreadDungeons
             var species = Species();
             var dungeon = Dungeon();
 
-            var uncached = ArchetypePlan(species, dungeon, Limits(), memo: null);
+            // The family is forced: this test needs a family whose entries uplift, and a forced family does not depend on the draw.
+            var uncached = ArchetypePlan(species, dungeon, Limits(), memo: null, family: "wide");
             Assert.IsNotNull(uncached.ArchetypeUplift, "fixture: the widened band tags uplifted entries and the switch defaults on");
 
             var cold = Memo2();
-            var coldPlan = ArchetypePlan(species, dungeon, Limits(), cold);
+            var coldPlan = ArchetypePlan(species, dungeon, Limits(), cold, "wide");
             var warm = Memo2();
-            var warmPlan = ArchetypePlan(species, dungeon, Limits(), warm);
+            var warmPlan = ArchetypePlan(species, dungeon, Limits(), warm, "wide");
 
             Assert.AreEqual(Shape(uncached), Shape(coldPlan));
             Assert.AreEqual(Shape(uncached), Shape(warmPlan));
@@ -465,10 +466,10 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             // A changed band low floor is a different classifier and different standards, never the old answer.
             var before = counts.ArchetypeStandards;
-            var lowerFloor = ArchetypePlan(species, dungeon, Limits(bandLowFloorRatio: 0.5), Memo2());
+            var lowerFloor = ArchetypePlan(species, dungeon, Limits(bandLowFloorRatio: 0.5), Memo2(), "wide");
             Assert.AreEqual(2, ThreadPlanCache.Counts.Rosters, "the floor is part of the roster key");
             Assert.IsTrue(ThreadPlanCache.Counts.ArchetypeStandards > before, "and of the standards key");
-            Assert.AreEqual(ArchetypeAnswers(ArchetypePlan(species, dungeon, Limits(bandLowFloorRatio: 0.5), memo: null)), ArchetypeAnswers(lowerFloor));
+            Assert.AreEqual(ArchetypeAnswers(ArchetypePlan(species, dungeon, Limits(bandLowFloorRatio: 0.5), memo: null, family: "wide")), ArchetypeAnswers(lowerFloor));
         }
 
         /// <summary>

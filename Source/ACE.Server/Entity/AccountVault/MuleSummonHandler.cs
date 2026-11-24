@@ -538,11 +538,19 @@ namespace ACE.Server.Entity.AccountVault
         /// and is unit-tested against a VaultActor with no live Player, which is exactly what these
         /// checks need.
         /// </summary>
-        private static bool TrySummonerState(Player summoner, out string failReason)
+        internal static bool TrySummonerState(Player summoner, out string failReason)
+            => TrySummonerState(summoner, out failReason, "You cannot summon your vault vendor while dead.");
+
+        /// <summary>
+        /// The same summoner-state rule with the caller's own dead-summoner wording, so another summon (the Allegiance
+        /// Avatar's) reuses the rule without telling a player about a vault vendor. The busy and airborne lines are
+        /// generic and shared.
+        /// </summary>
+        internal static bool TrySummonerState(Player summoner, out string failReason, string deadMessage)
         {
             if (summoner.IsDead)
             {
-                failReason = "You cannot summon your vault vendor while dead.";
+                failReason = deadMessage;
                 return false;
             }
 
@@ -737,8 +745,17 @@ namespace ACE.Server.Entity.AccountVault
         /// exercised it: every placement test drove the lower-level <see cref="TryPlace"/> core
         /// through an injected delegate instead.
         /// </summary>
-        internal static bool TryPlaceVendor(PersonalVendor vendor, Player summoner)
+        internal static bool TryPlaceVendor(Vendor vendor, Player summoner) => TryPlaceVendor(vendor, summoner, null);
+
+        /// <summary>
+        /// <see cref="TryPlaceVendor(Vendor, Player)"/> with the per-rung location rule injected. Null is the mule's own
+        /// rule (<see cref="IsSummonPermitted(Position, out string)"/>: denylist, then allowlist). The Allegiance Avatar
+        /// passes its own (denylist only, outdoors), because the mule allowlist would refuse every open-world rung.
+        /// </summary>
+        internal static bool TryPlaceVendor(Vendor vendor, Player summoner, Func<Position, bool> rungPermitted)
         {
+            rungPermitted ??= location => IsSummonPermitted(location, out _);
+
             // Fix round 2, F1 (coordinator-owned defect - the original brief prescribed this exact
             // vendor.PhysicsObj.GetPhysicsRadius() call and mis-cited it as "copying Pet.Init"; Pet.Init
             // actually uses GetPetRadius, reading the dat, for precisely this reason): WorldObject.
@@ -763,7 +780,7 @@ namespace ACE.Server.Entity.AccountVault
                 // after - cheaper, and it degrades to the next rung instead of failing the whole
                 // summon outright. The final rung (the summoner's own exact position) can never trip
                 // this, since TryGate already cleared that landblock.
-                if (!IsSummonPermitted(wo.Location, out _))
+                if (!rungPermitted(wo.Location))
                     return false;
 
                 return wo.EnterWorld();
@@ -779,7 +796,7 @@ namespace ACE.Server.Entity.AccountVault
         /// and its fallback SetupModel.CreateSimpleSetup() leaves Spheres empty, which is why this
         /// checks Count rather than indexing Spheres[0] unconditionally the way Pet.GetPetRadius does.
         /// </summary>
-        private static float GetVendorRadius(PersonalVendor vendor)
+        internal static float GetVendorRadius(Vendor vendor)
         {
             var setup = WorldObject.GetSetupModel(vendor.SetupTableId);
 
@@ -832,27 +849,117 @@ namespace ACE.Server.Entity.AccountVault
         {
             failReason = null;
 
+            switch (CheckSummonArea(location, isHousingSettlement))
+            {
+                case SummonAreaVerdict.Denylisted:
+                    failReason = "You cannot summon your vault vendor here.";
+                    return false;
+
+                case SummonAreaVerdict.OutsideAllowlist:
+                    failReason = $"You can only summon your vault vendor in {GetAllowlistName()}.";
+                    return false;
+
+                default:
+                    return true;
+            }
+        }
+
+        /// <summary>Which half of the location rule refused, if either. Each caller words its own sentence.</summary>
+        internal enum SummonAreaVerdict
+        {
+            Permitted,
+            Denylisted,
+            OutsideAllowlist,
+        }
+
+        /// <summary>
+        /// THE location rule, reason-returning, shared by the vault summon (<see cref="IsSummonPermitted"/>, whose
+        /// messages are the vault's own) and the web class ability panel (<see cref="ClassAbilityPanelAreaRefusal"/>,
+        /// which words its own). Order: denylist (outranks everything), then the allowlist, then the housing
+        /// settlement exemption. A null location is permitted.
+        /// </summary>
+        internal static SummonAreaVerdict CheckSummonArea(Position location, Func<Position, bool> isHousingSettlement) =>
+            CheckSummonArea(location, isHousingSettlement, GetAllowlistLandblocks());
+
+        /// <summary>The same rule with the allowlist already parsed, so a caller that also inspects it parses it once.</summary>
+        private static SummonAreaVerdict CheckSummonArea(Position location, Func<Position, bool> isHousingSettlement, LandblockRealmList allowlist)
+        {
             if (location == null)
-                return true;
+                return SummonAreaVerdict.Permitted;
 
             if (GetDenylistLandblocks().Contains(location))
-            {
-                failReason = "You cannot summon your vault vendor here.";
-                return false;
-            }
-
-            var allowlist = GetAllowlistLandblocks();
+                return SummonAreaVerdict.Denylisted;
 
             // Count == 0 is "no allowlist configured", NOT "nothing is allowed" - see
             // AllowlistConfigKey's remarks. Inverting this would make a blanked config row silently
             // disable the entire feature everywhere.
             if (allowlist.Count > 0 && !allowlist.Contains(location) && !isHousingSettlement(location))
-            {
-                failReason = $"You can only summon your vault vendor in {GetAllowlistName()}.";
-                return false;
-            }
+                return SummonAreaVerdict.OutsideAllowlist;
 
-            return true;
+            return SummonAreaVerdict.Permitted;
+        }
+
+        /// <summary>
+        /// The web class ability panel's location refusal (owner ruling: panel writes only where the mule vendor
+        /// could be summoned), or null where it is permitted. Same rule as the summon via
+        /// <see cref="CheckSummonArea"/>; its own sentences.
+        /// </summary>
+        internal static string ClassAbilityPanelAreaRefusal(Position location) =>
+            ClassAbilityPanelAreaRefusal(location, IsHousingSettlement);
+
+        /// <summary>The panel's refusal when the character's location is unknown (fails closed, unlike the summon).</summary>
+        internal const string ClassAbilityPanelNoLocationRefusal = "You cannot change class abilities here.";
+
+        /// <summary>The panel's refusal when no allowlist is configured (fails closed, unlike the summon).</summary>
+        internal const string ClassAbilityPanelNoAllowlistRefusal = "Class ability changes from the web panel are not set up on this server.";
+
+        /// <summary>
+        /// The panel location refusal with the housing test injected, for tests. The panel FAILS CLOSED where the
+        /// summon fails open: a null location and an empty allowlist (blank or unparseable account_vault_allowlist)
+        /// both refuse here, while <see cref="CheckSummonArea"/>, and so the vault summon, still permit them.
+        /// </summary>
+        internal static string ClassAbilityPanelAreaRefusal(Position location, Func<Position, bool> isHousingSettlement)
+        {
+            if (location == null)
+                return ClassAbilityPanelNoLocationRefusal;
+
+            var allowlist = GetAllowlistLandblocks();
+            if (allowlist.Count == 0)
+                return ClassAbilityPanelNoAllowlistRefusal;
+
+            var verdict = CheckSummonArea(location, isHousingSettlement, allowlist);
+
+            if (verdict == SummonAreaVerdict.Permitted)
+                return null;
+
+            return ClassAbilityPanelAreaSentence(verdict, GetAllowlistName(),
+                verdict == SummonAreaVerdict.OutsideAllowlist && PropertyManager.GetBool(HousingConfigKey).Item);
+        }
+
+        /// <summary>
+        /// Pure wording of the panel's location refusal. Denylisted: "You cannot change class abilities here.".
+        /// Outside the allowlist: "You can only change class abilities in {area}." with ", or at a housing
+        /// settlement" before the period when housing settlements are allowed - unless the configured area name
+        /// already names housing settlements (the shipped account_vault_allowlist_name does), which would
+        /// otherwise say it twice.
+        /// </summary>
+        internal static string ClassAbilityPanelAreaSentence(SummonAreaVerdict verdict, string allowlistName, bool housingAllowed)
+        {
+            switch (verdict)
+            {
+                case SummonAreaVerdict.Denylisted:
+                    return "You cannot change class abilities here.";
+
+                case SummonAreaVerdict.OutsideAllowlist:
+                    var area = string.IsNullOrWhiteSpace(allowlistName) ? AllowlistNameFallback : allowlistName.Trim();
+                    var housing = housingAllowed && area.IndexOf("housing settlement", StringComparison.OrdinalIgnoreCase) < 0
+                        ? ", or at a housing settlement"
+                        : string.Empty;
+                    return $"You can only change class abilities in {area}{housing}.";
+
+                default:
+                    return null;
+            }
         }
 
         /// <summary>

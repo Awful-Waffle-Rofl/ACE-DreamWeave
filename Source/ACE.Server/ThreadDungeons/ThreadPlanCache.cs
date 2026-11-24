@@ -182,6 +182,9 @@ namespace ACE.Server.ThreadDungeons
             // The archetype uplift's live resolver memoises spell and wielded-treasure reductions read off the same world
             // cache, so it is dropped with everything else.
             ArchetypeFactsResolver.ResetLive();
+
+            // The Character Details baseline reads the same weenie profiles and species tables.
+            ThreadBaseline.Clear();
         }
 
         /// <summary>

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 using ACE.Entity.Enum;
 using ACE.Server.EquipmentMods;
@@ -38,14 +39,47 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "overchannel",
             DisplayName = "Overchannel",
-            Description = "Increases the damage of your damaging spells, of any school, by 9.5% per rank " +
-                          "(+28.5% at rank 3); higher Arcane Lore increases the bonus. Boosted casts cost " +
-                          "+100% mana (stacking with Spell AOE to +200% on an Arc cast).",
+            DescriptionTemplate = "Your damaging spells from any school deal more damage. Boosted casts cost " +
+                          "+{v:class_ability_overchannel_mana_surcharge|pct}% mana; with Spell AOE, an Arc cast costs up to " +
+                          "+{fn:arc_surcharge@max|pct}%.",
+            // Live text: bonus = rank * class_ability_overchannel_percent_per_rank (GetReadout below, Player_ClassAbilityBuffs.cs:560-561);
+            // surcharge = class_ability_overchannel_mana_surcharge. "+28.5% at rank 3" is the top rank's value (@max). "+200%" is the
+            // Overchannel surcharge plus Spell AOE's on an Arc cast: arc_surcharge is ManaSurcharge, the method
+            // Player.GetClassAbilityManaSurcharge calls (rank independent, so the description selects @max).
+            RankTailTemplate = "+{per:class_ability_overchannel_percent_per_rank|pct}% spell damage",
+            TextFormulas = new Dictionary<string, TextFormula>
+            {
+                ["arc_surcharge"] = new TextFormula(
+                    (values, rank) => ManaSurcharge(values, true, true),
+                    "class_ability_overchannel_mana_surcharge",
+                    "class_ability_spellaoe_mana_surcharge"),
+            },
+            TunableSourceFiles = new[] { "WorldObjects/Player_ClassAbilityBuffs.cs" },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },   // Archmage pass 2026-10-24 (reprice wave 6): 2/rank -> 1/rank
             Implemented = true,
             AffinitySkill = Skill.ArcaneLore,
         };
+
+        /// <summary>
+        /// The mana surcharge FRACTION a cast pays (0.0 = none; 1.0 = +100%): Overchannel's own surcharge when
+        /// <paramref name="overchannelApplies"/> plus Spell AOE's when <paramref name="spellAoeApplies"/>, floored at
+        /// 0. Player.GetClassAbilityManaSurcharge decides the two flags (ownership and cast shape) and calls this
+        /// with <see cref="ClassAbilityText.Live"/>; the live text's arc_surcharge formula passes both true, so the
+        /// "+200% on an Arc cast" line is the very sum the mechanic charges. Each key is read only when its flag is set.
+        /// </summary>
+        public static double ManaSurcharge(ITunableValues values, bool overchannelApplies, bool spellAoeApplies)
+        {
+            var surcharge = 0.0;
+
+            if (overchannelApplies)
+                surcharge += values.GetDouble("class_ability_overchannel_mana_surcharge");
+
+            if (spellAoeApplies)
+                surcharge += values.GetDouble("class_ability_spellaoe_mana_surcharge");
+
+            return Math.Max(0.0, surcharge);
+        }
 
         /// <summary>
         /// The spell-damage multiplier at a given rank (1.0 = none), any school: 1 + rank*perRank + the Arcane

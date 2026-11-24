@@ -41,8 +41,10 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "voiddamage",
             DisplayName = "Void Damage",
-            Description = "Increases your void-magic damage by 8% per rank (+24% at rank 3). " +
-                          "Higher Void Magic increases the bonus.",
+            // Live text: bonus = rank * class_ability_voiddamage_percent_per_rank (GetReadout below; Player_ClassAbilityBuffs.cs:523). "+24% at
+            // rank 3" is the top rank's value: the @max selector renders that one rank.
+            DescriptionTemplate = "Raises your void magic damage.",
+            RankTailTemplate = "+{per:class_ability_voiddamage_percent_per_rank|pct}% void damage",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,

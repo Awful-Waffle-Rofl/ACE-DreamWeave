@@ -32,7 +32,11 @@ namespace ACE.Server.Factories
             var tier2Rares = new HashSet<int>() { 30107, 30108, 30109, 30181, 30182, 30185, 30190, 30191, 30192, 30193, 30201, 30203, 30204, 30207, 30208, 30210, 30211, 30212, 30213, 30219, 30220, 30227, 30230, 30231, 30235, 30237, 30239, 30241 };
             var tier3Rares = new HashSet<int>() { 30250, 30251, 30252, 30258, 52034 };
 
-            var tier4Rares = new HashSet<int>() { 30352, 30353, 30354, 30355, 30356, 30357, 30358, 30359, 30360, 30361, 30362, 30363, 30364, 30365, 30366, 30367, 30368, 30369, 30370, 30371, 30372, 30373, 30510, 30511, 30512, 30513, 30514, 30515, 30516, 30517, 30518, 30519, 30520, 30521, 30522, 30523, 30524, 30525, 30526, 30527, 30528, 30529, 30530, 30531, 30532, 30533, 30534 };
+            // The first 19 are retail tier-4 gear rares, still withheld by rares_suppress_gear_drops.
+            // The 28 reissued pieces live under their upgraded fork clones (1008400-1008427) instead of their retail wcids
+            // (Docs/superpowers/specs/2026-11-16-rare-armor-jewelry-reintroduction-design.md).
+            var tier4Rares = new HashSet<int>() { 30352, 30353, 30357, 30360, 30361, 30363, 30364, 30366, 30367, 30368, 30369, 30370, 30371, 30372, 30373, 30510, 30512, 30527, 30534,
+                1008400, 1008401, 1008402, 1008403, 1008404, 1008405, 1008406, 1008407, 1008408, 1008409, 1008410, 1008411, 1008412, 1008413, 1008414, 1008415, 1008416, 1008417, 1008418, 1008419, 1008420, 1008421, 1008422, 1008423, 1008424, 1008425, 1008426, 1008427 };
             var tier5Rares = new HashSet<int>() { 30074, 30075, 30076, 30077, 30078, 30079, 30080, 30081, 30082, 30083, 30084, 30085, 30086, 30087, 30088, 30089, 30090, 30091, 30092, 30093, 30094, 30095, 30096, 30097, 30098, 30099, 30100, 30101, 30102, 30103, 30104, 30105, 30106, 30110, 30111, 30112, 30113, 30114, 30115, 30116, 30117, 30118, 30119, 30120, 30121, 30122, 30123, 30124, 30125, 30126, 30127, 30128, 30130, 30131, 30132, 30133, 30134, 30135, 30136, 30137, 30138, 30139, 30140, 30141, 30142, 30143, 30144, 30145, 30146, 30147, 30148, 30149, 30150, 30151, 30152, 30153, 30154, 30155, 30157, 30158, 30159, 30160, 30161, 30162, 30163, 30164, 30165, 30166, 30167, 30168, 30169, 30171, 30173, 30174, 30175, 30176, 30179, 30180, 30247, 30248, 30249, 30253, 30254, 30936, 45361, 45362, 45363, 45364, 45365, 70001, 70002, 70003 };
             var tier6Rares = new HashSet<int>() { 30302, 30303, 30304, 30305, 30306, 30307, 30308, 30309, 30345, 30346, 30347, 30348, 30349, 30350, 30351, 30374, 30375, 30376, 30377, 30378, 42662, 42663, 42664, 42665, 42666, 43848, 45436, 45437, 45438, 45439, 45440, 45441, 45442, 45443, 45444, 45445, 45446, 45447, 45448, 45449, 45450, 45451, 45452, 45453, 45454, 45455, 45456, 45457, 45458, 45459, 45460, 45461, 45462, 45463, 45464, 45465, 45466, 45467, 45468, 45469, 45470 };
 
@@ -46,7 +50,8 @@ namespace ACE.Server.Factories
 
         /// <summary>
         /// True for the item types the rares_suppress_gear_drops kill-switch withholds: weapons, casters, armor and
-        /// jewelry. Decided by ItemType rather than tier so customized rares added to the tables later are covered.
+        /// jewelry. Decided by ItemType rather than tier. ShouldSuppressRare applies it to retail wcids only, so
+        /// customized fork rares added to the tables (wcid at or above FirstForkWcid) are not withheld.
         /// </summary>
         public static bool IsSuppressedRareGear(ItemType itemType)
         {
@@ -56,12 +61,21 @@ namespace ACE.Server.Factories
         }
 
         /// <summary>
-        /// The suppression decision for a rolled rare: false when the kill-switch is off or the weenie is missing,
-        /// otherwise whether the weenie's ItemType is in the suppressed gear set.
+        /// The first fork-content wcid. Everything below it is retail data.
+        /// </summary>
+        public const uint FirstForkWcid = 1000000;
+
+        /// <summary>
+        /// The suppression decision for a rolled rare: false when the kill-switch is off, the weenie is missing, or the
+        /// weenie is fork content (wcid at or above FirstForkWcid, e.g. the upgraded rare reissues); otherwise whether
+        /// the retail weenie's ItemType is in the suppressed gear set.
         /// </summary>
         internal static bool ShouldSuppressRare(bool killSwitch, ACE.Entity.Models.Weenie weenie)
         {
             if (!killSwitch || weenie == null)
+                return false;
+
+            if (weenie.WeenieClassId >= FirstForkWcid)
                 return false;
 
             return IsSuppressedRareGear(weenie.GetItemType());

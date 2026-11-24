@@ -140,6 +140,89 @@ namespace ACE.Server.Tests
             }
         }
 
+        private static readonly WeenieClassName[] SummonerMembers =
+        {
+            WeenieClassName.summonersceptre, WeenieClassName.summonerbaton, WeenieClassName.summonerstaff,
+        };
+
+        /// <summary>The Summoner caster family drops in T7 and T8 caster loot ONLY (owner ruling, 2026-11-21).</summary>
+        [TestMethod]
+        public void SummonerMembers_AppearOnlyInT7AndT8()
+        {
+            var tiers = GetTiers();
+
+            for (var i = 0; i < tiers.Count; i++)
+            {
+                foreach (var member in SummonerMembers)
+                {
+                    var present = tiers[i].Any(entry => entry.result == member);
+                    Assert.AreEqual(i >= 6, present, $"Tier {i + 1}: {member} present = {present}.");
+                }
+            }
+        }
+
+        /// <summary>The Summoner trio is funded as a tenth element, so it weighs what the Sanguine member of its shape weighs.</summary>
+        [TestMethod]
+        public void SummonerMembers_CarryTheSameWeightAsSanguine_InT7AndT8()
+        {
+            var tiers = GetTiers();
+            var pairs = new[]
+            {
+                (summoner: WeenieClassName.summonersceptre, sanguine: WeenieClassName.driftwardensanguinesceptre),
+                (summoner: WeenieClassName.summonerbaton,   sanguine: WeenieClassName.driftwardensanguinebaton),
+                (summoner: WeenieClassName.summonerstaff,   sanguine: WeenieClassName.driftwardensanguinestaff),
+            };
+
+            foreach (var i in new[] { 6, 7 })
+            {
+                foreach (var pair in pairs)
+                {
+                    var summoner = tiers[i].First(entry => entry.result == pair.summoner);
+                    var sanguine = tiers[i].First(entry => entry.result == pair.sanguine);
+                    Assert.AreEqual(sanguine.chance, summoner.chance, $"Tier {i + 1}: {pair.summoner} vs {pair.sanguine}.");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Ten elements at 8/10 of the retail per-member weight in T7-T8 (T1-T6 stay at nine elements, 8/9):
+        /// T7 0.16 + 0.72 + 0.12, T8 0.144 + 0.576 + 0.28. Pins the exact weights, not only the sum.
+        /// </summary>
+        [TestMethod]
+        public void T7_and_T8_weights_are_the_ten_element_funding()
+        {
+            var tiers = GetTiers();
+            var plain = new[] { WeenieClassName.orb, WeenieClassName.sceptre, WeenieClassName.staff, WeenieClassName.wand };
+            var stavesT7 = new HashSet<WeenieClassName>
+            {
+                WeenieClassName.ace37223_slashingstaff, WeenieClassName.ace37222_piercingstaff, WeenieClassName.ace37225_bluntstaff,
+                WeenieClassName.ace37224_acidstaff, WeenieClassName.ace37220_firestaff, WeenieClassName.ace37221_froststaff,
+                WeenieClassName.ace37219_electricstaff, WeenieClassName.ace43383_netherstaff, WeenieClassName.driftwardensanguinestaff,
+                WeenieClassName.summonerstaff,
+            };
+
+            var expected = new[]
+            {
+                (tier: 6, plain: 0.04f,  shape: 0.036f,  staff: 0.012f),
+                (tier: 7, plain: 0.036f, shape: 0.0288f, staff: 0.028f),
+            };
+
+            foreach (var e in expected)
+            {
+                var table = tiers[e.tier].ToList();
+                Assert.AreEqual(34, table.Count, $"Tier {e.tier + 1} entry count.");
+
+                foreach (var entry in table)
+                {
+                    var want = plain.Contains(entry.result) ? e.plain : stavesT7.Contains(entry.result) ? e.staff : e.shape;
+                    Assert.AreEqual(want, entry.chance, $"Tier {e.tier + 1}: {entry.result}.");
+                }
+
+                Assert.AreEqual(4, table.Count(x => plain.Contains(x.result)));
+                Assert.AreEqual(10, table.Count(x => stavesT7.Contains(x.result)));
+            }
+        }
+
         /// <summary>
         /// Retail has no elemental ORB - the orb is one of the four undifferentiated non-elemental
         /// casters - so the Sanguine Orb must not be in any tier table. The weenie still exists, which

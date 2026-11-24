@@ -16,13 +16,17 @@ namespace ACE.Server.Tests
 {
     /// <summary>
     /// The pre-existing tracker tests were written against the fixed 5 s stuck timeout; the timeout is now the
-    /// pet_follow_stuck_seconds tunable, passed in per call. This keeps those tests at the default.
+    /// pet_follow_stuck_seconds tunable, passed in per call. This keeps those tests at the 5 s they were written
+    /// for: they pin the TRACKER's arithmetic, not the default, which moved to 3 s on 2026-11-07 and is pinned
+    /// separately by Settings_CompiledDefaults_MatchThePropertyManagerDefaults.
     /// </summary>
     internal static class PetFollowProgressTrackerTestExtensions
     {
+        public const double TrackerTestTimeoutSeconds = 5.0;
+
         public static bool Update(this PetFollowProgressTracker tracker, double now, Vector3 pet, Vector3 owner)
         {
-            return tracker.Update(now, pet, owner, PetFollowSettings.DefaultStuckSeconds);
+            return tracker.Update(now, pet, owner, TrackerTestTimeoutSeconds);
         }
     }
 
@@ -553,7 +557,7 @@ namespace ACE.Server.Tests
 
             Assert.AreEqual(40.0, defaults.TeleportDistance);
             Assert.AreEqual(15.0, defaults.MaxFollowSeconds);
-            Assert.AreEqual(5.0, defaults.StuckSeconds);
+            Assert.AreEqual(3.0, defaults.StuckSeconds, "lowered from 5 s on 2026-11-07");
             Assert.AreEqual(8.0, defaults.UnreachableSeconds);
             Assert.AreEqual(10.0, defaults.UnreachableIgnoreSeconds);
 
@@ -692,6 +696,33 @@ namespace ACE.Server.Tests
 
             Assert.AreEqual(0, handler.Attribute.ParameterCount,
                 "/summonattackontarget with no argument reports the current setting, so it must not require one.");
+        }
+
+        [TestMethod]
+        public void SummonAggro_IsTheRegisteredPropertyId()
+        {
+            // reserved in Source/property-registry.tsv; PropertyRegistryTests is the collision gate
+            Assert.AreEqual(9097, (int)PropertyBool.SummonAggro);
+        }
+
+        [TestMethod]
+        public void SummonAggroCommand_IsRegisteredForOrdinaryPlayers()
+        {
+            var handler = typeof(PlayerCommands)
+                .GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .SelectMany(m => m.GetCustomAttributes<CommandHandlerAttribute>(), (m, a) => new { Method = m, Attribute = a })
+                .SingleOrDefault(x => string.Equals(x.Attribute.Command, "summonaggro", StringComparison.OrdinalIgnoreCase));
+
+            Assert.IsNotNull(handler, "No /summonaggro command handler is declared on PlayerCommands.");
+
+            Assert.AreEqual(AccessLevel.Player, handler.Attribute.Access,
+                "/summonaggro is a player preference and must not require elevated access.");
+
+            Assert.IsTrue(handler.Attribute.Flags.HasFlag(CommandHandlerFlag.RequiresWorld),
+                "/summonaggro reads and writes character state, so it needs a player in the world.");
+
+            Assert.AreEqual(0, handler.Attribute.ParameterCount,
+                "/summonaggro with no argument reports the current setting, so it must not require one.");
         }
     }
 }

@@ -600,7 +600,15 @@ namespace ACE.Server.Entity
             var invObj = player.FindObject(obj.Guid.Full, Player.SearchLocations.MyInventory);
 
             if (invObj != null)
+            {
                 player.MoveItemToFirstContainerSlot(obj);
+
+                // The UpdateObject above plus this container re-slot is the same pair as WeaponModManager.UpdateObj,
+                // which is observed live to rebuild the item client-side and drop its emitters (the note at
+                // WeaponModManager's ResetAuraForRebuild call). The re-slot itself is server-side only and sends
+                // nothing. Reopen the record only; the item is not drawn.
+                VisualEffectManager.Forget(player.Session, obj);
+            }
         }
     }
 }

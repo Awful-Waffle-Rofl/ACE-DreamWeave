@@ -49,15 +49,23 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "pocketsand",
             DisplayName = "Pocket Sand",
-            Description = "Whenever you avoid an attack - evade, parry, block, or resist a spell - you have a " +
-                          "15/30/45% chance by rank to fling sand in the attacker's eyes, lowering all of its " +
-                          "attack skills by 40 for 20 seconds. While it is blinded, every attack against it by " +
-                          "someone with Sneak Attack trained is a Sneak Attack. Stacks with Dirty Fighting's " +
-                          "Blinding Assault.",
+            // Live text: chanceBase + (rank - 1) * chanceStep (GetReadout); the blind magnitude and length are read
+            // where the proc lands (Player_ClassAbilityCombat).
+            DescriptionTemplate = "When you avoid an attack (evade, parry, block or resist a spell), you can fling sand in the " +
+                          "attacker's eyes, lowering all its attack skills by {v:class_ability_pocketsand_magnitude|num} for " +
+                          "{v:class_ability_pocketsand_duration_seconds|num} seconds. While it is blinded, any attack on it from " +
+                          "someone with Sneak Attack trained counts as a Sneak Attack. Stacks with Dirty Fighting's Blinding " +
+                          "Assault.",
+            RankTailTemplate = "{ladder:class_ability_pocketsand_chance_base,class_ability_pocketsand_chance_step|pct}% chance",
+            TunableSourceFiles = new[] { "WorldObjects/Player_ClassAbilityCombat.cs" },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
             AffinitySkill = Skill.Deception,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "affinity", Bounds = CeilingBounds.Affinity, Source = CeilingSource.Tunable, Key = "class_ability_affinity_chance_cap", Label = "max chance from affinity", Format = "pct" },
+            },
         };
 
         /// <summary>
@@ -145,6 +153,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "blind proc",
                 Per = null,
                 CapNote = affinityCapBites ? "affinity cap" : null,
+                Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "affinity", deception * 100.0, rank, ClassAbilityText.Live) },
             };
         }
     }

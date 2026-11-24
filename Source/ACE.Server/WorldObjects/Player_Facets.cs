@@ -877,9 +877,29 @@ namespace ACE.Server.WorldObjects
         internal static FacetVaultGateOutcome DecideFacetVaultGate(
             IEnumerable<FacetEquipEntry> incomingEquip, ISet<uint> localGuids, Func<FacetVaultStatus> probeVault, out string refusal)
         {
+            return DecideFacetVaultGate(incomingEquip, localGuids, false, probeVault, out refusal);
+        }
+
+        /// <summary>
+        /// <see cref="DecideFacetVaultGate(IEnumerable{FacetEquipEntry}, ISet{uint}, Func{FacetVaultStatus}, out string)"/>
+        /// plus the facet vault DEPOSIT's wish for the vault. <paramref name="outgoingWantsVault"/> is true when the
+        /// character has /facet vault on, facet_vault_deposit_enabled is on, and at least one outgoing item passes
+        /// the deposit's item checks before the strip (<see cref="SelectFacetDepositCandidates"/>).
+        ///
+        /// When the incoming gear needs the vault, the rules above apply unchanged. Otherwise, when the deposit
+        /// wants the vault: ready -> Proceed; still loading -> AwaitVault (the existing wait-and-resume, so a cold
+        /// vault is not a skipped deposit); ANY other failure, and no store -> Proceed. The deposit is a convenience
+        /// and must never block a switch: it is skipped after the switch commits, with one chat line. With neither
+        /// side wanting the vault the probe is never invoked, so a switch with the toggle off never starts a load.
+        /// </summary>
+        internal static FacetVaultGateOutcome DecideFacetVaultGate(
+            IEnumerable<FacetEquipEntry> incomingEquip, ISet<uint> localGuids, bool outgoingWantsVault, Func<FacetVaultStatus> probeVault, out string refusal)
+        {
             refusal = null;
 
-            if (!FacetEquipNeedsVault(incomingEquip, localGuids))
+            var incomingNeedsVault = FacetEquipNeedsVault(incomingEquip, localGuids);
+
+            if (!incomingNeedsVault && !outgoingWantsVault)
                 return FacetVaultGateOutcome.Proceed;
 
             var status = probeVault != null ? probeVault() : FacetVaultStatus.NoStore;
@@ -890,8 +910,358 @@ namespace ACE.Server.WorldObjects
             if (status.IsStillLoading)
                 return FacetVaultGateOutcome.AwaitVault;
 
+            if (!incomingNeedsVault)
+                return FacetVaultGateOutcome.Proceed;
+
             refusal = $"Cannot switch right now: {status.FailReason ?? "your vault could not be checked."} Some of the gear this facet remembers can only come back from your vault, so your facet was not changed.";
             return FacetVaultGateOutcome.Refuse;
+        }
+
+        // ==================================================================================
+        // Facet vault deposit (/facet vault on): the outgoing facet's gear goes into the account vault.
+        // ==================================================================================
+
+        /// <summary>
+        /// Per-character opt-in for the facet vault deposit, set by /facet vault on|off. ABSENT means OFF (the
+        /// SummonAggro precedent): it moves items into a vault that withdraw-grantees on other accounts can see.
+        /// </summary>
+        public bool FacetVaultDeposit
+        {
+            get => Biota != null && (GetProperty(PropertyBool.FacetVaultDeposit) ?? false);
+            set => SetProperty(PropertyBool.FacetVaultDeposit, value);
+        }
+
+        /// <summary>Why an outgoing item was kept out of the facet vault deposit.</summary>
+        internal enum FacetDepositKeepReason
+        {
+            /// <summary>Worn again: the incoming facet shares it. Not reported - it is on the character.</summary>
+            WornAgain,
+
+            /// <summary>
+            /// In the incoming facet's remembered gear set (by guid) but not worn now: its re-equip failed (a wield
+            /// requirement, a missing slot). Kept in the pack so the player can still put it on. Reported.
+            /// </summary>
+            IncomingFacetItem,
+
+            /// <summary>Not in the pool the deposit draws from (the main pack after the restore). Not reported.</summary>
+            NotInPool,
+
+            /// <summary>A pack or a RequiresPackSlot item: the store refuses these.</summary>
+            PackSlot,
+
+            /// <summary>The PvP template vault gate refused it (an issued template item, or a templated player's item).</summary>
+            Issued,
+
+            /// <summary>Player.IsAcceptableToSell refused it at a vault: attuned (or holding attuned), or its pet is out.</summary>
+            NotTransferable,
+
+            /// <summary>A timed item (Lifespan): the store refuses these.</summary>
+            Timed,
+
+            /// <summary>
+            /// A stack of more than one. Never auto-deposited: a pristine stack collapses to a ledger row and the
+            /// facet restore withdraws a ledger amount of 1 (RestoreFacetEquip), so 500 arrows would come back as one.
+            /// </summary>
+            Stack,
+        }
+
+        /// <summary>One outgoing item the deposit did not take, and why.</summary>
+        internal readonly struct FacetDepositKept
+        {
+            public FacetDepositKept(uint guid, WorldObject item, FacetDepositKeepReason reason)
+            {
+                Guid = guid;
+                Item = item;
+                Reason = reason;
+            }
+
+            public uint Guid { get; }
+
+            /// <summary>Null for <see cref="FacetDepositKeepReason.WornAgain"/> and <see cref="FacetDepositKeepReason.NotInPool"/>.</summary>
+            public WorldObject Item { get; }
+
+            public FacetDepositKeepReason Reason { get; }
+
+            /// <summary>Whether the player is told about it. Worn-again and not-in-pool items are not the deposit's to report.</summary>
+            public bool IsReported => Reason != FacetDepositKeepReason.WornAgain && Reason != FacetDepositKeepReason.NotInPool;
+        }
+
+        /// <summary>The split <see cref="SelectFacetDepositCandidates"/> returns. Both lists keep outgoing-equip order.</summary>
+        internal sealed class FacetDepositSelection
+        {
+            public List<WorldObject> Deposit { get; } = new List<WorldObject>();
+
+            public List<FacetDepositKept> Kept { get; } = new List<FacetDepositKept>();
+        }
+
+        /// <summary>Every item type, so the merchandise mask in IsAcceptableToSell never refuses on type here.</summary>
+        private const ItemType AllItemTypes = (ItemType)uint.MaxValue;
+
+        /// <summary>
+        /// THE ITEM CHECKS for the facet vault deposit, pure so ACE.Server.Tests can call it without a Player.
+        ///
+        /// Walks <paramref name="outgoingEquip"/> in order (the worn set captured before the strip) and picks each
+        /// entry whose item is in <paramref name="candidatePool"/> and the vault will accept. Called twice per
+        /// switch with different inputs: before the strip by the vault gate (pool = the worn items, worn-again =
+        /// the incoming facet's remembered guids), and after the restore by the deposit itself (pool = the main
+        /// pack, worn-again = what is worn now). Excluded, each with its reason:
+        ///   - worn again (shared with the incoming facet) - deposited AFTER the restore, so a shared item is
+        ///     never sent to the vault only to be withdrawn a moment later;
+        ///   - in <paramref name="incomingRememberedGuids"/> (the incoming facet's remembered gear) but not worn: a
+        ///     re-equip that failed. It stays in the pack, reported as an incoming facet item (orchestrator ruling
+        ///     2026-11-21);
+        ///   - not in the pool (not in the main pack where the strip put it);
+        ///   - a pack-slot item, a timed item (store refusals);
+        ///   - anything <paramref name="templateBlocked"/> refuses - production passes the vendor's per-item gate,
+        ///     PvpTemplateBlocked(PvpTemplateAction.Vault, item), which refuses an issued template item for anyone
+        ///     and a templated player's personal items too (gate sites never read the template state inline);
+        ///   - anything Player.IsAcceptableToSell refuses at a vault with the price gates bypassed and the attuned
+        ///     refusal kept - the vendor's own vault pre-check: attuned (including contents), pet out, non-empty
+        ///     container;
+        ///   - a stack of more than one (see <see cref="FacetDepositKeepReason.Stack"/>).
+        /// A null entry and a repeated guid are skipped.
+        /// </summary>
+        internal static FacetDepositSelection SelectFacetDepositCandidates(IEnumerable<FacetEquipEntry> outgoingEquip, ISet<uint> wornNowGuids, ISet<uint> incomingRememberedGuids,
+                                                                          IEnumerable<WorldObject> candidatePool, Func<WorldObject, bool> templateBlocked)
+        {
+            var selection = new FacetDepositSelection();
+
+            if (outgoingEquip == null)
+                return selection;
+
+            var pool = new Dictionary<uint, WorldObject>();
+
+            if (candidatePool != null)
+            {
+                foreach (var wo in candidatePool)
+                {
+                    if (wo != null)
+                        pool[wo.Guid.Full] = wo;
+                }
+            }
+
+            var seen = new HashSet<uint>();
+
+            foreach (var entry in outgoingEquip)
+            {
+                if (entry == null || !seen.Add(entry.Guid))
+                    continue;
+
+                if (wornNowGuids != null && wornNowGuids.Contains(entry.Guid))
+                {
+                    selection.Kept.Add(new FacetDepositKept(entry.Guid, null, FacetDepositKeepReason.WornAgain));
+                    continue;
+                }
+
+                if (!pool.TryGetValue(entry.Guid, out var item))
+                {
+                    selection.Kept.Add(new FacetDepositKept(entry.Guid, null, FacetDepositKeepReason.NotInPool));
+                    continue;
+                }
+
+                if (incomingRememberedGuids != null && incomingRememberedGuids.Contains(entry.Guid))
+                {
+                    selection.Kept.Add(new FacetDepositKept(entry.Guid, item, FacetDepositKeepReason.IncomingFacetItem));
+                    continue;
+                }
+
+                var reason = DepositKeepReason(item, templateBlocked);
+
+                if (reason != null)
+                {
+                    selection.Kept.Add(new FacetDepositKept(entry.Guid, item, reason.Value));
+                    continue;
+                }
+
+                selection.Deposit.Add(item);
+            }
+
+            return selection;
+        }
+
+        private static FacetDepositKeepReason? DepositKeepReason(WorldObject item, Func<WorldObject, bool> templateBlocked)
+        {
+            if (item.UseBackpackSlot)
+                return FacetDepositKeepReason.PackSlot;
+
+            if (templateBlocked != null && templateBlocked(item))
+                return FacetDepositKeepReason.Issued;
+
+            if (!IsAcceptableToSell(item, AllItemTypes, isVault: true, bypassPriceGates: true, bypassAttunedRefusal: false, out _))
+                return FacetDepositKeepReason.NotTransferable;
+
+            if (item.Lifespan != null)
+                return FacetDepositKeepReason.Timed;
+
+            if ((item.StackSize ?? 1) > 1)
+                return FacetDepositKeepReason.Stack;
+
+            return null;
+        }
+
+        /// <summary>
+        /// The vendor's per-item PvP template gate for a vault deposit (Player_Commerce.VerifySellItems'
+        /// PvpTemplateAction.Vault), as the predicate <see cref="SelectFacetDepositCandidates"/> takes.
+        /// </summary>
+        private bool FacetDepositTemplateBlocked(WorldObject item) => PvpTemplateBlocked(PvpTemplateAction.Vault, item) != null;
+
+        /// <summary>The short parenthesised reason a kept item is reported with. Printable ASCII.</summary>
+        internal static string FacetDepositKeepLabel(FacetDepositKept kept)
+        {
+            switch (kept.Reason)
+            {
+                case FacetDepositKeepReason.IncomingFacetItem:
+                    return "incoming facet item";
+                case FacetDepositKeepReason.PackSlot:
+                    return "takes a pack slot";
+                case FacetDepositKeepReason.Issued:
+                    return "PvP template item";
+                case FacetDepositKeepReason.NotTransferable:
+                    if (kept.Item != null && kept.Item.IsAttunedOrContainsAttuned)
+                        return "attuned";
+                    if (kept.Item is PetDevice device && device.Pet != null)
+                        return "its pet is out";
+                    return "cannot be stored";
+                case FacetDepositKeepReason.Timed:
+                    return "timed";
+                case FacetDepositKeepReason.Stack:
+                    return "a stack";
+                default:
+                    return "kept";
+            }
+        }
+
+        private static string FacetDepositItemName(WorldObject item) => item?.NameWithMaterial ?? item?.Name ?? "an item";
+
+        /// <summary>
+        /// The switch-summary lines for one facet vault deposit, in the order: stored, kept in the pack, needs staff.
+        /// Every item is named once. Pure, for unit tests. <paramref name="result"/> may be null (nothing was
+        /// submitted); <paramref name="unavailableReason"/> non-null means the deposit was skipped because the vault
+        /// was not available, and every candidate is then reported as kept.
+        /// </summary>
+        internal static List<string> ComposeFacetVaultDepositReport(VaultPackDepositResult result, IReadOnlyList<FacetDepositKept> kept,
+                                                                     IReadOnlyList<WorldObject> skippedCandidates, string unavailableReason)
+        {
+            var lines = new List<string>();
+
+            var stored = new List<string>();
+            var keptNames = new List<string>();
+            var staff = new List<string>();
+
+            if (result?.Items != null)
+            {
+                foreach (var r in result.Items)
+                {
+                    var name = FacetDepositItemName(r.Item);
+
+                    switch (r.Status)
+                    {
+                        case VaultPackDepositStatus.Deposited:
+                            stored.Add(name);
+                            break;
+
+                        case VaultPackDepositStatus.HandedBack:
+                        case VaultPackDepositStatus.AlreadyParented:
+                            keptNames.Add(AccountVaultStore.IsFullMessage(r.FailReason) ? $"{name} (vault full)" : $"{name} (not accepted)");
+                            break;
+
+                        case VaultPackDepositStatus.NotDetached:
+                            keptNames.Add($"{name} (could not be moved)");
+                            break;
+
+                        default:
+                            staff.Add(name);
+                            break;
+                    }
+                }
+            }
+
+            if (kept != null)
+            {
+                foreach (var k in kept)
+                {
+                    if (k.IsReported)
+                        keptNames.Add($"{FacetDepositItemName(k.Item)} ({FacetDepositKeepLabel(k)})");
+                }
+            }
+
+            if (unavailableReason != null && skippedCandidates != null && skippedCandidates.Count > 0)
+            {
+                var skipped = new List<string>();
+
+                foreach (var item in skippedCandidates)
+                    skipped.Add(FacetDepositItemName(item));
+
+                lines.Add($"Your vault could not take your outgoing gear ({unavailableReason.TrimEnd('.')}), so it stayed in your pack: {string.Join(", ", skipped)}.");
+            }
+
+            if (stored.Count > 0)
+                lines.Add($"Stored in your vault: {string.Join(", ", stored)}.");
+
+            if (keptNames.Count > 0)
+                lines.Add($"Kept in your pack: {string.Join(", ", keptNames)}.");
+
+            if (staff.Count > 0)
+                lines.Add($"Could not confirm where {string.Join(", ", staff)} ended up - contact staff.");
+
+            return lines;
+        }
+
+        /// <summary>
+        /// The facet vault deposit itself, run by <see cref="TrySwitchFacet"/> AFTER the switch has committed and
+        /// the incoming gear is back on. Deposits each outgoing item still in the main pack that passes
+        /// <see cref="SelectFacetDepositCandidates"/> (and the per-item PvP template vault gate) through
+        /// <see cref="VaultPackDeposit.DepositFromPack"/>, and returns the summary lines. Logs every withheld or
+        /// stranded item by guid at ERROR. May throw; the caller catches.
+        /// </summary>
+        private List<string> DepositOutgoingFacetGear(List<FacetEquipEntry> outgoingEquip, List<FacetEquipEntry> incomingEquip)
+        {
+            var incomingRemembered = new HashSet<uint>((incomingEquip ?? new List<FacetEquipEntry>()).Where(e => e != null).Select(e => e.Guid));
+
+            var wornNow = new HashSet<uint>();
+
+            foreach (var item in EquippedObjects.Values)
+                wornNow.Add(item.Guid.Full);
+
+            // Inventory holds the player's DIRECT children - the main pack, where the strip put every item.
+            var selection = SelectFacetDepositCandidates(outgoingEquip, wornNow, incomingRemembered, Inventory.Values.ToList(), FacetDepositTemplateBlocked);
+
+            var candidates = selection.Deposit;
+
+            if (candidates.Count == 0)
+                return ComposeFacetVaultDepositReport(null, selection.Kept, null, null);
+
+            var store = AccountVaultManager.GetStore(Account?.AccountId ?? 0);
+
+            string unavailable = null;
+
+            if (store == null)
+                unavailable = "no account vault could be resolved";
+            else if (!store.TryCheckReady(out var notReadyReason))
+                unavailable = notReadyReason ?? AccountVaultStore.UnavailableMessage;
+
+            if (unavailable != null)
+            {
+                log.Warn($"[FACET] {Name} (0x{Guid.Full:X8}): facet vault deposit skipped, vault not available ({unavailable}); {candidates.Count} item(s) stay in the pack.");
+                return ComposeFacetVaultDepositReport(null, selection.Kept, candidates, unavailable);
+            }
+
+            var result = VaultPackDeposit.DepositFromPack(store, candidates, this);
+
+            foreach (var r in result.Items)
+            {
+                if (r.Status == VaultPackDepositStatus.Withheld)
+                    log.Error($"[FACET] DEPOSIT STATE {(r.Commit == VaultDepositCommit.Committed ? "COMMITTED" : "UNKNOWN")} for account {Account?.AccountId ?? 0}: facet vault deposit of 0x{r.Item?.Guid.Full ?? 0:X8} ({r.Item?.Name}) for {Name} (0x{Guid.Full:X8}) threw. It is NOT being handed back - it may already be credited. Reconcile against account_vault_log. {result.Thrown}");
+                else if (r.Status == VaultPackDepositStatus.HandBackFailed)
+                    log.Error($"[FACET] ORPHAN: 0x{r.Item?.Guid.Full ?? 0:X8} ({r.Item?.Name}) could not be returned to {Name} (0x{Guid.Full:X8}) after the vault refused a facet deposit ({r.FailReason}). It is detached and needs manual recovery.");
+                else if (r.Status == VaultPackDepositStatus.AlreadyParented)
+                    log.Warn($"[FACET] {Name} (0x{Guid.Full:X8}): 0x{r.Item?.Guid.Full ?? 0:X8} ({r.Item?.Name}) is still parented after a facet deposit that reported failure ({r.FailReason}); not handing it back.");
+            }
+
+            if (result.StoreUnavailable)
+                log.Warn($"[FACET] {Name} (0x{Guid.Full:X8}): facet vault deposit found the store retired twice; every item was handed back.");
+
+            return ComposeFacetVaultDepositReport(result, selection.Kept, null, null);
         }
 
         /// <summary>
@@ -1867,7 +2237,7 @@ namespace ACE.Server.WorldObjects
 
             foreach (var row in rows)
             {
-                if (row == null || !FacetSnapshot.TryDeserializeSkills(row.SkillsJson, out var skills))
+                if (row == null || FacetSnapshot.IsResetMarker(row.SkillsJson) || !FacetSnapshot.TryDeserializeSkills(row.SkillsJson, out var skills))
                     continue;
 
                 result[row.Slot] = new FacetStoredSummary(FacetPools.TotalPp(skills), row.Name);
@@ -1916,6 +2286,20 @@ namespace ACE.Server.WorldObjects
 
             if (current != null && current.TryGetValue(slot, out var existing))
                 UpdateFacetStoredSummary(slot, existing.Pp, name);
+        }
+
+        /// <summary>Drops a slot from the cache when the cache has been populated at all (a reset slot holds no build).</summary>
+        private void RemoveFacetStoredSummary(int slot)
+        {
+            var current = Volatile.Read(ref facetStoredSummaries);
+
+            if (current == null || !current.ContainsKey(slot))
+                return;
+
+            var copy = new Dictionary<int, FacetStoredSummary>(current);
+            copy.Remove(slot);
+
+            Volatile.Write(ref facetStoredSummaries, copy);
         }
 
         /// <summary>
@@ -2478,6 +2862,227 @@ namespace ACE.Server.WorldObjects
             return true;
         }
 
+        // ---- /facet reset ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// True when the last <see cref="TrySwitchFacet"/> call found its target slot holding a reset marker
+        /// row (as opposed to no row at all). Read by FacetCommands to word the first-visit prompt. A side
+        /// channel because TrySwitchFacet's signature is pinned by tests. VALID ONLY when TrySwitchFacet
+        /// returned needsConfirmation == true; on any other outcome it is a leftover of that call and must
+        /// not be read.
+        /// </summary>
+        internal bool FacetConfirmTargetWasReset { get; private set; }
+
+        /// <summary>
+        /// Set by <see cref="TrySwitchFacet"/> on every awaitingVault return: true when ONLY the facet vault deposit
+        /// wanted the vault (the incoming gear is all local). The command layer reads it to decide what an expired
+        /// wait means - a deposit-only wait resumes the switch with the deposit skipped (the deposit must never
+        /// block a switch), while a wait for incoming gear still gives up. Same shape as FacetConfirmTargetWasReset.
+        /// </summary>
+        internal bool FacetVaultWaitIsDepositOnly { get; private set; }
+
+        /// <summary>The summary line when a deposit-only vault wait expired and the switch went ahead without the deposit.</summary>
+        internal const string FacetVaultDepositSkippedLine = "Vault not ready - gear left in your pack.";
+
+        /// <summary>
+        /// True when a slot's stored row means "start from a fresh build": no row at all (a never-visited
+        /// slot) or a reset marker row (<see cref="FacetSnapshot.IsResetMarker"/>). Pure, so it is testable
+        /// without a Player. TrySwitchFacet uses it for BOTH the first-visit confirmation and the choice
+        /// between the stored and the fresh branch.
+        /// </summary>
+        internal static bool IsFreshTarget(CharacterFacet row)
+            => row == null || FacetSnapshot.IsResetMarker(row.SkillsJson);
+
+        /// <summary>The incoming build of a fresh entry. A marker row differs from a missing row only by <see cref="Name"/>.</summary>
+        internal sealed class FreshFacetPlan
+        {
+            public List<FacetSkillEntry> Skills;
+            public Dictionary<string, int> Abilities;
+            public List<FacetEquipEntry> Equip;
+            public string Name;
+        }
+
+        /// <summary>
+        /// The incoming skills, class abilities, gear and name for a fresh entry. <paramref name="freshSkills"/>
+        /// is the result of <see cref="BuildFreshFacetSkills"/>, passed in so this stays pure. The name is the
+        /// marker row's kept name, or null for a slot that never had a row.
+        /// </summary>
+        internal static FreshFacetPlan PlanFreshFacetIncoming(CharacterFacet row, List<FacetSkillEntry> freshSkills)
+        {
+            return new FreshFacetPlan
+            {
+                Skills = freshSkills,
+                Abilities = new Dictionary<string, int>(),
+                Equip = new List<FacetEquipEntry>(),
+                Name = row?.Name,
+            };
+        }
+
+        /// <summary>
+        /// The marker row /facet reset writes over a slot's stored row. Every column is pinned by a test:
+        /// the name is kept, skills_Json is the marker, abilities and equip are the serializer's empty forms,
+        /// attrs_Json is null (a fresh entry inherits the live arrangement and never reads it).
+        /// </summary>
+        internal static CharacterFacet BuildFacetResetRow(uint characterId, int slot, string name, DateTime now)
+        {
+            return new CharacterFacet
+            {
+                CharacterId = characterId,
+                Slot = (byte)slot,
+                Name = name,
+                SkillsJson = FacetSnapshot.ResetMarkerSkillsJson,
+                AbilitiesJson = FacetSnapshot.SerializeAbilities(new Dictionary<string, int>()),
+                EquipJson = FacetSnapshot.SerializeEquip(new List<FacetEquipEntry>()),
+                AttrsJson = null,
+                UpdatedAt = now,
+            };
+        }
+
+        /// <summary>
+        /// The gates of /facet reset. Deliberately NOT the PK-timer, busy, trade or location gates of
+        /// <see cref="CheckFacetGates"/>: a reset changes no live state, only a stored row of a slot the
+        /// player is not standing on. It keeps the feature flag, the mule guard and the PvP match, template
+        /// and queue gates, then the slot rules: valid, not slot 1, not the active slot.
+        /// </summary>
+        internal bool CheckFacetResetGates(int slot, out string refusal)
+        {
+            refusal = null;
+
+            if (IsInPvpMatch)
+            {
+                refusal = PvpArenaText.FacetSwitchRefused;
+                return false;
+            }
+
+            var templateRefusal = PvpTemplateBlocked(PvpTemplateAction.FacetSwitch);
+            if (templateRefusal != null)
+            {
+                refusal = templateRefusal;
+                return false;
+            }
+
+            if (PvpPlayerRules.RefusesFacetSwitchForArena(PvpMatchManager.Status(this).Kind))
+            {
+                refusal = PvpArenaText.QueuedFacetSwitchRefused;
+                return false;
+            }
+
+            var dials = FacetTunables.DialSource();
+
+            if (!dials.Enabled)
+            {
+                refusal = "Facets are not available on this server yet.";
+                return false;
+            }
+
+            if (MuleBlocked(MuleAction.ChangeFacet, notify: false))
+            {
+                refusal = "A mule cannot change facets.";
+                return false;
+            }
+
+            if (!IsPkFacetSlot(slot) && (slot < 1 || slot > MaxFacetSlot))
+            {
+                refusal = $"There is no facet {slot}. Valid facets are 1-{MaxFacetSlot}{(dials.PkEnabled ? ", and pk" : "")}.";
+                return false;
+            }
+
+            if (slot == 1)
+            {
+                refusal = MainFacetResetRefusal;
+                return false;
+            }
+
+            if (slot == ActiveFacetSlot)
+            {
+                refusal = ActiveSlotResetRefusal(slot);
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>Shared by Player.CheckFacetResetGates and FacetCommands.TryParseResetArgs.</summary>
+        internal const string MainFacetResetRefusal = "Your main facet cannot be reset.";
+
+        internal static string ActiveSlotResetRefusal(int slot)
+            => $"You are using {FacetSlotDisplay(slot)} - turn to another facet first, then reset it.";
+
+        /// <summary>
+        /// Resets a stored slot to a marker row (see <see cref="FacetSnapshot.ResetMarkerSkillsJson"/>). Free,
+        /// with no tunable. Nothing is mutated on any refusal. The read is LOAD-BEARING (a failed read must
+        /// refuse, never be taken as "no row"), and the write is CONFIRMED (<see cref="FacetRowFetch.TrySaveAll"/>)
+        /// so a lost write is reported rather than announced as done. Pools are untouched: stored rows hold
+        /// ranks but no points (the points were released into the pools when the row was written).
+        ///
+        /// When <paramref name="confirmed"/> is false and the reset is allowed, returns false with
+        /// <paramref name="needsConfirmation"/> set and <paramref name="refusal"/> null: the caller owns the prompt.
+        /// </summary>
+        public bool TryResetFacet(int slot, bool confirmed, out string refusal, out bool needsConfirmation)
+        {
+            needsConfirmation = false;
+
+            if (!CheckFacetResetGates(slot, out refusal))
+                return false;
+
+            if (!TryGetCharacterFacetRows(out var rows))
+            {
+                refusal = "Cannot reset: your facets could not be read right now. Try again in a moment.";
+                return false;
+            }
+
+            var existing = rows.Find(r => r.Slot == (byte)slot);
+
+            if (existing == null)
+            {
+                refusal = $"{FacetSlotDisplayCapitalized(slot)} has not been cut yet - there is nothing to reset.";
+                return false;
+            }
+
+            if (FacetSnapshot.IsResetMarker(existing.SkillsJson))
+            {
+                refusal = $"{FacetSlotDisplayCapitalized(slot)} is already reset.";
+                return false;
+            }
+
+            if (!confirmed)
+            {
+                needsConfirmation = true;
+                return false;
+            }
+
+            // The old build is destroyed by the overwrite, so its full row goes to the log first: staff can
+            // restore it by hand if a player regrets the reset.
+            log.Info($"[FACET] {Name} (0x{Guid.Full:X8}): resetting slot {slot}. Old row: name={existing.Name ?? "(none)"} skills_Json={existing.SkillsJson} abilities_Json={existing.AbilitiesJson} equip_Json={existing.EquipJson} attrs_Json={existing.AttrsJson ?? "(null)"} updated_At={existing.UpdatedAt:O}");
+
+            var marker = BuildFacetResetRow(Character.Id, slot, existing.Name, DateTime.UtcNow);
+
+            // The read above can block the world thread, and the vault poll can re-enter a switch from a
+            // landblock thread, so the player may have turned to this slot meanwhile. Writing a marker over
+            // the ACTIVE slot's row would be harmless to live state but wrong; refuse with the usual text.
+            if (slot == ActiveFacetSlot)
+            {
+                refusal = ActiveSlotResetRefusal(slot);
+                return false;
+            }
+
+            if (!FacetRowFetch.TrySaveAll(new List<CharacterFacet> { marker }, FacetDbTimeoutMs, DatabaseManager.Shard.SaveCharacterFacet))
+            {
+                // A timeout does not prove the write failed: it can still land, so do not claim "nothing changed".
+                log.Error($"[FACET] {Name} (0x{Guid.Full:X8}): the reset marker write for slot {slot} did not confirm.");
+                refusal = "Cannot reset: the reset could not be confirmed. Check /facet and try again.";
+                return false;
+            }
+
+            RemoveFacetStoredSummary(slot);
+
+            // A reset supersedes any switch still waiting on the vault, like every other typed /facet request.
+            BeginFacetSwitchRequest();
+
+            refusal = null;
+            return true;
+        }
+
         /// <summary>
         /// The pure decision behind <see cref="SendFacetUnlockNoticeIfDue"/>: should the one-time
         /// slot-2 unlock notice fire, given the four inputs that gate it. Split out from the instance
@@ -2623,7 +3228,7 @@ namespace ACE.Server.WorldObjects
         /// class ability points, attribute conservation, gates re-check, gear strip) still runs against
         /// the trimmed build, unchanged. With no shortfall, trim does nothing. DESIGN.md section 4.2.
         /// </summary>
-        public bool TrySwitchFacet(int targetSlot, bool confirmed, bool trim, out string refusal, out bool needsConfirmation, out bool awaitingVault)
+        public bool TrySwitchFacet(int targetSlot, bool confirmed, bool trim, out string refusal, out bool needsConfirmation, out bool awaitingVault, bool skipVaultDeposit = false)
         {
             needsConfirmation = false;
             awaitingVault = false;
@@ -2651,7 +3256,12 @@ namespace ACE.Server.WorldObjects
             // because the gear strip is disruptive and the slot starts from a fresh build. Decided from
             // the read above rather than a second blocking read in the command layer - see this method's
             // remarks. Nothing has been mutated at this point.
-            if (targetRow == null && !confirmed)
+            //
+            // A RESET MARKER row (/facet reset) counts as "never visited" here: see IsFreshTarget. The command
+            // layer is told which it was so it can word the prompt (FacetConfirmTargetWasReset).
+            FacetConfirmTargetWasReset = targetRow != null && IsFreshTarget(targetRow);
+
+            if (IsFreshTarget(targetRow) && !confirmed)
             {
                 // refusal is deliberately left null on THIS path alone: the caller owns the prompt wording
                 // and must branch on needsConfirmation before it reads refusal. Assigning a string here
@@ -2673,7 +3283,9 @@ namespace ACE.Server.WorldObjects
             // which is what a pre-upgrade or unreadable attrs_Json degrades to - see below.
             Dictionary<PropertyAttribute, uint> incomingAttributes;
 
-            if (targetRow != null)
+            // The marker test runs BEFORE TryDeserializeSkills on purpose: the marker is unparseable as a
+            // build, so a stored-branch read of it would refuse with "Contact staff" instead of starting fresh.
+            if (!IsFreshTarget(targetRow))
             {
                 // LOAD-BEARING deserialize, and the ONLY one of the three that is. An unreadable
                 // skills_Json must refuse: the pool arithmetic below releases every point of the outgoing
@@ -2724,10 +3336,12 @@ namespace ACE.Server.WorldObjects
             }
             else
             {
-                incomingSkills = BuildFreshFacetSkills();
-                incomingAbilities = new Dictionary<string, int>();
-                incomingEquip = new List<FacetEquipEntry>();
-                incomingName = null;
+                var freshPlan = PlanFreshFacetIncoming(targetRow, BuildFreshFacetSkills());
+
+                incomingSkills = freshPlan.Skills;
+                incomingAbilities = freshPlan.Abilities;
+                incomingEquip = freshPlan.Equip;
+                incomingName = freshPlan.Name;
 
                 // A fresh slot INHERITS the character's current arrangement, so its sum is the live sum
                 // and conservation holds trivially - there is nothing to reconcile. See
@@ -2946,13 +3560,35 @@ namespace ACE.Server.WorldObjects
             foreach (var item in GetAllPossessions(Inventory.Values, EquippedObjects.Values))
                 facetLocalGuids.Add(item.Guid.Full);
 
-            switch (DecideFacetVaultGate(incomingEquip, facetLocalGuids,
+            // The facet vault deposit (/facet vault on): read ONCE here, so the gate and the deposit after the
+            // restore cannot disagree about whether this switch deposits. The kill switch is read through its seam,
+            // never inside FacetDials (a PropertyManager read throws in unit tests).
+            //
+            // skipVaultDeposit is the command layer's resume after a DEPOSIT-ONLY vault wait expired: the switch then
+            // goes ahead with the deposit off (outgoingWantsVault stays false) and one summary line saying so.
+            var facetVaultDepositWanted = FacetVaultDeposit && FacetTunables.VaultDepositEnabledSource();
+            var facetVaultDepositOn = facetVaultDepositWanted && !skipVaultDeposit;
+
+            // Before the strip: the pool is what is worn now, and "worn again" is what the incoming facet remembers.
+            // The probe is consulted only when at least one item would actually go, so the toggle being on never
+            // starts a vault load for a switch with nothing to deposit.
+            var outgoingWantsVault = false;
+
+            if (facetVaultDepositOn)
+            {
+                var incomingGuids = new HashSet<uint>((incomingEquip ?? new List<FacetEquipEntry>()).Where(e => e != null).Select(e => e.Guid));
+
+                outgoingWantsVault = SelectFacetDepositCandidates(outgoingEquip, null, incomingGuids, EquippedObjects.Values.ToList(), FacetDepositTemplateBlocked).Deposit.Count > 0;
+            }
+
+            switch (DecideFacetVaultGate(incomingEquip, facetLocalGuids, outgoingWantsVault,
                 () => FacetVaultStatus.Probe(AccountVaultManager.GetStore(Account?.AccountId ?? 0)), out var vaultRefusal))
             {
                 case FacetVaultGateOutcome.AwaitVault:
                     // refusal is left null, as on the needsConfirmation path: the command layer owns the
                     // wait-and-resume wording.
                     awaitingVault = true;
+                    FacetVaultWaitIsDepositOnly = !FacetEquipNeedsVault(incomingEquip, facetLocalGuids);
                     refusal = null;
                     return false;
 
@@ -3114,6 +3750,26 @@ namespace ACE.Server.WorldObjects
                 restoreReport = new List<string> { "Your build was switched, but some gear could not be restored - contact staff." };
             }
 
+            // THE FACET VAULT DEPOSIT, after the switch has committed and AFTER the restore, which is what keeps a
+            // piece the incoming facet shares out of the vault: it is worn again by now and is excluded as such.
+            // Its own catch for the same reason the restore has one - nothing is left to abort, and the switch's
+            // summary must still reach the player.
+            List<string> vaultDepositReport = null;
+
+            if (facetVaultDepositOn)
+            {
+                try
+                {
+                    vaultDepositReport = DepositOutgoingFacetGear(outgoingEquip, incomingEquip);
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[FACET] {Name} (0x{Guid.Full:X8}): the facet vault deposit threw AFTER the switch to slot {targetSlot} had committed. Outgoing gear may be in the pack, in the account vault, or detached; check against account_vault_log.", ex);
+
+                    vaultDepositReport = new List<string> { "Your outgoing gear could not all be put away in your vault - contact staff." };
+                }
+            }
+
             var summary = new System.Text.StringBuilder();
 
             summary.Append($"You turn the stone to {FacetSlotDisplay(targetSlot)}");
@@ -3143,6 +3799,11 @@ namespace ACE.Server.WorldObjects
 
             if (unrestoredGearNote != null)
                 summary.Append(" " + unrestoredGearNote);
+
+            if (vaultDepositReport != null && vaultDepositReport.Count > 0)
+                summary.Append(" " + string.Join(" ", vaultDepositReport));
+            else if (facetVaultDepositWanted && skipVaultDeposit)
+                summary.Append(" " + FacetVaultDepositSkippedLine);
 
             refusal = summary.ToString();
             return true;
@@ -3239,6 +3900,29 @@ namespace ACE.Server.WorldObjects
         /// Enabled/PkEnabled must swap this too.
         /// </summary>
         internal static Func<bool> PkRulesSource = ReadPkRulesFromProperties;
+
+        /// <summary>facet_vault_deposit_enabled's shipped default (PropertyManager.cs).</summary>
+        internal const bool DefaultVaultDepositEnabled = true;
+
+        /// <summary>
+        /// facet_vault_deposit_enabled, the server kill switch for the facet vault deposit. Read once per switch by
+        /// TrySwitchFacet and by /facet vault. A failed read answers FALSE: the feature moves items, so an
+        /// unreadable switch must not move them.
+        /// </summary>
+        internal static Func<bool> VaultDepositEnabledSource = ReadVaultDepositEnabledFromProperties;
+
+        private static bool ReadVaultDepositEnabledFromProperties()
+        {
+            try
+            {
+                return PropertyManager.GetBool("facet_vault_deposit_enabled", DefaultVaultDepositEnabled).Item;
+            }
+            catch (Exception ex)
+            {
+                log.Error("[FACET] could not read facet_vault_deposit_enabled; treating the facet vault deposit as off", ex);
+                return false;
+            }
+        }
 
         private static bool ReadPkRulesFromProperties()
         {

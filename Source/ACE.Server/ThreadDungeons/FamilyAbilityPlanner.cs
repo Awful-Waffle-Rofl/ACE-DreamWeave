@@ -262,7 +262,8 @@ namespace ACE.Server.ThreadDungeons
         /// <summary>
         /// The per-hit sources of one plan entry after every build-time damage writer that runs before the ceiling, in
         /// PrepareForPlacement's order: the reach-up stamp (non-boss, plan.StatCurve set), the archetype uplift (an uplifted
-        /// non-boss entry the plan resolved an archetype for) or else the band uplift, then the boss normalization (a boss
+        /// non-boss entry the plan resolved an archetype for) or else the band uplift (a stretched entry at its mapped level's
+        /// standard), then a stretched entry's family overscale on damage, then the boss normalization (a boss
         /// with plan.BossNormalize and a non-empty band standard: every damaging source SET to the band's MaxBodyDamage x the
         /// offense ratio, attributes SET to the band medians x their ratio).
         /// <paramref name="upliftAttributes"/> is dynamic_dungeons_uplift_attributes.
@@ -287,8 +288,20 @@ namespace ACE.Server.ThreadDungeons
             if (info != null)
                 predicted = predicted.UpliftedByArchetype(entry.UpliftLevel, info, ThreadDungeonSpawner.StampedDamageRating(plan, false));
             else if (entry.UpliftLevel > 0)
-                predicted = predicted.UpliftedByBand(entry.UpliftLevel, plan.BandStandard,
-                    ThreadDungeonSpawner.UpliftsAttributes(entry.UpliftLevel, entry.Role, plan.BandStandard, upliftAttributes));
+            {
+                // A stretched entry is normalized at its MAPPED level (ThreadDungeonSpawner.UpliftStandardFor), as the spawner does.
+                var upliftStandard = ThreadDungeonSpawner.UpliftStandardFor(entry, plan);
+
+                predicted = predicted.UpliftedByBand(entry.UpliftLevel, upliftStandard,
+                    ThreadDungeonSpawner.UpliftsAttributes(entry.UpliftLevel, entry.Role, upliftStandard, upliftAttributes));
+            }
+
+            // The Thread family stretch's overscale (ThreadDungeonSpawner.ApplyStretchOverscale): after either uplift, before
+            // the ceiling. 1.0 for every unstretched entry and the boss.
+            var overscale = ThreadDungeonSpawner.OverscaleFor(entry, plan);
+
+            if (overscale > 1.0)
+                predicted = predicted.DamageScaledBy(overscale);
 
             if (isBoss && plan.BossNormalize && plan.BandStandard != null && !plan.BandStandard.IsEmpty)
                 predicted = NormalizedBoss(predicted, plan);

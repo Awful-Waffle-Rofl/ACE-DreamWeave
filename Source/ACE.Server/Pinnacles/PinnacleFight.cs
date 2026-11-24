@@ -127,6 +127,7 @@ namespace ACE.Server.Pinnacles
             public string Pattern;
             public HazardArgs Args;
             public PinnacleHandle Origin;
+            public PinnacleHazardOptions Options;
             public int Attempts;
             public int Epoch;
         }
@@ -327,12 +328,13 @@ namespace ACE.Server.Pinnacles
             if (isEnded)
                 return PinnacleHandle.None;
 
-            var h = world.Spawn(wcid, at, withImmuneRecord: true, tier);
+            var healthMultiplier = HealthMultiplierFor(wcid);
+            var h = world.Spawn(wcid, at, withImmuneRecord: true, tier, healthMultiplier: healthMultiplier);
 
             if (h.IsNone)
             {
                 world.Log($"pinnacle: add '{tag}' wcid {wcid} failed to spawn; retrying once");
-                h = world.Spawn(wcid, at, withImmuneRecord: true, tier);
+                h = world.Spawn(wcid, at, withImmuneRecord: true, tier, healthMultiplier: healthMultiplier);
             }
 
             if (h.IsNone)
@@ -506,12 +508,47 @@ namespace ACE.Server.Pinnacles
             }));
         }
 
-        public void StartHazard(string tag, string kind, string pattern, HazardArgs args, PinnacleHandle origin = default)
+        public bool IsOwnerGrounded() => !isEnded && world.IsOwnerGrounded();
+
+        public int DestroyAdds(string tag)
+        {
+            if (isEnded || tag == null)
+                return 0;
+
+            var doomed = adds.Where(a => a.Tag == tag).ToList();
+
+            foreach (var a in doomed)
+            {
+                adds.Remove(a);
+
+                if (world.IsAlive(a.Handle))
+                    world.Destroy(a.Handle);
+            }
+
+            return doomed.Count;
+        }
+
+        /// <summary>The bare cast: no turn, no nod. Dropped unless the fight is Running and the caster is alive.</summary>
+        public void CastAtOwnerNow(PinnacleHandle caster, uint spellId)
+        {
+            if (caster.IsNone || isEnded || State != PinnacleFightState.Running || !world.IsAlive(caster))
+                return;
+
+            world.Cast(caster, spellId);
+        }
+
+        public void SetMeleeReach(PinnacleHandle h, float? metres)
+        {
+            if (!h.IsNone && !isEnded)
+                world.SetMeleeReach(h, metres);
+        }
+
+        public void StartHazard(string tag, string kind, string pattern, HazardArgs args, PinnacleHandle origin = default, PinnacleHazardOptions options = null)
         {
             if (isEnded)
                 return;
 
-            var req = new HazardRequest { Tag = tag, Kind = kind, Pattern = pattern, Args = args ?? HazardArgs.Empty, Origin = origin, Epoch = epoch };
+            var req = new HazardRequest { Tag = tag, Kind = kind, Pattern = pattern, Args = args ?? HazardArgs.Empty, Origin = origin, Options = options, Epoch = epoch };
             Launch(req);
         }
 
@@ -546,6 +583,18 @@ namespace ACE.Server.Pinnacles
 
         // always reaches the world, even for a count of 0: a failed round shows the dispel visual and the "nothing" line
         public int DispelOwnerBuffs(int count) => world.DispelOwnerBuffs(Math.Max(0, count), rng);
+
+        /// <summary>The head casts it: dropped unless Running with the head alive, and for a duration that is not a positive number.</summary>
+        public bool GrantOwnerBuff(uint spellId, double seconds)
+        {
+            if (isEnded || State != PinnacleFightState.Running || head.IsNone || !world.IsAlive(head) || !double.IsFinite(seconds) || seconds <= 0)
+                return false;
+
+            return world.GrantOwnerBuff(head, spellId, seconds);
+        }
+
+        /// <summary>The script's health multiplier for <paramref name="wcid"/> (PinnacleScriptData.HealthMultipliers), 1.0 with no data.</summary>
+        private double HealthMultiplierFor(uint wcid) => script.Data?.HealthMultiplierFor(wcid) ?? 1.0;
 
         public void Say(string line) => world.Tell(line);
 
@@ -754,10 +803,10 @@ namespace ACE.Server.Pinnacles
             // A seal is not a creature, so its tier is never read; Elite is only a placeholder argument.
             foreach (var p in script.Data?.SealPoints ?? Array.Empty<PinnaclePoint>())
             {
-                var h = world.Spawn(script.Data.SealWcid, p, withImmuneRecord: false, PinnacleTier.Elite);
+                var h = world.Spawn(script.Data.SealWcid, p, withImmuneRecord: false, PinnacleTier.Elite, healthMultiplier: HealthMultiplierFor(script.Data.SealWcid));
 
                 if (h.IsNone)
-                    h = world.Spawn(script.Data.SealWcid, p, withImmuneRecord: false, PinnacleTier.Elite);
+                    h = world.Spawn(script.Data.SealWcid, p, withImmuneRecord: false, PinnacleTier.Elite, healthMultiplier: HealthMultiplierFor(script.Data.SealWcid));
 
                 if (h.IsNone)
                     world.Log($"pinnacle: seal wcid {script.Data.SealWcid} failed to spawn twice at {p}; the room is not sealed there");
@@ -797,7 +846,8 @@ namespace ACE.Server.Pinnacles
             if (!head.IsNone && world.IsAlive(head))
                 return;
 
-            head = world.Spawn(script.Data.HeadWcid, script.Data.HeadPoint, withImmuneRecord: true, script.Data.HeadTier, script.Data.HeadLeavesCorpse);
+            head = world.Spawn(script.Data.HeadWcid, script.Data.HeadPoint, withImmuneRecord: true, script.Data.HeadTier, script.Data.HeadLeavesCorpse,
+                HealthMultiplierFor(script.Data.HeadWcid));
 
             if (head.IsNone && !headSpawnFailureLogged)
             {
@@ -1175,7 +1225,7 @@ namespace ACE.Server.Pinnacles
                     world.Log($"pinnacle: hazard '{req.Tag}' origin {req.Origin} has no position; starting without cx/cy");
             }
 
-            var token = world.StartHazard(req.Kind, req.Pattern, args, out var error);
+            var token = world.StartHazard(req.Kind, req.Pattern, args, req.Options, out var error);
 
             if (token > 0)
             {

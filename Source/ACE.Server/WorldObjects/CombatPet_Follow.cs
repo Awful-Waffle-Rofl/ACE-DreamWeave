@@ -62,11 +62,20 @@ namespace ACE.Server.WorldObjects
         private PetFollowSettings tickSettings = PetFollowSettings.Defaults;
 
         /// <summary>
+        /// The player this pet follows when idle and whose last attacked monster it assists on: its owner. The Allegiance
+        /// Avatar fighter, which has no owner, names its leader instead. Read once per follow tick and once per target pick.
+        /// </summary>
+        protected virtual Player FollowLeader => P_PetOwner;
+
+        /// <summary>Whether the summon assist is on for <paramref name="leader"/>: the owner's /summonattackontarget setting.</summary>
+        protected virtual bool AssistsLeaderTarget(Player leader) => leader.SummonAttackOnTarget;
+
+        /// <summary>
         /// One idle-follow step. Called from Monster_Tick in place of Sleep() when this pet has no target.
         /// </summary>
-        public void TickFollowOwner()
+        public virtual void TickFollowOwner()
         {
-            var owner = P_PetOwner;
+            var owner = FollowLeader;
 
             if (!CanFollowOwner(owner))
             {
@@ -94,12 +103,24 @@ namespace ACE.Server.WorldObjects
 
             if (!isFollowingOwner)
             {
-                if (PetFollowRules.ShouldStartFollow(distance) && IssueFollowMove(owner))
+                // The follow window opens as soon as the pet WANTS to follow, whether or not the MoveTo could be
+                // issued this tick. Until 2026-11-07 it opened only on a successful IssueFollowMove, so a pet held
+                // not-MoveReady (NextMoveTime, an animation that never ends) between 4 m and the distance trigger
+                // had no stuck or max-time trigger armed at all. Now the max-time trigger is armed from here on;
+                // the stuck window is reset on every tick the MoveTo cannot go out, so not being allowed to move
+                // is never counted as stuck. The re-issue at the bottom keeps trying the MoveTo every tick until
+                // it goes out (nextFollowIssueTime only advances on a successful issue).
+                if (PetFollowRules.ShouldStartFollow(distance))
                 {
                     isFollowingOwner = true;
                     followStartTime = now;
                     followProgress.Reset();
                     followProgress.Update(now, Location.ToGlobal(), owner.Location.ToGlobal(), settings.StuckSeconds);
+
+                    // a pet that cannot move yet (attack recovery, a pin or stun) is not stuck: only the max-time
+                    // trigger stays armed until the MoveTo goes out
+                    if (PetFollowRules.ShouldResetStuckWindow(IssueFollowMove(owner)))
+                        followProgress.Reset();
                 }
                 return;
             }
@@ -129,8 +150,8 @@ namespace ACE.Server.WorldObjects
 
             // the MoveTo ended but the owner is still out of range - they walked off after the pet arrived, or
             // MoveToManager gave up against geometry. Re-issue, throttled.
-            if (!IsMoving && now >= nextFollowIssueTime)
-                IssueFollowMove(owner);
+            if (!IsMoving && now >= nextFollowIssueTime && PetFollowRules.ShouldResetStuckWindow(IssueFollowMove(owner)))
+                followProgress.Reset();
         }
 
         /// <summary>
@@ -153,7 +174,7 @@ namespace ACE.Server.WorldObjects
             return SharesTickThreadWith(owner);
         }
 
-        private bool SharesTickThreadWith(Player owner)
+        protected bool SharesTickThreadWith(Player owner)
         {
             var petBlock = CurrentLandblock;
             var ownerBlock = owner.CurrentLandblock;
@@ -254,67 +275,89 @@ namespace ACE.Server.WorldObjects
             IsMoving = false;
         }
 
+        /// <summary>Timers.RunningTime of this pet's last "could not be teleported" warning, for the rate limit.</summary>
+        private double? lastTeleportFailureLogTime;
+
         /// <summary>
         /// Puts the pet back beside its owner. Refused while the owner is teleporting or dead, across instances,
-        /// or across tick threads (PetFollowRules.CanTeleportToOwner). Refused or not, the progress window and
-        /// the max-time clock restart and further attempts wait TeleportRetryIntervalSeconds, so a blocked
-        /// teleport is retried at a bounded rate rather than on every tick.
+        /// or across tick threads (PetFollowRules.CanTeleportToOwner). Every attempt waits
+        /// TeleportRetryIntervalSeconds before the next, so a blocked teleport is retried at a bounded rate; only
+        /// a SUCCESSFUL placement restarts the stuck window and the max-time clock (PetFollowRules.AfterTeleportAttempt),
+        /// so a failing one is retried every interval instead of after a fresh stuck window.
         ///
-        /// The spot in front of the owner is tried first, but only outdoors (Pet.GetInFrontPlacement) and only
-        /// accepted when the pet really ended up there (Pet.IsPlacedAt): a Slide placement reports OK for any
-        /// spot the transition resolves to, including the far side of a wall. Anything else falls back to the
-        /// owner's own spot. Location is synced and broadcast once, after the final attempt.
+        /// The placement itself is Pet.PlaceBesideOwner, shared with /telesummon: in front of the owner
+        /// (outdoors only), then the owner's spot, then the owner's spot lifted by OwnerSpotBumpHeight - the
+        /// attempt that places a large pet indoors, where the unlifted spot refuses it.
         /// </summary>
         private void TryTeleportToOwner(Player owner, double now)
         {
+            var placed = false;
+            var result = Physics.Common.SetPositionError.OK;
+            var allowed = PetFollowRules.CanTeleportToOwner(owner.Teleporting, owner.IsDead, owner.Location.Instance == Location.Instance, SharesTickThreadWith(owner));
+
+            if (allowed)
+            {
+                CancelPhysicsMoveTo();
+
+                placed = PlaceBesideOwner(owner, out result);
+            }
+
+            nextTeleportAttemptTime = PetFollowRules.AfterTeleportAttempt(placed, now, followProgress, ref followStartTime);
+
+            if (placed)
+            {
+                isFollowingOwner = false;
+                return;
+            }
+
+            // a refusal (owner dead or teleporting) is not a placement failure and is not worth a warning
+            if (allowed && PetFollowRules.ShouldLogTeleportFailure(lastTeleportFailureLogTime, now))
+            {
+                lastTeleportFailureLogTime = now;
+                followLog.Warn($"{Name} (0x{Guid}) could not be teleported to its owner {owner.Name} at 0x{owner.Location.Cell:X8} {owner.Location.Pos}: {result} (pet at 0x{Location.Cell:X8} {Location.Pos}; retrying every {PetFollowRules.TeleportRetryIntervalSeconds} s, this warning at most every {PetFollowRules.TeleportFailureLogIntervalSeconds} s)");
+            }
+        }
+
+        /// <summary>
+        /// /telesummon: the shared placement (Pet.TeleportToOwnerOnCommand), and on success a clean follow state
+        /// and no attack target. The dropped target is also ignored for pet_combat_unreachable_ignore_seconds, the
+        /// same as the unreachable rule, so the next tick's nearest-monster pick does not hand straight back the
+        /// chase the player just pulled the pet out of. Runs on this pet's own tick thread (enqueued on its
+        /// action chain by the command).
+        /// </summary>
+        public override TeleSummonOutcome TeleportToOwnerOnCommand(Player owner)
+        {
+            var outcome = base.TeleportToOwnerOnCommand(owner);
+
+            if (outcome != TeleSummonOutcome.Teleported)
+                return outcome;
+
+            isFollowingOwner = false;
             followProgress.Reset();
+
+            var now = Timers.RunningTime;
             followStartTime = now;
             nextTeleportAttemptTime = now + PetFollowRules.TeleportRetryIntervalSeconds;
 
-            if (!PetFollowRules.CanTeleportToOwner(owner.Teleporting, owner.IsDead, owner.Location.Instance == Location.Instance, SharesTickThreadWith(owner)))
-                return;
+            // a target engaging the owner or this pet is dropped but NOT ignored, so the pet may pick it straight
+            // back up; anything else is ignored like an unreachable target
+            if (AttackTarget is Creature target && PetFollowRules.ShouldIgnoreTeleSummonDroppedTarget(
+                    ReferenceEquals(target.AttackTarget, owner), ReferenceEquals(target.AttackTarget, this),
+                    target.PhysicsObj != null && target.HasRetaliateTarget(owner), target.PhysicsObj != null && target.HasRetaliateTarget(this)))
+                unreachableTargets.Ignore(target.Guid.Full, now, PetFollowSettings.Read().UnreachableIgnoreSeconds);
 
+            targetReach.Reset();
+
+            if (AttackTarget != null)
+                DropAttackTarget();
+
+            return outcome;
+        }
+
+        /// <summary>The combat pet's own cancel (see CancelPhysicsMoveTo for why not Creature.CancelMoveTo).</summary>
+        protected override void StopMovingForTeleport()
+        {
             CancelPhysicsMoveTo();
-
-            var moved = false;
-            var placed = false;
-
-            var inFront = GetInFrontPlacement(owner, GetOwnerPlacementDistance(owner), false);
-
-            if (inFront != null && PhysicsTeleport(inFront) == Physics.Common.SetPositionError.OK)
-            {
-                moved = true;
-                placed = IsPlacedAt(inFront);
-            }
-
-            var result = Physics.Common.SetPositionError.OK;
-
-            if (!placed)
-            {
-                var ownerSpot = GetOwnerSpotPlacement(owner);
-
-                result = PhysicsTeleport(ownerSpot);
-
-                if (result == Physics.Common.SetPositionError.OK)
-                {
-                    moved = true;
-                    placed = true;
-
-                    if (!IsPlacedAt(ownerSpot))
-                        followLog.Debug($"{Name} (0x{Guid}) was teleported toward its owner {owner.Name}'s spot but slid to {PhysicsObj.Position}");
-                }
-            }
-
-            if (moved)
-                SyncTeleportedPosition();
-
-            if (!placed)
-            {
-                followLog.Debug($"{Name} (0x{Guid}) could not be teleported to its owner {owner.Name}: {result}");
-                return;
-            }
-
-            isFollowingOwner = false;
         }
     }
 }

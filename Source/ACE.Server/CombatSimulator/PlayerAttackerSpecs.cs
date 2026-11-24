@@ -427,13 +427,13 @@ namespace ACE.Server.CombatSimulator
                     WorldObject.GetWeaponCreatureSlayerModifier(weapon, player, target),
                     AttackerTerms.PhysicalDamageRatingMod(player, weapon)),
 
-                ArmorRendingMod = AttackerTerms.ArmorIgnoreMod(weapon, player, attackSkill),
+                ArmorRendingMod = AttackerTerms.ArmorIgnoreMod(weapon, player, attackSkill, target),
                 IgnoreShieldMod = player.GetIgnoreShieldMod(weapon),
 
                 IgnoreMagicArmor = HollowMath.Resolve(weapon, player, PropertyBool.IgnoreMagicArmor) > 0.0,
                 IgnoreMagicResist = HollowMath.Resolve(weapon, player, PropertyBool.IgnoreMagicResist) > 0.0,
 
-                WeaponResistanceMod = WorldObject.GetWeaponResistanceModifier(weapon, player, attackSkill, damageType),
+                WeaponResistanceMod = WorldObject.GetWeaponResistanceModifier(weapon, player, attackSkill, damageType, target),
                 IgnoreAllArmor = weapon != null && weapon.HasImbuedEffect(ImbuedEffectType.IgnoreAllArmor),
 
                 WithinShieldArc = true,

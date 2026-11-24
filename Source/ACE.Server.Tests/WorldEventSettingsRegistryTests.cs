@@ -244,17 +244,19 @@ namespace ACE.Server.Tests
         {
             "max_alive", "teaser_lead_seconds", "progress_interval_seconds", "announce_chat_type", "boss_scale_multiplier",
             "boss_hits_to_kill", "boss_damage_rating_min", "boss_damage_rating_max", "boss_per_player", "boss_health_cap",
-            "boss_throughput_floor_health", "boss_throughput_cap_health", "participation_payout_enabled"
+            "boss_throughput_floor_health", "boss_throughput_cap_health", "participation_payout_enabled",
+            "boss_budget_enabled", "boss_health_per_power", "boss_power_exponent", "boss_budget_floor_health", "boss_budget_cap_health"
         };
 
         [TestMethod]
-        public void DefaultRows_GlobalRowsAreTheThirteenKeys_AndSeekShareIsAHoldRow()
+        public void DefaultRows_GlobalRowsAreTheEighteenKeys_AndSeekShareIsAHoldRow()
         {
             var rows = WorldEventSettingsRegistry.Default.Rows;
 
-            // The Hold slice (WorldEventSettingsRegistry.Hold.cs) added goal-scoped rows; the global rows are still exactly these 13.
+            // The Hold slice (WorldEventSettingsRegistry.Hold.cs) added goal-scoped rows; the global rows are still exactly these 18.
             CollectionAssert.AreEquivalent(ExpectedGlobalKeys, rows.Where(r => r.Scope.IsGlobal).Select(r => r.Key).ToArray());
-            Assert.IsTrue(rows.Where(r => !r.Scope.IsGlobal).All(r => r.Scope.Equals(WorldEventSettingsRegistry.HoldScope)));
+            Assert.IsTrue(rows.Where(r => !r.Scope.IsGlobal).All(r =>
+                r.Scope.Equals(WorldEventSettingsRegistry.HoldScope) || r.Scope.Equals(WorldEventSettingsRegistry.DestroySourceScope)));
 
             // seek_share is the Hold goal's own row, never a global one.
             Assert.IsTrue(WorldEventSettingsRegistry.Default.TryFind("world_events_hold_seek_share", out var seek));

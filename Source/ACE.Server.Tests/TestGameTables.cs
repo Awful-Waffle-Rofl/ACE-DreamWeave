@@ -30,6 +30,13 @@ namespace ACE.Server.Tests
             skillTable.SkillBaseHash[(uint)Skill.MeleeDefense] = new SkillBase(new SkillFormula(PropertyAttribute.Quickness, PropertyAttribute.Coordination, 3));
             skillTable.SkillBaseHash[(uint)Skill.MissileDefense] = new SkillBase(new SkillFormula(PropertyAttribute.Coordination, PropertyAttribute.Quickness, 5));
 
+            // Light Weapons as the live portal dat has it (probed 2026-11-21 through ACE.DatLoader: MinLevel 1,
+            // X=1, Str+Coord, Z=3): usable untrained, so a monster with no melee rows still swings at (Str+Coord)/3.
+            // MinLevel has a private setter on SkillBase, so it is written through reflection here.
+            var lightWeapons = new SkillBase(new SkillFormula(PropertyAttribute.Strength, PropertyAttribute.Coordination, 3));
+            typeof(SkillBase).GetProperty(nameof(SkillBase.MinLevel)).SetValue(lightWeapons, 1u);
+            skillTable.SkillBaseHash[(uint)Skill.LightWeapons] = lightWeapons;
+
             // retail vital formulas: health = endurance/2, stamina = endurance, mana = self
             var vitalTable = new SecondaryAttributeTable();
             SetFormula(vitalTable.MaxHealth, PropertyAttribute.Endurance, 2);

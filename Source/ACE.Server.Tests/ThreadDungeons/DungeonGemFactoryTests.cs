@@ -17,10 +17,10 @@ namespace ACE.Server.Tests.ThreadDungeons
             => new DungeonGemSpec("any", level, 7, "any", seed, new (string, double)[0], 0, 0, 0, null, load);
 
         /// <summary>
-        /// The fourteen shipped rung weenies, Content/sql/weenies/1003615..1003624 and 1003626..1003629.
+        /// The seventeen shipped rung weenies, Content/sql/weenies/1003615..1003624 and 1003626..1003632.
         /// Hand-copied here rather than read from DungeonGemFactory.Rungs on purpose: this array is the
         /// independent statement of the ladder, and a test that read the table it is checking would pass
-        /// against any table at all. Note the step is IRREGULAR above 275 (tens, then twenty-fives) and the
+        /// against any table at all. Note the step is IRREGULAR above 275 (tens, then twenty-fives, then fifties above 375) and the
         /// wcids SKIP 1003625, which is the Survey-Archivist's guide book.
         /// </summary>
         private static readonly (uint Wcid, int Level)[] Rungs =
@@ -28,19 +28,20 @@ namespace ACE.Server.Tests.ThreadDungeons
             (1003615u, 185), (1003616u, 195), (1003617u, 205), (1003618u, 215), (1003619u, 225),
             (1003620u, 235), (1003621u, 245), (1003622u, 255), (1003623u, 265), (1003624u, 275),
             (1003626u, 300), (1003627u, 325), (1003628u, 350), (1003629u, 375),
+            (1003630u, 400), (1003631u, 450), (1003632u, 500),
         };
 
         [TestMethod]
         public void RungWcid_maps_every_rung()
         {
-            Assert.AreEqual(14, Rungs.Length, "the ladder is fourteen rungs after the 2026-09-09 ceiling raise");
+            Assert.AreEqual(17, Rungs.Length, "the ladder is seventeen rungs after the 2026-11-16 ceiling raise");
 
             foreach (var (wcid, level) in Rungs)
                 Assert.AreEqual(wcid, DungeonGemFactory.RungWcid(level), $"level {level}");
         }
 
         [TestMethod]
-        public void RungWcid_clamps_below_185_and_above_375()
+        public void RungWcid_clamps_below_185_and_above_500()
         {
             Assert.AreEqual(1003615u, DungeonGemFactory.RungWcid(1));
             Assert.AreEqual(1003615u, DungeonGemFactory.RungWcid(184));
@@ -56,8 +57,16 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreEqual(1003626u, DungeonGemFactory.RungWcid(300));
             Assert.AreEqual(1003628u, DungeonGemFactory.RungWcid(374));
 
-            Assert.AreEqual(1003629u, DungeonGemFactory.RungWcid(DungeonGemSpec.MaxGemLevel));
-            Assert.AreEqual(1003629u, DungeonGemFactory.RungWcid(9999));
+            Assert.AreEqual(1003629u, DungeonGemFactory.RungWcid(375));
+            Assert.AreEqual(1003629u, DungeonGemFactory.RungWcid(399));
+
+            // The 2026-11-16 raise: rungs 400/450/500, so 425 and 475 round down to 400 and 450.
+            Assert.AreEqual(1003630u, DungeonGemFactory.RungWcid(400));
+            Assert.AreEqual(1003630u, DungeonGemFactory.RungWcid(425));
+            Assert.AreEqual(1003631u, DungeonGemFactory.RungWcid(450));
+            Assert.AreEqual(1003631u, DungeonGemFactory.RungWcid(475));
+            Assert.AreEqual(1003632u, DungeonGemFactory.RungWcid(DungeonGemSpec.MaxGemLevel));
+            Assert.AreEqual(1003632u, DungeonGemFactory.RungWcid(9999));
         }
 
         /// <summary>
@@ -90,7 +99,8 @@ namespace ACE.Server.Tests.ThreadDungeons
                 "Raw Fragment (Level 215)", "Raw Fragment (Level 225)", "Raw Fragment (Level 235)",
                 "Raw Fragment (Level 245)", "Raw Fragment (Level 255)", "Raw Fragment (Level 265)",
                 "Raw Fragment (Level 275)", "Raw Fragment (Level 300)", "Raw Fragment (Level 325)",
-                "Raw Fragment (Level 350)", "Raw Fragment (Level 375)",
+                "Raw Fragment (Level 350)", "Raw Fragment (Level 375)", "Raw Fragment (Level 400)",
+                "Raw Fragment (Level 450)", "Raw Fragment (Level 500)",
             };
 
             for (var i = 0; i < Rungs.Length; i++)

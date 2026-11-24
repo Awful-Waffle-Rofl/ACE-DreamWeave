@@ -29,9 +29,12 @@ namespace ACE.Server.Network.GameAction.Actions
             // vault access with to everyone in range. Intercepted here, before the "@" branch, and
             // rewritten onto the same @-command path /mule already uses - this closes both failure modes
             // at once (the command works no matter what the client recognises, and the mistyped form can
-            // never reach chat) without needing anything from the client. No other command gets this
-            // treatment; IsMuleSlashCommand's own remarks explain why this one earned it.
+            // never reach chat) without needing anything from the client. Only /mule and /salvageroller get
+            // this treatment; IsMuleSlashCommand's own remarks explain why /mule earned it, and
+            // /salvageroller earned it for the same reason (its "search <pattern>" text must never reach chat).
             if (MuleCommands.IsMuleSlashCommand(message))
+                message = "@" + message.Substring(1);
+            else if (SalvageRollerCommands.IsSalvageRollerSlashCommand(message))
                 message = "@" + message.Substring(1);
 
             // The blink plugin's own command is unknown to acclient, so the client sends it on as ordinary

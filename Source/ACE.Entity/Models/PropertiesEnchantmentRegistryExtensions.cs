@@ -258,6 +258,40 @@ namespace ACE.Entity.Models
             }
         }
 
+        /// <summary>
+        /// The TIMED entry (Duration greater than 0) for <paramref name="spellId"/> that ranks highest by the same
+        /// order top-layer selection uses within a category - PowerLevel, then the most recent StartTime - or null
+        /// when no timed entry for that spell id remains.
+        ///
+        /// This exists because the client holds at most ONE timed entry per spell id, whatever its layer. When an
+        /// UpdateEnchantment arrives whose exact (spell id, layer) the client does not already hold,
+        /// CEnchantmentRegistry::AttemptToReplaceSpellInList overwrites any timed entry with the same spell id
+        /// (it compares only the low 16 bits of the layered id) instead of inserting a second one; only when
+        /// neither side is timed - an item spell with Duration -1 - do two layers of one spell coexist. So a
+        /// second timed layer of a spell the player already has silently replaces the first one on the client,
+        /// while the server keeps both. When that second layer is later removed, the client is left with nothing
+        /// for the spell. A caller that removes a timed entry re-sends the result of this lookup so the client
+        /// gets back the layer it lost.
+        /// </summary>
+        public static PropertiesEnchantmentRegistry GetTopTimedEntryForSpell(this ICollection<PropertiesEnchantmentRegistry> value, int spellId, ReaderWriterLockSlim rwLock)
+        {
+            if (value == null)
+                return null;
+
+            rwLock.EnterReadLock();
+            try
+            {
+                return value.Where(e => e.SpellId == spellId && e.Duration > 0)
+                    .OrderByDescending(e => e.PowerLevel)
+                    .ThenByDescending(e => e.StartTime)
+                    .FirstOrDefault();
+            }
+            finally
+            {
+                rwLock.ExitReadLock();
+            }
+        }
+
         public static List<PropertiesEnchantmentRegistry> HeartBeatEnchantmentsAndReturnExpired(this ICollection<PropertiesEnchantmentRegistry> value, double heartbeatInterval, ReaderWriterLockSlim rwLock)
         {
             if (value == null)

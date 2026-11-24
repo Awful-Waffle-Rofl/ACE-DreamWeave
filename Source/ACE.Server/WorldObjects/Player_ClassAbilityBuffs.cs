@@ -155,10 +155,11 @@ namespace ACE.Server.WorldObjects
             killerInstinctStacks = 0;
             killerInstinctLastAddTime = 0;
 
-            // Player_ClassAbilityPreWriteBuffs.cs: Adrenaline, Kinetic Charge, Runic Ward
+            // Player_ClassAbilityPreWriteBuffs.cs: Adrenaline, Kinetic Charge, Soul Jump's immunity window, Runic Ward
             adrenalineWindowEndTime = 0;
             kineticChargeStacks = 0;
             kineticChargeExpireTime = 0;
+            soulJumpImmuneUntil = 0;
             runicWard = default;
             runicWardLifetimeAbsorbed = 0;
             runicWardFullyInscribedAnnounced = false;
@@ -190,12 +191,20 @@ namespace ACE.Server.WorldObjects
 
         private bool FrenzyExpired(double now) => now - frenzyLastHitTime > FrenzyExpireSeconds();
 
+        /// <summary>The Frenzy stack count after one more landed hit: up by one, never past <paramref name="cap"/>. Pure.</summary>
+        internal static int NextFrenzyStacks(int stacks, int cap) => stacks < cap ? stacks + 1 : stacks;
+
+        /// <summary>Frenzy stacks held right now (0 once the expiry window has lapsed). A read only: it never clears the stored count.</summary>
+        public int GetFrenzyStacks() => frenzyStacks > 0 && !FrenzyExpired(Time.GetUnixTime()) ? frenzyStacks : 0;
+
         /// <summary>
         /// TRUE while this player's current combat stance is a MELEE stance (any melee style, unarmed included -
         /// owner ruling 2026-10-24; it was two-handed / dual wield only until then). Gates both the stack trigger
         /// and the attack-speed application, so a bow neither builds stacks nor benefits from ones already held.
+        /// FALSE inside a Hunter's Echo hit (HuntersEchoWeaponScope): an Echo arrow is a missile shot whatever stance
+        /// the owner stands in, so it never builds Frenzy stacks (orchestrator ruling 2026-11-11).
         /// </summary>
-        public bool IsFrenzyWeaponStyle => FrenzyAbility.IsQualifyingStance(CurrentMotionState?.Stance);
+        public bool IsFrenzyWeaponStyle => HuntersEchoWeaponScope == null && FrenzyAbility.IsQualifyingStance(CurrentMotionState?.Stance);
 
         /// <summary>
         /// Called on every landed weapon hit against a monster (via the FrenzyAbility outgoing-damage
@@ -218,9 +227,10 @@ namespace ACE.Server.WorldObjects
             frenzyLastHitTime = now;
 
             var cap = FrenzyAbility.StackCap(rank);
-            if (frenzyStacks < cap)
+            var nextStacks = NextFrenzyStacks(frenzyStacks, cap);
+            if (nextStacks != frenzyStacks)
             {
-                frenzyStacks++;
+                frenzyStacks = nextStacks;
 
                 // announce once, on the hit that tops it off
                 if (frenzyStacks == cap)
@@ -363,17 +373,34 @@ namespace ACE.Server.WorldObjects
         public float ApplyClassAbilityAttackSpeed(float baseAnimSpeed, bool includeConditional)
         {
             var mod = GetFrenzyAttackSpeedMod() * GetAttackSpeedSkillMod() * GetWeaponModAttackSpeedMod(includeConditional);
+
+            // Harbinger Celerity (Arm Guard): a permanent gear term in the same product, so the ceiling below still bounds it.
+            mod *= GetKnotCelerityAttackSpeedMod();
+
+            // Thread Shrine attack-speed blessing (Docs/Threads/ENCOUNTERS.md "Shrine"): one more term in the same
+            // product, so the ceiling below still bounds it. Conditional on where the player stands (inside the run
+            // that granted it), so it joins only the combat call, exactly like Panic Reload.
+            if (includeConditional)
+                mod *= ACE.Server.ThreadDungeons.ThreadBoons.AttackSpeedFactorFor(this);
+
             if (mod <= 1.0f)
                 return baseAnimSpeed;
 
             var ceiling = (float)PropertyManager.GetDouble("class_ability_attack_speed_ceiling").Item;
-            return (float)Math.Clamp(baseAnimSpeed * mod, baseAnimSpeed, ceiling);
+            return ComposeAttackSpeed(baseAnimSpeed, mod, ceiling);
         }
+
+        /// <summary>The attack-speed product applied to a base speed and clamped: never below the base, never above <paramref name="ceiling"/>. Pure.</summary>
+        internal static float ComposeAttackSpeed(float baseAnimSpeed, float mod, float ceiling)
+            => mod <= 1.0f ? baseAnimSpeed : (float)Math.Clamp(baseAnimSpeed * mod, baseAnimSpeed, ceiling);
 
         // ---- Mana Rush (internal name netherrush): stacking cast-speed buff, every school -------
 
         private int netherRushStacks;
         private double netherRushExpireTime;
+
+        /// <summary>Mana Rush stacks held right now (0 once the reset window has lapsed). A read only: it never clears the stored count.</summary>
+        public int GetNetherRushStacks() => netherRushStacks > 0 && Time.GetUnixTime() <= netherRushExpireTime ? netherRushStacks : 0;
 
         /// <summary>
         /// Mana Rush (Void/Summon T1, internal name "netherrush"): the cast-speed multiplier applied to the
@@ -467,8 +494,13 @@ namespace ACE.Server.WorldObjects
         /// NOT A PURE READ ANY MORE: this also GRANTS a Resonance stack, because it is called exactly once
         /// per landed war/void projectile and Resonance is earned per landed magic hit. See the ordering note
         /// at the grant below - the stack is added after this hit's own multiplier is fixed.
+        ///
+        /// <paramref name="echoWispCast"/> is SpellProjectile.IsEchoWispCast: an Echo Cast wisp's projectile takes
+        /// Blood Price as 1.0 and leaves the Adrenaline window unspent (one-shot, paid-for terms - one payment
+        /// buys one cast). Its Spellweave stamp is already the neutral 1.0 (WorldObject.ResolveLaunchStamps), and
+        /// the ramps (Resonance, Hemomancy, Berserk Rage) run live as on any cast.
         /// </summary>
-        public float GetClassAbilitySpellDamageMod(Spell spell, float spellweaveDamageMod)
+        public float GetClassAbilitySpellDamageMod(Spell spell, float spellweaveDamageMod, bool echoWispCast = false)
         {
             if (spell == null)
                 return 1.0f;
@@ -479,8 +511,9 @@ namespace ACE.Server.WorldObjects
             // disabled, and each rider below is only computed for an owned ability, so class-ability
             // behavior is unchanged in every configuration.
             // Blood Price (Blood Mage T3): school-agnostic by design, so it sits outside the school
-            // branches. 1.0 unless the current cast actually paid health for it.
-            var mod = GetBloodPriceDamageMod();
+            // branches. 1.0 unless the current cast actually paid health for it, and 1.0 for a wisp cast, which
+            // pays nothing (the live field still holds the player's own last cast).
+            var mod = echoWispCast ? 1.0f : GetBloodPriceDamageMod();
 
             // Resonance (Spellsword T1): also school-agnostic, so it sits beside Blood Price and outside the
             // branches below rather than inside either of them. This is the war/void leg of the three-site
@@ -504,7 +537,8 @@ namespace ACE.Server.WorldObjects
             // School-agnostic like Blood Price and Resonance above, so it sits outside the school branches
             // below rather than inside one of them. The armed window is spent by whichever comes first, a
             // weapon hit or a spell - both call Player.TryConsumeAdrenaline, so it can never pay twice.
-            mod *= AdrenalineAbility.ConsumeSpellDamageMultiplier(this);
+            // A wisp cast never spends the window the player armed for their own next strike.
+            mod *= echoWispCast ? 1.0f : AdrenalineAbility.ConsumeSpellDamageMultiplier(this);
 
             if (spell.School == MagicSchool.VoidMagic)
             {
@@ -594,10 +628,9 @@ namespace ACE.Server.WorldObjects
             if (!owned && gearMod <= 0.0)
                 return 0.0f;
 
-            var perRank = PropertyManager.GetDouble("class_ability_fastaim_low_end_per_rank").Item;
             var affinity = GetClassAbilityAffinityMultiplier(Skill.Run);
 
-            return FastAimAbility.LowEndBonus(rank, perRank, affinity, gearMod);
+            return FastAimAbility.LowEndBonus(ClassAbilityText.Live, rank, affinity, gearMod);
         }
 
         /// <summary>
@@ -635,19 +668,16 @@ namespace ACE.Server.WorldObjects
             if (spell == null || !PropertyManager.GetBool("class_abilities_enabled").Item)
                 return 1.0f;
 
-            var surcharge = 0.0;
-
             // Overchannel only surcharges the casts its damage bonus can actually reach (any school)
-            if (TryGetClassAbility(ClassAbilityId.Overchannel, out _) &&
-                OverchannelAbility.DamageBonusApplies(spell.MetaSpellType))
-                surcharge += PropertyManager.GetDouble("class_ability_overchannel_mana_surcharge").Item;
+            var overchannelApplies = TryGetClassAbility(ClassAbilityId.Overchannel, out _) &&
+                OverchannelAbility.DamageBonusApplies(spell.MetaSpellType);
 
             // Spell AOE only surcharges the Arc casts it actually radiates from (any school)
-            if (TryGetClassAbility(ClassAbilityId.SpellAoe, out _) &&
-                SpellProjectile.GetProjectileSpellType(spell.Id) == ProjectileSpellType.Arc)
-                surcharge += PropertyManager.GetDouble("class_ability_spellaoe_mana_surcharge").Item;
+            var spellAoeApplies = TryGetClassAbility(ClassAbilityId.SpellAoe, out _) &&
+                SpellProjectile.GetProjectileSpellType(spell.Id) == ProjectileSpellType.Arc;
 
-            return (float)(1.0 + Math.Max(0.0, surcharge));
+            // the sum is OverchannelAbility.ManaSurcharge, the same method the live "+200% on an Arc cast" text formula calls
+            return (float)(1.0 + OverchannelAbility.ManaSurcharge(ClassAbilityText.Live, overchannelApplies, spellAoeApplies));
         }
 
         /// <summary>
@@ -733,13 +763,21 @@ namespace ACE.Server.WorldObjects
             if (!TryGetClassAbility(ClassAbilityId.EmpoweredSummons, out var rank))
                 return 1.0f;
 
-            var loyalty = GetClassAbilityScaling(Skill.Loyalty,
-                PropertyManager.GetDouble("class_ability_empoweredsummons_loyalty_per_trained").Item,
-                PropertyManager.GetDouble("class_ability_empoweredsummons_loyalty_per_spec").Item) * 0.01;
+            var loyalty = GetEmpoweredSummonsDurationBonusRaw();
 
             return EmpoweredSummonsAbility.DurationMultiplier(rank, loyalty,
                 PropertyManager.GetDouble("class_ability_empoweredsummons_max_duration_bonus").Item);
         }
+
+        /// <summary>
+        /// The Loyalty rider on the pet duration as a fraction, BEFORE the max-duration clamp (the value
+        /// <see cref="EmpoweredSummonsAbility.DurationMultiplier"/> clamps). Shared by <see cref="GetEmpoweredSummonsDurationMod"/>
+        /// and the ability's ceiling reading, so the two read one source.
+        /// </summary>
+        public double GetEmpoweredSummonsDurationBonusRaw() =>
+            GetClassAbilityScaling(Skill.Loyalty,
+                PropertyManager.GetDouble("class_ability_empoweredsummons_loyalty_per_trained").Item,
+                PropertyManager.GetDouble("class_ability_empoweredsummons_loyalty_per_spec").Item) * 0.01;
 
         /// <summary>
         /// Empowered Summons' leech fraction (2026-09-12 widening): the fraction of a combat pet's dealt
@@ -887,9 +925,11 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public double GetManaBarrierDivertShare()
         {
-            // Mana Barrier equipment mod (STANDALONE): folded into the ability's own divert share, reachable
-            // at rank 0 so an unowned player still diverts a small share of incoming damage to Mana. Subject
-            // to the same class_ability_manabarrier_max_share cap the ability itself enforces.
+            // Mana Barrier equipment mod (machinery, not Standalone): folded into the ability's own divert share
+            // and subject to the same class_ability_manabarrier_max_share cap the ability itself enforces. This
+            // method would return a gear-only share at rank 0, but the absorb entry points
+            // (AbsorbWithManaBarrier and AbsorbWithManaBarrierDot) return the damage unchanged unless the
+            // ability is learned, so an unowned player gets no diversion from the mod alone.
             var gearMod = GetEquippedModValue(EquipmentModId.ManaBarrier);
 
             var owned = TryGetClassAbility(ClassAbilityId.ManaBarrier, out var rank);
@@ -920,6 +960,33 @@ namespace ACE.Server.WorldObjects
                 magicDef,
                 PropertyManager.GetDouble("class_ability_manabarrier_max_share").Item,
                 gearMod);
+        }
+
+        /// <summary>
+        /// The Mana Barrier CASTING SHIELD (owner ruling 2026-11-23): the flat shield armor level the arcane cloud
+        /// grants against <paramref name="attacker"/> while this player is casting a spell, or 0. Read only by
+        /// Creature.GetShieldMod (physical melee/missile; SpellProjectile.GetAbsorbMod never reaches it, and
+        /// GetShieldMod applies the frontal cone itself). PvE only (EnemyCreature filter), class abilities enabled,
+        /// Mana Barrier learned at any rank, MagicState.IsCasting (from cast start through spell release: turn, windup and gesture; not the recoil). Flat at every rank
+        /// (class_ability_manabarrier_shield_level); the Mana Barrier equipment mod does not add to it. The
+        /// decision is ManaBarrierShieldMath.LevelFor.
+        /// </summary>
+        public double GetManaBarrierShieldLevel(WorldObject attacker)
+        {
+            // cheapest test first: nearly no blow lands mid-cast
+            if (MagicState?.IsCasting != true)
+                return 0.0;
+
+            var enabled = PropertyManager.GetBool("class_abilities_enabled").Item;
+
+            var rank = 0;
+            if (enabled)
+                TryGetClassAbility(ClassAbilityId.ManaBarrier, out rank);
+
+            var enemyCreature = ClassAbilityAttackerFilter.EnemyCreature(attacker, this) != null;
+
+            return ManaBarrierShieldMath.LevelFor(enabled, rank, MagicState.IsCasting, enemyCreature,
+                PropertyManager.GetLong("class_ability_manabarrier_shield_level").Item);
         }
 
         /// <summary>
@@ -1237,10 +1304,7 @@ namespace ACE.Server.WorldObjects
         /// Maximum number of Blood Charge stacks at a given rank: r1/r2/r3 tunables (3/4/5), 0 if
         /// unlearned. The rank is Sanguine Reserve's.
         /// </summary>
-        private static int BloodChargeStackCap(int rank) => BloodChargeMath.StackCap(rank,
-            PropertyManager.GetLong("class_ability_bloodmage_charge_stack_cap_r1").Item,
-            PropertyManager.GetLong("class_ability_bloodmage_charge_stack_cap_r2").Item,
-            PropertyManager.GetLong("class_ability_bloodmage_charge_stack_cap_r3").Item);
+        private static int BloodChargeStackCap(int rank) => BloodChargeMath.StackCap(ClassAbilityText.Live, rank);
 
         /// <summary>
         /// Adds one Blood Charge stack (up to the rank's cap) and refreshes the idle-expiry timer.
@@ -1256,8 +1320,7 @@ namespace ACE.Server.WorldObjects
             bloodChargeLastAddTime = now;
 
             var cap = BloodChargeStackCap(rank);
-            if (bloodChargeStacks < cap)
-                bloodChargeStacks++;
+            bloodChargeStacks = BloodChargeMath.NextStacks(bloodChargeStacks, cap);
         }
 
         /// <summary>
@@ -1324,9 +1387,7 @@ namespace ACE.Server.WorldObjects
         /// The Blood Charge gear term stays OUTSIDE it (BloodChargeGearPerStack, additive in the ramp).
         /// </summary>
         private double BloodChargePerStack() =>
-            BloodChargeMath.PerChargeValue(
-                PropertyManager.GetDouble("class_ability_bloodmage_charge_per_stack").Item,
-                GetClassAbilityAffinityMultiplier(Skill.CreatureEnchantment));
+            BloodChargeMath.PerChargeValue(ClassAbilityText.Live, GetClassAbilityAffinityMultiplier(Skill.CreatureEnchantment));
 
         /// <summary>
         /// The public read of <see cref="BloodChargePerStack"/> for readouts that must quote the
@@ -1469,7 +1530,7 @@ namespace ACE.Server.WorldObjects
                 // the same point as the burst tunable, so every projectile of a Raven Fury ring carries the
                 // one stamped answer.
                 var burst = ExsanguinateMath.BurstMultiplier(stacks, perStack,
-                    PropertyManager.GetDouble("class_ability_exsanguinate_multiplier").Item,
+                    ExsanguinateMath.BurstMultiplierTunable(ClassAbilityText.Live),
                     GetEquippedModValue(EquipmentModId.Sanguinate),
                     gearPerStack);
 
@@ -1477,11 +1538,7 @@ namespace ACE.Server.WorldObjects
                 // Exsanguinate rank (tunables class_ability_exsanguinate_charges_kept_r1..r3), never more than cap - 1 so the next burst still needs a rebuilt pool.
                 // The setter refreshes the idle clock, so the kept charges get a full window of their own.
                 // This cast still gains no charge of its own - the outcome gate at both call sites holds.
-                var kept = ExsanguinateMath.ChargesKept(exsanguinateRank,
-                    PropertyManager.GetLong("class_ability_exsanguinate_charges_kept_r1").Item,
-                    PropertyManager.GetLong("class_ability_exsanguinate_charges_kept_r2").Item,
-                    PropertyManager.GetLong("class_ability_exsanguinate_charges_kept_r3").Item,
-                    cap);
+                var kept = ExsanguinateMath.ChargesKept(ClassAbilityText.Live, exsanguinateRank, cap);
 
                 SetBloodChargeStacks(kept);
 
@@ -1537,7 +1594,12 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public float ApplyHarmClassAbilityDamage()
         {
-            var mod = GetBloodPriceDamageMod();
+            // Echo Cast wisp cast (Harm resolves synchronously, so the latch itself is armed here): Blood Price,
+            // Spellweave and the Blood Charge term are neutral and no charge is granted - the same one-shot terms
+            // the war/void and Life projectile sites neutralise. The ramps below run live.
+            var echoWispCast = ActiveEchoWispCast != null;
+
+            var mod = echoWispCast ? 1.0f : GetBloodPriceDamageMod();
 
             // Resonance (Spellsword T1): the Harm leg of its three-site wiring. Harm is magic damage, so it
             // both takes the ramp and feeds it - see GetResonanceMagicDamageMod for why the surface is
@@ -1552,12 +1614,15 @@ namespace ACE.Server.WorldObjects
 
             // Spellweave (Spellsword T1): the Harm leg of ITS three-site wiring - the stamped per-cast mod,
             // see GetSpellweaveSpellDamageMod's doc comment.
-            mod *= GetSpellweaveSpellDamageMod();
+            mod *= echoWispCast ? 1.0f : GetSpellweaveSpellDamageMod();
 
-            mod *= ApplyBloodChargeDamage(exsanguinateEligible: false, out var outcome);
+            if (!echoWispCast)
+            {
+                mod *= ApplyBloodChargeDamage(exsanguinateEligible: false, out var outcome);
 
-            if (ExsanguinateMath.GrantsCharge(outcome))
-                TryGrantBloodCharge();
+                if (ExsanguinateMath.GrantsCharge(outcome))
+                    TryGrantBloodCharge();
+            }
 
             // AFTER this cast's multiplier is fixed, so the Harm that earns the stack is not boosted by it.
             // Unlike the Blood Charge grant directly above, this is NOT gated on the cast outcome: Resonance
@@ -1708,8 +1773,8 @@ namespace ACE.Server.WorldObjects
         /// its own aimed bolt.
         ///
         /// <paramref name="castStamp"/> is the PROJECTILE's launch-time snapshot of those per-cast terms
-        /// (SpellProjectile.LifeProjectileStamp), never the live player fields: a projectile in flight - or an
-        /// Echo Cast recast, whose snapshot is its parent's - must not pick up a later cast's burst.
+        /// (SpellProjectile.LifeProjectileStamp), never the live player fields: a projectile in flight - or a
+        /// Spell AOE or Cascade child, whose snapshot is its parent's - must not pick up a later cast's burst.
         /// </summary>
         public float ApplyLifeProjectileClassAbilityDamage(Creature target, bool grantCharge, float spellweaveDamageMod, LifeProjectileCastStamp castStamp)
         {
@@ -2030,16 +2095,12 @@ namespace ACE.Server.WorldObjects
 
         private bool ResonanceExpired(double now) => now - resonanceLastAddTime > ResonanceWindowSeconds();
 
-        private static int ResonanceStackCap() =>
-            (int)PropertyManager.GetLong("class_ability_resonance_max_stacks").Item;
+        private static int ResonanceStackCap() => ResonanceAbility.MaxStacks(ClassAbilityText.Live);
 
         /// <summary>
         /// The per-stack magic-damage fraction at this player's Resonance rank: 2/3/4% by rank.
         /// </summary>
-        private static double ResonancePerStack(int rank) => ResonanceAbility.PerStack(rank,
-            PropertyManager.GetDouble("class_ability_resonance_per_stack_r1").Item,
-            PropertyManager.GetDouble("class_ability_resonance_per_stack_r2").Item,
-            PropertyManager.GetDouble("class_ability_resonance_per_stack_r3").Item);
+        private static double ResonancePerStack(int rank) => ResonanceAbility.PerStack(ClassAbilityText.Live, rank);
 
         /// <summary>
         /// Adds one Resonance stack (up to the cap) and refreshes the idle-expiry timer. Resets the pool
@@ -2082,10 +2143,12 @@ namespace ACE.Server.WorldObjects
 
             resonanceLastAddTime = now;
 
-            if (resonanceStacks >= cap)
+            var nextStacks = ResonanceAbility.NextStacks(resonanceStacks, cap);
+
+            if (nextStacks == resonanceStacks)
                 return;
 
-            resonanceStacks++;
+            resonanceStacks = nextStacks;
 
             if (resonanceStacks != cap)
                 return;
@@ -2141,14 +2204,21 @@ namespace ACE.Server.WorldObjects
             // Harmonics equipment mod (MACHINERY): +% magic damage PER STACK, added to the ability's own
             // per-stack rate inside the ramp. Ownership is already proven - TryGetClassAbility returned
             // above - so the plain read is correct and no GetMachineryEquipmentModValue gate is needed.
-            return ResonanceAbility.DamageMultiplier(rank, stacks,
-                PropertyManager.GetDouble("class_ability_resonance_per_stack_r1").Item,
-                PropertyManager.GetDouble("class_ability_resonance_per_stack_r2").Item,
-                PropertyManager.GetDouble("class_ability_resonance_per_stack_r3").Item,
+            return ResonanceAbility.DamageMultiplierFor(ClassAbilityText.Live, rank, stacks,
                 GetEquippedModValue(EquipmentModId.Harmonics));
         }
 
+        /// <summary>
+        /// The Resonance stacks held right now, lazily expired: the raw pool, not clamped to the cap. Pure read (no mutation), for the /abilities readout.
+        /// </summary>
+        public int GetResonanceStacks() => resonanceStacks > 0 && !ResonanceExpired(Time.GetUnixTime()) ? resonanceStacks : 0;
+
         // ---- Spellsurge (Spellsword T2): landed war procs raise your proc chance ----------------
+
+        /// <summary>
+        /// The Spellsurge stacks held right now, lazily expired: the raw pool, not clamped to the cap. Pure read (no mutation), for the /abilities readout.
+        /// </summary>
+        public int GetSpellsurgeStacks() => spellsurgeStacks > 0 && !SpellsurgeExpired(Time.GetUnixTime()) ? spellsurgeStacks : 0;
 
         private int spellsurgeStacks;
         private double spellsurgeLastAddTime;
@@ -2158,8 +2228,7 @@ namespace ACE.Server.WorldObjects
 
         private bool SpellsurgeExpired(double now) => now - spellsurgeLastAddTime > SpellsurgeWindowSeconds();
 
-        private static int SpellsurgeStackCap() =>
-            (int)PropertyManager.GetLong("class_ability_spellsurge_max_stacks").Item;
+        private static int SpellsurgeStackCap() => SpellsurgeAbility.MaxStacks(ClassAbilityText.Live);
 
         /// <summary>
         /// Adds one Spellsurge stack (up to the cap) and refreshes the decay timer. Resets the pool first if
@@ -2197,10 +2266,12 @@ namespace ACE.Server.WorldObjects
 
             spellsurgeLastAddTime = now;
 
-            if (spellsurgeStacks >= cap)
+            var nextStacks = SpellsurgeAbility.NextStacks(spellsurgeStacks, cap);
+
+            if (nextStacks == spellsurgeStacks)
                 return;
 
-            spellsurgeStacks++;
+            spellsurgeStacks = nextStacks;
 
             if (spellsurgeStacks != cap)
                 return;
@@ -2250,11 +2321,7 @@ namespace ACE.Server.WorldObjects
             // three; reading Surge again inside any of their Chance() helpers would double-count it
             // (DESIGN.md 2.4, the delegation rule). Their own Spellblade/Runeblade/Spellstorm mods are
             // separate registry rows and are added there instead.
-            return SpellsurgeAbility.ProcChanceBonus(rank, stacks,
-                SpellsurgeAbility.PerStack(rank,
-                    PropertyManager.GetDouble("class_ability_spellsurge_per_stack_r1").Item,
-                    PropertyManager.GetDouble("class_ability_spellsurge_per_stack_r2").Item,
-                    PropertyManager.GetDouble("class_ability_spellsurge_per_stack_r3").Item),
+            return SpellsurgeAbility.ProcChanceBonusFor(ClassAbilityText.Live, rank, stacks,
                 GetEquippedModValue(EquipmentModId.Surge));
         }
 
@@ -2297,6 +2364,10 @@ namespace ACE.Server.WorldObjects
         {
             if (cast == null)
                 return;
+
+            // Balance Trials recorder: a class-ability proc during a rep. Every overload forwards here. One field read otherwise.
+            if (TrialActive)
+                ACE.Server.BalanceTrials.TrialHooks.OnProc(this);
 
             ClassAbilityProcCastActive = true;
 
@@ -2497,7 +2568,7 @@ namespace ACE.Server.WorldObjects
 
         // ---- Killer Instinct: stacking "Opening" pool from crits / landed Sneak Attacks ---------
         //
-        // Rogue T3. Same shared-window stack shape as Frenzy/Resonance/Mana Rush: one shared expiry
+        // Rogue T2 since 2026-11-06 (T3 before). Same shared-window stack shape as Frenzy/Resonance/Mana Rush: one shared expiry
         // refreshed by every new Opening, rather than each Opening tracking its own independent 8s
         // countdown. Transient, never persisted, mutated only on the player's landblock thread (the
         // outgoing-damage dispatch and the melee/missile crit-chance roll both run there).
@@ -2510,7 +2581,10 @@ namespace ACE.Server.WorldObjects
 
         private bool KillerInstinctExpired(double now) => now - killerInstinctLastAddTime > KillerInstinctOpeningSeconds();
 
-        private static int KillerInstinctStackCap() =>
+        /// <summary>The Opening count after one more is granted: up by one, never past <paramref name="cap"/>. Pure.</summary>
+        internal static int NextKillerInstinctStacks(int stacks, int cap) => stacks < cap ? stacks + 1 : stacks;
+
+        internal static int KillerInstinctStackCap() =>
             (int)PropertyManager.GetLong("class_ability_killerinstinct_max_stacks").Item;
 
         /// <summary>
@@ -2540,9 +2614,7 @@ namespace ACE.Server.WorldObjects
 
             killerInstinctLastAddTime = now;
 
-            var cap = KillerInstinctStackCap();
-            if (killerInstinctStacks < cap)
-                killerInstinctStacks++;
+            killerInstinctStacks = NextKillerInstinctStacks(killerInstinctStacks, KillerInstinctStackCap());
         }
 
         /// <summary>

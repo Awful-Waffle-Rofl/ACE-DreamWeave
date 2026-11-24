@@ -80,8 +80,11 @@ namespace ACE.Server.Tests.Pvp
         // fixtures
         // ======================================================================================
 
-        /// <summary>A Session whose NetworkSession keeps what is sent in its bundles, so a test can read it back.</summary>
-        private sealed class Recorder
+        /// <summary>
+        /// A Session whose NetworkSession keeps what is sent in its bundles, so a test can read it back.
+        /// Internal so other test classes driving a seeded Player (SalvageRollerSellHookTests) reuse it.
+        /// </summary>
+        internal sealed class Recorder
         {
             private readonly NetworkBundle[] bundles = new NetworkBundle[(int)GameMessageGroup.QueueMax];
             public readonly List<GameMessage> Sent = new List<GameMessage>();

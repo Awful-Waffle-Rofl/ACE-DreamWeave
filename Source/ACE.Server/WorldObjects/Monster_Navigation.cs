@@ -194,10 +194,11 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// Returns TRUE if monster is within target melee range
+        /// (MeleeRange: retail MaxMeleeRange unless a Pinnacle fight set this creature's reach, Creature_PinnacleReach)
         /// </summary>
         public bool IsMeleeRange()
         {
-            return GetDistanceToTarget() <= MaxMeleeRange;
+            return GetDistanceToTarget() <= MeleeRange;
         }
 
         /// <summary>
@@ -412,9 +413,10 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// Points the monster at its target with no turn animation: sets the heading on the physics object and on
-        /// Location, then broadcasts the position. For creatures that cannot run a turn (no Gravity bit, see StartTurn).
+        /// Location, then broadcasts the position. For creatures that cannot run a turn (no Gravity bit, see StartTurn),
+        /// and for the Hunter's Echo, which never runs one (CombatPet.TickHuntersEcho).
         /// </summary>
-        private void FaceTargetDirectly(WorldObject target)
+        protected void FaceTargetDirectly(WorldObject target)
         {
             if (target?.Location == null) return;
 

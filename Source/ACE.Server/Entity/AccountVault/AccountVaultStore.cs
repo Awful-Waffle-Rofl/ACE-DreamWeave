@@ -199,8 +199,28 @@ namespace ACE.Server.Entity.AccountVault
         /// <summary>The account_vault.kind value that marks a barrel container.</summary>
         internal const int BarrelContainerKind = 1;
 
+        /// <summary>
+        /// The account_vault.kind value that marks a Salvage Roller escrow container
+        /// (Docs/SalvageRoller/DESIGN.md 5.8). Partitioned out at load exactly like the barrel, so no
+        /// path that walks <see cref="vaults"/> can ever see an escrowed item. See
+        /// AccountVaultStore_Escrow.cs.
+        /// </summary>
+        internal const int EscrowContainerKind = 2;
+
         /// <summary>The refusal when the barrel cannot be reached. Distinct from the vault being unavailable.</summary>
         public const string BarrelUnavailableMessage = "The barrel is unavailable, try again in a moment.";
+
+        /// <summary>
+        /// The retention purge's refusal while the barrel container's ASYNC inventory load is still in
+        /// flight (R4 applied to the barrel). Distinct from <see cref="BarrelUnavailableMessage"/> on
+        /// purpose: this one is expected and self-resolving - the purge itself starts the load on a
+        /// store nobody has opened - so <see cref="Managers.AccountVaultBarrelReaper"/> retries it within
+        /// the pass and logs it below WARN, while "unavailable" still means something is wrong.
+        ///
+        /// Returned ONLY by <see cref="TryPurgeFromBarrel"/>, which no player ever drives, so it is
+        /// never shown to anyone. The player- and admin-facing barrel paths keep their existing text.
+        /// </summary>
+        public const string BarrelStillLoadingMessage = "The barrel is still loading; retention retries it.";
 
         /// <summary>
         /// The refusal when the entry the player asked to barrel carries an active market listing.
@@ -1757,15 +1777,37 @@ namespace ACE.Server.Entity.AccountVault
         /// ten shared mules from one /mule search all would put up to ten cold loads on the world tick.
         /// This answers from state alone; a cold store is warmed later through
         /// AccountVaultManager.RequestWarm, which rate-limits the load.
+        ///
+        /// NEVER WAITS LONG FOR THE LOCK, either. A load running on another thread (the barrel retention
+        /// sweep loads cold stores on its own thread) holds stateLock for that load's whole duration, and
+        /// every caller of this property runs on the world thread. A contended lock is therefore answered
+        /// "not warm" after at most <see cref="IsWarmLockWaitMs"/>, which every caller already treats as a
+        /// safe skip: /mule search all (Player_Mule_Search.ScanOrWarm), the suit transfer step
+        /// (SuitTransferService, which polls within its bounded wait) and the market's shared-mule check
+        /// (MarketManager_SuitShared) all respond by queueing a RequestWarm and reporting "loading".
+        /// The short bound, rather than a zero-wait TryEnter, keeps ordinary microsecond contention from
+        /// flickering an already-warm store to "loading".
         /// </summary>
         public bool IsWarm
         {
             get
             {
-                lock (stateLock)
+                if (!Monitor.TryEnter(stateLock, IsWarmLockWaitMs))
+                    return false;
+
+                try
+                {
                     return IsWarmLocked();
+                }
+                finally
+                {
+                    Monitor.Exit(stateLock);
+                }
             }
         }
+
+        /// <summary>How long <see cref="IsWarm"/> waits for stateLock before answering "not warm".</summary>
+        internal const int IsWarmLockWaitMs = 5;
 
         /// <summary>
         /// True once the vault index has been read into memory. Answers from state alone and never starts a
@@ -2003,6 +2045,10 @@ namespace ACE.Server.Entity.AccountVault
             Container loadedBarrel = null;
             uint loadedBarrelRowId = 0;
 
+            var loadedEscrows = new List<Container>();
+            var escrowIds = new Dictionary<uint, uint>();
+            var loadedEscrowDegraded = false;
+
             foreach (var row in rows)
             {
                 var outcome = world.LoadContainer(row.ContainerGuid, out var container);
@@ -2013,9 +2059,15 @@ namespace ACE.Server.Entity.AccountVault
                 // barrel was never in the list.
                 var isBarrel = row.Kind == BarrelContainerKind;
 
+                // The Salvage Roller's escrow containers are partitioned out the same way, for the
+                // same reason: an escrowed target or Hammer must never be listed, withdrawn, folded,
+                // counted against the cap or offered to the market. Any OTHER unknown kind still
+                // loads as an ordinary vault, which is the pre-existing behaviour.
+                var isEscrow = row.Kind == EscrowContainerKind;
+
                 if (outcome == VaultContainerLoad.Absent)
                 {
-                    log.Error($"[VAULT] account {AccountId}: {(isBarrel ? "barrel" : "vault")} container 0x{row.ContainerGuid:X8} (account_vault row {row.Id}) has NO BIOTA. Deleting that one index row and loading the rest of the account's containers, because refusing here would make every other vault on the account permanently inaccessible. An empty container is the only thing this can have been.");
+                    log.Error($"[VAULT] account {AccountId}: {(isBarrel ? "barrel" : isEscrow ? "escrow" : "vault")} container 0x{row.ContainerGuid:X8} (account_vault row {row.Id}) has NO BIOTA. Deleting that one index row and loading the rest of the account's containers, because refusing here would make every other vault on the account permanently inaccessible. An empty container is the only thing this can have been.");
 
                     if (!backend.DeleteAccountVault(row.Id))
                         log.Error($"[VAULT] account {AccountId}: could not delete dangling account_vault row {row.Id}. It is harmless but will be retried on the next load.");
@@ -2036,6 +2088,19 @@ namespace ACE.Server.Entity.AccountVault
                         // even look at. It degrades instead: the barrel is absent, TryBarrel refuses
                         // until a later load reads it, and the vault is untouched.
                         log.Error($"[VAULT] account {AccountId}: barrel container 0x{row.ContainerGuid:X8} (account_vault row {row.Id}) could not be READ. Continuing WITHOUT it, because the barrel is not player-visible and refusing the whole store would take the player's vault away over something they cannot see. Barreling and restoring are unavailable for this account until a later load succeeds.");
+                        continue;
+                    }
+
+                    if (isEscrow)
+                    {
+                        // Degrades like the barrel, and for the same reason: the escrow holds nothing
+                        // the vault panel can show. But the WHOLE escrow is marked unusable, not just
+                        // this one container, because a batch's items may sit in the unreadable one -
+                        // a Salvage Roller that proceeded on the readable remainder could abort a batch
+                        // it cannot fully see. Every escrow operation refuses until a later load reads
+                        // every escrow container; the vault itself is untouched.
+                        log.Error($"[VAULT] account {AccountId}: escrow container 0x{row.ContainerGuid:X8} (account_vault row {row.Id}) could not be READ. Continuing WITHOUT the escrow: the vault works, and the Salvage Roller refuses for this account until a later load reads every escrow container.");
+                        loadedEscrowDegraded = true;
                         continue;
                     }
 
@@ -2065,6 +2130,18 @@ namespace ACE.Server.Entity.AccountVault
                     continue;
                 }
 
+                if (isEscrow)
+                {
+                    // Oldest-first, like `vaults`, because the read is ordered by created_At. The
+                    // escrow is a SET filled first-free-slot, never a chain.
+                    loadedEscrows.Add(container);
+                    escrowIds[row.ContainerGuid] = row.Id;
+
+                    // R1, second half: an escrow container must never enter a landblock either.
+                    AccountVaultSpawnFilter.Register(row.ContainerGuid);
+                    continue;
+                }
+
                 loaded.Add(container);
                 rowIds[row.ContainerGuid] = row.Id;
 
@@ -2080,6 +2157,17 @@ namespace ACE.Server.Entity.AccountVault
             // see a half-swapped pair.
             barrel = loadedBarrel;
             barrelRowId = loadedBarrelRowId;
+
+            // Same locked block, from locals, for the same reason. Grouping is unaffected: it walks
+            // `vaults`, and the escrow is not in it.
+            escrows.Clear();
+            escrows.AddRange(loadedEscrows);
+            escrowRowIds.Clear();
+
+            foreach (var kvp in escrowIds)
+                escrowRowIds[kvp.Key] = kvp.Value;
+
+            escrowDegraded = loadedEscrowDegraded;
 
             // Every stored item this store can see has just been replaced. The caller holds stateLock.
             InvalidateGroupingLocked();
@@ -4975,8 +5063,8 @@ namespace ACE.Server.Entity.AccountVault
         /// that moving the fold off the world loop "would mean creating and destroying WorldObjects off
         /// the world loop, which nothing else in this subsystem does". That is false, and the
         /// counter-example is in the same namespace: AccountVaultBarrelReaper runs its own background
-        /// thread (AccountVaultBarrelReaper.cs:216) and destroys vault biotas from it through this very
-        /// queue - AccountVaultBarrelReaper.cs:160 enqueues <see cref="TryPurgeFromBarrel"/>, which
+        /// thread (AccountVaultBarrelReaper.Start) and destroys vault biotas from it through this very
+        /// queue - AccountVaultBarrelReaper.TryPurgeRow enqueues <see cref="TryPurgeFromBarrel"/>, which
         /// calls world.DestroyItem, which is WorldObject.Destroy(). For a vault item every branch of
         /// Destroy() that touches live world state is inert (it is not a Container, Creature, Pet,
         /// Vendor, PersonalVendor or SpellProjectile; NotifyOfEvent returns immediately with no
@@ -5261,11 +5349,20 @@ namespace ACE.Server.Entity.AccountVault
         /// and it is not told which guid moved, so pruning there would mean walking the maps against
         /// the stored items on every deposit - per-deposit work proportional to vault size, which is
         /// exactly what the class tier's O(1) deposit forbids.
+        ///
+        /// It also drops the item's mule display alias (<see cref="ForgetDisplayAlias"/>), because this is
+        /// the store's one "an item crossed a vault boundary" hook and the alias map has the same problem:
+        /// RebuildView prunes it only when a window rebuilds, so an item leaving through a non-window path
+        /// (the market, a suit transfer, a pack delivery) would otherwise keep its entry, and a later item
+        /// reusing that recycled guid would inherit the old alias.
         /// </summary>
         private void ForgetFoldMemoryLocked(uint guid)
         {
             foldRefused.Remove(guid);
             foldClassHints.Remove(guid);
+
+            // stateLock -> aliasLock. Safe: aliasLock is a leaf and is never held while stateLock is taken.
+            ForgetDisplayAlias(guid);
         }
 
         private void TakeFoldCandidatesLocked(List<WorldObject> candidates, int budget, Func<string, bool> accept)
@@ -7382,11 +7479,14 @@ namespace ACE.Server.Entity.AccountVault
         /// inconsistent. One principle decides both: never leave behind a row that could, on its own,
         /// create or destroy value.
         ///
-        ///   - STORED ITEM: the account_vault_barrel row is written BEFORE the item moves. A stray row
-        ///     whose item never moved is inert - the retention sweep destroys only what it finds
-        ///     inside the barrel container, and a restore likewise moves only what is really there -
-        ///     so the worst case is a row an admin can see and ignore. The opposite order would leave
-        ///     an item sitting in the barrel that no row names, invisible to the restore command.
+        ///   - STORED ITEM: the account_vault_barrel row is written BEFORE the item moves (and before any
+        ///     eviction a full barrel needs). If the barreling is then refused, the rows it wrote are
+        ///     closed as restored (CloseRowsAsRestored), because their items never left the vault:
+        ///     left open, a stray row would refuse every later eviction plan once its item is barreled
+        ///     again. For the same reason, an open row that already names an item being barreled (a
+        ///     stray a crash or a failed close left behind) is closed before the new row is written. The
+        ///     opposite order would leave an item sitting in the barrel that no row names, invisible to
+        ///     the restore command.
         ///   - LEDGER: the decrement happens FIRST and the row is written after. A stray row here
         ///     would be a DUPE, because a restore against it would credit units that were never
         ///     debited. Only <see cref="AccountVaultStackAdjustResult.Refused"/> proves the ledger did
@@ -7684,7 +7784,18 @@ namespace ACE.Server.Entity.AccountVault
             // barreling into one would look like it fit and could overflow the real capacity.
             if (!destination.InventoryLoaded)
             {
+                log.Warn($"[VAULT] account {AccountId}: barreling refused - barrel 0x{destination.Guid.Full:X8} inventory not loaded yet (branch: barrel-inventory-not-loaded, op: barrel).");
                 failReason = BarrelUnavailableMessage;
+                return false;
+            }
+
+            var capacity = destination.ItemCapacity ?? 0;
+
+            // A single barreling bigger than the whole barrel. Nothing could ever be evicted to fit it, so
+            // nothing is.
+            if (targets.Count > capacity)
+            {
+                failReason = BarrelFullMessage;
                 return false;
             }
 
@@ -7694,17 +7805,20 @@ namespace ACE.Server.Entity.AccountVault
                 .Select(t => (Guid: t.Guid.Full, Wcid: t.WeenieClassId, Name: t.Name, Count: (long)(t.StackSize ?? 1)))
                 .ToList();
 
+            // THE ORDER BELOW IS THE EVICTION INVARIANT: nothing is destroyed for capacity until every check
+            // that can refuse this barreling has passed and its audit rows are written. So: (1) resolve the
+            // targets and size the shortfall under stateLock, (2) plan the evictions read-only and re-validate
+            // every planned row, (3) write this barreling's rows, (4) evict, (5) move. The move is the only
+            // step after an eviction, and it is in-memory.
             var located = new List<(Container Vault, ObjectGuid Guid)>();
             var moved = new List<WorldObject>();
             var touched = new List<Container>();
 
+            int needed;
+
             lock (stateLock)
             {
-                if (destination.Inventory.Count + targets.Count > (destination.ItemCapacity ?? 0))
-                {
-                    failReason = BarrelFullMessage;
-                    return false;
-                }
+                needed = destination.Inventory.Count + targets.Count - capacity;
 
                 // Re-resolved against the live vaults rather than trusted off the entry, so a second
                 // window that already took one of these loses cleanly instead of transacting twice.
@@ -7731,69 +7845,195 @@ namespace ACE.Server.Entity.AccountVault
                 }
             }
 
-            // The audit rows go in BEFORE the move - see TryBarrel's remarks for why a stray row is
-            // inert on this path and an unnamed item in the barrel is not. Written outside stateLock,
-            // because they are database round-trips and this store never holds its lock across one.
-            var rows = new List<AccountVaultBarrel>();
-
-            foreach (var snapshot in snapshots)
+            if (needed > MaxEvictionsPerBarreling)
             {
-                var row = new AccountVaultBarrel
-                {
-                    AccountId = AccountId,
-                    Wcid = snapshot.Wcid,
-                    ItemGuid = snapshot.Guid,
-                    Count = snapshot.Count,
-                    ItemName = string.IsNullOrEmpty(snapshot.Name) ? "<unknown>" : snapshot.Name,
-                    BarreledAt = DateTime.UtcNow,
-                    ActorCharacterGuid = actor.CharacterGuid,
-                    ActorCharacterName = string.IsNullOrEmpty(actor.Name) ? "<unknown>" : actor.Name,
-                };
+                log.Warn($"[VAULT] account {AccountId}: barreling refused - {targets.Count} item(s) would need {needed} barrel slot(s) freed, more than the {MaxEvictionsPerBarreling} one barreling may evict. Nothing written, moved or destroyed; refused as full (branch: eviction-cap, op: barrel).");
+                failReason = BarrelFullMessage;
+                return false;
+            }
 
-                if (!backend.AddAccountVaultBarrel(row))
+            // (2) ONE read of this account's open ITEM rows serves both the stray check and the eviction plan.
+            var openRows = backend.GetOpenAccountVaultBarrelItems(AccountId, ShardDatabase.MaxAccountVaultBarrelRows);
+
+            if (openRows == null)
+            {
+                log.Warn($"[VAULT] account {AccountId}: barreling refused - its open barrel rows could not be read. Nothing written, moved or destroyed (branch: open-rows-unreadable, op: barrel).");
+                failReason = BarrelUnavailableMessage;
+                return false;
+            }
+
+            // (2a) STRAYS. Every target was just found in a vault, so any open row already naming one of them
+            // is stray by definition: its barreling never completed, or its close failed. Left open it would
+            // give the item two open rows once this barreling writes its own, which refuses every eviction
+            // plan, and the retention sweep would destroy the item on the stray's older date. Closed first,
+            // the same way a refused barreling's rows are; if that close fails, nothing is written.
+            var targetGuids = new HashSet<uint>(snapshots.Select(s => s.Guid));
+
+            var strays = openRows
+                .Where(r => r.AccountId == AccountId && r.ItemGuid != null && r.RestoredAt == null && r.PurgedAt == null && targetGuids.Contains(r.ItemGuid.Value))
+                .ToList();
+
+            if (strays.Count > 0)
+            {
+                if (!CloseRowsAsRestored(strays, "stray", "their items are in a vault, about to be barreled again"))
                 {
-                    log.Error($"[VAULT] account {AccountId}: could not record the barreling of 0x{snapshot.Guid:X8} ({snapshot.Name}); refusing before anything moves, because an item in the barrel that no row names is invisible to /vaultrestore.");
                     failReason = BarrelUnavailableMessage;
                     return false;
                 }
 
-                rows.Add(row);
+                openRows = openRows.Where(r => !strays.Contains(r)).ToList();
             }
 
-            lock (stateLock)
+            // (2b) The eviction plan: read-only, and every planned row re-validated, so a plan that cannot be
+            // carried out in full is refused here with nothing destroyed and no row written.
+            List<AccountVaultBarrel> evictions = null;
+
+            if (needed > 0 && !TryPlanBarrelEvictions(destination, needed, openRows, out evictions))
             {
-                try
+                failReason = BarrelFullMessage;
+                return false;
+            }
+
+            // (3) to (5) run under one guard. On ANY exit after the first row is written and before the move
+            // has completed - a returned refusal or an exception - CleanUpRefused closes the rows whose items
+            // are not in the barrel and saves the barrel if anything was evicted; an exception is then
+            // rethrown unchanged.
+            var rows = new List<AccountVaultBarrel>();
+            var evicted = 0;
+            var completed = false;
+            var cleanedUp = false;
+
+            void CleanUpRefused(string why)
+            {
+                if (cleanedUp)
+                    return;
+
+                cleanedUp = true;
+
+                if (evicted > 0 || moved.Count > 0)
+                    world.SaveBiota(destination);
+
+                List<AccountVaultBarrel> notMoved;
+
+                lock (stateLock)
+                    notMoved = rows.Where(r => r.ItemGuid == null || !destination.Inventory.ContainsKey(new ObjectGuid(r.ItemGuid.Value))).ToList();
+
+                CloseRowsAsRestored(notMoved, "refused-barreling", why);
+            }
+
+            try
+            {
+                // (3) The audit rows go in BEFORE any eviction and before the move - see TryBarrel's remarks
+                // for why an unnamed item in the barrel is unrecoverable. Written outside stateLock, because
+                // they are database round-trips and this store never holds its lock across one.
+                foreach (var snapshot in snapshots)
                 {
-                    foreach (var (vault, guid) in located)
+                    var row = new AccountVaultBarrel
                     {
-                        if (!vault.TryRemoveFromInventory(guid, out var item) || !destination.TryAddToInventory(item))
+                        AccountId = AccountId,
+                        Wcid = snapshot.Wcid,
+                        ItemGuid = snapshot.Guid,
+                        Count = snapshot.Count,
+                        ItemName = string.IsNullOrEmpty(snapshot.Name) ? "<unknown>" : snapshot.Name,
+                        BarreledAt = DateTime.UtcNow,
+                        ActorCharacterGuid = actor.CharacterGuid,
+                        ActorCharacterName = string.IsNullOrEmpty(actor.Name) ? "<unknown>" : actor.Name,
+                    };
+
+                    if (!backend.AddAccountVaultBarrel(row))
+                    {
+                        log.Error($"[VAULT] account {AccountId}: could not record the barreling of 0x{snapshot.Guid:X8}; refusing before anything is evicted or moves, because an item in the barrel that no row names is invisible to /vaultrestore.");
+                        CleanUpRefused("its audit row write failed");
+                        failReason = BarrelUnavailableMessage;
+                        return false;
+                    }
+
+                    rows.Add(row);
+                }
+
+                // (4) Evict. Every planned row was validated in (2b); what can still fail here is the destroy
+                // or the stamp of a validated row, and an eviction that already landed stays landed.
+                if (evictions != null && !TryExecuteBarrelEvictions(evictions, out evicted))
+                {
+                    CleanUpRefused($"an eviction failed after {evicted} of {evictions.Count}");
+                    failReason = BarrelFullMessage;
+                    return false;
+                }
+
+                // (5) The move, in memory.
+                lock (stateLock)
+                {
+                    if (destination.Inventory.Count + targets.Count > (destination.ItemCapacity ?? 0))
+                    {
+                        // Unreachable while every barrel mutation runs on this queue; kept as the last guard
+                        // against overfilling the container. Cleaned up below, outside the lock.
+                        log.Error($"[VAULT] account {AccountId}: a barreling found the barrel still too full after {evicted} eviction(s); refusing before anything moves.");
+                        failReason = BarrelFullMessage;
+                    }
+                    else
+                    {
+                        try
                         {
-                            log.Error($"[VAULT] account {AccountId}: a barreling could not move 0x{guid.Full:X8} out of vault 0x{vault.Guid.Full:X8} after locating it; putting back the {moved.Count} item(s) already moved. account_vault_barrel row(s) {string.Join(", ", rows.Select(r => r.Id))} were already written and are INERT - retention destroys only what it finds inside the barrel, and a restore likewise moves only what is really there.");
-
-                            for (var i = 0; i < moved.Count; i++)
+                            foreach (var (vault, guid) in located)
                             {
-                                if (!destination.TryRemoveFromInventory(moved[i].Guid, out _) || !located[i].Vault.TryAddToInventory(moved[i]))
-                                    log.Error($"[VAULT] ORPHAN: account {AccountId}: could not put 0x{moved[i].Guid.Full:X8} ({moved[i].Name}) back into vault 0x{located[i].Vault.Guid.Full:X8} while unwinding a barreling. It has NOT been destroyed and needs manual recovery.");
+                                if (!vault.TryRemoveFromInventory(guid, out var item) || !destination.TryAddToInventory(item))
+                                {
+                                    log.Error($"[VAULT] account {AccountId}: a barreling could not move 0x{guid.Full:X8} out of vault 0x{vault.Guid.Full:X8} after locating it; putting back the {moved.Count} item(s) already moved. Its account_vault_barrel row(s) {string.Join(", ", rows.Select(r => r.Id))} are closed below; {evicted} eviction(s) already landed and stay landed.");
+
+                                    for (var i = 0; i < moved.Count; i++)
+                                    {
+                                        if (!destination.TryRemoveFromInventory(moved[i].Guid, out _) || !located[i].Vault.TryAddToInventory(moved[i]))
+                                            log.Error($"[VAULT] ORPHAN: account {AccountId}: could not put 0x{moved[i].Guid.Full:X8} back into vault 0x{located[i].Vault.Guid.Full:X8} while unwinding a barreling. It has NOT been destroyed and needs manual recovery.");
+                                    }
+
+                                    moved.Clear();
+                                    failReason = GoneMessage;
+                                    break;
+                                }
+
+                                moved.Add(item);
+                                ForgetFoldMemoryLocked(item.Guid.Full);
+
+                                if (!touched.Contains(vault))
+                                    touched.Add(vault);
                             }
-
-                            failReason = GoneMessage;
-                            return false;
                         }
-
-                        moved.Add(item);
-                        ForgetFoldMemoryLocked(item.Guid.Full);
-
-                        if (!touched.Contains(vault))
-                            touched.Add(vault);
+                        finally
+                        {
+                            // EVERY exit from the mutation phase drops the memo, the unwind included, and it
+                            // happens INSIDE the lock: the version bump that would otherwise signal it runs
+                            // well after the lock is released. See groupingMemo's remarks.
+                            InvalidateGroupingLocked();
+                        }
                     }
                 }
-                finally
+
+                if (failReason != null)
                 {
-                    // EVERY exit from the mutation phase drops the memo, the unwind included, and it
-                    // happens INSIDE the lock: the version bump that would otherwise signal it runs
-                    // well after the lock is released. See groupingMemo's remarks.
-                    InvalidateGroupingLocked();
+                    // Outside stateLock: the closes and the save are database work.
+                    CleanUpRefused(failReason == GoneMessage ? "the move failed" : "the barrel was still full after eviction");
+                    return false;
                 }
+
+                completed = true;
+            }
+            catch (Exception ex)
+            {
+                if (!completed)
+                {
+                    log.Error($"[VAULT] account {AccountId}: a barreling threw after writing {rows.Count} row(s) and {evicted} eviction(s): {ex.GetFullMessage()}. Closing its rows whose items are not in the barrel, then rethrowing.");
+
+                    try
+                    {
+                        CleanUpRefused("it threw");
+                    }
+                    catch (Exception cleanupEx)
+                    {
+                        log.Error($"[VAULT] account {AccountId}: cleaning up a barreling that threw also threw: {cleanupEx.GetFullMessage()}. Rows {string.Join(", ", rows.Select(r => r.Id))} may still be open; check them by hand.");
+                    }
+                }
+
+                throw;
             }
 
             // Bumped HERE, the moment the items are physically out of the vaults, not on the success
@@ -7930,7 +8170,7 @@ namespace ACE.Server.Entity.AccountVault
         public const string AlreadyRestoredMessage = "That has already been restored.";
 
         /// <summary>The refusal for a row whose item retention has already destroyed.</summary>
-        public const string PurgedMessage = "That was destroyed by retention and cannot be restored.";
+        public const string PurgedMessage = "That was destroyed (retention, or evicted from a full barrel) and cannot be restored.";
 
         /// <summary>The refusal when the account's vault has no room for the item coming back.</summary>
         public const string NoRoomToRestoreMessage = "That account's vault has no room for it. It has to make room first.";
@@ -8025,8 +8265,16 @@ namespace ACE.Server.Entity.AccountVault
 
             lock (stateLock)
             {
-                if (barrel == null || !barrel.InventoryLoaded)
+                if (barrel == null)
                 {
+                    log.Warn($"[VAULT] account {AccountId}: restore of account_vault_barrel row {row.Id} refused - the store has no barrel container (branch: barrel-null, op: restore).");
+                    failReason = BarrelUnavailableMessage;
+                    return false;
+                }
+
+                if (!barrel.InventoryLoaded)
+                {
+                    log.Warn($"[VAULT] account {AccountId}: restore of account_vault_barrel row {row.Id} refused - barrel 0x{barrel.Guid.Full:X8} inventory not loaded yet (branch: barrel-inventory-not-loaded, op: restore).");
                     failReason = BarrelUnavailableMessage;
                     return false;
                 }
@@ -8037,7 +8285,7 @@ namespace ACE.Server.Entity.AccountVault
                     // barreling leaves behind when its row landed and its move did not, and it is
                     // deliberately INERT rather than an error the admin has to clear: nothing is
                     // destroyed, and the row simply cannot be acted on.
-                    log.Error($"[VAULT] account {AccountId}: account_vault_barrel row {row.Id} names 0x{row.ItemGuid.Value:X8} ({row.ItemName}) but the barrel does not hold it. Nothing was moved and the row is left open.");
+                    log.Error($"[VAULT] account {AccountId}: account_vault_barrel row {row.Id} names 0x{row.ItemGuid.Value:X8} but the barrel does not hold it. Nothing was moved and the row is left open.");
                     failReason = $"Barrel row {row.Id} names an item the barrel does not hold.";
                     return false;
                 }
@@ -8243,6 +8491,170 @@ namespace ACE.Server.Entity.AccountVault
         }
 
         /// <summary>
+        /// How far a store's retention-triggered load has got, answered from state alone (never starts a
+        /// load). See <see cref="GetRetentionLoadState"/>.
+        /// </summary>
+        internal enum RetentionLoadState
+        {
+            /// <summary>The index has not been read: nothing is loaded and nothing is in flight.</summary>
+            Cold,
+
+            /// <summary>The index is read but at least one container's async inventory load has not finished.</summary>
+            Unsettled,
+
+            /// <summary>The index is read and every container this store loaded has its inventory.</summary>
+            Settled,
+        }
+
+        /// <summary>
+        /// The internal refusal when the row re-read at purge time no longer says what the reaper's
+        /// snapshot said: missing, already restored, already purged, another account, or another item.
+        /// Never shown to anyone; <see cref="Managers.AccountVaultBarrelReaper"/> logs it.
+        /// </summary>
+        internal const string BarrelRowChangedMessage = "The barrel row changed since the retention sweep read it.";
+
+        /// <summary>
+        /// The purge's refusal for a row whose item the LOADED barrel does not hold. Matched by symbol in
+        /// <see cref="Managers.AccountVaultBarrelReaper"/>, which treats it as permanent: it does not heal
+        /// by itself, so the reaper stops re-reading that row (until its periodic reset) instead of letting
+        /// it sit at the head of the oldest-first query forever. Internal; never shown to a player.
+        /// </summary>
+        internal const string BarrelRowItemMissingMessage = "The barrel does not hold the item this row names.";
+
+        /// <summary>
+        /// Above this, the one line <see cref="TryEnsureLoadedTimedLocked"/> writes for a real load is a
+        /// WARN rather than an INFO. Anything over it held stateLock long enough for a world-thread reader
+        /// of the same store to notice.
+        /// </summary>
+        internal const long RetentionSlowLoadWarnMs = 50;
+
+        /// <summary>
+        /// Loads this store if it is cold, on the CALLING thread and outside the mutation queue, and
+        /// reports whether that load succeeded (true for a store that was already loaded).
+        ///
+        /// WHY OUTSIDE THE QUEUE. <see cref="Drain"/> is a combining queue: whichever thread wins
+        /// drainLock runs every queued closure, including ones other threads enqueued. A load queued by
+        /// the reaper could therefore run on a world-thread caller that happened to be draining the same
+        /// store. Loading here instead pins the reads to the reaper's own thread; the purge closures that
+        /// follow then take TryEnsureLoadedLocked's no-read fast path. This is the same off-queue shape
+        /// AccountVaultManager.DrainWarmQueue already uses (it reads <see cref="IsLoaded"/>).
+        ///
+        /// It still holds stateLock for the load's duration, so a world-thread reader of THIS store
+        /// (IsIndexLoaded, IsLoaded, HasBarrelForTest, VaultContainerCountForTest, an Enqueue whose
+        /// closure takes the lock) waits for that long; <see cref="IsWarm"/> does not, see its remarks.
+        /// The timing line makes that duration visible.
+        /// </summary>
+        internal bool TryLoadForRetention()
+        {
+            Touch();
+
+            lock (stateLock)
+                return TryEnsureLoadedTimedLocked();
+        }
+
+        /// <summary>
+        /// Where this store's load stands, from state alone. <paramref name="barrelReady"/> is true when
+        /// the barrel exists and its inventory has arrived, which is all a purge needs; Settled is the
+        /// stronger fact the reaper waits for before it lets itself start another account's load,
+        /// because every container's inventory read is queued on the one shard worker.
+        /// </summary>
+        internal RetentionLoadState GetRetentionLoadState(out bool barrelReady)
+        {
+            lock (stateLock)
+            {
+                barrelReady = indexLoaded && barrel != null && barrel.InventoryLoaded;
+
+                if (!indexLoaded)
+                    return RetentionLoadState.Cold;
+
+                if (!AllVaultsLoadedLocked())
+                    return RetentionLoadState.Unsettled;
+
+                if (barrel != null && !barrel.InventoryLoaded)
+                    return RetentionLoadState.Unsettled;
+
+                foreach (var escrow in escrows)
+                {
+                    if (!escrow.InventoryLoaded)
+                        return RetentionLoadState.Unsettled;
+                }
+
+                return RetentionLoadState.Settled;
+            }
+        }
+
+        /// <summary>
+        /// <see cref="TryEnsureLoadedLocked()"/>, plus one log line when it did a REAL load rather than
+        /// the fast path: "[VAULT] account N: retention loaded a cold store in X ms (V vault containers)",
+        /// at INFO, or WARN above <see cref="RetentionSlowLoadWarnMs"/>. Caller holds stateLock.
+        /// </summary>
+        private bool TryEnsureLoadedTimedLocked()
+        {
+            if (indexLoaded)
+                return TryEnsureLoadedLocked();
+
+            var timer = Stopwatch.StartNew();
+
+            var loaded = TryEnsureLoadedLocked();
+
+            timer.Stop();
+
+            if (!loaded)
+                return false;
+
+            var ms = timer.ElapsedMilliseconds;
+            var line = $"[VAULT] account {AccountId}: retention loaded a cold store in {ms} ms ({vaults.Count} vault containers)";
+
+            if (ms > RetentionSlowLoadWarnMs)
+                log.Warn(line);
+            else
+                log.Info(line);
+
+            return true;
+        }
+
+        /// <summary>
+        /// Re-reads <paramref name="row"/> by id and confirms it is still the open, expired-at-read row
+        /// the reaper's snapshot describes. Called inside the queued closure, before anything is
+        /// destroyed or stamped, and OUTSIDE stateLock because it is a database round trip.
+        ///
+        /// The snapshot was read at the start of the pass, and the cold-store load plus the in-pass
+        /// retries widen the gap before the purge runs. In that gap an admin can restore the item and the
+        /// player can barrel it again: the item is then back in the barrel under a NEW, non-expired row,
+        /// and the old row - restored, in the table - would otherwise destroy it. Every restore and every
+        /// barreling runs on this same mutation queue, so once this check passes inside the closure
+        /// nothing can change the row before the destroy below.
+        ///
+        /// GetAccountVaultBarrel's null means "missing" AND "the read failed", and both refuse.
+        /// </summary>
+        private bool IsRowStillPurgeable(AccountVaultBarrel row, string op, out string failReason)
+        {
+            failReason = null;
+
+            var fresh = backend.GetAccountVaultBarrel(row.Id);
+
+            string why = null;
+
+            if (fresh == null)
+                why = "it could not be re-read (missing, or the read failed)";
+            else if (fresh.AccountId != AccountId)
+                why = $"it now belongs to account {fresh.AccountId}";
+            else if (fresh.RestoredAt != null)
+                why = $"it was restored at {fresh.RestoredAt:o}";
+            else if (fresh.PurgedAt != null)
+                why = $"it was already purged at {fresh.PurgedAt:o}";
+            else if (fresh.ItemGuid != row.ItemGuid || fresh.ClassKey != row.ClassKey)
+                why = "it now names a different item";
+
+            if (why == null)
+                return true;
+
+            log.Warn($"[VAULT] account {AccountId}: {OpLabel(op)} refused account_vault_barrel row {row.Id} (snapshot item 0x{row.ItemGuid ?? 0:X8}, current item 0x{fresh?.ItemGuid ?? 0:X8}) because {why} since it was read. Nothing destroyed, nothing stamped (branch: row-changed, op: {op}).");
+            failReason = BarrelRowChangedMessage;
+            return false;
+        }
+
+        /// <summary>
         /// Retention's half of the barrel: destroys the biota one expired row names, so
         /// <see cref="AccountVaultBarrelReaper"/> can then stamp purged_At.
         ///
@@ -8251,12 +8663,45 @@ namespace ACE.Server.Entity.AccountVault
         /// purged_At only on true, so a row this refuses is left open and tried again next pass.
         ///
         /// Runs on the store's mutation queue like every other mutation, which is what stops it
-        /// racing a restore of the same row.
+        /// racing a restore of the same row. The row is re-read first (<see cref="IsRowStillPurgeable"/>)
+        /// so a stale snapshot cannot destroy an item that was restored and barreled again.
+        ///
+        /// Loads a cold store itself if the caller has not (the reaper normally has, through
+        /// <see cref="TryLoadForRetention"/>). While the barrel's inventory is still arriving it refuses
+        /// with <see cref="BarrelStillLoadingMessage"/>, which the reaper retries.
         /// </summary>
         internal bool TryPurgeFromBarrel(AccountVaultBarrel row, out string failReason)
         {
+            return TryPurgeFromBarrel(row, PurgeOp, out failReason);
+        }
+
+        /// <summary>The op names the purge primitive logs under.</summary>
+        internal const string PurgeOp = "purge";
+
+        internal const string EvictOp = "evict";
+
+        private static string OpLabel(string op) => op == EvictOp ? "barrel eviction" : "retention";
+
+        /// <summary>
+        /// The purge primitive with the op it logs under: the retention purge, or a full barrel evicting its
+        /// oldest item (<see cref="TryExecuteBarrelEvictions"/>). ONE destroy primitive for both, so an early
+        /// eviction is guarded and recorded exactly as a retention purge is.
+        /// </summary>
+        internal bool TryPurgeFromBarrel(AccountVaultBarrel row, string op, out string failReason)
+        {
             AssertOnMutationQueue(nameof(TryPurgeFromBarrel));
 
+            return TryPurgeFromBarrelCore(row, op, revalidate: true, saveBarrel: true, out failReason);
+        }
+
+        /// <summary>
+        /// The destroy itself. <paramref name="revalidate"/> false skips the row re-read, and is passed
+        /// only by <see cref="TryExecuteBarrelEvictions"/>, whose rows <see cref="TryPlanBarrelEvictions"/>
+        /// re-read in this same closure moments before. <paramref name="saveBarrel"/> false skips the
+        /// per-row barrel save, because the barreling that evicts saves the barrel once itself.
+        /// </summary>
+        private bool TryPurgeFromBarrelCore(AccountVaultBarrel row, string op, bool revalidate, bool saveBarrel, out string failReason)
+        {
             Touch();
 
             failReason = null;
@@ -8266,6 +8711,11 @@ namespace ACE.Server.Entity.AccountVault
                 failReason = "There is no row to purge.";
                 return false;
             }
+
+            // Before the ledger short-cut as well as the biota path: a stale ledger row's stamp would
+            // write over a restore just as surely as a stale item row's destroy would.
+            if (revalidate && !IsRowStillPurgeable(row, op, out failReason))
+                return false;
 
             if (row.ItemGuid == null)
             {
@@ -8282,9 +8732,46 @@ namespace ACE.Server.Entity.AccountVault
 
             lock (stateLock)
             {
-                if (barrel == null || !barrel.InventoryLoaded)
+                // A COLD STORE MUST LOAD, and this is the defect it closes (Discord bug thread
+                // 1569220583785234502). AccountVaultManager.GetStore builds a store without reading
+                // anything, so for an account whose owner has not opened the vault since the last
+                // restart `barrel` is still null, and refusing on that alone left the same rows open
+                // every hour, forever.
+                //
+                // TryEnsureLoadedLocked is the store's ONE load path, the same call CheckReadyLocked makes
+                // for every other mutation. On a store that is already loaded it is the no-read fast path,
+                // so a player who is online with the vault open sees no change. It deliberately is NOT
+                // CheckReadyLocked: that would also demand every VAULT container's inventory, and the
+                // purge touches only the barrel.
+                //
+                // Threading, stated exactly: this closure runs on whichever thread wins drainLock, and
+                // Drain is a combining queue, so it is NOT guaranteed to be the reaper's thread - a
+                // world-thread caller draining this store at the same moment would run it. That is why
+                // the reaper loads through TryLoadForRetention on its own thread FIRST; by the time this
+                // runs the store is normally loaded and this is the fast path. The real load here is the
+                // fallback for a store retired and rebuilt in between, and it is timed and logged.
+                if (!TryEnsureLoadedTimedLocked())
                 {
+                    // TryEnsureLoadedLocked has already logged which read failed, at ERROR.
+                    failReason = UnavailableMessage;
+                    return false;
+                }
+
+                if (barrel == null)
+                {
+                    log.Warn($"[VAULT] account {AccountId}: {OpLabel(op)} cannot purge account_vault_barrel row {row.Id} - the loaded store has no barrel container (branch: barrel-null, op: {op}). Either the barrel biota could not be read at load (logged at ERROR then) or the account has no kind 1 account_vault row.");
                     failReason = BarrelUnavailableMessage;
+                    return false;
+                }
+
+                if (!barrel.InventoryLoaded)
+                {
+                    // Expected on the first touch of a cold store: the load has just started the barrel's
+                    // async inventory read. NOT logged here - the reaper waits for it and reports what is
+                    // still outstanding below WARN. Never purge against an inventory that has not arrived:
+                    // an unloaded container reads as empty, so TryRemoveFromInventory would report "does
+                    // not hold it" and the row would be misreported to an operator.
+                    failReason = BarrelStillLoadingMessage;
                     return false;
                 }
 
@@ -8296,8 +8783,8 @@ namespace ACE.Server.Entity.AccountVault
                     // is in fact still sitting in the player's vault, and the audit row is the one
                     // artifact that has to stay true. The row stays open and an operator has to
                     // resolve it.
-                    log.Error($"[VAULT] account {AccountId}: account_vault_barrel row {row.Id} names 0x{row.ItemGuid.Value:X8} ({row.ItemName}) for purging, but the barrel does not hold it. NOT stamping purged_At - the item was never barreled and may still be in the player's vault. This needs an operator.");
-                    failReason = $"Barrel row {row.Id} names an item the barrel does not hold.";
+                    log.Error($"[VAULT] account {AccountId}: account_vault_barrel row {row.Id} names 0x{row.ItemGuid.Value:X8} for {(op == EvictOp ? "eviction" : "purging")}, but the barrel does not hold it. NOT stamping purged_At - the item was never barreled and may still be in the player's vault. This needs an operator.");
+                    failReason = BarrelRowItemMissingMessage;
                     return false;
                 }
             }
@@ -8305,9 +8792,276 @@ namespace ACE.Server.Entity.AccountVault
             // No InvalidateGroupingLocked and no version bump: grouping walks `vaults`, and the barrel
             // is in neither that list nor GetEntries, so nothing a window can see has changed.
             world.DestroyItem(item);
-            world.SaveBiota(barrel);
+
+            if (saveBarrel)
+                world.SaveBiota(barrel);
 
             return true;
+        }
+
+        /// <summary>
+        /// Destroys one row's item through <see cref="TryPurgeFromBarrel(AccountVaultBarrel, string, out string)"/>
+        /// and then stamps purged_At, both inside the caller's queued closure. Shared by the retention
+        /// reaper and by <see cref="TryExecuteBarrelEvictions"/>, so an early eviction leaves exactly the row a
+        /// retention purge leaves: kept, and stamped purged.
+        ///
+        /// <paramref name="destroyed"/> is true once the item is gone, whatever the stamp did; a true
+        /// <paramref name="destroyed"/> with a false return is the destroyed-but-unstamped case, already
+        /// logged at ERROR here. A stamp that THROWS is caught for the same reason: the item cannot come
+        /// back, and the caller must still learn that it is gone.
+        /// </summary>
+        internal bool TryPurgeAndStamp(AccountVaultBarrel row, string op, out string failReason, out bool destroyed)
+        {
+            AssertOnMutationQueue(nameof(TryPurgeAndStamp));
+
+            return PurgeAndStampCore(row, op, revalidate: true, saveBarrel: true, out failReason, out destroyed);
+        }
+
+        /// <summary>
+        /// <see cref="TryPurgeAndStamp"/>'s body. The destroyed-but-unstamped case is logged here, at ERROR,
+        /// and ONLY here: callers return its outcome without logging it again.
+        /// </summary>
+        private bool PurgeAndStampCore(AccountVaultBarrel row, string op, bool revalidate, bool saveBarrel, out string failReason, out bool destroyed)
+        {
+            destroyed = TryPurgeFromBarrelCore(row, op, revalidate, saveBarrel, out failReason);
+
+            if (!destroyed)
+                return false;
+
+            row.PurgedAt = DateTime.UtcNow;
+
+            bool stamped;
+
+            try
+            {
+                stamped = backend.UpdateAccountVaultBarrel(row);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[VAULT] account {AccountId}: stamping purged_At on account_vault_barrel row {row.Id} threw: {ex.GetFullMessage()}");
+                stamped = false;
+            }
+
+            if (stamped)
+                return true;
+
+            log.Error($"[VAULT] account {AccountId}: {OpLabel(op)} DESTROYED 0x{row.ItemGuid ?? 0:X8} but could not stamp purged_At on account_vault_barrel row {row.Id}. The row still reads open over an item that no longer exists.");
+            failReason = BarrelStampFailedMessage;
+            return false;
+        }
+
+        /// <summary>The internal reason <see cref="TryPurgeAndStamp"/> gives when the item is gone and the stamp is not.</summary>
+        internal const string BarrelStampFailedMessage = "The item was destroyed but its barrel row could not be stamped.";
+
+        /// <summary>
+        /// Most barrel slots one barreling may free by eviction. A barreling that would need more is
+        /// refused with <see cref="BarrelFullMessage"/> and nothing destroyed, so a single barreling can
+        /// free at most this many slots. It bounds the synchronous work one closure does on the drain lock
+        /// (see <see cref="TryExecuteBarrelEvictions"/>).
+        /// </summary>
+        internal const int MaxEvictionsPerBarreling = 64;
+
+        /// <summary>
+        /// A FULL BARREL EVICTS ITS OLDEST ITEMS (owner decision "Evict oldest when full"). Plans which open
+        /// item rows to evict so that <paramref name="needed"/> slots in <paramref name="destination"/> come
+        /// free: the account's OLDEST open item rows, by barreled_At then id, exactly as many as needed.
+        /// READ-ONLY: it destroys nothing and writes nothing. The undo window is therefore
+        /// vault_barrel_retention_days, or less once a full barrel needs the slot.
+        ///
+        /// It refuses (false, nothing destroyed, the caller refuses with <see cref="BarrelFullMessage"/>)
+        /// unless it can PROVE the chosen rows are the oldest: every item in the barrel must be explained by
+        /// exactly one of <paramref name="rows"/>, the caller's one <see cref="IAccountVaultBackend.GetOpenAccountVaultBarrelItems"/> read of
+        /// this account's open item rows only. An item no row explains could be older than every candidate,
+        /// and an item two rows name is ambiguous, so either refuses with a WARN. An open row whose item is
+        /// NOT in the barrel is an inert stray that frees nothing; it is skipped and never evicted.
+        ///
+        /// ALL OR NOTHING BEFORE ANY DESTROY. After choosing, every planned row is re-read
+        /// (<see cref="IsRowStillPurgeable"/>: present, this account, still open, same item) and its item
+        /// checked to be in the barrel. If any one fails, the whole plan is refused and nothing is destroyed.
+        ///
+        /// Runs on the mutation queue inside the barreling's own closure, so no restore, purge or second
+        /// barreling of this account interleaves with the plan or with the eviction that follows it.
+        /// </summary>
+        private bool TryPlanBarrelEvictions(Container destination, int needed, List<AccountVaultBarrel> rows, out List<AccountVaultBarrel> plan)
+        {
+            plan = null;
+
+            HashSet<uint> held;
+
+            lock (stateLock)
+            {
+                if (barrel != destination || !destination.InventoryLoaded)
+                {
+                    log.Warn($"[VAULT] account {AccountId}: a full barrel could not evict - its inventory is not loaded. Nothing destroyed; the barreling is refused as full.");
+                    return false;
+                }
+
+                held = new HashSet<uint>(destination.Inventory.Keys.Select(g => g.Full));
+            }
+
+            var openByGuid = rows
+                .Where(r => r.AccountId == AccountId && r.ItemGuid != null && r.RestoredAt == null && r.PurgedAt == null)
+                .GroupBy(r => r.ItemGuid.Value)
+                .ToDictionary(g => g.Key, g => g.ToList());
+
+            var candidates = new List<AccountVaultBarrel>();
+
+            foreach (var guid in held)
+            {
+                if (!openByGuid.TryGetValue(guid, out var named))
+                {
+                    log.Warn($"[VAULT] account {AccountId}: a full barrel could not evict - barrel item 0x{guid:X8} has no open account_vault_barrel row in the newest {rows.Count} open item row(s), so the oldest items cannot be proven. Nothing destroyed; the barreling is refused as full.");
+                    return false;
+                }
+
+                if (named.Count > 1)
+                {
+                    log.Warn($"[VAULT] account {AccountId}: a full barrel could not evict - barrel item 0x{guid:X8} is named by {named.Count} open rows ({string.Join(", ", named.Select(r => r.Id))}). Nothing destroyed; the barreling is refused as full.");
+                    return false;
+                }
+
+                candidates.Add(named[0]);
+            }
+
+            var chosen = candidates
+                .OrderBy(r => r.BarreledAt)
+                .ThenBy(r => r.Id)
+                .Take(needed)
+                .ToList();
+
+            if (chosen.Count < needed)
+            {
+                log.Warn($"[VAULT] account {AccountId}: a full barrel could not evict - {needed} slot(s) needed but only {chosen.Count} evictable item(s). Nothing destroyed; the barreling is refused as full.");
+                return false;
+            }
+
+            for (var i = 0; i < chosen.Count; i++)
+            {
+                var row = chosen[i];
+
+                // IsRowStillPurgeable logs its own WARN naming the row and the reason.
+                if (!IsRowStillPurgeable(row, EvictOp, out var why))
+                {
+                    log.Warn($"[VAULT] account {AccountId}: a full barrel refused its eviction plan at planned row {i + 1} of {chosen.Count} (row {row.Id}): {why}. Nothing destroyed; the barreling is refused as full.");
+                    return false;
+                }
+
+                bool present;
+
+                lock (stateLock)
+                    present = destination.Inventory.ContainsKey(new ObjectGuid(row.ItemGuid.Value));
+
+                if (!present)
+                {
+                    log.Warn($"[VAULT] account {AccountId}: a full barrel refused its eviction plan at planned row {i + 1} of {chosen.Count} (row {row.Id}): item 0x{row.ItemGuid.Value:X8} is no longer in the barrel. Nothing destroyed; the barreling is refused as full.");
+                    return false;
+                }
+            }
+
+            plan = chosen;
+            return true;
+        }
+
+        /// <summary>
+        /// Carries out a plan <see cref="TryPlanBarrelEvictions"/> validated, oldest first. Each row is
+        /// destroyed and stamped purged through the shared <see cref="PurgeAndStampCore"/>, without the
+        /// row re-read (it was re-read moments ago in the same closure) and without a per-row barrel save
+        /// (the barreling saves the barrel once). <paramref name="evicted"/> counts the items destroyed,
+        /// and is written as each one lands, so a caller sees the right count even if this throws.
+        ///
+        /// THE ONE REMAINING PARTIAL CASE. Everything that could refuse the barreling was checked before
+        /// this runs, so what can still go wrong is the destroy or the stamp of a validated row. Either
+        /// one STOPS the evictions, false is returned and the barreling is refused:
+        ///   - the destroy fails (the item cannot be taken out of the barrel): nothing more is destroyed;
+        ///   - the stamp fails after its destroy: that eviction is counted (the item is gone) and its row
+        ///     stays open over nothing, logged once at ERROR by PurgeAndStampCore, and nothing more is
+        ///     destroyed - a database that cannot take the stamp is not trusted with the next one. So the
+        ///     worst case is ONE destroyed-but-unstamped item per barreling.
+        /// In both cases the evictions that already landed STAY LANDED: each destroyed an item that was
+        /// already barreled, and none can be undone.
+        ///
+        /// COST, on whichever thread drains this store's queue, while it holds drainLock: per eviction one
+        /// synchronous single-row update (the stamp) and one queued biota removal on the shard worker
+        /// (WorldObject.Destroy), on top of the plan's one re-read per planned row. At most
+        /// <see cref="MaxEvictionsPerBarreling"/> evictions.
+        /// </summary>
+        private bool TryExecuteBarrelEvictions(List<AccountVaultBarrel> plan, out int evicted)
+        {
+            evicted = 0;
+
+            foreach (var row in plan)
+            {
+                var stamped = PurgeAndStampCore(row, EvictOp, revalidate: false, saveBarrel: false, out var why, out var destroyed);
+
+                if (destroyed)
+                {
+                    evicted++;
+
+                    log.Info($"[VAULT] account {AccountId}: account_vault_barrel row {row.Id} (item 0x{row.ItemGuid ?? 0:X8}) EVICTED EARLY FOR CAPACITY - the barrel was full, so its oldest item was destroyed {(DateTime.UtcNow - row.BarreledAt).TotalDays:N1} day(s) after barreling, before retention would have.{(stamped ? "" : " Its row could not be stamped (logged above).")}");
+
+                    if (stamped)
+                        continue;
+
+                    log.Warn($"[VAULT] account {AccountId}: a full barrel stopped evicting after row {row.Id} ({evicted} of {plan.Count}): its purged_At stamp failed, so nothing more is destroyed. The barreling is refused as full; the {evicted} eviction(s) that landed stay landed, and the items being barreled have not moved.");
+                    return false;
+                }
+
+                log.Warn($"[VAULT] account {AccountId}: a full barrel could not evict validated row {row.Id} after {evicted} of {plan.Count}: {why}. The barreling is refused as full; the {evicted} eviction(s) that landed stay landed, and the items being barreled have not moved.");
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Closes open barrel rows whose items are NOT in the barrel, by stamping restored_At - the terminal
+        /// state that matches where each item is, back in (or never out of) the vault. Two callers:
+        ///   - a refused stored-item barreling, for the rows it wrote ("refused-barreling");
+        ///   - a barreling about to write a row for an item that already has an open row ("stray").
+        /// Left open, such a row is not inert: a later barreling of the same item gives the barrel two open
+        /// rows naming one guid, which refuses every eviction plan, and the retention sweep would destroy
+        /// the re-barreled item on the stray's older date.
+        ///
+        /// One WARN names the rows. A stamp that fails is logged at ERROR ("could not close &lt;kind&gt;
+        /// row(s)"), the row stays open, and this returns false.
+        /// </summary>
+        private bool CloseRowsAsRestored(List<AccountVaultBarrel> rows, string kind, string why)
+        {
+            if (rows == null || rows.Count == 0)
+                return true;
+
+            var failed = new List<uint>();
+
+            foreach (var row in rows)
+            {
+                row.RestoredAt = DateTime.UtcNow;
+
+                bool ok;
+
+                try
+                {
+                    ok = backend.UpdateAccountVaultBarrel(row);
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[VAULT] account {AccountId}: closing {kind} row {row.Id} threw: {ex.GetFullMessage()}");
+                    ok = false;
+                }
+
+                if (!ok)
+                {
+                    row.RestoredAt = null;
+                    failed.Add(row.Id);
+                }
+            }
+
+            log.Warn($"[VAULT] account {AccountId}: closing {kind} account_vault_barrel row(s) {string.Join(", ", rows.Select(r => r.Id))} as restored ({why}); their items are not in the barrel.");
+
+            if (failed.Count == 0)
+                return true;
+
+            log.Error($"[VAULT] account {AccountId}: could not close {kind} row(s) {string.Join(", ", failed)}. They stay OPEN over items that are still in a vault; close them by hand before those items are barreled again.");
+            return false;
         }
 
         /// <summary>
@@ -8692,7 +9446,7 @@ namespace ACE.Server.Entity.AccountVault
             // The barrel is reported separately from the vault count, not folded into it: an operator
             // reading this line has to be able to see that a container exists which holds nothing the
             // player can reach.
-            return $"AccountVaultStore(account {AccountId}, {vaults.Count} vaults, {ledger.Count} ledger rows, barrel {(barrel != null ? "loaded" : "none")})";
+            return $"AccountVaultStore(account {AccountId}, {vaults.Count} vaults, {ledger.Count} ledger rows, barrel {(barrel != null ? "loaded" : "none")}, {escrows.Count} escrow{(escrowDegraded ? " DEGRADED" : "")})";
         }
     }
 

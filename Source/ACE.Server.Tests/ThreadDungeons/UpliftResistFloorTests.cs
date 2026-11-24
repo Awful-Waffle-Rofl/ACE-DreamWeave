@@ -283,7 +283,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             CollectionAssert.AreEqual(axes.ResistMedians.ToList(), with.ResistMedians.ToList(), "With keeps them");
             CollectionAssert.AreEqual(axes.ArmorModMedians.ToList(), with.ArmorModMedians.ToList());
 
-            var extrapolated = DungeonArchetypeStandards.Extrapolate(axes, 326, 400, 0.5, 0.5, 1.0);
+            var extrapolated = DungeonArchetypeStandards.Extrapolate(axes, 326, 400, 0.5, 0.5, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400);
             CollectionAssert.AreEqual(axes.ResistMedians.ToList(), extrapolated.ResistMedians.ToList(), "carried flat up the stat curve");
             CollectionAssert.AreEqual(axes.ArmorModMedians.ToList(), extrapolated.ArmorModMedians.ToList());
 

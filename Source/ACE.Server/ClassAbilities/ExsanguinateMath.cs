@@ -58,6 +58,16 @@ namespace ACE.Server.ClassAbilities
         /// Rank 0 or below keeps nothing; a rank above 3 clamps to rank 3's value. Never negative: a cap of 0
         /// (no Sanguine Reserve) or a mis-set negative tunable keeps 0.
         /// </summary>
+        public static int ChargesKept(ITunableValues values, int rank, int stackCap) =>
+            ChargesKept(rank,
+                values.GetLong("class_ability_exsanguinate_charges_kept_r1"),
+                values.GetLong("class_ability_exsanguinate_charges_kept_r2"),
+                values.GetLong("class_ability_exsanguinate_charges_kept_r3"),
+                stackCap);
+
+        /// <summary>
+        /// <see cref="ChargesKept(ITunableValues, int, int)"/> with the three kept-charge tunables read by value.
+        /// </summary>
         public static int ChargesKept(int rank, long keptR1, long keptR2, long keptR3, int stackCap)
         {
             if (rank <= 0)
@@ -159,13 +169,28 @@ namespace ACE.Server.ClassAbilities
         /// </summary>
         public static float BurstMultiplier(int stacks, double perStack, double burstMultiplier, double gearBurstMultiplier = 0.0, double gearPerStack = 0.0)
         {
-            burstMultiplier += gearBurstMultiplier;
-
-            if (burstMultiplier < 1.0)
-                burstMultiplier = 1.0;
+            burstMultiplier = EffectiveBurstMultiplier(burstMultiplier, gearBurstMultiplier);
 
             return BloodChargeMath.DamageMultiplier(stacks, perStack * burstMultiplier, gearPerStack * burstMultiplier);
         }
+
+        /// <summary>
+        /// The burst multiplier <see cref="BurstMultiplier"/> actually applies: the tunable plus the gear term, floored at the
+        /// neutral 1.0 (a burst never weakens the pool). The live text's burst_multiplier formula reads this same floor.
+        /// </summary>
+        public static double EffectiveBurstMultiplier(double burstMultiplier, double gearBurstMultiplier = 0.0)
+        {
+            var m = burstMultiplier + gearBurstMultiplier;
+            return m < 1.0 ? 1.0 : m;
+        }
+
+        /// <summary>
+        /// The class_ability_exsanguinate_multiplier tunable (3.0 at the defaults) read through
+        /// <paramref name="values"/>: the <c>burstMultiplier</c> argument of <see cref="BurstMultiplier"/>. Player.ApplyBloodChargeDamage
+        /// and ExsanguinateAbility.GetReadout pass it with <see cref="ClassAbilityText.Live"/>, and the live text reads it
+        /// through the same call. A separate name rather than an overload on purpose: BurstMultiplier keeps one signature.
+        /// </summary>
+        public static double BurstMultiplierTunable(ITunableValues values) => values.GetDouble("class_ability_exsanguinate_multiplier");
 
         /// <summary>
         /// The damage multiplier that represents "ignore <paramref name="ignoreFraction"/> of the target's

@@ -471,6 +471,43 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         [TestMethod]
+        public void The_weighted_family_draw_uses_its_own_stream_and_burns_one_NextDouble_from_the_main_one()
+        {
+            // Widened band (one natural family against the default four wanted) with the weighting on: the weighted draw runs. Everything
+            // after it must equal the same family FORCED on a main stream pre-advanced by the one NextDouble the old draw took.
+            var f = Fixture();
+            DungeonStatProfile ProfileOf(uint w) => f.Profiles[w];
+            var families = new HashSet<string>();
+
+            for (var seed = 1; seed <= 40; seed++)
+            {
+                var any = BuildPlan(f, seed, Limits(1.0), ProfileOf);
+
+                Assert.IsTrue(any.Notes.Any(n => n.StartsWith("family: archetype-weighted")), $"seed {seed}: fixture must take the weighted draw: " + string.Join(" / ", any.Notes));
+                Assert.IsNotNull(any.FamilyId);
+                families.Add(any.FamilyId);
+
+                // The family is a function of the SPEC seed alone (its own salted stream): handing the builder a different main rng must not move it.
+                Assert.AreEqual(any.FamilyId, BuildPlan(f, seed, Limits(1.0), ProfileOf, new Random(12345)).FamilyId, $"seed {seed}: family followed the main rng");
+
+                var main = new Random(seed);
+                main.NextDouble();
+
+                var forcedSpec = new DungeonGemSpec("filos_doom", 200, 6, any.FamilyId, seed, new (string, double)[0], 0, 0);
+                var forced = DungeonPopulationBuilder.Build(forcedSpec, Dungeon(), Store(), f.Tables, w => f.Profiles[w].Level, w => 1000u, Limits(1.0), main,
+                    w => f.Profiles[w], archetypeProfileOf: ProfileOf);
+
+                Assert.AreEqual(any.FamilyId, forced.FamilyId);
+                Assert.IsTrue(any.Entries.Count > 0);
+                CollectionAssert.AreEqual(any.Entries.Select(e => (e.Wcid, e.Role, e.Point.Cell)).ToList(), forced.Entries.Select(e => (e.Wcid, e.Role, e.Point.Cell)).ToList(),
+                    $"seed {seed}: population after the family draw differs");
+                Assert.AreEqual(any.BossWcid, forced.BossWcid);
+            }
+
+            Assert.IsTrue(families.Count > 1, "fixture: the draw reaches more than one family");
+        }
+
+        [TestMethod]
         public void A_run_that_does_not_widen_fields_q_within_two_percent()
         {
             // Positive control for the target: with two eligible families enough, nothing widens, the legacy draw runs, and

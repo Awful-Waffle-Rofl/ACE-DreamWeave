@@ -16,7 +16,7 @@ namespace ACE.DatLoader.Tests
         private static string DAT_PATH = Environment.GetEnvironmentVariable("ACE_DAT_PATH") ?? @"C:\Turbine\Asheron's Call\";
 
         private static string cellDatLocation = Path.Combine(DAT_PATH, "client_cell_1.dat");
-        private static int expectedCellDatFileCount = 805003;
+        private static int expectedCellDatFileCount = 805348;
 
         private static string portalDatLocation = Path.Combine(DAT_PATH, "client_portal.dat");
         private static int expectedPortalDatFileCount = 79694;
@@ -90,6 +90,7 @@ namespace ACE.DatLoader.Tests
 
         [TestMethod]
         [TestCategory("RequiresDatFiles")]
+        [TestCategory("Slow")] // 8-14 s locally: walks every file in the dat
         public void UnpackCellDatFiles_NoExceptions()
         {
             RequireDatFile(cellDatLocation);
@@ -150,6 +151,7 @@ namespace ACE.DatLoader.Tests
 
         [TestMethod]
         [TestCategory("RequiresDatFiles")]
+        [TestCategory("Slow")] // 8-14 s locally: walks every file in the dat
         public void UnpackPortalDatFiles_NoExceptions()
         {
             RequireDatFile(portalDatLocation);

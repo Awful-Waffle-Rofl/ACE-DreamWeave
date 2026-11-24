@@ -47,9 +47,10 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "opportunist",
             DisplayName = "Opportunist",
-            Description = "You deal 2/4/6/8/10% more damage (by rank) to any target carrying a debuff or " +
-                          "crowd control applied by you or a fellow - Vulnerability, Imperil, blindness, " +
-                          "taunts, or Weakened Blood. Higher Sneak Attack multiplies the bonus.",
+            // Live text: rank * class_ability_opportunist_percent_per_rank (ModifyOutgoingDamage / GetReadout).
+            DescriptionTemplate = "You deal more damage to any target with a debuff or crowd control from you or a fellow: " +
+                          "Vulnerability, Imperil, blindness, taunts or Weakened Blood.",
+            RankTailTemplate = "+{per:class_ability_opportunist_percent_per_rank|pct}% damage",
             MaxRank = 5,
             CostPerRank = new[] { 1, 1, 1, 1, 1 },
             Implemented = true,

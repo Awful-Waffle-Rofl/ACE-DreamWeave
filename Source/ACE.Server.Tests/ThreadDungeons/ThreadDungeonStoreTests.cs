@@ -681,11 +681,11 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             // The owner's chosen material list (ruling 2026-09-07), which replaced the gem-name alignment:
             // tourmaline, amethyst and obsidian kept from pre-v2, plus serpentine, steel, iron, mahogany and
-            // green garnet. The count is asserted so a row added without a home in the powder slot is
+            // green garnet, and green jade (owner request 2026-11-12, mapped to Powdered Bloodstone). The count is asserted so a row added without a home in the powder slot is
             // noticed - see The_powder_slot_covers_every_affinity, which is the assertion that actually
-            // matters. Adding a ninth material is one row here plus one powder converted from wildcard to
+            // matters. Adding a tenth material is one row here plus one powder converted from wildcard to
             // mapped, and both tests move together.
-            Assert.AreEqual(8, affinities.Count);
+            Assert.AreEqual(9, affinities.Count);
 
             // Every material is distinct: two rows sharing one MaterialType would be two ways to roll the
             // same drop while reading as different affinities on the panel.

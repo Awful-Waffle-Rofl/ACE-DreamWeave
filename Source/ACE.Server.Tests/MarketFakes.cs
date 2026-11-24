@@ -1459,6 +1459,12 @@ namespace ACE.Server.Tests
         public readonly HashSet<uint> BarrelUnavailableAccounts = new HashSet<uint>();
 
         /// <summary>
+        /// An AccountVaultStore.TryBarrel refusal string per account (for example
+        /// AccountVaultStore.BarrelFullMessage), classified by VaultMarketItemStore.ClassifyBarrelFailure.
+        /// </summary>
+        public readonly Dictionary<uint, string> BarrelRefusalReasons = new Dictionary<uint, string>();
+
+        /// <summary>
         /// What was barreled, in order: (account, itemGuid, wcid, count). The holdings themselves are
         /// REMOVED rather than moved to a second collection, because from the market's side that is
         /// exactly what a barreling is - the row is gone from every read this store answers.
@@ -1500,6 +1506,14 @@ namespace ACE.Server.Tests
             if (BarrelUnavailableAccounts.Contains(accountId))
             {
                 error = MarketError.BarrelUnavailable;
+                return false;
+            }
+
+            // A refusal fed through the REAL classifier, so a route test exercises the same mapping
+            // VaultMarketItemStore.TryBarrel applies to AccountVaultStore's own refusal strings.
+            if (BarrelRefusalReasons.TryGetValue(accountId, out var refusal))
+            {
+                error = VaultMarketItemStore.ClassifyBarrelFailure(refusal);
                 return false;
             }
 

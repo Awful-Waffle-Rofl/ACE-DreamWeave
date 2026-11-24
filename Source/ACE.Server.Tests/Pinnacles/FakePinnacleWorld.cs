@@ -15,9 +15,9 @@ namespace ACE.Server.Tests.Pinnacles
     /// </summary>
     public sealed class FakePinnacleWorld : IPinnacleWorld
     {
-        public sealed record SpawnCall(uint Wcid, PinnaclePoint At, bool WithImmuneRecord, PinnacleHandle Result, PinnacleTier Tier, bool LeavesCorpse = false);
+        public sealed record SpawnCall(uint Wcid, PinnaclePoint At, bool WithImmuneRecord, PinnacleHandle Result, PinnacleTier Tier, bool LeavesCorpse = false, double HealthMultiplier = 1.0);
 
-        public sealed record HazardCall(string Kind, string Pattern, HazardArgs Args, int Token);
+        public sealed record HazardCall(string Kind, string Pattern, HazardArgs Args, int Token, PinnacleHazardOptions Options = null);
 
         public sealed record PropCall(PinnacleProp Prop, PinnacleHandle Result);
 
@@ -163,6 +163,11 @@ namespace ACE.Server.Tests.Pinnacles
 
         public List<int> DispelRequests { get; } = new List<int>();
 
+        public List<(PinnacleHandle Caster, uint SpellId, double Seconds)> OwnerBuffs { get; } = new List<(PinnacleHandle, uint, double)>();
+
+        /// <summary>What GrantOwnerBuff returns.</summary>
+        public bool GrantOwnerBuffResult { get; set; } = true;
+
         public List<string> Told { get; } = new List<string>();
 
         public List<string> Logged { get; } = new List<string>();
@@ -190,7 +195,7 @@ namespace ACE.Server.Tests.Pinnacles
         public IEnumerable<string> CallsSince(int from) => Calls.Skip(from);
 
         // ---- IPinnacleWorld ----
-        public PinnacleHandle Spawn(uint wcid, PinnaclePoint at, bool withImmuneRecord, PinnacleTier tier, bool leavesCorpse = false)
+        public PinnacleHandle Spawn(uint wcid, PinnaclePoint at, bool withImmuneRecord, PinnacleTier tier, bool leavesCorpse = false, double healthMultiplier = 1.0)
         {
             Calls.Add(nameof(Spawn));
 
@@ -217,7 +222,7 @@ namespace ACE.Server.Tests.Pinnacles
                 WcidOf[h] = wcid;
             }
 
-            Spawns.Add(new SpawnCall(wcid, at, withImmuneRecord, h, tier, leavesCorpse));
+            Spawns.Add(new SpawnCall(wcid, at, withImmuneRecord, h, tier, leavesCorpse, healthMultiplier));
             return h;
         }
 
@@ -413,7 +418,25 @@ namespace ACE.Server.Tests.Pinnacles
             Casts.Add((caster, spellId));
         }
 
-        public int StartHazard(string kind, string pattern, HazardArgs args, out string error)
+        /// <summary>What IsOwnerGrounded returns.</summary>
+        public bool OwnerGrounded { get; set; }
+
+        /// <summary>SetMeleeReach calls, last write wins; a null reach removes the entry.</summary>
+        public Dictionary<PinnacleHandle, float> MeleeReach { get; } = new Dictionary<PinnacleHandle, float>();
+
+        public bool IsOwnerGrounded() => OwnerGrounded;
+
+        public void SetMeleeReach(PinnacleHandle h, float? metres)
+        {
+            Calls.Add(nameof(SetMeleeReach));
+
+            if (metres.HasValue)
+                MeleeReach[h] = metres.Value;
+            else
+                MeleeReach.Remove(h);
+        }
+
+        public int StartHazard(string kind, string pattern, HazardArgs args, PinnacleHazardOptions options, out string error)
         {
             Calls.Add(nameof(StartHazard));
 
@@ -421,13 +444,13 @@ namespace ACE.Server.Tests.Pinnacles
             {
                 RefuseNextHazards--;
                 error = "fake refusal";
-                Hazards.Add(new HazardCall(kind, pattern, args, 0));
+                Hazards.Add(new HazardCall(kind, pattern, args, 0, options));
                 return 0;
             }
 
             error = null;
             var token = nextToken++;
-            Hazards.Add(new HazardCall(kind, pattern, args, token));
+            Hazards.Add(new HazardCall(kind, pattern, args, token, options));
             return token;
         }
 
@@ -444,6 +467,13 @@ namespace ACE.Server.Tests.Pinnacles
             var taken = Math.Min(count, BuffsAvailable);
             BuffsAvailable -= taken;
             return taken;
+        }
+
+        public bool GrantOwnerBuff(PinnacleHandle caster, uint spellId, double seconds)
+        {
+            Calls.Add(nameof(GrantOwnerBuff));
+            OwnerBuffs.Add((caster, spellId, seconds));
+            return GrantOwnerBuffResult;
         }
 
         public void Tell(string line)

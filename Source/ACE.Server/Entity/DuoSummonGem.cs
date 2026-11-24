@@ -80,6 +80,28 @@ namespace ACE.Server.Entity
         /// <summary>The combined pool a bound gem starts with (retail essences carry 50).</summary>
         public const int Charges = 50;
 
+        /// <summary>
+        /// The gem texture drawn as the gem's IconUnderlay (PropertyDataId.IconUnderlay) and, while nothing is absorbed,
+        /// as its Icon too, so an empty gem reads as a bare gem. The owner picks the final look: change it here, in the
+        /// content row (1007741 Duo Summon Gem.sql, Icon and IconUnderlay) and nowhere else.
+        /// </summary>
+        public const uint GemIcon = 0x06002B9B;
+
+        /// <summary>
+        /// Gives the gem the Icon of the FIRST summon it absorbs, read from the absorbed item itself. The client draws
+        /// Icon above IconUnderlay, so the gem texture stays behind the summon's figure. The second absorb never calls this.
+        /// </summary>
+        public static void TakeIconOf(WorldObject gem, WorldObject absorbed)
+        {
+            var icon = absorbed.GetProperty(PropertyDataId.Icon);
+
+            if (icon.HasValue && icon.Value != 0)
+                gem.SetProperty(PropertyDataId.Icon, icon.Value);
+        }
+
+        /// <summary>Puts the empty-gem Icon back (<see cref="GemIcon"/>). For any path that leaves a gem holding fewer than two summons.</summary>
+        public static void ResetIcon(WorldObject gem) => gem.SetProperty(PropertyDataId.Icon, GemIcon);
+
         /// <summary>PropertyInt.SharedCooldown of every summon. VTank detects a summon item by exactly this value.</summary>
         public const int SummonSharedCooldown = 213;
 
@@ -264,14 +286,25 @@ namespace ACE.Server.Entity
             var bondedBefore = gem.GetProperty(PropertyInt.Bonded);
 
             // record first (memory only), then spend the item; undo the record if the item cannot be spent
+            var iconBefore = gem.GetProperty(PropertyDataId.Icon);
+
             gem.SetProperty(slot, json);
             InheritRestrictions(gem, snapshot);
+
+            if (filled == 0)
+                TakeIconOf(gem, target);
 
             if (!inventory.TryConsumeOne(target))
             {
                 gem.RemoveProperty(slot);
                 Restore(gem, PropertyInt.Attuned, attunedBefore);
                 Restore(gem, PropertyInt.Bonded, bondedBefore);
+
+                if (iconBefore.HasValue)
+                    gem.SetProperty(PropertyDataId.Icon, iconBefore.Value);
+                else
+                    gem.RemoveProperty(PropertyDataId.Icon);
+
                 return DuoAbsorbResult.ConsumeFailed;
             }
 
@@ -442,6 +475,9 @@ namespace ACE.Server.Entity
             if (result == DuoAbsorbResult.Bound && player.FindObject(gem.Guid.Full, Player.SearchLocations.MyInventory) != null)
                 player.MoveItemToFirstContainerSlot(gem);
 
+            // The Icon set by the first absorb reaches the client in this full-object refresh: SerializeUpdateObject
+            // writes IconId into the weenie header (WorldObject_Networking.cs), the same way the mule-form token ships
+            // its new IconOverlay (Gem.cs). A property-only update would not redraw an inventory icon.
             player.UpdateProperty(gem, PropertyString.LongDesc, SummonItemDescription.Compose(gem));
             player.EnqueueBroadcast(new GameMessageUpdateObject(gem));
 
@@ -516,6 +552,11 @@ namespace ACE.Server.Entity
             addedTo.TryGetValue(wo.Guid.Full, out var container);
 
             player.Session.Network.EnqueueSend(new GameMessageCreateObject(wo));
+
+            // Mirrors TryCreateInInventoryWithNetworking's forget. The guid is new (BuildRestored), so this is a
+            // no-op unless the guid was recycled from an object this client still has recorded.
+            VisualEffectManager.Forget(player.Session, wo);
+
             player.Session.Network.EnqueueSend(
                 new GameEventItemServerSaysContainId(player.Session, wo, container ?? player),
                 new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.EncumbranceVal, player.EncumbranceVal ?? 0));

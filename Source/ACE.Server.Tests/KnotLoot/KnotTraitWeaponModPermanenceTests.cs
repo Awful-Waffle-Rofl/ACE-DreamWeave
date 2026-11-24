@@ -65,8 +65,10 @@ namespace ACE.Server.Tests.KnotLoot
         [TestMethod]
         public void NoWeaponModRecordOrNative_TargetsAKnotStamp()
         {
-            Assert.AreEqual(5, KnotTraitFloats.Length, "control: the trait list is the full registry, 9020 included");
+            Assert.AreEqual(7, KnotTraitFloats.Length, "control: the trait list is the full registry, 9020, 9023 and 9024 included");
             CollectionAssert.Contains(KnotTraitFloats, PropertyFloat.KnotTraitOverpoweringIntent);
+            CollectionAssert.Contains(KnotTraitFloats, PropertyFloat.KnotTraitHarbingerGuard);
+            CollectionAssert.Contains(KnotTraitFloats, PropertyFloat.KnotTraitHarbingerCelerity);
 
             foreach (var d in WeaponModRegistry.AllMods)
             {
@@ -135,6 +137,8 @@ namespace ACE.Server.Tests.KnotLoot
 
                     var before = KnotStamps(baton);
                     var resolvedBefore = KnotTraitValue.ResolveOn(baton, KnotTraitId.OverpoweringIntent, null);
+                    var guardBefore = KnotTraitValue.ResolveOn(baton, KnotTraitId.HarbingerGuard, null);
+                    Assert.IsTrue(guardBefore.Active && guardBefore.Primary > 0, "control: the baton carries a live Harbinger's Guard");
 
                     var lines = reroll
                         ? WeaponModManager.ApplyReroll(baton, weaponClass, 10.0)
@@ -148,6 +152,7 @@ namespace ACE.Server.Tests.KnotLoot
 
                     CollectionAssert.AreEqual(before, KnotStamps(baton), $"iteration {i}: a Knot stamp moved");
                     Assert.AreEqual(resolvedBefore, KnotTraitValue.ResolveOn(baton, KnotTraitId.OverpoweringIntent, null), $"iteration {i}: the resolved trait moved");
+                    Assert.AreEqual(guardBefore, KnotTraitValue.ResolveOn(baton, KnotTraitId.HarbingerGuard, null), $"iteration {i}: Harbinger's Guard moved");
                 }
             });
         }
@@ -184,11 +189,11 @@ namespace ACE.Server.Tests.KnotLoot
                     { PropertyInt.ItemWorkmanship, 10 },
                     { PropertyInt.KnotLootLevel, 300 },
                 },
-                PropertiesFloat = new Dictionary<PropertyFloat, double> { { PropertyFloat.KnotTraitOverpoweringIntent, 0.4 } },
+                PropertiesFloat = new Dictionary<PropertyFloat, double> { { PropertyFloat.KnotTraitOverpoweringIntent, 0.4 }, { PropertyFloat.KnotTraitHarbingerGuard, 0.6 } },
                 PropertiesString = new Dictionary<PropertyString, string>
                 {
                     { PropertyString.Name, "Hive Nether Baton" },
-                    { PropertyString.KnotLootTable, "matron" },
+                    { PropertyString.KnotLootTable, "harbinger" },
                 },
             };
 
@@ -207,7 +212,7 @@ namespace ACE.Server.Tests.KnotLoot
                 stamps.Add($"float {(int)p} = {item.GetProperty(p)?.ToString("R", System.Globalization.CultureInfo.InvariantCulture) ?? "absent"}");
 
             Assert.AreEqual("int 9093 = 300", stamps[0], "control: the level stamp is present");
-            Assert.AreEqual("string 9029 = matron", stamps[1], "control: the table stamp is present");
+            Assert.AreEqual("string 9029 = harbinger", stamps[1], "control: the table stamp is present");
 
             return stamps.ToArray();
         }

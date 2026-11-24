@@ -45,7 +45,7 @@ namespace ACE.Server.Tests
     ///    the SAME combined variable, threads it into TryHandleKillTask's bootstrapRow parameter for both,
     ///    and calls OnDeath_HandleKillTask with the correct isPrimarySlot per slot. This is the same
     ///    source-text-pin technique
-    ///    BluespireLadderKillCooldownTests.HandleKillTask_CallsApplyKillStamp_AndGatesRepeatPayoutBehindOutcome
+    ///    BluespireLadderKillCooldownTests.HandleKillTask_CallsApplyKillStamp_AndPaysNothingItself
     ///    uses, for the same reason: OnDeath_HandleKillTask needs a live Player with DamageHistory and a
     ///    Fellowship to exercise end-to-end, which (per CLAUDE.md) reaches DatabaseManager.Authentication
     ///    and PropertyManager reads that throw outside a real server - not available to this harness.
@@ -192,9 +192,6 @@ namespace ACE.Server.Tests
             Assert.AreEqual(QuestManager.KillStampOutcome.Refused, outcome,
                 "a maxed KillQuestCreatesRow row must be Refused (task complete), never OnCooldown (ladder-only message)");
             Assert.AreEqual(1, qm.GetCurrentSolves(MaxSolvedKillQuest), "a refused repeat kill must not change the solve count");
-
-            Assert.IsFalse(BluespireLadderRewards.ShouldPayOnKillStamp(outcome),
-                "a refused repeat kill must never route the ladder's repeat payout");
         }
 
         /// <summary>

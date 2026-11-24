@@ -171,7 +171,7 @@ namespace ACE.Server.Tests
 
         /// <summary>
         /// Drives WeaponModCombat.ReadWeaponOnlyWieldedBy, the shape of DamageEvent's Execution read,
-        /// SpellProjectile's two Execution reads, WorldObject_Weapon's Focus/Attunement reads and
+        /// SpellProjectile's two Execution reads, WorldObject_Weapon's Precision/Attunement reads and
         /// ApplyBaseDamageMods: a launcher that is no longer equipped (Wielder null) fired by a suppressed
         /// attacker reads 0, and the same launcher fired by an unsuppressed attacker, or with no attacker in
         /// hand, reads the full amount.

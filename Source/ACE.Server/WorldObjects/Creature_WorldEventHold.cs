@@ -976,6 +976,51 @@ namespace ACE.Server.WorldObjects
             s.HealTokens = Math.Min(maxHealth * playerHealCap, s.HealTokens + unused);
         }
 
+        /// <summary>
+        /// READ-ONLY: how much health a player's heal could restore on this knight right now (the smaller of what the player-heal
+        /// bucket, the per-wave budget and its missing health allow), with the after-hit factor a heal would be scaled by in
+        /// <paramref name="afterHitFactor"/>. Changes nothing (the budget is not rolled, the bucket not refilled). 0 when it
+        /// cannot take a heal. Under lock(state); call on the knight's own landblock thread.
+        /// </summary>
+        internal int HoldPlayerHealRoom(double now, out double afterHitFactor)
+        {
+            afterHitFactor = 0;
+
+            var t = WorldEventHold?.Run?.Tuning;
+
+            if (t == null || !t.PlayerHealEnabled)
+                return 0;
+
+            var max = Health.MaxValue;
+            var room = (int)(max - Math.Min(max, Health.Current));
+
+            if (room <= 0 || max == 0 || !(t.PlayerHealCap > 0) || !double.IsFinite(t.PlayerHealCap))
+                return 0;
+
+            var wave = WorldEventHold.Run.WaveNumber;
+            var s = HoldState;
+
+            lock (s)
+            {
+                double? sinceHit = s.LastMonsterHitAt > 0 ? now - s.LastMonsterHitAt : (double?)null;
+                afterHitFactor = WorldEventHoldRules.HealAfterHitFactor(sinceHit, t.HealReductionAfterHit, t.HealReductionSeconds);
+
+                var capacity = max * t.PlayerHealCap;
+                var tokens = !(s.HealLastAt > 0) || !double.IsFinite(s.HealLastAt) || !double.IsFinite(s.HealTokens)
+                    ? capacity
+                    : Math.Min(capacity, s.HealTokens + capacity / 10.0 * Math.Max(0, now - s.HealLastAt));
+
+                room = Math.Min(room, (int)Math.Floor(tokens));
+
+                var spent = s.BudgetWave == wave ? s.BudgetSpent : 0;
+
+                if (t.HealBudgetPerWave > 0 && double.IsFinite(t.HealBudgetPerWave))
+                    room = Math.Min(room, (int)Math.Floor(Math.Min(1.0, t.HealBudgetPerWave) * max) - Math.Max(0, spent));
+            }
+
+            return Math.Max(0, room);
+        }
+
         /// <summary>Starts a fresh budget (and rescue cap) when the run has started a new wave since the last heal. Under lock(state).</summary>
         private static void RollHoldHealBudget(HoldCombatState s, int wave)
         {

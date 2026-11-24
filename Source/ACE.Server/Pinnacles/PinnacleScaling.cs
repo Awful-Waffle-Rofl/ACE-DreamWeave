@@ -20,7 +20,9 @@ namespace ACE.Server.Pinnacles
     /// <see cref="BandUplift.Apply"/> (level floor, skill medians, body-part ratio) against the band standard
     /// <see cref="WorldEventBandMemo.StandardFor"/> computes for that level, then the band-median health floor
     /// (<see cref="WorldEventSpawner.HealthFloorTarget"/> / <see cref="WorldEventSpawner.ApplyHealth"/>): the same
-    /// sequence <c>WorldEventSpawner.ApplyBandUplift</c> runs, which is private there. Threads itself has no
+    /// sequence <c>WorldEventSpawner.ApplyBandUplift</c> runs, which is private there - but only with its Threads steps
+    /// off (world_events_threads_uplift: spell tier, attributes, skill top-up, exact health write) and against the
+    /// plain StandardFor (Pinnacles never read the World Events stat curve). Threads itself has no
     /// stand-alone per-creature entry point (its scaling is interleaved with a whole-run plan inside
     /// ThreadDungeonSpawner.TryPlaceOnce).
     ///
@@ -33,6 +35,12 @@ namespace ACE.Server.Pinnacles
     public static class PinnacleScaling
     {
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
+
+        /// <summary>
+        /// The high edge of the band Pinnacles sample. Pinnacle bands stay capped at the retail level (275);
+        /// World Events moved to <see cref="WorldEventRosterSelector.MaxConsideredLevel"/> (400).
+        /// </summary>
+        internal const int BandHighEdge = 275;
 
         /// <summary>
         /// WorldEventBandMemo is documented world-thread-only (unlocked Dictionary writes), but a fight spawns from its
@@ -69,8 +77,8 @@ namespace ACE.Server.Pinnacles
 
             lock (MemoGate)
             {
-                var standard = WorldEventBandMemo.StandardFor(tables, knotLevel, low, high, dials.LowFloor, LiveProfileOf);
-                var median = WorldEventBandMemo.MedianHealthFor(tables, knotLevel, low, high, LiveProfileOf);
+                var standard = WorldEventBandMemo.StandardFor(tables, knotLevel, low, high, dials.LowFloor, LiveProfileOf, BandHighEdge);
+                var median = WorldEventBandMemo.MedianHealthFor(tables, knotLevel, low, high, LiveProfileOf, BandHighEdge);
                 return (standard, median);
             }
         }
@@ -114,11 +122,19 @@ namespace ACE.Server.Pinnacles
             };
 
         /// <summary>
-        /// The tier's max health at <paramref name="knotLevel"/>: TierHealthFactor x DungeonHealthCurve.Target (which
-        /// sanitizes the anchors and the top level itself), rounded, in [1, int.MaxValue]; 0 ("leave it") at a level of
-        /// 0 or below. Two-way: may be lower than authored. Pure.
+        /// A script's per-wcid health multiplier (PinnacleScriptData.HealthMultipliers) as the scaling uses it: a positive,
+        /// finite value as given, anything else (0, negative, NaN, infinity) 1.0, so a bad data row can never zero or blow
+        /// up a creature's health. Pure.
         /// </summary>
-        internal static uint TierHealth(PinnacleTier tier, int knotLevel, double anchorLow, double anchorHigh, long topLevel)
+        internal static double SanitizeHealthMultiplier(double healthMultiplier)
+            => double.IsFinite(healthMultiplier) && healthMultiplier > 0 ? healthMultiplier : 1.0;
+
+        /// <summary>
+        /// The tier's max health at <paramref name="knotLevel"/>: TierHealthFactor x DungeonHealthCurve.Target (which
+        /// sanitizes the anchors and the top level itself) x <paramref name="healthMultiplier"/> (SanitizeHealthMultiplier),
+        /// rounded, in [1, int.MaxValue]; 0 ("leave it") at a level of 0 or below. Two-way: may be lower than authored. Pure.
+        /// </summary>
+        internal static uint TierHealth(PinnacleTier tier, int knotLevel, double anchorLow, double anchorHigh, long topLevel, double healthMultiplier = 1.0)
         {
             if (knotLevel <= 0)
                 return 0;
@@ -128,7 +144,7 @@ namespace ACE.Server.Pinnacles
             if (!(curve > 0))
                 return 0;
 
-            return (uint)Math.Clamp(Math.Round(curve * TierHealthFactor(tier)), 1, int.MaxValue);
+            return (uint)Math.Clamp(Math.Round(curve * TierHealthFactor(tier) * SanitizeHealthMultiplier(healthMultiplier)), 1, int.MaxValue);
         }
 
         /// <summary>
@@ -166,11 +182,11 @@ namespace ACE.Server.Pinnacles
         /// the Endurance write above cannot move it (ApplyHealth measures its delta against the live MaxValue). Returns a
         /// short description for the log line.
         /// </summary>
-        private static string ApplyTier(Creature creature, int knotLevel, PinnacleTier tier, DungeonBandStandard standard)
-            => ApplyTier(creature, knotLevel, tier, standard, PinnacleTunables.HealthCurveDials());
+        private static string ApplyTier(Creature creature, int knotLevel, PinnacleTier tier, DungeonBandStandard standard, double healthMultiplier)
+            => ApplyTier(creature, knotLevel, tier, standard, PinnacleTunables.HealthCurveDials(), healthMultiplier);
 
         /// <summary>The tier step on explicit curve dials (the test seam: no settings read).</summary>
-        internal static string ApplyTier(Creature creature, int knotLevel, PinnacleTier tier, DungeonBandStandard standard, (double Low, double High, long Top) dials)
+        internal static string ApplyTier(Creature creature, int knotLevel, PinnacleTier tier, DungeonBandStandard standard, (double Low, double High, long Top) dials, double healthMultiplier = 1.0)
         {
             var notes = new List<string>();
 
@@ -191,12 +207,13 @@ namespace ACE.Server.Pinnacles
             creature.Level = TierLevel(tier, knotLevel);
 
             // Owner ruling 2026-10-20: Pinnacle tiers ALWAYS use the curve; the Threads master switch dynamic_dungeons_health_curve is not read.
-            var health = TierHealth(tier, knotLevel, dials.Low, dials.High, dials.Top);
+            var health = TierHealth(tier, knotLevel, dials.Low, dials.High, dials.Top, healthMultiplier);
 
             if (health > 0 && WorldEventSpawner.ApplyHealth(creature, (int)health))
                 log.Warn($"[PINNACLE] wcid {creature.WeenieClassId} {tier} health target {health} unreachable; StartingValue clamped to 1 (MaxValue={creature.Health.MaxValue})");
 
-            notes.Add($"level {creature.Level}, health {(health > 0 ? health.ToString() : "unchanged")}");
+            notes.Add($"level {creature.Level}, health {(health > 0 ? health.ToString() : "unchanged")}" +
+                      (SanitizeHealthMultiplier(healthMultiplier) != 1.0 ? $" (x{SanitizeHealthMultiplier(healthMultiplier):0.###})" : ""));
 
             return string.Join("; ", notes);
         }
@@ -205,7 +222,7 @@ namespace ACE.Server.Pinnacles
         /// Returns true when the scaling ran (even if the band had nothing to measure). <paramref name="knotLevel"/> 0 or
         /// below: nothing at all, the creature spawns as authored.
         /// </summary>
-        public static bool Apply(Creature creature, int knotLevel, PinnacleTier tier)
+        public static bool Apply(Creature creature, int knotLevel, PinnacleTier tier, double healthMultiplier = 1.0)
         {
             if (creature == null || knotLevel <= 0)
                 return false;
@@ -232,7 +249,7 @@ namespace ACE.Server.Pinnacles
                     WorldEventSpawner.ApplyHealth(creature, (int)Math.Min(floorTarget, (uint)int.MaxValue));
 
                 // AFTER the uplift, the weapon scaling and the floor: the tier's two-way SETs are what stand.
-                var tierNotes = ApplyTier(creature, knotLevel, tier, standard);
+                var tierNotes = ApplyTier(creature, knotLevel, tier, standard, healthMultiplier);
 
                 log.Info($"[PINNACLE] scaled wcid {creature.WeenieClassId} to knot level {knotLevel} as {tier} (authored {authoredLevel}): " +
                          $"{skillsRaised} skill(s) raised, {partsScaled} body part(s) scaled, {weaponsScaled} weapon(s) scaled x{damageRatio:0.###}, " +

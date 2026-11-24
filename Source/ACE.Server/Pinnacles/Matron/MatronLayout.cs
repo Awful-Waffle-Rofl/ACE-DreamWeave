@@ -319,8 +319,12 @@ namespace ACE.Server.Pinnacles.Matron
             return MatronData.Point(o.NicheCell, at.X, at.Y, DoorZ, MatronData.YawDegFacing(-o.Outward));
         }
 
-        /// <summary>The opening's door prop: closed, at <see cref="DoorScale"/>.</summary>
-        public static PinnacleProp DoorProp(MatronOpening o) => new PinnacleProp(MatronData.DoorWcid, Door(o), DoorScale, DoorOpen: false);
+        /// <summary>
+        /// The opening's door prop: closed, at <see cref="DoorScale"/>, and ETHEREAL (player report 2026-11-11: a door swinging
+        /// shut on a player in its niche wedged them). It only animates; nothing it gates needs it solid, since the niche
+        /// behind it ends at the back panel and wall.
+        /// </summary>
+        public static PinnacleProp DoorProp(MatronOpening o) => new PinnacleProp(MatronData.DoorWcid, Door(o), DoorScale, DoorOpen: false, Ethereal: true);
 
         /// <summary>
         /// The drain's black base layer (1007553): the grate's ClipMap quad wearing an opaque black texture, centred on the drain point,

@@ -71,9 +71,11 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "spellweave",
             DisplayName = "Spellweave",
-            Description = "Casting any spell, including procs, makes your next weapon hit deal " +
-                          "3/6/9/12/15% more damage (by rank). Landing a weapon hit makes your next spell " +
-                          "deal 3/6/9/12/15% more. Higher Item Enchantment multiplies the bonus.",
+            // Live text. Bonus is rank * class_ability_spellweave_percent_per_rank (SpellweaveAbility.cs ~128 GetReadout,
+            // Player_ClassAbilityBuffs.cs ~2488 SpellweaveChargeMod).
+            DescriptionTemplate = "Casting any spell, procs included, makes your next weapon hit deal more damage. Landing a weapon " +
+                          "hit makes your next spell deal more.",
+            RankTailTemplate = "+{per:class_ability_spellweave_percent_per_rank|pct}% on the next hit or spell",
             MaxRank = 5,
             CostPerRank = new[] { 1, 1, 1, 1, 1 },
             Implemented = true,

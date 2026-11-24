@@ -247,6 +247,178 @@ namespace ACE.Server.Tests
                 $"a {radius:0.000} m sphere does not fit in this cell at any lift");
         }
 
+        /// <summary>
+        /// The FOLLOW teleport's path, not the spawn path: CombatPet.TryTeleportToOwner moves a pet that is
+        /// already in the world with PhysicsObj.SetPosition(Teleport | Slide) (Pet.PhysicsTeleport), where
+        /// Pet.Init's measurement above went through AddPhysicsObj / enter_world (Placement | Slide). Both reach
+        /// PhysicsObj.CheckPositionInternal, which reads only the Slide flag, but this test measures it rather
+        /// than inferring it: each body is first put in the world on the lifted spot (which takes all three), then
+        /// teleported onto the owner's exact spot and onto the lifted spot again.
+        ///
+        /// Expected, and asserted: the player-sized control teleports to both; the two larger bodies are refused
+        /// at the owner's exact Z and accepted on the lifted spot, landing where AcceptBumpedOwnerSpot keeps them.
+        /// That is the follow-teleport form of the same bug, and the reason TryTeleportToOwner now ends with the
+        /// lifted attempt.
+        /// </summary>
+        [TestMethod]
+        [TestCategory("RequiresDatFiles")]
+        public void FollowTeleport_ExactSpotRefusesABiggerBody_LiftedSpotTakesIt()
+        {
+            RequireDats();
+
+            var report = new StringBuilder();
+
+            foreach (var scale in new[] { PlayerScale, LargerPetScale, LargestPetScale })
+            {
+                var r = TeleportProbe(scale, asCombatPet: true);
+
+                report.AppendLine($"CombatPet scale {scale}: radius {r.Radius:0.000} state=[{r.State}] exact={r.Exact} lifted={r.Lifted} liftedLanded=0x{r.LiftedCell:X8} {r.LiftedOrigin}");
+
+                Assert.IsTrue(r.Entered, $"setup: the {r.Radius:0.000} m body must enter on the lifted spot first\n{report}");
+
+                Assert.IsTrue(r.State.HasFlag(ACE.Entity.Enum.PhysicsState.Ethereal),
+                    $"the probe must carry the Ethereal physics state a live pet gets from Pet.SetEphemeralValues, or it does not answer the question\n{report}");
+
+                Assert.AreEqual(ACE.Server.Physics.Common.SetPositionError.OK, r.Lifted,
+                    $"a {r.Radius:0.000} m body must teleport onto the lifted spot\n{report}");
+
+                var requested = new Vector3(OwnerX, OwnerY, OwnerZ + PetFollowRules.OwnerSpotBumpHeight);
+                Assert.IsTrue(PetFollowRules.AcceptBumpedOwnerSpot(ProbeCell, requested, 0, r.LiftedCell, r.LiftedOrigin, 0, true),
+                    $"and land where it was sent\n{report}");
+
+                if (scale == PlayerScale)
+                    Assert.AreEqual(ACE.Server.Physics.Common.SetPositionError.OK, r.Exact,
+                        $"control: a player-sized body teleports onto the owner's exact spot\n{report}");
+                else
+                    Assert.AreNotEqual(ACE.Server.Physics.Common.SetPositionError.OK, r.Exact,
+                        $"a {r.Radius:0.000} m body must be REFUSED on the owner's exact spot by the teleport path too\n{report}");
+            }
+
+            // control: the same refusal with Ethereal OFF, so Ethereal is shown to make no difference against
+            // cell geometry (it only skips object collisions) rather than assumed to
+            var solid = TeleportProbe(LargerPetScale, asCombatPet: false, ethereal: false);
+            report.AppendLine($"non-ethereal Creature scale {LargerPetScale}: radius {solid.Radius:0.000} state=[{solid.State}] exact={solid.Exact} lifted={solid.Lifted}");
+
+            Assert.IsFalse(solid.State.HasFlag(ACE.Entity.Enum.PhysicsState.Ethereal), $"control setup: this body is not ethereal\n{report}");
+            Assert.AreNotEqual(ACE.Server.Physics.Common.SetPositionError.OK, solid.Exact, $"control: refused unlifted without Ethereal too\n{report}");
+
+            Console.WriteLine(report.ToString());
+        }
+
+        /// <summary>
+        /// Pet.MoveBackAfterRejectedLift's two tries, measured: a big CombatPet that has settled on the lifted spot
+        /// records where it stands (`before`), is teleported away (onto the lifted spot again, a fresh transition),
+        /// then sent back to `before` exactly and to `before` lifted by OwnerSpotBumpHeight. The test reports both
+        /// results and asserts the move-back as written succeeds: at least one of the two tries is accepted by
+        /// PetFollowRules.AcceptMoveBack. The exact try is reported, not asserted, because a settled Z a few
+        /// millimetres above the floor is the very height the lift exists for.
+        /// </summary>
+        [TestMethod]
+        [TestCategory("RequiresDatFiles")]
+        public void MoveBack_BigBodyToItsSettledSpot_IsAcceptedExactOrLifted()
+        {
+            RequireDats();
+
+            var report = new StringBuilder();
+            const ACE.Server.Physics.Common.SetPositionFlags flags =
+                ACE.Server.Physics.Common.SetPositionFlags.Teleport | ACE.Server.Physics.Common.SetPositionFlags.Slide;
+
+            foreach (var scale in new[] { LargerPetScale, LargestPetScale })
+            {
+                var wo = MakeCombatPetBody(scale, PetFollowRules.OwnerSpotBumpHeight);
+
+                var engine = PhysicsEngine.Instance;
+                var wasServer = engine.Server;
+                engine.Server = false;
+
+                try
+                {
+                    wo.InitPhysicsObj();
+                    Assert.IsTrue(wo.AddPhysicsObj(), "setup: the body enters on the lifted spot");
+
+                    var before = new ACE.Server.Physics.Common.Position(wo.PhysicsObj.Position);
+
+                    var lifted = new Position(ProbeCell, OwnerX, OwnerY, OwnerZ + PetFollowRules.OwnerSpotBumpHeight, 0f, 0f, 0f, 1f, 0);
+                    Assert.AreEqual(ACE.Server.Physics.Common.SetPositionError.OK,
+                        wo.PhysicsObj.SetPosition(new ACE.Server.Physics.Common.SetPosition(new ACE.Server.Physics.Common.Position(lifted), flags, 0)), "setup: teleported away");
+
+                    var exact = wo.PhysicsObj.SetPosition(new ACE.Server.Physics.Common.SetPosition(new ACE.Server.Physics.Common.Position(before), flags, 0));
+                    var exactBack = exact == ACE.Server.Physics.Common.SetPositionError.OK && PetFollowRules.AcceptMoveBack(before.ObjCellID, before.Frame.Origin,
+                        wo.PhysicsObj.Position.ObjCellID, wo.PhysicsObj.Position.Frame.Origin, wo.PhysicsObj.CurCell != null);
+
+                    var liftedBefore = new ACE.Server.Physics.Common.Position(before);
+                    liftedBefore.Frame.Origin.Z += PetFollowRules.OwnerSpotBumpHeight;
+
+                    var liftedResult = wo.PhysicsObj.SetPosition(new ACE.Server.Physics.Common.SetPosition(liftedBefore, flags, 0));
+                    var liftedBack = liftedResult == ACE.Server.Physics.Common.SetPositionError.OK && PetFollowRules.AcceptMoveBack(before.ObjCellID, before.Frame.Origin,
+                        wo.PhysicsObj.Position.ObjCellID, wo.PhysicsObj.Position.Frame.Origin, wo.PhysicsObj.CurCell != null);
+
+                    report.AppendLine($"move-back radius {wo.PhysicsObj.GetPhysicsRadius():0.000}: before z {before.Frame.Origin.Z} exact={exact} accepted={exactBack} lifted={liftedResult} accepted={liftedBack}");
+
+                    wo.PhysicsObj.leave_world();
+
+                    Assert.IsTrue(exactBack || liftedBack, $"the move-back must put the pet back by one of its two tries\n{report}");
+                }
+                finally
+                {
+                    engine.Server = wasServer;
+                }
+            }
+
+            Console.WriteLine(report.ToString());
+        }
+
+        private struct TeleportProbeResult
+        {
+            public bool Entered;
+            public ACE.Entity.Enum.PhysicsState State;
+            public float Radius;
+            public ACE.Server.Physics.Common.SetPositionError Exact;
+            public ACE.Server.Physics.Common.SetPositionError Lifted;
+            public uint LiftedCell;
+            public Vector3 LiftedOrigin;
+        }
+
+        private static TeleportProbeResult TeleportProbe(float scale, bool asCombatPet, bool ethereal = true)
+        {
+            var result = new TeleportProbeResult();
+            var wo = asCombatPet ? MakeCombatPetBody(scale, PetFollowRules.OwnerSpotBumpHeight) : MakeBody(scale, PetFollowRules.OwnerSpotBumpHeight, ethereal);
+
+            var engine = PhysicsEngine.Instance;
+            var wasServer = engine.Server;
+            engine.Server = false;
+
+            try
+            {
+                wo.InitPhysicsObj();
+                result.Radius = wo.PhysicsObj?.GetPhysicsRadius() ?? -1f;
+                result.State = wo.PhysicsObj?.State ?? 0;
+                result.Entered = wo.AddPhysicsObj();
+
+                if (!result.Entered)
+                    return result;
+
+                const ACE.Server.Physics.Common.SetPositionFlags flags =
+                    ACE.Server.Physics.Common.SetPositionFlags.Teleport | ACE.Server.Physics.Common.SetPositionFlags.Slide;
+
+                var exact = new Position(ProbeCell, OwnerX, OwnerY, OwnerZ, 0f, 0f, 0f, 1f, 0);
+                result.Exact = wo.PhysicsObj.SetPosition(new ACE.Server.Physics.Common.SetPosition(new ACE.Server.Physics.Common.Position(exact), flags, 0));
+
+                var lifted = new Position(ProbeCell, OwnerX, OwnerY, OwnerZ + PetFollowRules.OwnerSpotBumpHeight, 0f, 0f, 0f, 1f, 0);
+                result.Lifted = wo.PhysicsObj.SetPosition(new ACE.Server.Physics.Common.SetPosition(new ACE.Server.Physics.Common.Position(lifted), flags, 0));
+                result.LiftedCell = wo.PhysicsObj.Position.ObjCellID;
+                result.LiftedOrigin = wo.PhysicsObj.Position.Frame.Origin;
+
+                wo.PhysicsObj.leave_world();
+
+                return result;
+            }
+            finally
+            {
+                engine.Server = wasServer;
+            }
+        }
+
         // ===================== source pins: the wiring =====================
         //
         // The dat-backed tests above are about the engine and the pure tests are about two helpers; between
@@ -258,8 +430,12 @@ namespace ACE.Server.Tests
         private const string PetPath = "Source/ACE.Server/WorldObjects/Pet.cs";
 
         private const string ExistingCorrection = "RelocateToOwnerSpot(player);";
-        private const string LiftUse = "PetFollowRules.OwnerSpotBumpHeight";
-        private const string LandingCheck = "PetFollowRules.AcceptBumpedOwnerSpot(";
+
+        // Since 2026-11-07 the lift and the landing check are shared helpers (GetLiftedOwnerSpotPlacement,
+        // IsPlacedAtLiftedOwnerSpot) that the follow teleport also uses, so Init's markers are the CALLS; the
+        // helpers' own use of the constant and the rule is pinned by Helpers_UseTheLiftAndTheStrictLandingRule.
+        private const string LiftUse = "GetLiftedOwnerSpotPlacement(player)";
+        private const string LandingCheck = "IsPlacedAtLiftedOwnerSpot(requested";
         private const string CleanFailure = "PlacementFailed = true;";
         private const string Dismissal = "petsPendingSwapDismissal != null";
 
@@ -339,6 +515,125 @@ namespace ACE.Server.Tests
                 "a rejected landing has to be taken back out of the world, not left standing somewhere the player cannot use it");
         }
 
+        /// <summary>
+        /// The shared helpers really are the lift and the strict rule: the lift helper adds OwnerSpotBumpHeight,
+        /// and the landing helper calls AcceptBumpedOwnerSpot (instance included) rather than the looser
+        /// AcceptPlacement. Each appears exactly once in Pet.cs, so nothing else can quietly re-implement them.
+        /// </summary>
+        [TestMethod]
+        public void Helpers_UseTheLiftAndTheStrictLandingRule()
+        {
+            var code = StrippedSource(PetPath);
+
+            var liftHelper = Body(code, "Position GetLiftedOwnerSpotPlacement(Player owner)");
+            StringAssert.Contains(liftHelper, "PositionZ += PetFollowRules.OwnerSpotBumpHeight", "the lift helper must lift by OwnerSpotBumpHeight");
+
+            var landingHelper = Body(code, "bool IsPlacedAtLiftedOwnerSpot(Position requested, uint landedInstance)");
+            StringAssert.Contains(landingHelper, "PetFollowRules.AcceptBumpedOwnerSpot(", "the landing helper must use the strict lifted-spot rule");
+            StringAssert.Contains(landingHelper, "landedInstance", "and pass the landed instance into it");
+
+            Single(code, "PositionZ += PetFollowRules.OwnerSpotBumpHeight");
+            Single(code, "PetFollowRules.AcceptBumpedOwnerSpot(");
+        }
+
+        /// <summary>
+        /// The FOLLOW teleport's wiring (CI-visible; the dat-backed probe above is Inconclusive without dats):
+        /// TryTeleportToOwner places through Pet.PlaceBesideOwner, and PlaceBesideOwner makes the lifted attempt
+        /// AFTER the unlifted owner spot, gated on that having failed, judged by the strict landing helper, and
+        /// moves a rejected landing back instead of keeping it.
+        /// </summary>
+        [TestMethod]
+        public void FollowTeleport_PlacesThroughTheSharedRoutineWithTheLiftedFallbackLast()
+        {
+            var follow = Body(StrippedSource(FollowPath), "void TryTeleportToOwner(Player owner, double now)");
+            StringAssert.Contains(follow, "PlaceBesideOwner(owner, out result)", "the follow teleport must use the shared placement");
+            StringAssert.Contains(follow, "PetFollowRules.AfterTeleportAttempt(placed,", "and only a successful placement may restart the stuck window");
+            Assert.IsFalse(follow.Contains("followProgress.Reset()"), "TryTeleportToOwner must not reset the stuck window itself - a failed attempt has to stay armed");
+
+            var place = Body(StrippedSource(PetPath), "bool PlaceBesideOwner(Player owner, out Physics.Common.SetPositionError result)");
+
+            var ownerSpot = place.IndexOf("GetOwnerSpotPlacement(owner)", StringComparison.Ordinal);
+            var lifted = place.IndexOf("GetLiftedOwnerSpotPlacement(owner)", StringComparison.Ordinal);
+            var check = place.IndexOf("IsPlacedAtLiftedOwnerSpot(lifted, instance)", StringComparison.Ordinal);
+
+            Assert.IsTrue(ownerSpot >= 0 && lifted > ownerSpot, "the lifted attempt must come after the unlifted owner spot");
+            Assert.IsTrue(check > lifted, "and be judged by the strict landing check");
+
+            var before = place.Substring(0, lifted);
+            var lastIf = before.LastIndexOf("if (", StringComparison.Ordinal);
+            Assert.IsTrue(lastIf > ownerSpot, "no condition guards the lifted attempt");
+            StringAssert.StartsWith(Collapse(before.Substring(lastIf)), "if (!placed)",
+                "the lifted attempt must be gated on every earlier attempt having failed");
+
+            StringAssert.Contains(place.Substring(check), "MoveBackAfterRejectedLift(before, instance)",
+                "a lifted landing the check rejects must be moved back, not kept");
+        }
+
+        /// <summary>
+        /// F3: a rejected lifted landing that is put back must not count as a move when nothing earlier moved the
+        /// pet. The pre-lift state is saved BEFORE the lifted teleport and restored from the move-back result.
+        /// </summary>
+        [TestMethod]
+        public void PlaceBesideOwner_ARestoredPetIsNotBroadcastAsMoved()
+        {
+            var place = Body(StrippedSource(PetPath), "bool PlaceBesideOwner(Player owner, out Physics.Common.SetPositionError result)");
+
+            var save = place.IndexOf("var movedBeforeLift = moved;", StringComparison.Ordinal);
+            var liftedTeleport = place.IndexOf("PhysicsTeleport(lifted)", StringComparison.Ordinal);
+            var restore = place.IndexOf("moved = PetFollowRules.MovedAfterRejectedLift(movedBeforeLift, restored);", StringComparison.Ordinal);
+            var moveBack = place.IndexOf("var restored = MoveBackAfterRejectedLift(before, instance);", StringComparison.Ordinal);
+
+            Assert.IsTrue(save >= 0 && save < liftedTeleport, "the pre-lift moved state must be saved before the lifted teleport");
+            Assert.IsTrue(moveBack > liftedTeleport && restore > moveBack, "and restored from the move-back's result");
+        }
+
+        /// <summary>
+        /// F2: the move-back keeps its results, tries the original spot lifted when the exact one is refused, judges
+        /// both by AcceptMoveBack, and warns (rate-limited) when the pet stays parked elsewhere.
+        /// </summary>
+        [TestMethod]
+        public void MoveBack_RetriesLiftedAndWarnsWhenParked()
+        {
+            var body = Body(StrippedSource(PetPath), "bool MoveBackAfterRejectedLift(Physics.Common.Position before, uint instance)");
+
+            var exact = body.IndexOf("var back = PhysicsObj.SetPosition(", StringComparison.Ordinal);
+            var exactCheck = body.IndexOf("back == Physics.Common.SetPositionError.OK && IsBackAt(before)", StringComparison.Ordinal);
+            var lift = body.IndexOf("liftedBack.Frame.Origin.Z += PetFollowRules.OwnerSpotBumpHeight;", StringComparison.Ordinal);
+            var liftedTry = body.IndexOf("var backLifted = PhysicsObj.SetPosition(", StringComparison.Ordinal);
+            var liftedCheck = body.IndexOf("backLifted == Physics.Common.SetPositionError.OK && IsBackAt(before)", StringComparison.Ordinal);
+            var rate = body.IndexOf("PetFollowRules.ShouldLogTeleportFailure(lastParkedWarnTime, now)", StringComparison.Ordinal);
+            var warn = body.IndexOf("log.Warn(", StringComparison.Ordinal);
+
+            Assert.IsTrue(exact >= 0 && exactCheck > exact, "the exact move-back result must be captured and checked");
+            Assert.IsTrue(lift > exactCheck && liftedTry > lift && liftedCheck > liftedTry, "then the lifted original spot tried and checked");
+            Assert.IsTrue(rate > liftedCheck && warn > rate, "then a rate-limited Warn");
+
+            StringAssert.Contains(Body(StrippedSource(PetPath), "bool IsBackAt(Physics.Common.Position before)"), "PetFollowRules.AcceptMoveBack(",
+                "the move-back is judged by the strict tolerance rule");
+        }
+
+        private const string FollowPath = "Source/ACE.Server/WorldObjects/CombatPet_Follow.cs";
+
+        /// <summary>The text of the method whose signature is <paramref name="signature"/>, braces balanced.</summary>
+        private static string Body(string code, string signature)
+        {
+            var at = code.IndexOf(signature, StringComparison.Ordinal);
+            Assert.IsTrue(at >= 0, $"source no longer contains: {signature}");
+
+            var open = code.IndexOf('{', at);
+            var depth = 0;
+
+            for (var i = open; i < code.Length; i++)
+            {
+                if (code[i] == '{') depth++;
+                else if (code[i] == '}' && --depth == 0)
+                    return code.Substring(open, i - open + 1);
+            }
+
+            Assert.Fail($"unbalanced braces after {signature}");
+            return null;
+        }
+
         /// <summary>The one index of <paramref name="marker"/> in <paramref name="code"/>; fails if it is absent or repeated.</summary>
         private static int Single(string code, string marker)
         {
@@ -349,9 +644,11 @@ namespace ACE.Server.Tests
             return at;
         }
 
-        private static string StrippedPetSource()
+        private static string StrippedPetSource() => StrippedSource(PetPath);
+
+        private static string StrippedSource(string repoPath)
         {
-            var native = PetPath.Replace('/', Path.DirectorySeparatorChar);
+            var native = repoPath.Replace('/', Path.DirectorySeparatorChar);
             string path = null;
 
             for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null && path == null; dir = dir.Parent)
@@ -361,7 +658,7 @@ namespace ACE.Server.Tests
                     path = candidate;
             }
 
-            Assert.IsNotNull(path, $"Could not find {PetPath} by walking up from {AppContext.BaseDirectory} - this suite must run in-tree");
+            Assert.IsNotNull(path, $"Could not find {repoPath} by walking up from {AppContext.BaseDirectory} - this suite must run in-tree");
 
             return StripComments(File.ReadAllText(path));
         }
@@ -467,24 +764,45 @@ namespace ACE.Server.Tests
         /// geometry - which is the point: Ethereal is why the owner standing on the spot does not block their
         /// own pet, and why it does nothing at all about a dungeon wall or floor.
         /// </summary>
-        private static Creature MakeBody(float scale, float lift)
+        private static Creature MakeBody(float scale, float lift, bool ethereal = true)
         {
-            var weenie = new Weenie
-            {
-                WeenieClassId = 999870,
-                ClassName = "petindoorplacementtestbody",
-                WeenieType = WeenieType.Creature,
-                PropertiesString = new Dictionary<PropertyString, string> { { PropertyString.Name, "Pet Placement Test Body" } },
-                PropertiesDID = new Dictionary<PropertyDataId, uint> { { PropertyDataId.Setup, HumanSetup } },
-                PropertiesBool = new Dictionary<PropertyBool, bool> { { PropertyBool.Ethereal, true } },
-                PropertiesFloat = new Dictionary<PropertyFloat, double> { { PropertyFloat.DefaultScale, scale } },
-            };
+            var weenie = BodyWeenie(scale, WeenieType.Creature);
+            weenie.PropertiesBool = new Dictionary<PropertyBool, bool> { { PropertyBool.Ethereal, ethereal } };
 
             TestGameTables.EnsureInitialized();   // Creature's ctor reads the vital formula tables
 
             var wo = new Creature(weenie, new ObjectGuid(nextGuid++));
             wo.Location = new Position(ProbeCell, OwnerX, OwnerY, OwnerZ + lift, 0f, 0f, 0f, 1f, 0);
             return wo;
+        }
+
+        /// <summary>
+        /// A real CombatPet, built through the same constructor chain a summon uses (CombatPet -> Pet, whose
+        /// SetEphemeralValues sets Ethereal), so its physics state is a live pet's rather than a hand-set flag.
+        /// The weenie carries no Ethereal of its own: the pet class is the only thing making it ethereal.
+        /// </summary>
+        private static CombatPet MakeCombatPetBody(float scale, float lift)
+        {
+            var weenie = BodyWeenie(scale, WeenieType.CombatPet);
+
+            TestGameTables.EnsureInitialized();
+
+            var wo = new CombatPet(weenie, new ObjectGuid(nextGuid++));
+            wo.Location = new Position(ProbeCell, OwnerX, OwnerY, OwnerZ + lift, 0f, 0f, 0f, 1f, 0);
+            return wo;
+        }
+
+        private static Weenie BodyWeenie(float scale, WeenieType type)
+        {
+            return new Weenie
+            {
+                WeenieClassId = 999870,
+                ClassName = "petindoorplacementtestbody",
+                WeenieType = type,
+                PropertiesString = new Dictionary<PropertyString, string> { { PropertyString.Name, "Pet Placement Test Body" } },
+                PropertiesDID = new Dictionary<PropertyDataId, uint> { { PropertyDataId.Setup, HumanSetup } },
+                PropertiesFloat = new Dictionary<PropertyFloat, double> { { PropertyFloat.DefaultScale, scale } },
+            };
         }
 
         // ===================== dat handling =====================

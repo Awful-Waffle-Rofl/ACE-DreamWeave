@@ -178,9 +178,10 @@ namespace ACE.Server.Tests.HazardMechanics
                 .ToArray();
 
             // Berserk Rage joined the readers deliberately (Berserker pass 2026-10-24): a hazard neither triggers the rage
-            // nor is blocked by its immunity window (BerserkerPassMechanicsTests pins both behaviours).
-            CollectionAssert.AreEqual(new[] { "BerserkRageAbility.cs", "ManaBarrierAbility.cs", "ReflectMagicAbility.cs", "RunicWardAbility.cs", "SanguineWardAbility.cs" }, readers,
-                "every ward and Berserk Rage read the flag; Soul Jump, Adrenaline and Kinetic Charge deliberately do not");
+            // nor is blocked by its immunity window (BerserkerPassMechanicsTests pins both behaviours). Soul Jump's companion
+            // SoulJumpImmunity joined with the same rule (it shares BerserkRageImmunity.DamageAfterImmunity).
+            CollectionAssert.AreEqual(new[] { "BerserkRageAbility.cs", "ManaBarrierAbility.cs", "ReflectMagicAbility.cs", "RunicWardAbility.cs", "SanguineWardAbility.cs", "SoulJumpAbility.cs" }, readers,
+                "every ward, Berserk Rage and Soul Jump's post-save immunity window read the flag; Soul Jump's death save, Adrenaline and Kinetic Charge deliberately do not");
         }
 
         [TestMethod]

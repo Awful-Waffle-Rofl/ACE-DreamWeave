@@ -148,6 +148,12 @@ namespace ACE.Server.WorldObjects
                 if (xpType == XpType.Kill || combatShare)
                     addAmount = ApplyOfflineExperienceBonus(amount);
 
+                // Thread Shrine luminance blessing (Docs/Threads/ENCOUNTERS.md "Shrine"): same receiver-side rule as the
+                // offline bonus above and the XP blessing in GrantXP - only this player's own combat Luminance, after the
+                // fellowship split, while they stand inside the run that granted it.
+                if (xpType == XpType.Kill || combatShare)
+                    addAmount = ACE.Server.ThreadDungeons.ThreadBoons.ScaleAmount(addAmount, ACE.Server.ThreadDungeons.ThreadBoons.For(this, ACE.Server.ThreadDungeons.ThreadBoonKind.Luminance));
+
                 AddLuminance(addAmount, xpType);
             }
         }
@@ -163,6 +169,10 @@ namespace ACE.Server.WorldObjects
             // Analytics: per-character luminance rate (Tier-1). Lock-free Interlocked.Add, flushed off-thread.
             AnalyticsManager.RecordLuminance(this, amount);
 
+            // Balance Trials recorder: the luminance actually added, the run row's lum_earned. One field read otherwise.
+            if (TrialActive)
+                ACE.Server.BalanceTrials.TrialHooks.OnLumGranted(this, amount);
+
             // /lph per-session window accumulator (see ResetLumRateWindow / CalcLumPerHour).
             Interlocked.Add(ref lumRateWindowEarned, amount);
 
@@ -172,10 +182,76 @@ namespace ACE.Server.WorldObjects
             // from the first kill, and it accumulates without limit. The retail AvailableLuminance
             // UI bar is intentionally left untouched (not driven), so we do NOT call UpdateLuminance().
             ModifyBankBalance(PropertyInt64.BankedLuminance, amount);
+            CountEarnedLuminance(amount);
             RushNextPlayerSave(60);
 
             if (xpType == XpType.Quest)
                 Session.Network.EnqueueSend(new GameMessageSystemChat($"You've earned {amount:N0} Luminance.", ChatMessageType.Broadcast));
+        }
+
+        /// <summary>
+        /// Running total of Luminance earned this login (ephemeral, see <see cref="PropertyInt64.LuminanceEarnedThisSession"/>).
+        /// </summary>
+        private long LuminanceEarnedThisSession
+        {
+            get => GetProperty(PropertyInt64.LuminanceEarnedThisSession) ?? 0;
+            set => SetProperty(PropertyInt64.LuminanceEarnedThisSession, value);
+        }
+
+        /// <summary>
+        /// Adds an earned grant to the session total and tells the client. Called from <see cref="AddLuminance"/>
+        /// only - deposits, transfers, admin adds and spends are not earnings and never reach it. The add and the
+        /// send share <c>bankBalanceLock</c> so concurrent grants reach the client in the order they were counted
+        /// (the update's sequence number is assigned when the message is built). The bank write has already
+        /// happened by the time this runs, and nothing here can throw into it.
+        /// </summary>
+        private void CountEarnedLuminance(long amount)
+        {
+            try
+            {
+                lock (bankBalanceLock)
+                {
+                    var total = SaturatingAdd(LuminanceEarnedThisSession, amount);
+                    LuminanceEarnedThisSession = total;
+                    SendLuminanceEarnedUpdate(total);
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[LUM] Could not count earned luminance for {Name}: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Once per login, from the first-enter-world block: gives the client's tracker a baseline (0 on a fresh
+        /// login) before the first grant. Unconditional on purpose - a zero is the baseline.
+        /// </summary>
+        private void SendLuminanceEarnedOnLogin()
+        {
+            try
+            {
+                lock (bankBalanceLock)
+                {
+                    // Seed the ephemeral key here, on the player's own thread, so the dictionary's first insert for
+                    // 9102 never happens on a non-owner thread (a fellowship split or landblock grant).
+                    LuminanceEarnedThisSession = LuminanceEarnedThisSession;
+                    SendLuminanceEarnedUpdate(LuminanceEarnedThisSession);
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[LUM] Could not send the earned-luminance baseline to {Name}: {ex.Message}");
+            }
+        }
+
+        /// <summary>No-ops without a live session (offline or test player); EnqueueSend itself is ignored once the session is released.</summary>
+        private void SendLuminanceEarnedUpdate(long total)
+        {
+            var network = Session?.Network;
+            if (network == null)
+                return;
+
+            network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt64(this, PropertyInt64.LuminanceEarnedThisSession, total));
         }
 
         /// <summary>

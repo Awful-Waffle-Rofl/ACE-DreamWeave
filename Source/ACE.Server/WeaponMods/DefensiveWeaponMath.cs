@@ -78,20 +78,23 @@ namespace ACE.Server.WeaponMods
 
         /// <summary>
         /// The equipped-shield path's level after the Shield-skill cap: the capped shield level, plus the
-        /// Defensive Weapon level, plus the ward shield level (WardShieldMath.AfterShieldCap). The ward and
+        /// Defensive Weapon level, plus the ward shield level (WardShieldMath.AfterShieldCap), plus the Mana Barrier casting shield level (ManaBarrierShieldMath). The ward and
         /// Defensive Weapon SUM, the same as on the no-shield path; the ward's own larger-of-two-wards rule is
         /// already applied inside the ward level. A negative or NaN Defensive Weapon level counts as 0. The
         /// caller then multiplies by the attacker's ignore-shield term.
         /// </summary>
-        public static double AfterShieldCap(double cappedShieldLevel, double defensiveWeaponLevel, double wardLevel) =>
-            ACE.Server.ClassAbilities.WardShieldMath.AfterShieldCap(cappedShieldLevel, wardLevel) + Sanitize(defensiveWeaponLevel);
+        public static double AfterShieldCap(double cappedShieldLevel, double defensiveWeaponLevel, double wardLevel, double manaBarrierShieldLevel = 0.0) =>
+            ACE.Server.ClassAbilities.WardShieldMath.AfterShieldCap(cappedShieldLevel, wardLevel) + Sanitize(defensiveWeaponLevel) + Math.Max(0.0, manaBarrierShieldLevel);
 
         /// <summary>
         /// The armor level Thorns reflects from: the equipped shield's armor level plus the Defensive Weapon
-        /// level. The caller has already refused a defender with no shield, so this is never reached shieldless.
+        /// level plus the standing ward's Thorns level (owner ruling 2026-11-05; see
+        /// WardShieldMath.ThornsLevelFor, 0 when no ward applies). The ward term is sanitized like the Defensive
+        /// Weapon term (NaN or negative counts as 0). The caller has already refused a defender with no shield,
+        /// so this is never reached shieldless: a ward INCREASES Thorns, it never ENABLES it.
         /// </summary>
-        public static double ThornsArmorLevel(double shieldArmorLevel, double defensiveWeaponLevel) =>
-            shieldArmorLevel + Sanitize(defensiveWeaponLevel);
+        public static double ThornsArmorLevel(double shieldArmorLevel, double defensiveWeaponLevel, double wardThornsLevel) =>
+            shieldArmorLevel + Sanitize(defensiveWeaponLevel) + Sanitize(wardThornsLevel);
 
         /// <summary>A Defensive Weapon level as read: NaN or negative counts as 0.</summary>
         public static double Sanitize(double level) =>

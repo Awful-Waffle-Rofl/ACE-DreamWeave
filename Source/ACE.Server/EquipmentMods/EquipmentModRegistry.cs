@@ -139,10 +139,10 @@ namespace ACE.Server.EquipmentMods
                 LinkedAbility = ClassAbilityId.AcidProc,
                 Standalone = false,
                 MaxMagnitude = 0.103,
-                // Proc-chance mod: base Acid Proc chance is 40% (AcidProcAbility). Uncapped, an equipped
-                // stack of this magnitude reaches 100% at SIX pieces (40% + 6 x 10.3pp = 102%), turning a
-                // chance-on-hit ability into a guarantee. StackCap = 3.0 (three perfect rolls) holds the
-                // cross-item sum to 40% + 3.0 x 10.3pp = 70.9%, well short of a guarantee at any stack depth.
+                // Proc-chance mod: base Acid Proc chance is 30% (class_ability_acidproc_chance_base, flat). Uncapped,
+                // an equipped stack of this magnitude reaches 91.8% at SIX pieces (30% + 6 x 10.3pp), nearly a
+                // guarantee. StackCap = 3.0 (three perfect rolls) holds the cross-item sum to
+                // 30% + 30.9pp = 60.9%, well short of a guarantee at any stack depth.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
                 DisplayFormat = "+{0:0.##}% acid proc chance",
@@ -374,6 +374,21 @@ namespace ACE.Server.EquipmentMods
             },
             new EquipmentModDefinition
             {
+                Id = EquipmentModId.ElementalRendVuln,
+                Property = PropertyFloat.GearModElementalRendVuln,
+                DisplayName = "Elemental Rend",
+                LinkedAbility = ClassAbilityId.ElementalRendVuln,
+                Standalone = false,
+                MaxMagnitude = 0.02,
+                // Proc-chance mod (the returned Elemental Rend; the old pre-Proficiency row restored verbatim under
+                // a new id): capped alongside Acid Proc/Echo Cast/Double Volley/Nether Bloom so an uncapped stack
+                // cannot push a chance-on-hit ability toward a guarantee. 3.0 = three perfect rolls.
+                StackCap = 3.0,
+                HookKind = EquipmentModHookKind.AbilityMachinery,
+                DisplayFormat = "+{0:0.##}% vulnerability proc chance",
+            },
+            new EquipmentModDefinition
+            {
                 Id = EquipmentModId.Resonance,
                 Property = PropertyFloat.GearModResonance,
                 DisplayName = "Resonance",
@@ -452,9 +467,12 @@ namespace ACE.Server.EquipmentMods
                 Property = PropertyFloat.GearModManaBarrier,
                 DisplayName = "Mana Barrier",
                 LinkedAbility = ClassAbilityId.ManaBarrier,
-                Standalone = true,
+                // Not Standalone: the barrier absorbs only for a player who has LEARNED Mana Barrier. GetManaBarrierDivertShare
+                // would fold the mod in at rank 0, but both absorb entry points (AbsorbWithManaBarrier, AbsorbWithManaBarrierDot)
+                // return the damage unchanged unless TryGetClassAbility(ManaBarrier) succeeds, so the mod does nothing untrained.
+                Standalone = false,
                 MaxMagnitude = 0.03,
-                HookKind = EquipmentModHookKind.AbilityCompose,
+                HookKind = EquipmentModHookKind.AbilityMachinery,
                 DisplayFormat = "+{0:0.##}% damage diverted from Health to Mana",
             },
 

@@ -10,11 +10,11 @@ namespace ACE.Server.ThreadDungeons
     /// </summary>
     public sealed class GuideRung
     {
-        /// <summary>The rung's level, which is also the guide fragment's lvl=. 50..375 in steps of 25.</summary>
+        /// <summary>The rung's level, which is also the guide fragment's lvl=. 50..500 in steps of 25.</summary>
         public int Level { get; }
 
         /// <summary>
-        /// The guide fragment's loot tier. Rungs 50..175 carry the owner-ruled tiers and 200..375 follow the
+        /// The guide fragment's loot tier. Rungs 50..175 carry the owner-ruled tiers and 200..500 follow the
         /// shipped Raw Fragment weenies: see the TIER note on <see cref="ThreadGuideLadder"/>. Nullable only
         /// because the type predates the ruling; every shipped rung has a value.
         /// </summary>
@@ -58,20 +58,21 @@ namespace ACE.Server.ThreadDungeons
     }
 
     /// <summary>
-    /// THE Thread-Guide ladder: a compiled table of the fourteen solo guide rungs a Thread-Guide hands out,
-    /// 50, 75, ..., 375, one rung up per win and never reset. Pure, static, no engine state; follows the
+    /// THE Thread-Guide ladder: a compiled table of the nineteen solo guide rungs a Thread-Guide hands out,
+    /// 50, 75, ..., 500, one rung up per win and never reset. Pure, static, no engine state; follows the
     /// DungeonGemFactory.Rungs compiled-table pattern.
     ///
     /// The first six rungs each TEACH one press component type, in the order Scarab, Taper, Herb, Powder,
     /// Talisman, Potion (50..175); that type's aim roll is guaranteed on its rung. Rung 150 also demands and
-    /// guarantees a Taper, since its Talisman needs a modifier to sharpen. Rungs 200..375 are plain.
+    /// guarantees a Taper, since its Talisman needs a modifier to sharpen. Rungs 200..500 are plain.
     ///
     /// TIER. No code rule maps a gem level to a loot tier. The only source for Thread rungs is the tier=
     /// hand-authored into each shipped Raw Fragment weenie's DungeonGemSpec (Content/sql/weenies/1003615..
-    /// 1003629): levels 185..235 carry tier 7, levels 245..375 carry tier 8. The guide rungs at 200..375 take
+    /// 1003632): levels 185..235 carry tier 7, levels 245..500 carry tier 8. The guide rungs at 200..500 take
     /// their tier from that table, and none of them is ambiguous: 200 sits between the tier-7 rungs 195 and
-    /// 205, 250 between the tier-8 rungs 245 and 255, and 225/275/300/325/350/375 are shipped rung levels
-    /// themselves. Below 185 there is no shipped rung and no Thread rule at all, so rungs 50..175 take the
+    /// 205, 250 between the tier-8 rungs 245 and 255, 225/275/300/325/350/375/400/450/500 are shipped rung
+    /// levels themselves, and 425 and 475 sit between the tier-8 rungs 400/450 and 450/500 (the guide
+    /// fragment is built on the rung weenie below the level, DungeonGemFactory.RungWcid). Below 185 there is no shipped rung and no Thread rule at all, so rungs 50..175 take the
     /// tiers the owner ruled for the guide ladder (Thread-Guide chunk 3 spec): 50 = 3, 75 = 4, 100 = 5, 125 = 5, 150 = 6,
     /// 175 = 6. (The only level-to-tier function in the server, LootGenerationFactory_OlthoiPlay.GetTierHeuristic,
     /// is private to Olthoi play and disagrees with the shipped rungs at 245..265, so it is not treated as the
@@ -80,7 +81,7 @@ namespace ACE.Server.ThreadDungeons
     public static class ThreadGuideLadder
     {
         public const int FirstRung = 50;
-        public const int LastRung = 375;
+        public const int LastRung = 500;
         public const int RungStep = 25;
 
         public static readonly IReadOnlyList<GuideRung> Rungs = new[]
@@ -99,6 +100,11 @@ namespace ACE.Server.ThreadDungeons
             new GuideRung(325, 8, null, null),
             new GuideRung(350, 8, null, null),
             new GuideRung(375, 8, null, null),
+            new GuideRung(400, 8, null, null),
+            new GuideRung(425, 8, null, null),
+            new GuideRung(450, 8, null, null),
+            new GuideRung(475, 8, null, null),
+            new GuideRung(500, 8, null, null),
         };
 
         /// <summary>True when <paramref name="level"/> is exactly one of the ladder's rungs.</summary>
@@ -114,9 +120,9 @@ namespace ACE.Server.ThreadDungeons
 
         /// <summary>
         /// The rung to issue next, given the highest rung the player has WON (0 when none): the smallest rung
-        /// strictly above <paramref name="highestWon"/>. So 0 -> 50, n -> n + 25 for any rung n, and 375 ->
+        /// strictly above <paramref name="highestWon"/>. So 0 -> 50, n -> n + 25 for any rung n, and 500 ->
         /// null (the ladder is complete). An off-ladder value is tolerated rather than thrown on - a negative
-        /// reads as 0, 60 reads as "next is 75", anything at or above 375 is complete - because the value
+        /// reads as 0, 60 reads as "next is 75", anything at or above 500 is complete - because the value
         /// comes from persisted player state and a corrupt one must not wedge the NPC.
         /// </summary>
         public static int? NextRung(int highestWon)

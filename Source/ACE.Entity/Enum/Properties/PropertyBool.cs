@@ -301,7 +301,7 @@ namespace ACE.Entity.Enum.Properties
 
         // Marketplace Tinkerer's Inspiration pedestal (WaffleACE, DreamWeave, 2026-08-19): on the Generic
         // pedestal weenie (wcid 1002761), flags it as the use-dispatch target for the free tinkering buff -
-        // GenericObject.ActOnUse -> Entity.TinkerersInspiration.TryHandleUse.
+        // GenericObject.ActOnUse (or Hooker.ActOnUse for the hookable wcid 1002770) -> Entity.TinkerersInspiration.TryHandleUse.
         TinkerersInspiration                = 9037,
 
         // World Events (WaffleACE, DreamWeave, 2026-08-19): on a CREATURE weenie, makes every create_list
@@ -600,5 +600,80 @@ namespace ACE.Entity.Enum.Properties
 
         // Marks a pet that never initiates aggro: it only targets monsters already engaged with its owner or the owner's pets.
         SummonNeverInitiates                  = 9088,
+
+        // Salvage Roller (Docs/SalvageRoller/DESIGN.md 5.1): marks the placed Marketplace station (wcid 1007800,
+        // weenie type 10). WorldObjectFactory builds a SalvageRollerVendor when it is set, ahead of the WeenieType switch: ONE shared
+        // station that serves every player their own panel (per-player views keyed by player guid). A Give to it is
+        // refused with a tell. 9090 (the retired per-player window opt-in) is RETIRED_DO_NOT_REUSE in property-registry.tsv.
+        SalvageRollerStation                  = 9089,
+
+        // Physics opt-in: a NON-creature carrying this keeps PhysicsState.Static on its physics body (and so in the state it
+        // serializes), and is built as a non-dynamic physics object. Without it WorldObject.InitPhysicsObj always drops
+        // Static, because CalculatedPhysicsState reads the Static accessor before the PhysicsObj exists. It matters to
+        // ETHEREAL movers: PhysicsObj.FindObjCollisions lets an ethereal mover pass through any non-Static object, so an
+        // invisible walkable floor (the Pinnacle Ward Plane 1006900) must be Static or summons, which are always
+        // ethereal, fall through it. Ignored on a Creature. Absent is the unchanged path.
+        ForcePhysicsStatic                    = 9091,
+
+        // Cloak Mantle: a bool flag ("true" = set). Set on a cloak by a Mantle, it adds rear-arc shield armor against
+        // PvE attackers; the Mantle gem itself also carries it (CloakMantleApplicator.IsMantle keys on it).
+        CloakRearGuard                        = 9092,
+
+        // Jewelry Aspects (Docs/JewelryAspects/DESIGN.md): a bool flag (true = set) on the Jewelers Aspect Gem weenie; a Gem carrying it runs the
+        // jewelry aspect applicator instead of its normal gem use.
+        JewelryAspectGem                      = 9093,
+
+        // Pattern Exchanger (Docs/Knots/KNOTS-DESIGN.md, Pattern Exchanger): a bool flag (true = set) on the Pattern Exchanger NPC weenie (wcid 1007006); a Give to an NPC carrying it is intercepted and handed to PatternExchangeStation instead of the emote give logic.
+        PatternExchanger                      = 9094,
+
+        // Paragon weapon mods (Paragon 51-55): a bool flag (true = set) on the Paragon reset item weenie. The gem-apply/clear
+        // flow that reads it lands in a later PR.
+        ParagonModReset                       = 9095,
+
+        // Thread Encounters Wandering Peddler: a bool flag (true = set) on the peddler NPC weenie (wcid 1007981). The
+        // weenie stays type 10 (Creature); WorldObjectFactory builds a ThreadPeddlerVendor when it is set, ahead of the
+        // WeenieType switch, so an older image that does not know the flag never builds it as a retail Vendor.
+        ThreadPeddlerVendor                   = 9096,
+
+        // WaffleACE fork (DreamWeave, 2026-11-16): per-character preference, set by the player command
+        // "/summonaggro on|off". ABSENT means OFF. When on, the owner's never-initiates summons (the Archer and
+        // every caster pet) behave like melee pets: they wake monsters, take the nearest monster and keep a target
+        // that is not fighting the owner. Hunter's Echo follows it too (since 2026-11-19): it may shoot a monster
+        // that is not fighting the owner. CombatPet.NeverInitiates reads it live on the pet's tick.
+        SummonAggro                           = 9097,
+
+        // Allegiance Avatar phase 1: a bool flag (true = set) on the Avatar NPC weenie (wcid 1008500). The weenie stays
+        // type 10 (Creature); WorldObjectFactory builds an AvatarVendor when it is set, ahead of the WeenieType switch,
+        // so an older image that does not know the flag never builds it as a retail Vendor.
+        AllegianceAvatarVendor                = 9098,
+
+        // WaffleACE fork (DreamWeave, 2026-11-21): marks the Summoner Sceptre/Baton/Staff caster weenies (Summoner
+        // casters, Docs/SummonerCasters/DESIGN.md). TRUE means the wand is a summoner focus: the wand's own rolled
+        // elemental damage mod and weapon damage mods no longer boost the wielder; the wielder's damage is cut and
+        // the wielder's combat pets get the power instead, read live at each hit (ACE.Server.Entity.SummonerFocus).
+        // Every runtime check reads this flag, never the weenie's damage type (which is Undef).
+        SummonerFocus                         = 9099,
+
+        // Player Facets vault deposit (2026-11-21): per-character preference, set by the player command
+        // "/facet vault on|off". ABSENT means OFF. When on, a facet switch deposits the outgoing facet's gear into
+        // the account vault after the incoming gear is back on (Player.DepositOutgoingFacetGear).
+        FacetVaultDeposit                     = 9100,
+
+        // Allegiance Avatar look: true on a worn piece the Avatar NPC carries for show only (AvatarLookApplier strips it
+        // to cosmetic). Lets combat code exclude it and a guard test assert no such item reaches a player or a save.
+        // 9099 stays free for open PR #2268.
+        AvatarCosmetic                        = 9101,
+
+        // Allegiance Gauntlet: true on the Allegiance Avatar fighter weenie (wcid 1008504). WorldObjectFactory builds a
+        // GauntletAvatarFighter when it is set, ahead of the WeenieType switch (the weenie stays type 71, CombatPet).
+        AllegianceGauntletFighter             = 9102,
+
+        // Allegiance Gauntlet: true on the Gauntlet Gate weenie (wcid 1008505). GenericObject.ActOnUse
+        // dispatches it to GauntletGate.TryHandleUse.
+        AllegianceGauntletGate                = 9103,
+
+        // Allegiance Gauntlet (Task 12): true on the Gauntlet reward cache weenie (wcid 1008506). GenericObject.ActOnUse dispatches it to
+        // GauntletCacheHandler.TryHandleUse. The crate it pays is wcid 1008507, a World Event reward crate stamped with a gauntlet_tN profile.
+        AllegianceGauntletCache               = 9104,
     }
 }

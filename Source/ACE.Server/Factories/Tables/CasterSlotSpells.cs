@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 
 using ACE.Entity.Enum;
+using ACE.Server.Entity;
 using ACE.Server.Factories.Entity;
 using ACE.Server.WorldObjects;
 
@@ -80,7 +81,8 @@ namespace ACE.Server.Factories.Tables
             // deliberately (widening it would change behaviour for existing retail orbs, a separate
             // decision); with the Health case below, the Sanguine Orb falls through to lifeSpells, which
             // is the correct table for it anyway, so this is not a functional gap.
-            var table = IsOrb(wo) ? orbSpells :
+            // fork addition (Summoner casters): a focus takes the support/orb table (owner ruling 2026-11-21)
+            var table = IsOrb(wo) || SummonerFocus.IsSummonerFocus(wo) ? orbSpells :
                 wo.W_DamageType == DamageType.Nether ? netherSpells :
                 wo.W_DamageType == DamageType.Health ? lifeSpells : wandStaffSpells;
 

@@ -4,6 +4,7 @@ using System.Linq;
 
 using ACE.Entity.Models;
 using ACE.Server.ClassAbilities.Abilities;
+using ACE.Server.Entity;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.WeaponMods
@@ -112,6 +113,12 @@ namespace ACE.Server.WeaponMods
         /// time. That keeps the roll's inputs frozen where they belong - a weapon's effect cannot shift because
         /// its workmanship property was edited afterwards - and keeps this path off
         /// <see cref="WorldObject.Workmanship"/>, whose getter can WRITE to the item on malformed data.
+        ///
+        /// SUMMONER FOCUS STRIP (Docs/SummonerCasters/DESIGN.md "Weapon mods on a Summoner caster"). Returns 0
+        /// for a damage mod the focus sends to its wielder's combat pets (<see cref="SummonerFocus.IsWielderStrippedMod"/>),
+        /// so the wielder never gets it. Every wielder read of a Tier B mod reaches this overload, which is why the
+        /// strip lives here and at no individual hook site. The pets read the same value through
+        /// <see cref="ReadFocusModForPets"/>, which skips the strip.
         /// </summary>
         public static double ReadWeaponOnly(WorldObject weapon, WeaponModId modId, bool enabled, double scale)
         {
@@ -121,13 +128,41 @@ namespace ACE.Server.WeaponMods
             if (!WeaponModRegistry.TryGet(modId, out var definition) || definition.Tier != WeaponModTier.B)
                 return 0.0;
 
-            var fraction = weapon.GetProperty(definition.Record);
+            if (SummonerFocus.IsWielderStrippedMod(weapon, definition))
+                return 0.0;
 
-            if (fraction == null || double.IsNaN(fraction.Value) || fraction.Value <= 0.0)
+            return ReadCore(weapon, definition, modId, scale);
+        }
+
+        /// <summary>
+        /// The pets' read of a Tier B mod on their owner's Summoner focus: the same read as
+        /// <see cref="ReadWeaponOnly(WorldObject, WeaponModId, bool, double)"/> at the live gate and scale, Paragon
+        /// fraction included, with the Summoner focus strip bypassed. Per-owner suppression is NOT applied here;
+        /// <see cref="SummonerFocus.PetFocusModValue"/> applies it against the owner. Only SummonerFocus calls this.
+        /// </summary>
+        internal static double ReadFocusModForPets(WorldObject focus, WeaponModId modId)
+        {
+            if (!WeaponModRegistry.Enabled() || focus == null)
+                return 0.0;
+
+            if (!WeaponModRegistry.TryGet(modId, out var definition) || definition.Tier != WeaponModTier.B)
+                return 0.0;
+
+            return ReadCore(focus, definition, modId, WeaponModValue.MagnitudeScale());
+        }
+
+        /// <summary>The record-plus-Paragon fraction resolved to a magnitude; the gate, tier and strip are the callers' job.</summary>
+        private static double ReadCore(WorldObject weapon, WeaponModDefinition definition, WeaponModId modId, double scale)
+        {
+            // Paragon weapon mods: the Tourmaline record plus the Paragon gems for this id, clamped at a perfect
+            // roll (1.0). A Paragon-only mod (no record) still reads, so an absent record is not an early exit.
+            var fraction = WeaponModParagon.CombinedFraction(weapon.GetProperty(definition.Record), WeaponModParagon.ParagonFraction(weapon, modId));
+
+            if (fraction <= 0.0)
                 return 0.0;
 
             // the weapon is the carrier, so a per-item ceiling (Defensive Weapon) resolves against it
-            return WeaponModValue.MagnitudeFromFraction(definition, fraction.Value, scale, weapon);
+            return WeaponModValue.MagnitudeFromFraction(definition, fraction, scale, weapon);
         }
 
         // ---------------- conditions ----------------
@@ -235,6 +270,28 @@ namespace ACE.Server.WeaponMods
                 return false;
 
             return distanceSq <= PanicReloadRangeSq;
+        }
+
+        /// <summary>
+        /// TRUE when a death's killing blow pays the killer's PET OWNER the three utility on-kill weapon mods
+        /// (Second Wind, Mana Well, Cleanse - Player.ApplyWeaponModCreatureDeath). Pure, so the rule is testable
+        /// without a live pet, owner or landblock; Creature.OnDeath reads the world into these bools.
+        ///
+        /// The branch is for a COMBAT PET's killing blow only: a Player killer takes the ordinary killing-player
+        /// path and never this one, so a single death cannot pay twice. <paramref name="killerWasCombatPet"/> is
+        /// whether the killing blow's DamageHistoryInfo carries a PetOwner, which is fixed when the hit is
+        /// recorded and does not depend on the pet still existing when the victim dies. An ownerless pet (no
+        /// owner, or the owner's weak reference collected) pays nobody. A victim that is a Player or a Pet pays
+        /// nothing, the same exclusions the killing-player path owns: a summon killing a player is PvP and gives
+        /// the owner nothing. Nothing else (class abilities, kill-fill vessels, mule tokens, damage mods) is ever
+        /// routed by this.
+        /// </summary>
+        public static bool PetKillPaysOwner(bool killerIsPlayer, bool killerWasCombatPet, bool ownerResolved, bool victimIsPlayer, bool victimIsPet)
+        {
+            if (killerIsPlayer || !killerWasCombatPet || !ownerResolved)
+                return false;
+
+            return !victimIsPlayer && !victimIsPet;
         }
 
         /// <summary>

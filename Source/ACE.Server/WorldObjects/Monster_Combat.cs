@@ -10,7 +10,9 @@ using ACE.DatLoader.FileTypes;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
+using ACE.Server.ClassAbilities.Abilities;
 using ACE.Server.Entity;
+using ACE.Server.Managers;
 using ACE.Server.MonsterEffects;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
@@ -93,12 +95,54 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// Selects a random attack height for the next attack
+        /// Selects a random attack height for the next attack. Medium when there is nothing to choose from: a creature
+        /// whose combat table was never loaded (AttackHeights is null until GetCombatTable runs, which only
+        /// GetNextAttackType and GamePiece do) or that lists no maneuvers. The Hunter's Echo is one - its tick sets
+        /// CurrentAttack itself and never calls GetNextAttackType, so every LaunchMissile used to throw here
+        /// (2026-11-10, stage). Unchanged for every creature with a loaded, non-empty table.
         /// </summary>
-        public AttackHeight ChooseAttackHeight()
+        public AttackHeight ChooseAttackHeight() => ChooseAttackHeight(AttackHeights);
+
+        /// <summary>The pick behind <see cref="ChooseAttackHeight()"/>, pure over its list: Medium for a null or empty one.</summary>
+        internal static AttackHeight ChooseAttackHeight(List<AttackHeight> attackHeights)
         {
-            var rng = ThreadSafeRandom.Next(0, AttackHeights.Count - 1);
-            return AttackHeights[rng];
+            if (attackHeights == null || attackHeights.Count == 0)
+                return ACE.Entity.Enum.AttackHeight.Medium;
+
+            var rng = ThreadSafeRandom.Next(0, attackHeights.Count - 1);
+            return attackHeights[rng];
+        }
+
+        /// <summary>
+        /// Test seam for the class_ability_taunt_cast_chance_mult read. PropertyManager reads throw in the
+        /// unit-test host on a cache miss, so the default reader falls back to 0.5.
+        /// </summary>
+        internal static Func<double> TauntCastChanceMultReader = () =>
+        {
+            try { return PropertyManager.GetDouble("class_ability_taunt_cast_chance_mult", 0.5, false).Item; }
+            catch { return 0.5; }
+        };
+
+        /// <summary>
+        /// Pure decision for the Taunt cast-chance gate. Not held: always passes and neither the multiplier
+        /// reader nor the roll is invoked. Held: passes when roll (uniform [0,1)) is below the multiplier clamped to [0,1].
+        /// </summary>
+        internal static bool PassesTauntCastGate(bool held, Func<double> multReader, Func<double> roll)
+        {
+            if (!held)
+                return true;
+
+            var m = TauntAbility.CastChanceMultiplier(multReader());
+            return roll() < m;
+        }
+
+        /// <summary>
+        /// A taunted monster is class_ability_taunt_cast_chance_mult (default 0.5) as likely to cast. A coin flip
+        /// ahead of the spell roll scales P(cast) exactly. Untaunted monsters draw no random number here.
+        /// </summary>
+        internal bool PassesTauntCastGate()
+        {
+            return PassesTauntCastGate(IsTauntHeld, TauntCastChanceMultReader, () => ThreadSafeRandom.Next(0.0f, 1.0f));
         }
 
         public CombatType GetNextAttackType()
@@ -107,7 +151,7 @@ namespace ACE.Server.WorldObjects
                 GetCombatTable();
 
             // if caster, roll for spellcasting chance
-            if (HasKnownSpells && TryRollSpell())
+            if (HasKnownSpells && PassesTauntCastGate() && TryRollSpell())
                 return CombatType.Magic;
 
             if (IsRanged)
@@ -237,7 +281,7 @@ namespace ACE.Server.WorldObjects
                 return GetMaxMissileRange();
             }
             else
-                return MaxMeleeRange;   // distance_to_target?
+                return MeleeRange;   // distance_to_target? (retail MaxMeleeRange unless a Pinnacle reach is set)
         }
 
         public bool MoveReady()
@@ -444,6 +488,14 @@ namespace ACE.Server.WorldObjects
             // field read for every creature that is not a knight.
             amount = ACE.Server.WorldEvents.WorldEventHooks.ScaleHoldKnightHit(this, source, amount);
 
+            // Summoner casters (Docs/SummonerCasters/DESIGN.md): the live focus multiplier, read at the hit
+            if (amount > 0.0f)
+                amount *= SummonerFocus.HitMod(source, this);
+
+            // Allegiance Gauntlet: the Avatar fighter's damage intake cap (max health over fighter_min_death_seconds), the
+            // first of its three damage paths. Unchanged after one type test for every other creature.
+            amount = ACE.Server.Avatars.Gauntlet.GauntletAvatarFighter.CapGauntletFighterHit(this, amount);
+
             var tryDamage = (int)Math.Round(amount);
 
             // monster combat effects: incoming-damage filters (a ward subtracting, a reflect answering) get
@@ -479,6 +531,11 @@ namespace ACE.Server.WorldObjects
                     damagingPet.NotifyOwnerOfDamage(this, damage);
                     damagingPet.ApplyUmbralSiphonLeech(damage);
                     damagingPet.ApplyEmpoweredSummonsLeech(damage);
+
+                    // Summoner casters: a pet's landed melee or missile strike (DirectHit, never a tick or a proc) rolls its
+                    // owner's focus Siphon once; the pet's spell half is in SpellProjectile
+                    if (origin == IncomingDamageOrigin.DirectHit && damage > 0 && damagingPet is CombatPet siphonPet)
+                        SummonerFocus.TryPetSiphon(siphonPet, this);
                 }
             }
             else if (P_PendingThreadDotTick != null)

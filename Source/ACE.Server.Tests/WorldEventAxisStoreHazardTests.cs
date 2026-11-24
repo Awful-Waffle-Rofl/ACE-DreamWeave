@@ -55,6 +55,53 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0, HazardDiagnostics(store));
         }
 
+        [TestMethod]
+        public void Kinds_AreKept_NormalisedAndDeduplicated()
+        {
+            var store = Load(Source(@"{ ""kind"": ""wisps"", ""kinds"": ["" Wisps "", ""BALLS"", ""wisps""] }"));
+
+            CollectionAssert.AreEqual(new[] { "wisps", "balls" }, store.Sources["plain"].Hazard.Kinds.ToArray());
+            Assert.AreEqual(0, HazardDiagnostics(store));
+        }
+
+        [DataTestMethod]
+        [DataRow(@"[""wisps"", ""meteors""]")]
+        [DataRow(@"[""random""]")]
+        [DataRow(@"[""none"", ""balls""]")]
+        [DataRow(@"[""wisps"", null]")]
+        public void BadKinds_AreDropped_WithADiagnostic_TheBlockIsKept(string kindsJson)
+        {
+            var store = Load(Source(@"{ ""kind"": ""wisps"", ""kinds"": " + kindsJson + @" }"));
+            var h = store.Sources["plain"].Hazard;
+
+            Assert.IsNotNull(h, "a bad kinds list drops the list, not the block");
+            Assert.AreEqual("wisps", h.Kind);
+            Assert.IsNull(h.Kinds);
+            Assert.AreEqual(1, HazardDiagnostics(store));
+            Assert.IsTrue(store.Diagnostics.Any(d => d.Contains("plain") && d.Contains("kinds")));
+        }
+
+        [TestMethod]
+        public void KindNone_WithKinds_IgnoresThem_WithADiagnostic()
+        {
+            var store = Load(Source(@"{ ""kind"": ""none"", ""kinds"": [""wisps"", ""balls""] }"));
+            var h = store.Sources["plain"].Hazard;
+
+            Assert.AreEqual("none", h.Kind);
+            Assert.IsNull(h.Kinds);
+            Assert.AreEqual(1, HazardDiagnostics(store));
+            Assert.IsTrue(store.Diagnostics.Any(d => d.Contains("plain") && d.Contains("kinds are ignored")));
+        }
+
+        [TestMethod]
+        public void EmptyKinds_IsTreatedAsAbsent_NoDiagnostic()
+        {
+            var store = Load(Source(@"{ ""kind"": ""wisps"", ""kinds"": [] }"));
+
+            Assert.IsNull(store.Sources["plain"].Hazard.Kinds);
+            Assert.AreEqual(0, HazardDiagnostics(store));
+        }
+
         [DataTestMethod]
         [DataRow("wisps")]
         [DataRow("balls")]
@@ -155,6 +202,7 @@ namespace ACE.Server.Tests
                 var h = store.Sources["element_portal_" + element].Hazard;
 
                 Assert.AreEqual("wisps", h.Kind, element);
+                CollectionAssert.AreEqual(new[] { "wisps", "balls" }, h.Kinds.ToArray(), element);
                 Assert.AreEqual(element, h.Element, element);
             }
 

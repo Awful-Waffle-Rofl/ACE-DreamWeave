@@ -323,10 +323,11 @@ namespace ACE.Server.Tests
             var t = WorldEventHoldTuning.From(WorldEventHoldSettingsResolver.Resolve(goal, _ => null), goal, 1);
 
             // Knights (protect.*).
-            Assert.AreEqual(200.0, t.UndefendedSecondsBase);
-            Assert.AreEqual(65.0, t.UndefendedSecondsPerParticipant);
-            Assert.AreEqual(100.0, t.UndefendedSecondsFloor);
-            Assert.AreEqual(200.0, t.UndefendedSeconds, "one participant: no reduction");
+            Assert.AreEqual(240.0, t.UndefendedSecondsBase);
+            Assert.AreEqual(0.0, t.UndefendedSecondsPerParticipant, "durability replaced the per-participant shrink");
+            Assert.AreEqual(0.0, t.UndefendedSecondsFloor);
+            Assert.AreEqual(240.0, t.UndefendedSeconds, "one participant: no durability");
+            Assert.AreEqual(1.0, t.KnightDurability, "one participant: D = 1");
             Assert.AreEqual(60.0, t.MinDeathSeconds);
             Assert.AreEqual(1, t.MinSurvivors);
             Assert.AreEqual(480.0, t.HoldSeconds);
@@ -334,7 +335,7 @@ namespace ACE.Server.Tests
             // Healing.
             Assert.AreEqual(0.5, t.HealReductionAfterHit);
             Assert.AreEqual(5.0, t.HealReductionSeconds);
-            Assert.AreEqual(0.35, t.HealBudgetPerWave);
+            Assert.AreEqual(0.30, t.HealBudgetPerWave);
             Assert.AreEqual(0.01, t.RescueHeal);
             Assert.AreEqual(0.1, t.RescueCapPerWave);
             Assert.AreEqual(0.1, t.CorruptedKillHeal);
@@ -413,12 +414,184 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void Tuning_From_UndefendedSeconds_ShrinksPerParticipant_DownToTheFloor()
         {
+            // The shrink is driven by explicit overrides (the shipped goal no longer uses it); durability is zeroed so only the shrink shows.
             var goal = DefendEnvoys();
-            var settings = WorldEventHoldSettingsResolver.Resolve(goal, _ => null);
+            var props = new Dictionary<string, string>
+            {
+                [K.PropertyPrefix + K.UndefendedSeconds] = "200",
+                [K.PropertyPrefix + K.UndefendedSecondsPerParticipant] = "65",
+                [K.PropertyPrefix + K.UndefendedSecondsFloor] = "100",
+                [K.PropertyPrefix + K.KnightDurabilityPerParticipant] = "0",
+            };
+            var settings = Resolver(props)(goal);
 
             Assert.AreEqual(135.0, WorldEventHoldTuning.From(settings, goal, 2).UndefendedSeconds, "200 - 65");
             Assert.AreEqual(100.0, WorldEventHoldTuning.From(settings, goal, 3).UndefendedSeconds, "200 - 130 = 70, floored at 100");
             Assert.AreEqual(200.0, WorldEventHoldTuning.From(settings, goal, 0).UndefendedSeconds, "below 1 counts as 1");
+        }
+
+        // ---- group-scaled knight durability ---------------------------------------------------------------------------
+
+        [TestMethod]
+        public void ProtectDef_Durability_RampsPerParticipant_ThenCaps_NeverBelowOne()
+        {
+            var p = new ProtectDef { DurabilityPerParticipant = 0.12, DurabilityCap = 2.8 };
+
+            Assert.AreEqual(1.0, p.Durability(1), 1e-9);
+            Assert.AreEqual(1.12, p.Durability(2), 1e-9);
+            Assert.AreEqual(2.8, p.Durability(16), 1e-9, "1 + 0.12 x 15 = 2.8, exactly at the cap");
+            Assert.AreEqual(2.8, p.Durability(30), 1e-9, "capped");
+            Assert.AreEqual(1.0, p.Durability(0), 1e-9, "below 1 counts as 1");
+            Assert.AreEqual(1.0, p.Durability(-5), 1e-9);
+
+            Assert.AreEqual(1.0, new ProtectDef().Durability(30), 1e-9, "defaults: no scaling");
+            Assert.AreEqual(1.0, new ProtectDef { DurabilityPerParticipant = -1, DurabilityCap = 5 }.Durability(30), 1e-9, "negative per-participant never shrinks");
+            Assert.AreEqual(1.0, new ProtectDef { DurabilityPerParticipant = 0.5, DurabilityCap = 0.5 }.Durability(30), 1e-9, "a cap below 1 reads as 1");
+            Assert.AreEqual(1.0, new ProtectDef { DurabilityPerParticipant = 0, DurabilityCap = 9 }.Durability(30), 1e-9, "zero per-participant");
+            Assert.AreEqual(1.0, ProtectDef.Durability(double.NaN, 3, 10), 1e-9, "unusable input is no scaling");
+        }
+
+        [TestMethod]
+        public void Tuning_From_DefendEnvoys_TwentyParticipants_UsesDurability()
+        {
+            var goal = DefendEnvoys();
+            var t = WorldEventHoldTuning.From(WorldEventHoldSettingsResolver.Resolve(goal, _ => null), goal, 20);
+
+            Assert.AreEqual(2.8, t.KnightDurability, 1e-9, "1 + 0.12 x 19 = 3.28, capped at 2.8");
+            Assert.AreEqual(672.0, t.UndefendedSeconds, 1e-9, "240 x 2.8");
+            Assert.AreEqual(168.0, t.MinDeathSeconds, 1e-9, "60 x 2.8");
+            Assert.AreEqual(140.0, t.FinaleMinKillSeconds, 1e-9, "50 x 2.8");
+
+            // Passive heals are divided by D; player-driven healing is not.
+            Assert.AreEqual(0.15 / 2.8, t.ShrineHeal, 1e-9);
+            Assert.AreEqual(0.01 / 2.8, t.RescueHeal, 1e-9);
+            Assert.AreEqual(0.10 / 2.8, t.RescueCapPerWave, 1e-9);
+            Assert.AreEqual(0.005 / 2.8, t.RegenPerSecond, 1e-9);
+            Assert.AreEqual(0.10 / 2.8, t.HealBetweenWaves, 1e-9);
+            Assert.AreEqual(0.10 / 2.8, t.CorruptedKillHeal, 1e-9);
+
+            var solo = WorldEventHoldTuning.From(WorldEventHoldSettingsResolver.Resolve(goal, _ => null), goal, 1);
+            Assert.AreEqual(0.30, t.HealBudgetPerWave, 1e-9, "heal_budget_per_wave is not divided");
+            Assert.AreEqual(solo.HealBudgetPerWave, t.HealBudgetPerWave);
+            Assert.AreEqual(solo.PlayerHealCap, t.PlayerHealCap, "maxHealPerTenSeconds is not divided");
+            Assert.AreEqual(solo.PlayerHealMult, t.PlayerHealMult, "player_heal_mult is not divided");
+            Assert.AreEqual(solo.HealReductionAfterHit, t.HealReductionAfterHit);
+            Assert.AreEqual(0.15, solo.ShrineHeal, 1e-9, "one participant: D = 1, the goal's own shares");
+            Assert.AreEqual(0.005, solo.RegenPerSecond, 1e-9);
+
+            var five = WorldEventHoldTuning.From(WorldEventHoldSettingsResolver.Resolve(goal, _ => null), goal, 5);
+            Assert.AreEqual(1.48, five.KnightDurability, 1e-9);
+            Assert.AreEqual(240.0 * 1.48, five.UndefendedSeconds, 1e-9);
+            Assert.AreEqual(60.0 * 1.48, five.MinDeathSeconds, 1e-9);
+        }
+
+        [TestMethod]
+        public void KnightHit_AtTwentyParticipants_SliceAndCapUseTheDurableTuning()
+        {
+            var goal = DefendEnvoys();
+            var run = new FakeHoldRunView(61) { Tuning = HoldFixtures.Tuning(new Dictionary<string, string>(), goal, 20) };
+            var knight = HoldFixtures.Tagged(run, HoldUnitKind.Knight);
+            var monster = HoldFixtures.Tagged(run, HoldUnitKind.Monster);
+            var max = knight.Health.MaxValue;
+
+            Assert.AreEqual((float)Math.Round(max * 2.0 / 672), knight.ScaleHoldKnightHit(monster, 7f, 1000), "first hit: 2 s of attacking, sized to 672 s");
+        }
+
+        [TestMethod]
+        public void KnightHit_AtTwentyParticipants_ManyAttackers_TotalIsBoundedByTheDurableMinDeathRate()
+        {
+            var goal = DefendEnvoys();
+            var run = new FakeHoldRunView(62) { Tuning = HoldFixtures.Tuning(new Dictionary<string, string>(), goal, 20) };
+            var knight = HoldFixtures.Tagged(run, HoldUnitKind.Knight);
+            var max = (double)knight.Health.MaxValue;
+            var attackers = Enumerable.Range(0, 20).Select(_ => HoldFixtures.Tagged(run, HoldUnitKind.Monster)).ToList();
+
+            const double start = 1000;
+            var now = start;
+            double total = 0;
+
+            for (var round = 0; round < 40; round++)
+                foreach (var a in attackers)
+                {
+                    total += knight.ScaleHoldKnightHit(a, 7f, now);
+                    now += 0.05;
+                }
+
+            var elapsed = now - start;
+            var bound = max / 168.0 * elapsed + max / 168.0 * run.Tuning.CapBurstSeconds;
+
+            Assert.IsTrue(total <= bound + 20, $"total {total} must stay under max/168 x elapsed + burst = {bound} (max/60 would allow {max / 60.0 * elapsed})");
+            Assert.IsTrue(total >= bound * 0.8, $"the cap, not the demand, should be what limits it: total {total}, bound {bound}");
+        }
+
+        [TestMethod]
+        public void KnightHit_AtTwentyParticipants_FinaleBoss_SliceUsesTheDurableMinKill()
+        {
+            var goal = DefendEnvoys();
+            var run = new FakeHoldRunView(63)
+            {
+                // min_death_seconds 0 takes the shared knight bucket out, so the boss's own slice and bucket are what is measured.
+                Tuning = HoldFixtures.Tuning(new Dictionary<string, string> { [K.FinaleTarget] = ProtectDef.FinaleTargetNpcs, [K.MinDeathSeconds] = "0" }, goal, 20)
+            };
+            run.EnrageMult = 1.0;
+
+            var knight = HoldFixtures.Tagged(run, HoldUnitKind.Knight);
+            var boss = HoldFixtures.Tagged(run, HoldUnitKind.FinaleBoss);
+            var max = knight.Health.MaxValue;
+
+            Assert.IsTrue(run.Tuning.FinaleTargetsKnights);
+            Assert.AreEqual((float)Math.Round(max * 2.0 / 140), knight.ScaleHoldKnightHit(boss, 7f, 1000), 1.0, "first boss hit: 2 s sized to 50 x 2.8 = 140 s");
+        }
+
+        [TestMethod]
+        public void Run_Refresh_RecomputesDurability_FromTheLiveParticipantCount()
+        {
+            var run = new WorldEventHoldRun(7, Resolver(new Dictionary<string, string>()));
+            run.Stage(DefendEnvoys(), 1, 1000);
+
+            Assert.AreEqual(1.0, run.Tuning.KnightDurability, 1e-9);
+            Assert.AreEqual(240.0, run.Tuning.UndefendedSeconds, 1e-9);
+
+            run.SetParticipantCount(20);
+            Assert.IsTrue(run.Refresh(1001.1));
+            Assert.AreEqual(2.8, run.Tuning.KnightDurability, 1e-9);
+            Assert.AreEqual(672.0, run.Tuning.UndefendedSeconds, 1e-9);
+
+            run.SetParticipantCount(5);
+            Assert.IsTrue(run.Refresh(1002.2));
+            Assert.AreEqual(1.48, run.Tuning.KnightDurability, 1e-9);
+        }
+
+        [TestMethod]
+        public void Tuning_From_NoGoal_AndThreadDefense_KeepDurabilityAtOne()
+        {
+            var t = WorldEventHoldTuning.From(WorldEventHoldSettingsResolver.Resolve(null, _ => null), null, 20);
+            Assert.AreEqual(1.0, t.KnightDurability);
+
+            var defense = ThreadDefenseHoldView.BuildTuning(240, 45);
+            Assert.AreEqual(1.0, defense.KnightDurability);
+            Assert.AreEqual(240.0, defense.UndefendedSeconds);
+            Assert.AreEqual(45.0, defense.MinDeathSeconds);
+            Assert.AreEqual(WorldEventHoldTuning.Defaults.FinaleMinKillSeconds, defense.FinaleMinKillSeconds);
+            Assert.AreEqual(WorldEventHoldTuning.Defaults.ShrineHeal, defense.ShrineHeal, "Thread Defense heals are not divided");
+            Assert.AreEqual(WorldEventHoldTuning.Defaults.RescueHeal, defense.RescueHeal);
+            Assert.AreEqual(WorldEventHoldTuning.Defaults.RegenPerSecond, defense.RegenPerSecond);
+            Assert.AreEqual(WorldEventHoldTuning.Defaults.HealBetweenWaves, defense.HealBetweenWaves);
+            Assert.AreEqual(WorldEventHoldTuning.Defaults.CorruptedKillHeal, defense.CorruptedKillHeal);
+        }
+
+        [TestMethod]
+        public void Tuning_From_DurabilitySettings_OverrideTheGoal()
+        {
+            var goal = DefendEnvoys();
+            var props = new Dictionary<string, string>
+            {
+                [K.PropertyPrefix + K.KnightDurabilityPerParticipant] = "0.5",
+                [K.PropertyPrefix + K.KnightDurabilityCap] = "2",
+            };
+
+            var t = WorldEventHoldTuning.From(Resolver(props)(goal), goal, 4);
+            Assert.AreEqual(2.0, t.KnightDurability, 1e-9, "1 + 0.5 x 3 = 2.5, capped at 2");
         }
 
         [TestMethod]

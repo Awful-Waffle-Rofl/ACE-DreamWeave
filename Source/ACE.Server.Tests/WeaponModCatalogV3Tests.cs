@@ -16,7 +16,7 @@ namespace ACE.Server.Tests
 {
     /// <summary>
     /// The v3 weapon-mod catalog expansion (2026-08-06): six new Tier B rows - Heft, Tension, Leverage,
-    /// Attunement, Focus, Execution - plus the CHANGE 2 retune of Quickening, Ambush, DefaultMinPotency and
+    /// Attunement, Precision, Execution - plus the CHANGE 2 retune of Quickening, Ambush, DefaultMinPotency and
     /// the special-chance/guarantee tunables.
     ///
     /// ALL SIX ARE TIER B, NOT TIER A. The original same-day draft shipped Heft/Tension/Leverage/Attunement as
@@ -24,14 +24,14 @@ namespace ACE.Server.Tests
     /// directly), which collided with the structural invariant that no Tier A special may share a native with
     /// a layer 1 tinker material - all three natives are already owned by Iron, Mahogany and Green Garnet
     /// respectively (see WeaponModInteractionTests.Registry_NoSpecialSharesANativePropertyWithALayerOneMaterial).
-    /// Focus/Execution were blocked from the start for a different collision, with the HARD "crit routes
+    /// Precision/Execution were blocked from the start for a different collision, with the HARD "crit routes
     /// through ratings" invariant. Routing all six through Tier B - no native property, read live at combat
     /// time - resolves both: see WeaponModRegistry.cs's Tier B v3 remarks for the hook sites.
     ///
     /// WHAT IS COVERED HERE: the registry shape of all six rows, and the four combat-time hooks that are
     /// reachable without a live Player/session - BaseDamageMod's constructor (Heft, Tension, Leverage),
     /// GetCasterElementalDamageModifier (Attunement) and GetWeaponCriticalChance / GetWeaponMagicCritFrequency
-    /// (Focus), all static and callable against TestCreatures' bare Creature objects.
+    /// (Precision), all static and callable against TestCreatures' bare Creature objects.
     ///
     /// WHAT IS NOT: Execution's hooks (DamageEvent.cs and SpellProjectile.cs) run deep inside the live combat
     /// resolution path (DamageEvent's constructor needs a full attacker/defender/weapon triple with body parts
@@ -70,7 +70,7 @@ namespace ACE.Server.Tests
             return new Clothing(weenie, new ObjectGuid(nextGuid++));
         }
 
-        /// <summary>A bare Caster weapon (wand), needed for the Attunement/Focus magic-side hooks.</summary>
+        /// <summary>A bare Caster weapon (wand), needed for the Attunement/Precision magic-side hooks.</summary>
         private static WorldObject MakeCasterWeapon(DamageType damageType)
         {
             var weenie = new Weenie
@@ -118,7 +118,7 @@ namespace ACE.Server.Tests
             (WeaponModId.Tension,    "Tension",    PropertyFloat.WeaponModTension,    0.50, WeaponClass.Missile),
             (WeaponModId.Leverage,   "Leverage",   PropertyFloat.WeaponModLeverage,   0.30, WeaponClass.Melee),
             (WeaponModId.Attunement, "Attunement", PropertyFloat.WeaponModAttunement, 0.28, WeaponClass.Caster),
-            (WeaponModId.Focus,      "Focus",      PropertyFloat.WeaponModFocus,      0.25, WeaponClass.All),
+            (WeaponModId.Focus,      "Precision",  PropertyFloat.WeaponModFocus,      0.25, WeaponClass.All),
             (WeaponModId.Execution,  "Execution",  PropertyFloat.WeaponModExecution,  0.50, WeaponClass.All),
         };
 
@@ -156,7 +156,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(18, WeaponModRegistry.TierBMods.Count, "three surviving v2 rows plus six v3 rows plus nine v4 rows");
         }
 
-        /// <summary>Neither Focus nor Execution ever writes the retail crit properties - the invariant they were blocked over.</summary>
+        /// <summary>Neither Precision nor Execution ever writes the retail crit properties - the invariant they were blocked over.</summary>
         [TestMethod]
         public void CatalogV3_NeitherFocusNorExecutionWritesTheRetailCritProperties()
         {
@@ -377,7 +377,7 @@ namespace ACE.Server.Tests
             }
         }
 
-        // ================= combat hooks: crit chance (Focus) =================
+        // ================= combat hooks: crit chance (Precision) =================
 
         [TestMethod]
         public void Hook_FocusAddsToPhysicalCritChanceAfterTheImbueMax()
@@ -396,7 +396,7 @@ namespace ACE.Server.Tests
                 WithGate(false, () => off = WorldObject.GetWeaponCriticalChance(weapon, wielder, skill, target));
                 WithGate(true, () => on = WorldObject.GetWeaponCriticalChance(weapon, wielder, skill, target));
 
-                Assert.AreEqual(on - off, 0.20f, 1e-3f, "the gate-on/gate-off delta must be exactly Focus's magnitude");
+                Assert.AreEqual(on - off, 0.20f, 1e-3f, "the gate-on/gate-off delta must be exactly Precision's magnitude");
             }
             finally
             {
@@ -423,7 +423,7 @@ namespace ACE.Server.Tests
                 WithGate(true, () => on = WorldObject.GetWeaponMagicCritFrequency(wand, wielder, skill, target));
 
                 Assert.AreEqual(on - off, 0.20f, 1e-3f,
-                    "Focus must fire on the MAGIC crit-chance function too, not just the physical one - it is Caster-eligible and GetWeaponCriticalChance is never reached by a spell cast");
+                    "Precision must fire on the MAGIC crit-chance function too, not just the physical one - it is Caster-eligible and GetWeaponCriticalChance is never reached by a spell cast");
             }
             finally
             {

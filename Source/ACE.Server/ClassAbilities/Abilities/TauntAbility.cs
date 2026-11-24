@@ -24,9 +24,10 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// THE CLOAK TRIGGER WAS ADDED 2026-09-29 AND REUSES THE EXISTING IItemProcAbility HOOK rather than a new
     /// one. Cloak procs resolve entirely inside ACE.Server.Entity.Cloak and never touched
     /// WorldObject.TryProcItem, so Cloak.TryProcSpell now calls Player.OnClassAbilityItemProc(cloak) on its
-    /// success path. Routing it through the existing hook is safe precisely because this class is the ONLY
-    /// implementor of IItemProcAbility, so no other handler can pick up the new source; the filter in
-    /// <see cref="TriggersOn"/> is what keeps it honest if that ever stops being true.
+    /// success path. Routing it through the existing hook was safe because this class was then the ONLY
+    /// implementor of IItemProcAbility. Since 2026-11-10 Hunter's Echo (Archer T3) is the second one, and it
+    /// rides EXACTLY these two sources by calling <see cref="TriggersOn"/> itself, so the filter here is now
+    /// the shared allowlist for both handlers: widening it widens Hunter's Echo too.
     /// </summary>
     public class TauntAbility : IItemProcAbility, ITestableClassAbility, IAbilityReadout
     {
@@ -43,9 +44,21 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "taunt",
             DisplayName = "Taunt",
-            Description = "When one of your equipped Aetheria surges, or your equipped cloak fires its spell " +
-                          "proc, all monsters within 15/30/65 meters (by rank) are taunted into attacking you " +
-                          "for a short time.",
+            // Live text: the radius is class_ability_taunt_radius_r1/_r2/_r3, one key per rank (RadiusForRank). "As likely to cast"
+            // is class_ability_taunt_cast_chance_mult (Monster_Combat.PassesTauntCastGate), shown as a percent: it read "half"
+            // (the 0.5 default) before, a word that went stale on a retune.
+            DescriptionTemplate = "When one of your Aetheria surges or your cloak fires its spell proc, monsters near you are " +
+                          "taunted into attacking you for a short time, and are only {fn:cast_chance@max|pct}% as likely to cast " +
+                          "spells while taunted.",
+            // cast_chance is TauntAbility.CastChanceMultiplier, the clamp to [0, 1] Monster.PassesTauntCastGate applies to the tunable.
+            TextFormulas = new Dictionary<string, TextFormula>
+            {
+                ["cast_chance"] = new TextFormula(
+                    (values, rank) => CastChanceMultiplier(values),
+                    "class_ability_taunt_cast_chance_mult"),
+            },
+            TunableSourceFiles = new[] { "WorldObjects/Monster_Combat.cs" },
+            RankTailTemplate = "{ranks:class_ability_taunt_radius_r|num} metre radius",
             MaxRank = TopRank,
             // 2026-10-17: one rank at 3 -> three ranks at 1/1/1 (rank 3 = the old single rank's price).
             // Existing owners are raised to rank 3 by ClassAbilityRepricing wave 2.
@@ -139,8 +152,8 @@ namespace ACE.Server.ClassAbilities.Abilities
                 if (!player.IsDirectVisible(creature))
                     continue;
 
-                creature.ApplyTaunt(player, duration);
-                taunted++;
+                if (creature.ApplyTaunt(player, duration))
+                    taunted++;
             }
 
             return taunted;
@@ -152,6 +165,15 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// There is no affinity term since the 2026-10-17 Vanguard pass. Pure for testability. The gear term is
         /// last and defaulted to 0 so an unmodded build is bit-identical.
         /// </summary>
+        /// <summary>
+        /// The chance multiplier on a taunted monster's spell cast: the tunable clamped to [0, 1]. Monster.PassesTauntCastGate
+        /// clamps through this; the live text's cast_chance formula reads the same clamp.
+        /// </summary>
+        public static double CastChanceMultiplier(double mult) => Math.Min(1.0, Math.Max(0.0, mult));
+
+        /// <summary><see cref="CastChanceMultiplier(double)"/> of class_ability_taunt_cast_chance_mult read through <paramref name="values"/>.</summary>
+        public static double CastChanceMultiplier(ITunableValues values) => CastChanceMultiplier(values.GetDouble("class_ability_taunt_cast_chance_mult"));
+
         public static double EffectiveDuration(double baseDuration, double gearSeconds = 0.0) =>
             baseDuration + Math.Max(0.0, gearSeconds);
 

@@ -110,21 +110,29 @@ namespace ACE.Server.ThreadDungeons
         /// </summary>
         public IReadOnlyDictionary<string, WeakPointFamilyDef> WeakPoints { get; }
 
+        /// <summary>
+        /// The run encounter types and per-dungeon switches (encounters.json, Docs/Threads/ENCOUNTERS.md). Never null:
+        /// a missing or unreadable file is <see cref="ThreadEncounterStore.Empty"/>.
+        /// </summary>
+        public ThreadEncounterStore Encounters { get; }
+
         public IReadOnlyList<string> Diagnostics { get; }
 
         public static readonly ThreadDungeonStore Empty = new ThreadDungeonStore(
             new Dictionary<string, DungeonEntryDef>(), new List<BossEntryDef>(), new Dictionary<string, ModifierDef>(),
             new List<XpLadderRungDef>(), AttunementDef.Empty, new Dictionary<string, DungeonClearanceEntryDef>(),
             new Dictionary<string, IReadOnlyList<PuzzleSiteDef>>(), new List<PinnacleDef>(), new List<string>(),
-            new Dictionary<string, WeakPointFamilyDef>());
+            new Dictionary<string, WeakPointFamilyDef>(), ThreadEncounterStore.Empty);
 
         private ThreadDungeonStore(Dictionary<string, DungeonEntryDef> dungeons, List<BossEntryDef> bosses,
             Dictionary<string, ModifierDef> modifiers, List<XpLadderRungDef> ladder, AttunementDef attunement,
             Dictionary<string, DungeonClearanceEntryDef> clearance, Dictionary<string, IReadOnlyList<PuzzleSiteDef>> puzzleSites,
             List<PinnacleDef> pinnacles,
             List<string> diagnostics,
-            Dictionary<string, WeakPointFamilyDef> weakPoints)
+            Dictionary<string, WeakPointFamilyDef> weakPoints,
+            ThreadEncounterStore encounters)
         {
+            Encounters = encounters ?? ThreadEncounterStore.Empty;
             WeakPoints = weakPoints;
             Dungeons = dungeons;
             Bosses = bosses;
@@ -185,7 +193,8 @@ namespace ACE.Server.ThreadDungeons
             double outdoorWarningBandM = OutdoorSiteTunables.DefaultWarningBandM,
             double outdoorDropMinInsideM = OutdoorSiteTunables.DefaultDropMinInsideM,
             double outdoorContainmentMarginM = OutdoorSiteTunables.DefaultContainmentMarginM,
-            string weakPointsJson = null)
+            string weakPointsJson = null,
+            string encountersJson = null)
         {
             dungeonJsonByStem ??= new Dictionary<string, string>();
             outdoorJsonById ??= new Dictionary<string, string>();
@@ -397,7 +406,10 @@ namespace ACE.Server.ThreadDungeons
 
             var weakPoints = ParseWeakPoints(weakPointsJson, diagnostics);
 
-            return new ThreadDungeonStore(dungeons, bosses, modifiers, ladder, attunement, clearance, puzzleSites, pinnacles, diagnostics, weakPoints);
+            // Optional (encounters.json): null or empty is "no encounter types" and silent; cross-checks the dungeon dictionary.
+            var encounters = ThreadEncounterStore.Parse(encountersJson, dungeons, diagnostics);
+
+            return new ThreadDungeonStore(dungeons, bosses, modifiers, ladder, attunement, clearance, puzzleSites, pinnacles, diagnostics, weakPoints, encounters);
         }
 
         /// <summary>
@@ -1371,7 +1383,7 @@ namespace ACE.Server.ThreadDungeons
                 attunementJson: ReadOrEmpty("attunement.json"), clearanceJson: ReadOrEmpty("clearance.json"), puzzleGatesJson: ReadOrEmpty("puzzle-gates.json"),
                 pinnaclesJson: ReadOrEmpty("pinnacles.json"), outdoorJsonById: ReadOutdoorFiles(folder, diagnostics),
                 outdoorWarningBandM: ReadWarningBand(), outdoorDropMinInsideM: ReadDropMinInside(), outdoorContainmentMarginM: ReadContainmentMargin(),
-                weakPointsJson: ReadOrEmpty("weak-points.json"));
+                weakPointsJson: ReadOrEmpty("weak-points.json"), encountersJson: ReadOrEmpty(ThreadEncounterStore.FileName));
         }
 
         /// <summary>outdoor/*.json keyed by file stem (the site id). A missing outdoor folder is normal (no sites).</summary>

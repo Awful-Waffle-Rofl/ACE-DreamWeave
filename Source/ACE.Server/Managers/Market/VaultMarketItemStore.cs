@@ -1201,8 +1201,13 @@ namespace ACE.Server.Managers.Market
             if (failReason == AccountVaultStore.ItemListedMessage)
                 return MarketError.ItemListed;
 
-            if (failReason == AccountVaultStore.BarrelUnavailableMessage || failReason == AccountVaultStore.BarrelFullMessage)
+            if (failReason == AccountVaultStore.BarrelUnavailableMessage)
                 return MarketError.BarrelUnavailable;
+
+            // Its own code rather than BarrelUnavailable: that one tells the player to try again in
+            // a moment, and a full barrel does not clear within a retry window.
+            if (failReason == AccountVaultStore.BarrelFullMessage)
+                return MarketError.BarrelFull;
 
             return MarketError.VaultUnavailable;
         }

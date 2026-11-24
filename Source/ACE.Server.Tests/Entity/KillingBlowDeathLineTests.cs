@@ -151,13 +151,13 @@ namespace ACE.Server.Tests.Entity
         {
             // the sinks a monster's hit reaches a player through; a sink left out shows no suffix (never a wrong one)
             StringAssert.Contains(Read("Source/ACE.Server/WorldObjects/Player_Combat.cs"),
-                "DamageHistory.Add(source, damageType, damageTaken, thrown: amount);");
+                "DamageHistory.Add(source, damageType, damageTaken, thrown: amount, kind: recordedKind, isCritical: DamageAttackKindNames.CritFor(recordedKind, crit));");
             StringAssert.Contains(Read("Source/ACE.Server/WorldObjects/SpellProjectile.cs"),
-                "target.DamageHistory.Add(ProjectileSource, Spell.DamageType, amount, thrown: (uint)Math.Round(damage));");
+                "target.DamageHistory.Add(ProjectileSource, Spell.DamageType, amount, thrown: (uint)Math.Round(damage), kind: DamageAttackKind.Magic, isCritical: critical, spellId: Spell.Id);");
 
             var magic = Read("Source/ACE.Server/WorldObjects/WorldObject_Magic.cs");
-            StringAssert.Contains(magic, "targetCreature.DamageHistory.Add(this, DamageType.Health, (uint)-boost, thrown: (uint)-tryBoost);");
-            StringAssert.Contains(magic, "transferSource.DamageHistory.Add(this, DamageType.Health, srcVitalChange, thrown: drainThrown);");
+            StringAssert.Contains(magic, "targetCreature.DamageHistory.Add(this, DamageType.Health, (uint)-boost, thrown: (uint)-tryBoost, kind: DamageAttackKind.Magic, isCritical: lifeCritMultiplier > 1.0f, spellId: spell.Id);");
+            StringAssert.Contains(magic, "transferSource.DamageHistory.Add(this, DamageType.Health, srcVitalChange, thrown: drainThrown, kind: DamageAttackKind.Magic, isCritical: drainCritCapMod > 1.0f, spellId: spell.Id);");
 
             StringAssert.Contains(Read("Source/ACE.Server/WorldObjects/Player_Death.cs"),
                 "playerMsg += FormatKillingBlowSuffix(DamageHistory.KillingBlow);");

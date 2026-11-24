@@ -90,6 +90,10 @@ namespace ACE.Server.WorldObjects
                     return;
             }
 
+            // Balance Trials recorder: a food or potion used during a rep. One field read otherwise.
+            if (player.TrialActive)
+                ACE.Server.BalanceTrials.TrialHooks.OnConsume(player, WeenieClassId);
+
             if (BoosterEnum != PropertyAttribute2nd.Undef)
             {
                 BoostVital(player);

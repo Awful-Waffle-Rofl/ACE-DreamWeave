@@ -67,7 +67,16 @@ namespace ACE.Server.ClassAbilities.Abilities
     ///
     /// If Mana cannot pay the whole diverted share, it pays what it can (partial) and never goes negative.
     /// It also stops at a Mana floor (class_ability_manabarrier_mana_floor, default 50): only Mana above the floor is spendable.
-    /// The "50" is hardcoded in Description and its derived copies (token SQL LongDescs, PLAYER-GUIDE.md, ca-planner catalog.json); change them together.
+    /// The floor, the 6/12/18 ladder and the cap in the Definition's text are placeholders bound to these tunables, so
+    /// the in-game text follows a live retune. The committed copies (token SQL LongDescs via CA_TOKEN_REGEN, ca-planner
+    /// catalog.json via CA_PLANNER_REGEN) are regenerated from the defaults; PLAYER-GUIDE.md is still hand-written.
+    ///
+    /// CASTING SHIELD (owner ruling 2026-11-23), separate from the divert above: while the player is casting a spell
+    /// (MagicState.IsCasting: from cast start through spell release, not the recoil) the cloud also acts as a flat shield armor level (class_ability_manabarrier_shield_level,
+    /// default 100, the same at every rank, not touched by the equipment mod) against frontal physical PvE attacks.
+    /// Decided by ManaBarrierShieldMath.LevelFor, gathered in Player.GetManaBarrierShieldLevel (Player_ClassAbilityBuffs.cs)
+    /// and summed into Creature.GetShieldMod beside the ward shield on both the no-shield and equipped-shield paths.
+    /// Spells never reach GetShieldMod, so it is physical only.
     /// </summary>
     public class ManaBarrierAbility : IClassAbility, IPreWriteDamageAbility, IAbilityReadout
     {
@@ -78,13 +87,27 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "manabarrier",
             DisplayName = "Mana Barrier",
-            Description = "6/12/18% of the damage you take is paid out of your Mana instead of your Health " +
-                          "(30% cap). Higher Magic Defense increases the share. It stops at 50 Mana, so it " +
-                          "never drains you below that.",
+            // Live text. The ladder is base + (rank - 1) * step, the same terms GetReadout and
+            // Player.GetManaBarrierDivertShare feed DivertShare (ManaBarrierAbility.cs GetReadout,
+            // Player_ClassAbilityBuffs.cs ~908-921); the cap is class_ability_manabarrier_max_share; the Mana
+            // floor is class_ability_manabarrier_mana_floor (long), read at Player_ClassAbilityBuffs.cs ~1034.
+            // The casting shield level is class_ability_manabarrier_shield_level (long), read in Player.GetManaBarrierShieldLevel (same file).
+            DescriptionTemplate = "Part of the damage you take comes out of your Mana instead of your Health, up to " +
+                          "{v:class_ability_manabarrier_max_share|pct}%. It stops at {v:class_ability_manabarrier_mana_floor|uint} " +
+                          "Mana, so it never drains you below that. " +
+                          "Your arcane cloud also provides protection from physical attacks: while you are casting a spell, you have " +
+                          "+{v:class_ability_manabarrier_shield_level|uint} shield armor against attacks from the front.",
+            RankTailTemplate = "{ladder:class_ability_manabarrier_base,class_ability_manabarrier_step,class_ability_manabarrier_max_share|pct}% " +
+                          "of damage taken from Mana",
+            TunableSourceFiles = new[] { "WorldObjects/Player_ClassAbilityBuffs.cs" },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },   // Archmage pass 2026-10-24 (reprice wave 6): was 1/2/3
             Implemented = true,
             AffinitySkill = Skill.MagicDefense,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "total", Bounds = CeilingBounds.Total, Source = CeilingSource.Tunable, Key = "class_ability_manabarrier_max_share", Label = "max damage diverted to mana", Format = "pct", ZeroIsLimit = true },
+            },
         };
 
         /// <summary>
@@ -263,7 +286,11 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// the same Math.Clamp(abilityShare + gearBonus, 0.0, cap) DivertShare uses. CapNote is set only when
         /// the clamp actually reduced this call's value.
         /// </summary>
-        public ClassAbilityReadout GetReadout(Player player, int rank)
+        public ClassAbilityReadout GetReadout(Player player, int rank) =>
+            BuildReadout(rank, player.GetClassAbilityAffinityMultiplier(Skill.MagicDefense), player.GetEquippedModValue(EquipmentModId.ManaBarrier));
+
+        /// <summary>The pure core of <see cref="GetReadout"/>, taking the live affinity multiplier and gear mod value so the readings can be pinned with fixed inputs.</summary>
+        public ClassAbilityReadout BuildReadout(int rank, double multiplier, double gearModValue)
         {
             var baseShare = PropertyManager.GetDouble("class_ability_manabarrier_base").Item;
             var stepPerRank = PropertyManager.GetDouble("class_ability_manabarrier_step").Item;
@@ -271,11 +298,9 @@ namespace ACE.Server.ClassAbilities.Abilities
 
             var skillShare = rank <= 0 ? 0.0 : baseShare + (rank - 1) * stepPerRank;
 
-            var multiplier = player.GetClassAbilityAffinityMultiplier(Skill.MagicDefense);
-
             var rawAffinity = Math.Max(0.0, skillShare * multiplier - skillShare);
 
-            var gearBonus = Math.Max(0.0, player.GetEquippedModValue(EquipmentModId.ManaBarrier));
+            var gearBonus = Math.Max(0.0, gearModValue);
 
             var abilityShare = skillShare + rawAffinity;
             var uncapped = abilityShare + gearBonus;
@@ -296,6 +321,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "dmg to mana",
                 Per = null,
                 CapNote = clamped < uncapped - 0.0000001 ? "barrier cap" : null,
+                Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "total", uncapped * 100.0, rank, ClassAbilityText.Live) },
             };
         }
     }

@@ -847,6 +847,30 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         [TestMethod]
+        public void FloorRatings_holds_crit_damage_rating_at_zero_when_the_strip_is_on_and_floors_the_other_ratings()
+        {
+            var info = Info();
+            info.Run = new ArchetypeAxes(info.Run.Core, 40, 300, 12, 10, 4, 6, 0, 8, 1.0);
+            info.Own = new ArchetypeAxes(info.Own.Core, 20, 100, 6, 5, 2, 3, 0, 8, 1.0);
+
+            var stripped = MakeCreature(withMissileDefense: true);
+            ArchetypeUplift.FloorRatings(stripped, ArchetypeUplift.Begin(stripped, info, 1.0), id => 0.0, noCritDamage: true);
+            Assert.AreEqual(0, stripped.CritDamageRating ?? 0, "the floor would set 6; the strip holds it at zero");
+            Assert.AreEqual(4, stripped.CritRating, "base crit chance still floors");
+            Assert.AreEqual(12, stripped.DamageRating);
+
+            var control = MakeCreature(withMissileDefense: true);
+            ArchetypeUplift.FloorRatings(control, ArchetypeUplift.Begin(control, info, 1.0), id => 0.0, noCritDamage: false);
+            Assert.AreEqual(6, control.CritDamageRating, "control: with the strip off the floor still writes it");
+
+            // Never raises crit damage: an authored negative rating stays negative instead of being lifted to 0.
+            var negative = MakeCreature(withMissileDefense: true);
+            negative.CritDamageRating = -5;
+            ArchetypeUplift.FloorRatings(negative, ArchetypeUplift.Begin(negative, info, 1.0), id => 0.0, noCritDamage: true);
+            Assert.AreEqual(-5, negative.CritDamageRating, "the hold must not raise a negative rating");
+        }
+
+        [TestMethod]
         public void Apply_divides_physical_damage_by_the_damage_rating_added_for_spells()
         {
             var creature = MakeCreature(withMissileDefense: true);

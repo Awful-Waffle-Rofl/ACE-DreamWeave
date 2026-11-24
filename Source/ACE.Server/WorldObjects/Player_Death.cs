@@ -8,6 +8,7 @@ using ACE.DatLoader.FileTypes;
 using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Server.BalanceTrials;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Entity.Facets;
@@ -56,6 +57,10 @@ namespace ACE.Server.WorldObjects
             // the killing hit never reaches the "X hits you for N" line - every damage sink returns into the death
             // path before it - so the victim's own death line carries it. Victim only; the broadcast is unchanged.
             playerMsg += FormatKillingBlowSuffix(DamageHistory.KillingBlow);
+
+            // player_death_event (ace_analytics): one row per death, carrying this exact line. Queued only - the writer
+            // thread does the insert. A no-op while analytics is off, and it never throws.
+            ACE.Server.Managers.Analytics.DeathTelemetry.RecordDeath(this, lastDamager, damageType, playerMsg);
 
             var msgYourDeath = new GameEventVictimNotification(Session, playerMsg);
             Session.Network.EnqueueSend(msgYourDeath);
@@ -259,8 +264,12 @@ namespace ACE.Server.WorldObjects
             // recorded and no row is written - but it is penalty-free in exactly the same way as the other two.
             var speedDeath = TryBeginSpeedChallengeDeath();
 
-            // any Proving Grounds run death waives the normal death penalties for the rest of the sequence
-            var arenaDeath = survivalDeath || waveDeath || speedDeath;
+            // Balance Trials: a death inside the bound trial room ends the live rep as died and is penalty-free in the same
+            // way; the respawn goes to the room start (TrialManager.StartPositionFor), not outside.
+            var trialDeath = TryBeginTrialDeath();
+
+            // any Proving Grounds run death (and a trial death) waives the normal death penalties for the rest of the sequence
+            var arenaDeath = survivalDeath || waveDeath || speedDeath || trialDeath;
 
             // Asheron's Protection (WaffleACE): a death within an Active world event's radius waives the
             // normal death penalties (vitae, item loss, enchantment purge) the same way an arena death does,
@@ -322,6 +331,11 @@ namespace ACE.Server.WorldObjects
             {
                 log.Error($"[PINNACLE] OnOwnerDied threw for {Name}", ex);
             }
+
+            // Allegiance Gauntlet (Task 9, owner ruling): a death inside a live arena copy is held in the pen with no vitae,
+            // no item loss, no corpse and every buff kept. Latched here with the others; the run lookup, the death count
+            // and the start of the hold are all inside LatchGauntletDeath (Player_Gauntlet.cs), which never throws.
+            gauntletDeathInProgress = LatchGauntletDeath();
 
             if (worldEventDeathInProgress)
             {
@@ -398,27 +412,34 @@ namespace ACE.Server.WorldObjects
             // by which point the player may have teleported out of the run's instance.
             // PvP arena match deaths (H5) accrue no vitae either, read from the latch.
             // Pinnacle deaths (owner ruling 2026-10-20) accrue no vitae, read from the latch taken in Die().
+            // Allegiance Gauntlet deaths (owner ruling) accrue no vitae, read from the latch taken in Die().
             if (!arenaDeath && !IsPKLiteDeath(topDamager) && !IsMule && !worldEventDeathInProgress && !ThreadDungeonDeathInProgress
                 && !PinnacleDeathInProgress
+                && !GauntletDeathInProgress
                 && !PvpPlayerRules.WaivesVitae(PvpMatchDeathInProgress, pvpMatchDeathWaiver))
                 InflictVitaePenalty();
 
             // Proving Grounds arena deaths, and Asheron's Protection deaths, skip the enchantment purge
             // entirely - the player keeps their buffs. A PvP arena match death does too while
             // pvp_arena_death_keeps_enchantments is on (the waiver latched in Die()).
-            if (!arenaDeath && !worldEventDeathInProgress && !PvpPlayerRules.WaivesEnchantmentPurge(PvpMatchDeathInProgress, pvpMatchDeathWaiver))
+            // An Allegiance Gauntlet death keeps every buff too (orchestrator default), read from the latch taken in Die(). It is
+            // its own outer gate so the existing purge head, which other suites pin exactly, is unchanged.
+            if (!GauntletDeathInProgress)
             {
-                if (IsPKDeath(topDamager) || AugmentationSpellsRemainPastDeath == 0)
+                if (!arenaDeath && !worldEventDeathInProgress && !PvpPlayerRules.WaivesEnchantmentPurge(PvpMatchDeathInProgress, pvpMatchDeathWaiver))
                 {
-                    var msgPurgeEnchantments = new GameEventMagicPurgeEnchantments(Session);
-                    EnchantmentManager.RemoveAllEnchantments();
-                    Session.Network.EnqueueSend(msgPurgeEnchantments);
-                }
-                else
-                {
-                    var msgPurgeBadEnchantments = new GameEventMagicPurgeBadEnchantments(Session);
-                    EnchantmentManager.RemoveAllBadEnchantments();
-                    Session.Network.EnqueueSend(msgPurgeBadEnchantments, new GameMessageSystemChat("Your augmentation prevents the tides of death from ripping away your current enchantments!", ChatMessageType.Broadcast));
+                    if (IsPKDeath(topDamager) || AugmentationSpellsRemainPastDeath == 0)
+                    {
+                        var msgPurgeEnchantments = new GameEventMagicPurgeEnchantments(Session);
+                        EnchantmentManager.RemoveAllEnchantments();
+                        Session.Network.EnqueueSend(msgPurgeEnchantments);
+                    }
+                    else
+                    {
+                        var msgPurgeBadEnchantments = new GameEventMagicPurgeBadEnchantments(Session);
+                        EnchantmentManager.RemoveAllBadEnchantments();
+                        Session.Network.EnqueueSend(msgPurgeBadEnchantments, new GameMessageSystemChat("Your augmentation prevents the tides of death from ripping away your current enchantments!", ChatMessageType.Broadcast));
+                    }
                 }
             }
 
@@ -432,7 +453,8 @@ namespace ACE.Server.WorldObjects
                 // Battlegrounds (Docs/Pvp/BATTLEGROUNDS.md "Respawn" 3): a battleground death leaves no corpse (so no
                 // empty corpse and no "retained all your items" line), and goes to the team pen while the match is
                 // still Live for this player; otherwise it takes the exit path below, unchanged.
-                if (!PvpBattlegroundDeathLatched)
+                // Allegiance Gauntlet: a held death leaves no corpse either (the Battlegrounds shape), read from the latch.
+                if (!PvpBattlegroundDeathLatched && !GauntletDeathInProgress)
                     CreateCorpse(topDamager, hadVitae);
 
                 ThreadSafeTeleportOnDeath(); // enter portal space
@@ -473,6 +495,35 @@ namespace ACE.Server.WorldObjects
                 // The one PvP return resolver (Docs/Pvp/BATTLEGROUNDS.md "Pulled from a Thread"): back inside a Thread the player was
                 // pulled from when it still takes them, else the stamp, else home.
                 newPosition = ResolvePvpReturn("match death") ?? Instantiation ?? Location;
+            }
+            else if (GauntletDeathInProgress && GauntletDeathPen() is Position gauntletPen)
+            {
+                // Allegiance Gauntlet: to the site's death pen inside the arena copy. The EphemeralRealmExitTo stamp is kept:
+                // the player is still in the run and is released back into the fight when the hold ends.
+                newPosition = gauntletPen;
+            }
+            else if (GauntletDeathInProgress)
+            {
+                // Allegiance Gauntlet, the run ended during the death animation (its holds released): out through the exit
+                // stamp, which is spent here, the way a Proving Grounds death leaves.
+                var gauntletExit = GetPosition(PositionType.EphemeralRealmExitTo);
+                newPosition = (gauntletExit != null ? new Position(gauntletExit) : Sanctuary) ?? Instantiation ?? Location;
+                SetPosition(PositionType.EphemeralRealmExitTo, null);
+            }
+            else if (TrialDeathInProgress && TrialManager.StartPositionFor(this) is Position trialStart)
+            {
+                // Balance Trials: back to the room start, still inside the room. The EphemeralRealmExitTo stamp is kept: the
+                // player is still in the trial and leaves through it later.
+                newPosition = trialStart;
+            }
+            else if (TrialDeathInProgress)
+            {
+                // Balance Trials, session already gone: the player leaves the room like a Proving Grounds death, through the
+                // exit stamp, which is spent here.
+                var trialExit = GetPosition(PositionType.EphemeralRealmExitTo);
+                newPosition = (trialExit != null ? new Position(trialExit) : Sanctuary) ?? Instantiation ?? Location;
+                SetPosition(PositionType.EphemeralRealmExitTo, null);
+                TrialExitStamp = null;
             }
             else if (SurvivalChallengeDeathInProgress || WaveChallengeDeathInProgress || SpeedChallengeDeathInProgress || ThreadDungeonDeathInProgress)
             {
@@ -541,11 +592,13 @@ namespace ACE.Server.WorldObjects
                     EndSurvivalChallengeDeath();
                     EndWaveChallengeDeath();
                     EndSpeedChallengeDeath();
+                    EndTrialDeath();
                     pinnacleDeathInProgress = false;
                     worldEventDeathInProgress = false;
                     pvpMatchDeathInProgress = false;
                     pvpMatchDeathWaiver = null;
                     ClearPvpDeathPenLatch();
+                    gauntletDeathInProgress = false;
 
                     // Battlegrounds completion backstop (Docs/Pvp/BATTLEGROUNDS.md "Respawn" 4): the player went to
                     // the pen, but the match is no longer Live for them (it ended, or they were exited while dying).
@@ -766,8 +819,10 @@ namespace ACE.Server.WorldObjects
             // PvP arena match deaths (H5) drop nothing either, read from the latch
             // Pinnacle deaths (owner ruling 2026-10-20) drop nothing, read from the latch; a Pinnacle copy is ephemeral, so
             // IsOnNoDropLandblock already covers it, and the latch states the rule rather than leaning on that
+            // Allegiance Gauntlet deaths (owner ruling) drop nothing, read from the latch, for the same reason
             if (PropertyManager.GetBool("player_death_no_item_loss").Item || corpse.IsOnNoDropLandblock || IsPKLiteDeath(corpse.KillerId) || SurvivalChallengeDeathInProgress || WaveChallengeDeathInProgress || SpeedChallengeDeathInProgress || WorldEventHooks.IsProtectedDeathInProgress(this) || ThreadDungeonDeathInProgress
-                || PinnacleDeathInProgress
+                || PinnacleDeathInProgress || TrialDeathInProgress
+                || GauntletDeathInProgress
                 || PvpPlayerRules.WaivesItemLoss(PvpMatchDeathInProgress, pvpMatchDeathWaiver))
                 return new List<WorldObject>();
 
@@ -1206,6 +1261,7 @@ namespace ACE.Server.WorldObjects
 
         public void SetLifestoneProtection()
         {
+            ClearGauntletArrivalShieldStamp();
             UnderLifestoneProtection = true;
             LifestoneProtectionTimestamp = 0;
         }
@@ -1236,6 +1292,7 @@ namespace ACE.Server.WorldObjects
 
         public void LifestoneProtectionDispel()
         {
+            ClearGauntletArrivalShieldStamp();
             UnderLifestoneProtection = false;
             LifestoneProtectionTimestamp = null;
 
@@ -1391,6 +1448,8 @@ namespace ACE.Server.WorldObjects
             if (PropertyManager.GetBool("player_death_no_item_loss").Item || corpse.IsOnNoDropLandblock
                 || SurvivalChallengeDeathInProgress || WaveChallengeDeathInProgress || SpeedChallengeDeathInProgress
                 || WorldEventHooks.IsProtectedDeathInProgress(this) || ThreadDungeonDeathInProgress || PinnacleDeathInProgress
+                || TrialDeathInProgress
+                || GauntletDeathInProgress
                 || PvpPlayerRules.WaivesItemLoss(PvpMatchDeathInProgress, pvpMatchDeathWaiver))
                 return new List<WorldObject>();
 

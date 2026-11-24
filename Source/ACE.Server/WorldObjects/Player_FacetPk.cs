@@ -259,6 +259,7 @@ namespace ACE.Server.WorldObjects
             {
                 if (pet is CombatPet combatPet && !combatPet.IsDestroyed)
                 {
+                    combatPet.RemovalReason = "facetpk";
                     combatPet.Destroy();
                     retired++;
                 }

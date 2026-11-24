@@ -73,7 +73,11 @@ namespace ACE.Server.WorldEvents
             ("world_events_boss_throughput_calibration", false),
             ("world_events_boss_min_sample_seconds", false),
             ("world_events_boss_per_player", false),
-            ("world_events_boss_health_cap", false)
+            ("world_events_boss_health_cap", false),
+            ("world_events_boss_health_per_power", false),
+            ("world_events_boss_power_exponent", false),
+            ("world_events_boss_budget_floor_health", true),
+            ("world_events_boss_budget_cap_health", true)
         };
 
         /// <summary>True for a value that counts as "set" for a live override: finite and strictly positive.</summary>

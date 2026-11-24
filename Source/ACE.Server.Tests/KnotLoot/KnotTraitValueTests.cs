@@ -30,6 +30,7 @@ namespace ACE.Server.Tests.KnotLoot
         private static readonly string[] BoolKeys =
         {
             "knot_trait_cast_speed_enabled", "knot_trait_shield_trade_enabled", "knot_trait_frugal_hand_enabled", "knot_trait_wrist_trade_enabled", "knot_trait_overpowering_intent_enabled",
+            "knot_trait_harbinger_guard_enabled", "knot_trait_harbinger_celerity_enabled",
         };
 
         private static readonly string[] LongKeys =
@@ -45,6 +46,8 @@ namespace ACE.Server.Tests.KnotLoot
             "knot_trait_frugal_hand_min", "knot_trait_frugal_hand_max",
             "knot_trait_wrist_trade_gain_min", "knot_trait_wrist_trade_gain_max", "knot_trait_wrist_trade_cost_min", "knot_trait_wrist_trade_cost_max",
             "knot_trait_overpowering_intent_min", "knot_trait_overpowering_intent_max",
+            "knot_trait_harbinger_guard_min", "knot_trait_harbinger_guard_max",
+            "knot_trait_harbinger_celerity_attack_min", "knot_trait_harbinger_celerity_attack_max", "knot_trait_harbinger_celerity_cast_min", "knot_trait_harbinger_celerity_cast_max",
         };
 
         private static uint nextGuid = 0x7F100000;
@@ -245,10 +248,10 @@ namespace ACE.Server.Tests.KnotLoot
         [TestMethod]
         public void Registry_PropertiesUnique_AndKindsPinned()
         {
-            Assert.AreEqual(5, KnotTraitRegistry.All.Count);
+            Assert.AreEqual(7, KnotTraitRegistry.All.Count);
 
             var props = KnotTraitRegistry.All.Select(d => (int)d.Property).OrderBy(x => x).ToArray();
-            CollectionAssert.AreEqual(new[] { 9015, 9016, 9017, 9018, 9020 }, props);
+            CollectionAssert.AreEqual(new[] { 9015, 9016, 9017, 9018, 9020, 9023, 9024 }, props);
 
             Expect(KnotTraitId.CastSpeed, PropertyFloat.KnotTraitCastSpeed, "Mirrorglass Haste", "cast_speed", KnotTraitSuppressionKind.Weapon);
             Expect(KnotTraitId.ShieldTrade, PropertyFloat.KnotTraitShieldTrade, "Rose's Bargain", "shield_trade", KnotTraitSuppressionKind.Equipment);
@@ -256,6 +259,10 @@ namespace ACE.Server.Tests.KnotLoot
             Expect(KnotTraitId.WristTrade, PropertyFloat.KnotTraitWristTrade, "Glass Turtle", "wrist_trade", KnotTraitSuppressionKind.Equipment);
             Expect(KnotTraitId.OverpoweringIntent, PropertyFloat.KnotTraitOverpoweringIntent, "Overpowering Intent", "overpowering_intent", KnotTraitSuppressionKind.Weapon);
             Assert.AreEqual(5, (int)KnotTraitId.OverpoweringIntent);
+            Expect(KnotTraitId.HarbingerGuard, PropertyFloat.KnotTraitHarbingerGuard, "Harbinger's Guard", "harbinger_guard", KnotTraitSuppressionKind.Weapon);
+            Assert.AreEqual(6, (int)KnotTraitId.HarbingerGuard);
+            Expect(KnotTraitId.HarbingerCelerity, PropertyFloat.KnotTraitHarbingerCelerity, "Harbinger's Celerity", "harbinger_celerity", KnotTraitSuppressionKind.Equipment);
+            Assert.AreEqual(7, (int)KnotTraitId.HarbingerCelerity);
 
             Assert.IsFalse(KnotTraitRegistry.TryGet((KnotTraitId)99, out _));
         }
@@ -300,6 +307,8 @@ namespace ACE.Server.Tests.KnotLoot
             Check(KnotTraitId.FrugalHand, "knot_trait_frugal_hand_min", "knot_trait_frugal_hand_max", null, null);
             Check(KnotTraitId.WristTrade, "knot_trait_wrist_trade_gain_min", "knot_trait_wrist_trade_gain_max", "knot_trait_wrist_trade_cost_min", "knot_trait_wrist_trade_cost_max");
             Check(KnotTraitId.OverpoweringIntent, "knot_trait_overpowering_intent_min", "knot_trait_overpowering_intent_max", null, null);
+            Check(KnotTraitId.HarbingerGuard, "knot_trait_harbinger_guard_min", "knot_trait_harbinger_guard_max", null, null);
+            Check(KnotTraitId.HarbingerCelerity, "knot_trait_harbinger_celerity_attack_min", "knot_trait_harbinger_celerity_attack_max", "knot_trait_harbinger_celerity_cast_min", "knot_trait_harbinger_celerity_cast_max");
         }
 
         [TestMethod]

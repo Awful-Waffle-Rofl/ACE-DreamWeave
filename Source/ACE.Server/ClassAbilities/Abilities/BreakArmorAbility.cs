@@ -38,13 +38,26 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "breakarmor",
             DisplayName = "Break Armor",
-            Description = "Your melee and missile hits have a 15% chance to shatter the target's guard, casting Imperil " +
-                          "III / V / VII on it by rank. It cannot be resisted. Higher Weapon Tinkering raises " +
-                          "the chance.",
+            // Live text: the proc chance is class_ability_breakarmor_chance, flat and rank-invariant (ModifyOutgoingDamage
+            // and GetReadout below). The Imperil tier by rank is ImperilFor, a code constant (a roman numeral, so no digit to bind).
+            // The token tail differs in shape per rank ("replaces III"), so it is a per-rank array.
+            DescriptionTemplate = "Your melee and missile hits have a {v:class_ability_breakarmor_chance|pct}% chance to shatter the " +
+                          "target's guard and cast Imperil on it. It cannot be resisted.",
+            RankTailTemplate = new[]
+            {
+                "Imperil III",
+                "Imperil V",
+                "Imperil VII",
+            },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
             AffinitySkill = Skill.WeaponTinkering,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "affinity", Bounds = CeilingBounds.Affinity, Source = CeilingSource.Tunable, Key = "class_ability_affinity_chance_cap", Label = "max chance from affinity", Format = "pct" },
+                new ClassAbilityCeiling { Id = "gear", Bounds = CeilingBounds.Gear, Source = CeilingSource.GearStackCap, GearMod = EquipmentModId.BreakArmor, Label = "max from gear", Format = "pct" },
+            },
         };
 
         /// <summary>
@@ -169,6 +182,11 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "proc",
                 Per = null,
                 CapNote = capBit ? "affinity cap" : null,
+                Ceilings = new[]
+                {
+                    ClassAbilityCeilings.Read(Definition, "affinity", rawRider * 100.0, rank, ClassAbilityText.Live),
+                    ClassAbilityCeilings.Read(Definition, "gear", gear, rank, ClassAbilityText.Live),
+                },
             };
         }
     }

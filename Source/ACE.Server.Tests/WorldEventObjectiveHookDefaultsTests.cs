@@ -337,6 +337,44 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
+        public void OnSourceSpawning_DefaultIsANoOp_AndAThrowingHookIsSwallowedAtTheSeam()
+        {
+            // The interface default, called on an objective that overrides nothing.
+            ((IWorldEventObjective)new PlainObjective()).OnSourceSpawning(null);
+
+            // The seam: no objective, a default objective and a throwing hook all return normally.
+            BuildEvent(null).NotifyObjectiveSourceSpawning(null);
+            BuildEvent(new PlainObjective()).NotifyObjectiveSourceSpawning(null);
+
+            var calls = new List<Creature>();
+            BuildEvent(new SourceSpyObjective(calls)).NotifyObjectiveSourceSpawning(null);
+            Assert.AreEqual(1, calls.Count, "the seam reaches the objective's hook");
+
+            BuildEvent(new SourceSpyObjective(calls) { Throw = true }).NotifyObjectiveSourceSpawning(null);
+            Assert.AreEqual(2, calls.Count, "a throwing hook was called and swallowed");
+        }
+
+        private sealed class SourceSpyObjective : PlainObjective, IWorldEventObjective
+        {
+            private readonly List<Creature> calls;
+
+            public bool Throw;
+
+            public SourceSpyObjective(List<Creature> calls)
+            {
+                this.calls = calls;
+            }
+
+            void IWorldEventObjective.OnSourceSpawning(Creature source)
+            {
+                calls.Add(source);
+
+                if (Throw)
+                    throw new InvalidOperationException("source hook threw");
+            }
+        }
+
+        [TestMethod]
         public void ObjectiveCountsStaff_DefaultFalse_HookReadThrowingIsFalse()
         {
             Assert.IsFalse(BuildEvent(new PlainObjective()).ObjectiveCountsStaff());

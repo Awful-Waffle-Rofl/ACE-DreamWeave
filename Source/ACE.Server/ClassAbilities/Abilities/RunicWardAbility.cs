@@ -48,15 +48,23 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "runic_ward",
             DisplayName = "Runic Ward",
-            Description = "Each landed weapon hit inscribes a ward, adding 3/6/9% of that hit's damage (by " +
-                          "rank) to the ward, up to 10/20/30% of your maximum health. The ward absorbs incoming " +
-                          "damage from monsters and lapses after 12 seconds without a weapon hit. While it " +
-                          "holds, it also acts as a shield against monsters' physical " +
-                          "attacks from the front. Higher Item Tinkering multiplies the ward.",
+            // Live text. Per-hit gain ladder is base + (rank - 1) * step, uncapped (RunicWardAbility.cs ~122-123, RunicWardMath.GainFraction);
+            // pool ceiling per rank: RunicWardAbility.cs ~129-131; lapse window: Player_ClassAbilityPreWriteBuffs.cs ~309.
+            DescriptionTemplate = "Each weapon hit you land adds part of its damage to a ward, up to a share of your maximum health. " +
+                          "The ward absorbs damage from creatures and lapses after {v:class_ability_runicward_duration_seconds|num} " +
+                          "seconds without a weapon hit. While it holds, it also works as a shield against creatures' physical " +
+                          "attacks from the front and adds its shield level to what Thorns reflects.",
+            RankTailTemplate = "{ladder:class_ability_runicward_gain_base,class_ability_runicward_gain_step|pct}% of each hit, up to " +
+                          "{ranks:class_ability_runicward_cap_fraction_r|pct}% of max health",
+            TunableSourceFiles = new[] { "WorldObjects/Player_ClassAbilityPreWriteBuffs.cs" },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
             AffinitySkill = Skill.ItemTinkering,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "total", Bounds = CeilingBounds.Total, Source = CeilingSource.TunablePerRank, Key = "class_ability_runicward_cap_fraction_r", Label = "max ward as share of max health", Format = "pct", ZeroIsLimit = true },
+            },
         };
 
         /// <summary>
@@ -144,12 +152,19 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
+            return BuildReadout(rank, player.GetClassAbilityAffinityMultiplier(Skill.ItemTinkering), player.GetRunicWardFillPercent());
+        }
+
+        /// <summary>
+        /// The pure core of <see cref="GetReadout"/>: every live input is a parameter, so a test can pin the readout and its ceiling reading
+        /// without a Player. <paramref name="fillPercent"/> is the standing ward as a PERCENT OF MAX HEALTH, the unit of the "total" ceiling.
+        /// </summary>
+        public ClassAbilityReadout BuildReadout(int rank, double multiplier, double fillPercent)
+        {
             var gainBase = PropertyManager.GetDouble("class_ability_runicward_gain_base").Item;
             var gainStep = PropertyManager.GetDouble("class_ability_runicward_gain_step").Item;
 
             var rankFraction = RunicWardMath.GainFraction(rank, gainBase, gainStep, 1.0);
-
-            var multiplier = player.GetClassAbilityAffinityMultiplier(Skill.ItemTinkering);
 
             var skill = rankFraction * 100.0;
             var affinity = (RunicWardMath.GainFraction(rank, gainBase, gainStep, multiplier) - rankFraction) * 100.0;
@@ -165,6 +180,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "ward",
                 Per = "/hit",
                 CapNote = null,
+                Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "total", fillPercent, rank, ClassAbilityText.Live) },
             };
         }
     }

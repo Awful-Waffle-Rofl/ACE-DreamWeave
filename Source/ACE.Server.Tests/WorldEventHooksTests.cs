@@ -818,6 +818,14 @@ namespace ACE.Server.Tests
         [DataRow("public static bool HoldClientAttackable(WorldObject wo, bool attackable)", "return tag != null && HoldClientAttackable(attackable, tag.Kind == HoldUnitKind.Knight, tag.ShowHealthBar);")]
         [DataRow("public static void ApplyHoldTint(", "WorldEventTint.Apply(objDesc, tag.TintPalette);")]
         [DataRow("public static void SendHoldKnightHealthLine(", "if (!IsHoldKnightHealthLineTarget(target)) return; player.SendHoldKnightHealthLine((Creature)target, ACE.Common.Time.GetUnixTime());")]
+        [DataRow("public static float CapProtectedHit(", "WorldEventHoldRules.CapProtectedHit(requested, maxHealth, minDeathSeconds, burstSeconds, ref tokens, ref lastAt, now);")]
+        [DataRow("public static int ConvertPlayerHeal(", "WorldEventHoldRules.ConvertPlayerHeal(rawHeal, maxHealth, maxHealPerTenSeconds, ref tokens, ref lastAt, now);")]
+        [DataRow("public const double TypicalPlayerHeal", "= WorldEventHoldRules.TypicalPlayerHeal;")]
+        [DataRow("public static string PlayerHealLine(", "WorldEventHoldRules.PlayerHealLine(name, healed, outcome, critical, kitRemaining);")]
+        [DataRow("public static Player ResolveAttackingPlayer(", "WorldEventCombatCreditHook.ResolveAttackingPlayer(attacker);")]
+        [DataRow("public static Defs.RewardDef TryGetRewardProfile(", "=> WorldEventRewardCrate.TryGetProfile(id);")]
+        [DataRow("public static bool RewardStoreLoaded", "=> WorldEventRewardCrate.ProfileStoreLoaded;")]
+        [DataRow("public static void StampRewardCrate(", "=> WorldEventRewardCrate.Stamp(crate, profile, multiplier);")]
         public void Hook_ForwardsToItsImplementation(string declaration, string forward)
         {
             var source = WorldEventHooksCallSiteTests.StripComments(File.ReadAllText(HooksPath()));

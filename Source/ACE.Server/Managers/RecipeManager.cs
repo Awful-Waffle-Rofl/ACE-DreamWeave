@@ -208,6 +208,31 @@ namespace ACE.Server.Managers
                 return;
             }
 
+            // Green Jade (WaffleACE): a Bag or Hammer of Green Jade adds an aspect to (below ten) or swaps one aspect on (at ten) an aspected ring, bracelet or
+            // necklace. Claimed here, before the cookbook lookup, for the Serpentine reasons above: GetRecipe,
+            // VerifyRequirements and TryMutate are never reached, so a step writes neither NumTimesTinkered nor the
+            // tinker log. The mule craft gate and the TinkerLock refusal above already ran. Nothing to forward: the client
+            // fires its own generic tinkering-material confirmation. The switch is NOT read here: with the feature off
+            // GreenJadeManager's own check refuses with "Jewelry Aspects are disabled right now." (the Green Jade bag has no
+            // cookbook rows to fall through to, so falling through would only produce a silent failure).
+            if (GreenJadeManager.IsGreenJadeMaterial(source))
+            {
+                GreenJadeManager.UseObjectOnTarget(player, source, target);
+                return;
+            }
+
+            // Paragon weapon mods (WaffleACE): a Paragon mod gem or the Paragon reset item, detected by PROPERTY
+            // (ParagonModGemModifier / ParagonModReset), is claimed here, after the TinkerLock check above and
+            // before the cookbook lookup. It is claimed even with weapon_mods_enabled off: ParagonModManager
+            // refuses with its own message, because falling through would only end in a silent "cannot be used on".
+            // Deliberately NOT routed through WeaponModManager, whose nothing-is-targetable contract stays true
+            // for Tourmaline and Amethyst.
+            if (ParagonModManager.IsParagonSource(source))
+            {
+                ParagonModManager.UseObjectOnTarget(player, source, target);
+                return;
+            }
+
             var recipe = GetRecipe(player, source, target);
 
             if (recipe == null)

@@ -338,6 +338,16 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
+        public void IsEligibleWeapon_RefusesASummonerFocus_ButNotAPlainUndefCaster()
+        {
+            var focus = CreateCaster(DamageType.Undef);
+            focus.SetProperty(PropertyBool.SummonerFocus, true);
+
+            Assert.IsFalse(PrismaticDriftStone.IsEligibleWeapon(focus), "a Summoner focus is refused");
+            Assert.IsTrue(PrismaticDriftStone.IsEligibleWeapon(CreateCaster(DamageType.Undef)), "control: a plain Undef caster stays eligible");
+        }
+
+        [TestMethod]
         public void IsEligibleWeapon_RejectsEverythingElse()
         {
             var weenie = new Weenie

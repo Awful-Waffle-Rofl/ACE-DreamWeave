@@ -45,11 +45,11 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "elemental_inversion",
             DisplayName = "Elemental Inversion",
-            Description = "Each of your fire, cold, acid, electric, pierce, slash or bludgeon hits on a monster - spells " +
-                          "and weapon attacks alike - has a 2/4/6/8/10% chance (by rank) to treat the monster's natural " +
-                          "resistance to that type as its weakest natural resistance among those seven. The hit keeps " +
-                          "its own damage type, rends and vulnerabilities, and a monster immune to that type stays immune. " +
-                          "Higher Arcane Lore increases the chance.",
+            DescriptionTemplate = "Your fire, cold, acid, electric, pierce, slash and bludgeon hits on a target, from spells or " +
+                          "weapons, can treat the target's natural resistance to that type as its weakest of those seven. The hit " +
+                          "keeps its own damage type, rends and vulnerabilities, and a target immune to the type stays immune.",
+            // Live text: chance = rank * class_ability_elementalinversion_chance_per_rank (ProcChance and GetReadout below).
+            RankTailTemplate = "+{per:class_ability_elementalinversion_chance_per_rank|pct}% chance",
             MaxRank = 5,
             CostPerRank = new[] { 1, 1, 1, 1, 1 },
             Implemented = true,

@@ -24,11 +24,18 @@ namespace ACE.Server.ThreadDungeons
         /// stand, so every reward and message this file feeds skips them from the moment of removal.
         /// </summary>
         public static bool IsMemberInside(ThreadDungeonRun run, Player player)
-            => run?.Dungeon != null && player?.Location != null
-               && run.IsRosterMember(player.Guid.Full)
-               && !run.IsPuzzleRemoved(player.Guid.Full)
-               && player.Location.Instance == run.Instance
-               && ThreadRunGeometry.IsOnRunLandblock(run, player.Location);
+            => player != null && IsMemberInside(run, player.Guid.Full, player.Location);
+
+        /// <summary>
+        /// <see cref="IsMemberInside(ThreadDungeonRun, Player)"/> over a guid and a position, so a Player-free caller (and
+        /// the unit-test harness, which cannot build a Player) asks the very same question. The Player overload is this.
+        /// </summary>
+        public static bool IsMemberInside(ThreadDungeonRun run, uint guid, ACE.Entity.Position location)
+            => run?.Dungeon != null && location != null
+               && run.IsRosterMember(guid)
+               && !run.IsPuzzleRemoved(guid)
+               && location.Instance == run.Instance
+               && ThreadRunGeometry.IsOnRunLandblock(run, location);
 
         /// <summary>Online roster members who are inside, in roster order (invariant 4).</summary>
         public static List<Player> OnlineMembersInside(ThreadDungeonRun run, Func<uint, Player> onlinePlayer = null)

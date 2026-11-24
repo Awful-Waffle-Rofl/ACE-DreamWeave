@@ -18,7 +18,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 namespace ACE.Server.Tests.KnotLoot
 {
     /// <summary>
-    /// Overpowering Intent (Matron hive batons 1007603 / 1007604): the caster's War/Void skill counts as (1 + X) times its
+    /// Overpowering Intent (Matron hive batons 1007603 / 1007604 / 1007605): the caster's War/Void/Life skill counts as (1 + X) times its
     /// value for the target's magic resist check only, for a damaging spell the player casts itself at a non-player.
     /// </summary>
     [TestClass]
@@ -86,8 +86,11 @@ namespace ACE.Server.Tests.KnotLoot
                 (MagicSchool.VoidMagic, true, false, true, false, true, "Void DoT vs monster"),
                 (MagicSchool.VoidMagic, true, false, false, false, false, "Void non-damaging debuff"),
                 (MagicSchool.WarMagic, true, false, false, false, false, "War non-projectile non-DoT"),
-                (MagicSchool.LifeMagic, true, true, false, false, false, "Life projectile"),
-                (MagicSchool.LifeMagic, true, false, true, false, false, "Life DoT"),
+                (MagicSchool.LifeMagic, true, true, false, false, true, "Life projectile vs monster"),
+                (MagicSchool.LifeMagic, true, false, true, false, true, "Life DoT vs monster"),
+                (MagicSchool.LifeMagic, true, false, false, false, false, "Life non-damaging harmful"),
+                (MagicSchool.LifeMagic, true, true, false, true, false, "Life projectile vs player"),
+                (MagicSchool.LifeMagic, false, true, false, false, false, "beneficial Life"),
                 (MagicSchool.CreatureEnchantment, true, false, false, false, false, "Creature debuff"),
                 (MagicSchool.ItemEnchantment, true, false, false, false, false, "Item debuff"),
                 (MagicSchool.WarMagic, true, true, false, true, false, "War projectile vs player"),

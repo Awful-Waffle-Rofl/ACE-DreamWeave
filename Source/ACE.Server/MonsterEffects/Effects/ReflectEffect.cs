@@ -110,6 +110,13 @@ namespace ACE.Server.MonsterEffects.Effects
             if (!(source is Creature attacker) || attacker.IsDead)
                 return amount;
 
+            // Hunter's Echo: an Echo arrow's reflect lands on the Echo that fired it, never its owner; dropped when
+            // that Echo is gone (owner ruling 2026-11-11). Every other attacker is returned unchanged.
+            attacker = Creature.ResolveHuntersEchoRetaliationTarget(attacker, defender);
+
+            if (attacker == null)
+                return amount;
+
             if (!CloseRangeReflect.IsWithinRange(defender, attacker, MonsterEffectCaps.ReflectMaxRange))
                 return amount;
 
@@ -126,7 +133,7 @@ namespace ACE.Server.MonsterEffects.Effects
                 return amount;
 
             if (attacker is Player attackerPlayer)
-                attackerPlayer.TakeDamage(defender, damageType, reflected, BodyPart.Chest);
+                attackerPlayer.TakeDamage(defender, damageType, reflected, BodyPart.Chest, attackKind: DamageAttackKind.Effect);
             else
                 attacker.TakeDamage(defender, damageType, reflected);
 
@@ -181,6 +188,12 @@ namespace ACE.Server.MonsterEffects.Effects
             if (attacker == null || attacker.IsDead)
                 return;
 
+            // Hunter's Echo: an avoided Echo arrow's reflect lands on the Echo that fired it, or is dropped
+            attacker = Creature.ResolveHuntersEchoRetaliationTarget(attacker, defender);
+
+            if (attacker == null)
+                return;
+
             var flat = spec.GetDouble("flat", 0.0);
             if (flat <= 0.0)
                 return;
@@ -197,7 +210,7 @@ namespace ACE.Server.MonsterEffects.Effects
             var damageType = attacker.GetDamageType(false, combatType: CombatType.Melee);
 
             if (attacker is Player attackerPlayer)
-                attackerPlayer.TakeDamage(defender, damageType, reflected, BodyPart.Chest);
+                attackerPlayer.TakeDamage(defender, damageType, reflected, BodyPart.Chest, attackKind: DamageAttackKind.Effect);
             else
                 attacker.TakeDamage(defender, damageType, reflected);
 

@@ -4,8 +4,9 @@ namespace ACE.Server.ClassAbilities
 {
     /// <summary>
     /// Pure arithmetic for the Void/Summon T3 entry Soul Jump: when a blow would kill the summoner and a
-    /// combat pet is alive, the pet dies instead and the summoner ends the hit at 10% of maximum health,
-    /// once every 6/4/2 minutes by rank.
+    /// combat pet is alive, the pet dies instead and the summoner ends the hit at 20/40/60% of maximum
+    /// health by rank (and is then shielded from monster damage for a few seconds), once every 6/4/2
+    /// minutes by rank.
     ///
     /// Kept as a pure static because the decision itself - "would this blow kill me, and may the save fire" -
     /// is the whole ability, and Player's static initializer cannot run under the unit test host.
@@ -47,18 +48,28 @@ namespace ACE.Server.ClassAbilities
         }
 
         /// <summary>
-        /// The fraction of maximum health the summoner comes back with: the flat base fraction (10%),
-        /// multiplied by the Jump affinity factor.
+        /// The fraction of maximum health the summoner comes back with at a rank: the rank's value
+        /// (base + (rank-1)*step, 20/40/60% at the defaults) multiplied by the Jump affinity factor and
+        /// clamped to [0, 1]. Rank 0 / unlearned returns 0.
+        /// </summary>
+        public static double RestoreFractionForRank(int rank, double baseFraction, double stepFraction, double affinityMultiplier)
+        {
+            if (rank <= 0)
+                return 0.0;
+
+            var rankFraction = Math.Max(0.0, baseFraction + (rank - 1) * stepFraction);
+
+            return Math.Min(1.0, RestoreFraction(rankFraction, affinityMultiplier));
+        }
+
+        /// <summary>
+        /// Multiplies one rank's restore fraction (see <see cref="RestoreFractionForRank"/>) by the Jump
+        /// affinity factor.
         ///
-        /// THIS IS THE ABILITY'S ONE AFFINITY-BEARING MAGNITUDE. Jump multiplies the health you come back
-        /// with at Soul Jump's own non-standard rate pair (+5% of it per 100 points, +7% per 100 when
-        /// Specialized, against the shared 0.12/0.17), so 200 points of Specialized Jump turns a 10.0%
-        /// restore into 11.4%. At zero effective Jump the factor is exactly 1.0 and the restore is
-        /// bit-identical to the bare tunable.
-        ///
-        /// RANK-INVARIANT ON PURPOSE: rank buys cooldown here, not restore size, so there is no rank term to
-        /// scale and the factor multiplies the flat fraction directly. A factor below 1.0 - which the
-        /// primitive never returns - is treated as 1.0 rather than shrinking the restore.
+        /// Jump multiplies the health you come back with at the SHARED affinity rate, so the factor is
+        /// exactly 1.0 at zero effective Jump and the restore is then bit-identical to the rank's value.
+        /// A factor below 1.0 - which the primitive never returns - is treated as 1.0 rather than
+        /// shrinking the restore. Rank scaling lives in RestoreFractionForRank, not here.
         /// </summary>
         public static double RestoreFraction(double baseFraction, double affinityMultiplier)
         {
@@ -73,7 +84,7 @@ namespace ACE.Server.ClassAbilities
         ///
         ///  - <paramref name="hasLivePet"/> - WITH NO PET ALIVE THERE IS NO SAVE. That is the entry's whole
         ///    cost structure, not a precondition to be relaxed later: it spends a pet and leaves the
-        ///    summoner at 10% health with nothing out.
+        ///    summoner at a fraction of their health with nothing out.
         ///  - <paramref name="cooldownReady"/> - one save per 6/4/2 minutes by rank.
         ///  - <paramref name="currentHealth"/> above zero - a defender already at zero is not being saved by
         ///    anything; the blow that took them there was the lethal one.

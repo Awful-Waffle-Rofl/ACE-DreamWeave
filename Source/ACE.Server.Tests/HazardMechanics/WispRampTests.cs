@@ -78,7 +78,7 @@ namespace ACE.Server.Tests.HazardMechanics
         {
             // every property gets a non-default value, so one ForCycle forgets to copy shows up as a difference
             var rich = WispSettings.From(HazardArgs.Parse(
-                "n=5 scale=1.5 move=3 move_end=2 hold=2 hold_end=1.5 burst=2.5 strike_delay=0.7 rest=3 rest_end=2 pillar_radius=2.5 cycles=6 fire=sequence seq_gap=0.5 dir=n sweep_move=2 steps=3 ring_radius=7 cx=4 cy=-9 scatter_cover=0.3 wisp_clear=1.2 wisp_wcid=1006999 script=0x33001029 player_radius=0.6 edge_inset=3 escape_speed=4 hold_floor=0 follow=1 follow_lag=3 mark_dest=1 mark_script=0x33001030 ceiling_beam=1.5 beam_script=0x33001031"));
+                "n=5 scale=1.5 move=3 move_end=2 hold=2 hold_end=1.5 burst=2.5 strike_delay=0.7 rest=3 rest_end=2 pillar_radius=2.5 cycles=6 fire=sequence seq_gap=0.5 dir=n sweep_move=2 steps=3 ring_radius=7 cx=4 cy=-9 scatter_cover=0.3 mixed_pool=row,column wisp_clear=1.2 wisp_wcid=1006999 script=0x33001029 player_radius=0.6 edge_inset=3 escape_speed=4 hold_floor=0 follow=1 follow_target=random follow_lag=3 mark_dest=1 mark_script=0x33001030 ceiling_beam=1.5 beam_script=0x33001031 beam_height=5.4"));
             var fresh = WispSettings.From(HazardArgs.Empty);
             var ramped = new[] { nameof(WispSettings.Move), nameof(WispSettings.Hold), nameof(WispSettings.Rest) };
             var copy = rich.ForCycle(2);

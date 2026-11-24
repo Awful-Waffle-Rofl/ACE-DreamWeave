@@ -36,9 +36,14 @@ namespace ACE.Server.WorldObjects
             SerializeCreateObject(writer, false, adminvision, changenodraw);
         }
 
-        public virtual void SerializeGameDataOnly(BinaryWriter writer, bool adminvision = false)
+        /// <param name="wireGuid">
+        /// The guid to write in place of this object's own, or null (the default) for its own. Only a
+        /// vendor row passes one (Vendor.GetWireGuid): everything after the guid is this object's full
+        /// PublicWeenieDesc either way.
+        /// </param>
+        public virtual void SerializeGameDataOnly(BinaryWriter writer, bool adminvision = false, uint? wireGuid = null)
         {
-            SerializeCreateObject(writer, true, adminvision, false);
+            SerializeCreateObject(writer, true, adminvision, false, wireGuid);
         }
 
         /// <summary>
@@ -53,9 +58,12 @@ namespace ACE.Server.WorldObjects
             writer.Write(Sequences.GetNextSequence(SequenceType.ObjectVisualDesc));
         }
 
-        private void SerializeCreateObject(BinaryWriter writer, bool gamedataonly, bool adminvision = false, bool changenodraw = false)
+        private void SerializeCreateObject(BinaryWriter writer, bool gamedataonly, bool adminvision = false, bool changenodraw = false, uint? wireGuid = null)
         {
-            writer.WriteGuid(Guid);
+            if (wireGuid.HasValue)
+                writer.Write(wireGuid.Value);
+            else
+                writer.WriteGuid(Guid);
 
             if (!gamedataonly)
             {
@@ -895,8 +903,10 @@ namespace ACE.Server.WorldObjects
                 UpdateObjectDescriptionFlag(ObjectDescriptionFlag.Player, CloakStatus < CloakStatus.Creature);
 
             // World Events Hold: a knight that shows its health bar is sent as attackable (the server still refuses every
-            // attack on it). Unchanged for everything else.
-            UpdateObjectDescriptionFlag(ObjectDescriptionFlag.Attackable, ACE.Server.WorldEvents.WorldEventHooks.HoldClientAttackable(this, Attackable));
+            // attack on it). The Allegiance Avatar fighter is sent as NOT attackable (monsters still fight it). Unchanged for
+            // everything else.
+            UpdateObjectDescriptionFlag(ObjectDescriptionFlag.Attackable,
+                ACE.Server.Avatars.Gauntlet.GauntletAvatarFighter.ClientAttackable(this, ACE.Server.WorldEvents.WorldEventHooks.HoldClientAttackable(this, Attackable)));
             UpdateObjectDescriptionFlag(ObjectDescriptionFlag.PlayerKiller, PlayerKillerStatus == PlayerKillerStatus.PK);
             UpdateObjectDescriptionFlag(ObjectDescriptionFlag.HiddenAdmin, HiddenAdmin);
             UpdateObjectDescriptionFlag(ObjectDescriptionFlag.UiHidden, UiHidden);
@@ -1061,6 +1071,8 @@ namespace ACE.Server.WorldObjects
 
             if (this is Player player)
                 objDesc.TextureChanges.Add(new PropertiesTextureMap { PartIndex = 0x10, OldTexture = player.Character.DefaultHairTexture, NewTexture = player.Character.HairTexture });
+            else if (this is ACE.Server.Avatars.IAvatarFigure avatar && avatar.HairTextureOverride is (uint oldHair, uint newHair))
+                objDesc.TextureChanges.Add(new PropertiesTextureMap { PartIndex = 0x10, OldTexture = oldHair, NewTexture = newHair });
             //AddTexture(0x10, DefaultHairTextureDID.Value, HairTextureDID.Value);
             if (HairPaletteDID.HasValue)
                 objDesc.SubPalettes.Add(new PropertiesPalette { SubPaletteId = HairPaletteDID.Value, Offset = 0x18, Length = 0x8 });

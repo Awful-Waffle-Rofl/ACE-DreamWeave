@@ -595,19 +595,19 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             Assert.AreEqual(1.0, plan.LumMultiplier, 1e-9, "guard: no lum modifiers on this gem");
             Assert.AreEqual(DungeonPopulationLimits.DefaultLumScale, plan.LumScale, 1e-9, "guard: the plan carries the shipped scale");
-            Assert.AreEqual(2.0, plan.LumScale, 1e-9, "guard: the shipped scale these expectations are written against");
+            Assert.AreEqual(2.7, plan.LumScale, 1e-9, "guard: the shipped scale these expectations are written against");
             Assert.AreEqual(185, DungeonPopulationBuilder.LuminanceBaseLevel, "guard: the standard's floor");
 
             // Below the floor: nothing, however much XP the creature is worth.
             Assert.AreEqual(0, DungeonPopulationBuilder.LuminanceFor(plan, 800000, 184, DungeonRole.Trash));
 
             // At the floor: 800,000 / 4,000 = 200 lum base, then role and scale.
-            Assert.AreEqual(400, DungeonPopulationBuilder.LuminanceFor(plan, 800000, 185, DungeonRole.Trash), "200 x 1.0 x 2.0");
-            Assert.AreEqual(600, DungeonPopulationBuilder.LuminanceFor(plan, 800000, 185, DungeonRole.Elite), "200 x 1.5 x 2.0");
-            Assert.AreEqual(800, DungeonPopulationBuilder.LuminanceFor(plan, 800000, 185, DungeonRole.Boss), "200 x 2.0 x 2.0");
+            Assert.AreEqual(540, DungeonPopulationBuilder.LuminanceFor(plan, 800000, 185, DungeonRole.Trash), "200 x 1.0 x 2.7");
+            Assert.AreEqual(810, DungeonPopulationBuilder.LuminanceFor(plan, 800000, 185, DungeonRole.Elite), "200 x 1.5 x 2.7");
+            Assert.AreEqual(1080, DungeonPopulationBuilder.LuminanceFor(plan, 800000, 185, DungeonRole.Boss), "200 x 2.0 x 2.7");
 
             // A higher draw is worth more XP and so pays proportionally more luminance.
-            Assert.AreEqual(600, DungeonPopulationBuilder.LuminanceFor(plan, 1100000, 200, DungeonRole.Trash), "300 x 1.0 x 2.0");
+            Assert.AreEqual(810, DungeonPopulationBuilder.LuminanceFor(plan, 1100000, 200, DungeonRole.Trash), "300 x 1.0 x 2.7");
             Assert.IsTrue(DungeonPopulationBuilder.LuminanceFor(plan, 1100000, 200, DungeonRole.Trash)
                         > DungeonPopulationBuilder.LuminanceFor(plan, 800000, 185, DungeonRole.Trash),
                 "a higher-level draw must pay more luminance, not the same flat award");
@@ -715,7 +715,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         /// <summary>
         /// XP is priced off the DRAWN CREATURE's own retail worth times the reward scale - ruling R20, which
         /// used to price everything off the gem's level, was reversed by the owner on 2026-09-06. The
-        /// baseline is therefore exactly 1.0x retail and the 2.0 is measurable against it, and a higher-level
+        /// baseline is therefore exactly 1.0x retail and the 2.7 is measurable against it, and a higher-level
         /// draw pays more rather than the gem's flat advertised rate.
         /// </summary>
         [TestMethod]
@@ -725,15 +725,15 @@ namespace ACE.Server.Tests.ThreadDungeons
             var plan = DungeonPopulationBuilder.Build(Spec(), Dungeon(4), store, Species(), LevelOf, HealthOf, Limits(), new Random(3));
 
             Assert.AreEqual(1.0, plan.XpMultiplier, 1e-9, "guard: no XP modifiers on this gem");
-            Assert.AreEqual(2.0, plan.XpScale, 1e-9, "guard: the shipped scale these expectations are written against");
+            Assert.AreEqual(2.7, plan.XpScale, 1e-9, "guard: the shipped scale these expectations are written against");
 
             // The creature's own XpOverride is the anchor; the gem's level (100) plays no part.
             var baseXp = DungeonPopulationBuilder.BaseXp(store.XpLadder, 500000, 130, DungeonRole.Trash, plan.BossLevel);
             Assert.AreEqual(500000L, baseXp, "an authored XpOverride is used as-is");
 
-            Assert.AreEqual(1000000L, DungeonPopulationBuilder.XpFor(plan, baseXp, DungeonRole.Trash), "500000 x 2.0");
-            Assert.AreEqual(1500000L, DungeonPopulationBuilder.XpFor(plan, baseXp, DungeonRole.Elite), "elite rate is 1.5x on top");
-            Assert.AreEqual(2000000L, DungeonPopulationBuilder.XpFor(plan, baseXp, DungeonRole.Boss), "boss rate is 2.0x on top");
+            Assert.AreEqual(1350000L, DungeonPopulationBuilder.XpFor(plan, baseXp, DungeonRole.Trash), "500000 x 2.7");
+            Assert.AreEqual(2025000L, DungeonPopulationBuilder.XpFor(plan, baseXp, DungeonRole.Elite), "500000 x 2.7 x 1.5 (elite rate)");
+            Assert.AreEqual(2700000L, DungeonPopulationBuilder.XpFor(plan, baseXp, DungeonRole.Boss), "500000 x 2.7 x 2.0 (boss rate)");
 
             var richer = DungeonPopulationBuilder.BaseXp(store.XpLadder, 900000, 160, DungeonRole.Trash, plan.BossLevel);
             Assert.IsTrue(DungeonPopulationBuilder.XpFor(plan, richer, DungeonRole.Trash) > DungeonPopulationBuilder.XpFor(plan, baseXp, DungeonRole.Trash),
@@ -758,7 +758,7 @@ namespace ACE.Server.Tests.ThreadDungeons
 
                 Assert.AreEqual(80000L, baseXp, $"the ladder rung at the creature's OWN level 100 (xpOverride {absent?.ToString() ?? "null"})");
                 Assert.AreNotEqual(0L, DungeonPopulationBuilder.XpFor(plan, baseXp, DungeonRole.Trash), "such a creature must never be worth nothing");
-                Assert.AreEqual(160000L, DungeonPopulationBuilder.XpFor(plan, baseXp, DungeonRole.Trash), "80000 x 2.0");
+                Assert.AreEqual(216000L, DungeonPopulationBuilder.XpFor(plan, baseXp, DungeonRole.Trash), "80000 x 2.7");
             }
 
             // The fallback reads the CREATURE's level, not the gem's: a level-200 draw off a level-100 gem
@@ -798,7 +798,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             var plan = DungeonPopulationBuilder.Build(Spec(("hardy", 1.6)), Dungeon(4), store, Species(), LevelOf, HealthOf, Limits(), new Random(3));
 
             Assert.AreEqual(1.4, plan.XpMultiplier, 1e-9);
-            Assert.AreEqual(224000L, DungeonPopulationBuilder.XpFor(plan, 80000, DungeonRole.Trash), "80000 x 1.4 x 2.0");
+            Assert.AreEqual(302400L, DungeonPopulationBuilder.XpFor(plan, 80000, DungeonRole.Trash), "80000 x 1.4 x 2.7");
         }
 
         /// <summary>A gem naming a family that has no table at all is a note, not an exception.</summary>
@@ -1207,27 +1207,28 @@ namespace ACE.Server.Tests.ThreadDungeons
 
         /// <summary>
         /// The XP/luminance scale are MULTIPLICATIVE axes (neutral value 1.0): effective = 1 + ratio *
-        /// (raw - 1). At level 185 (ratio 0.25 exactly, per the spec's reference table) the shipped 2.0
-        /// default becomes 1 + 0.25 * (2.0 - 1) = 1.25 - never the wrong form's 0.25 * 2.0 = 0.5, which would
-        /// pay LESS than retail.
+        /// (raw - 1). At level 185 (ratio (185 / 300)^2 = 0.380278 at the shipped exponent 2) the shipped 2.7
+        /// default becomes 1 + 0.380278 * (2.7 - 1) = 1.646472 - never the wrong form's 0.380278 * 2.7 = 1.027,
+        /// which would pay barely more than retail.
         /// </summary>
         [TestMethod]
         public void XpScale_and_LumScale_are_scaled_multiplicatively()
         {
             var plan = DungeonPopulationBuilder.Build(LeveledSpec(185), Dungeon(4), Store(), Species(), LevelOf, HealthOf, ScaledLimits(), new Random(3));
 
-            Assert.AreEqual(1.25, plan.XpScale, 0.01);
-            Assert.AreEqual(1.25, plan.LumScale, 0.01);
+            // 1 + (185 / 300)^2 * (2.7 - 1) = 1 + 0.380278 * 1.7 = 1.646472
+            Assert.AreEqual(1.6465, plan.XpScale, 0.001);
+            Assert.AreEqual(1.6465, plan.LumScale, 0.001);
             Assert.IsTrue(plan.XpScale > 1.0, "must never drop below retail (1.0x) at any level");
         }
 
         /// <summary>
         /// Loot QUANTITY is a multiplicative axis (a count multiplier, neutral 1.0); loot QUALITY and the
         /// salvage-affinity per-kill chance are ADDITIVE axes (neutral 0.0, effective = ratio * raw). At
-        /// level 185 (ratio 0.25): the "rich" modifier's raw 2.0x loot-quantity multiplier becomes
-        /// 1 + 0.25 * (2.0 - 1) = 1.25x (observed via the profile's scaled max item counts), its raw 0.4
-        /// loot-quality bonus becomes 0.25 * 0.4 = 0.10, and the salvage row's raw 25% chance becomes
-        /// 0.25 * 0.25 = 0.0625.
+        /// level 185 (ratio (185 / 300)^2 = 0.380278): the "rich" modifier's raw 2.0x loot-quantity multiplier
+        /// becomes 1 + 0.380278 * (2.0 - 1) = 1.380278x (observed via the profile's scaled max item counts),
+        /// its raw 0.4 loot-quality bonus becomes 0.380278 * 0.4 = 0.152111, and the salvage row's raw 25%
+        /// chance becomes 0.380278 * 0.25 = 0.095069.
         /// </summary>
         [TestMethod]
         public void Loot_quantity_scales_multiplicatively_and_quality_and_salvage_chance_scale_additively()
@@ -1239,16 +1240,15 @@ namespace ACE.Server.Tests.ThreadDungeons
                 new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5, lootQuantityCap: 3.0, rewardScalingEnabled: false, minMonsters: 0), new Random(3));
             var scaled = DungeonPopulationBuilder.Build(spec, Dungeon(4), store, Species(), LevelOf, HealthOf, ScaledLimits(), new Random(3));
 
-            // Loot quantity: raw 2.0x -> Scale(2) = ceil(2 * 2.0) = 4; scaled 1.25x -> Scale(2) = ceil(2 * 1.25) = 3.
+            // Loot quantity: raw 2.0x -> Scale(2) = ceil(2 * 2.0) = 4; scaled 1.380278x -> Scale(2) = ceil(2 * 1.380278) = ceil(2.76) = 3.
             Assert.AreEqual(4, raw.Profile.ItemMaxAmount, "guard: the unscaled profile carries the raw 2.0x multiplier");
-            Assert.AreEqual(3, scaled.Profile.ItemMaxAmount, "loot quantity scaled multiplicatively: 1 + 0.25 * (2.0 - 1) = 1.25x");
+            Assert.AreEqual(3, scaled.Profile.ItemMaxAmount, "loot quantity scaled multiplicatively: 1 + 0.380278 * (2.0 - 1) = 1.380278x");
 
-            // Loot quality: raw bonus 0.4 unchanged; scaled bonus 0.25 * 0.4 = 0.10.
+            // Loot quality: raw bonus 0.4 unchanged; scaled bonus (185 / 300)^2 * 0.4 = 0.380278 * 0.4 = 0.152111.
             Assert.AreEqual(0.4f, raw.Profile.LootQualityMod, 0.001f, "guard: the unscaled profile carries the raw 0.4 bonus");
-            Assert.AreEqual(0.10f, scaled.Profile.LootQualityMod, 0.001f, "loot quality scaled additively: 0.25 * 0.4 = 0.10");
+            Assert.AreEqual(0.152111f, scaled.Profile.LootQualityMod, 0.001f, "loot quality scaled additively: 0.380278 * 0.4 = 0.152111");
 
-            // Salvage-affinity chance: raw 25% -> 0.25; scaled -> ratio(185) * 0.25 (~0.0625, ratio itself only
-            // pinned to 0.01 by the spec's reference table, so compare against the actual ratio rather than
+            // Salvage-affinity chance: raw 25% -> 0.25; scaled -> ratio(185) * 0.25 (~0.0951, so compare against the actual ratio rather than
             // the rounded 0.25 to avoid a spurious floating-point mismatch).
             var ratio185 = DungeonRewardMath.RewardScaleRatio(185, DungeonPopulationLimits.DefaultRewardScaleAnchor,
                 DungeonPopulationLimits.DefaultRewardScaleExponent, DungeonPopulationLimits.DefaultRewardScaleFloor, DungeonPopulationLimits.DefaultRewardScaleCap);
@@ -1256,7 +1256,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreEqual(1, raw.SalvageAffinities.Count);
             Assert.AreEqual(0.25, raw.SalvageAffinities[0].Chance, 1e-9, "guard: the unscaled chance is the raw 25%");
             Assert.AreEqual(1, scaled.SalvageAffinities.Count);
-            Assert.AreEqual(ratio185 * 0.25, scaled.SalvageAffinities[0].Chance, 1e-9, "salvage chance scaled additively: ratio(185) * 0.25 (~0.0625)");
+            Assert.AreEqual(ratio185 * 0.25, scaled.SalvageAffinities[0].Chance, 1e-9, "salvage chance scaled additively: ratio(185) * 0.25 (~0.0951)");
         }
 
         // ---- dynamic_dungeons_salvage_affinity_chance_cap: affinity's own, uncapped ratio -------------
@@ -1264,8 +1264,8 @@ namespace ACE.Server.Tests.ThreadDungeons
         /// <summary>
         /// THE WORKED EXAMPLE from the spec: a gem-375 with a 20% affinity mod, dynamic_dungeons_reward_scale_cap
         /// set to 1 (which caps XP/luminance/loot-quantity's ratio at 1.0, per XpScale_is_capped_by_reward_scale_cap
-        /// below), still resolves affinity's OWN ratio uncapped: (375/300)^2.87 = ~1.897. The raw 20% chance
-        /// becomes ~37.9% with the chance cap at its neutral default (1.0), and exactly 25% with the chance cap
+        /// below), still resolves affinity's OWN ratio uncapped: (375/300)^2 = 1.5625. The raw 20% chance
+        /// becomes 31.25% with the chance cap at its neutral default (1.0), and exactly 25% with the chance cap
         /// set to 0.25 - proving dynamic_dungeons_salvage_affinity_chance_cap is the only ceiling on the
         /// result, never dynamic_dungeons_reward_scale_cap.
         /// </summary>
@@ -1277,7 +1277,7 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             var expectedRatio = DungeonRewardMath.RewardScaleRatio(375, DungeonPopulationLimits.DefaultRewardScaleAnchor,
                 DungeonPopulationLimits.DefaultRewardScaleExponent, DungeonPopulationLimits.DefaultRewardScaleFloor, 0.0);
-            Assert.AreEqual(1.897, expectedRatio, 0.001, "guard: matches the spec's worked (375/300)^2.87 ~= 1.897");
+            Assert.AreEqual(1.5625, expectedRatio, 0.001, "guard: (375/300)^2 = 1.25^2 = 1.5625 at the shipped exponent 2");
 
             // dynamic_dungeons_reward_scale_cap = 1: caps XP/luminance/loot-quantity's ratio at 1.0.
             var uncappedChance = DungeonPopulationBuilder.Build(spec, Dungeon(4), store, Species(), LevelOf, HealthOf,
@@ -1286,8 +1286,9 @@ namespace ACE.Server.Tests.ThreadDungeons
                 ScaledLimits(cap: 1.0, salvageAffinityChanceCap: 0.25), new Random(3));
 
             Assert.AreEqual(1, uncappedChance.SalvageAffinities.Count);
-            Assert.AreEqual(0.20 * expectedRatio, uncappedChance.SalvageAffinities[0].Chance, 1e-6, "~37.9%, chance cap at its neutral 1.0");
-            Assert.AreEqual(0.379, uncappedChance.SalvageAffinities[0].Chance, 0.001, "matches the spec's worked 37.9%");
+            Assert.AreEqual(0.20 * expectedRatio, uncappedChance.SalvageAffinities[0].Chance, 1e-6, "31.25%, chance cap at its neutral 1.0");
+            // 0.20 * (375 / 300)^2 = 0.20 * 1.5625 = 0.3125
+            Assert.AreEqual(0.3125, uncappedChance.SalvageAffinities[0].Chance, 0.001, "20% x 1.5625 = 31.25%, still above the 0.25 chance cap used below");
 
             Assert.AreEqual(1, cappedChance.SalvageAffinities.Count);
             Assert.AreEqual(0.25, cappedChance.SalvageAffinities[0].Chance, 1e-9, "clamped to the 0.25 chance cap");
@@ -1296,7 +1297,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         /// <summary>
         /// The other half of the same worked example: with dynamic_dungeons_reward_scale_cap = 1, XP still
         /// uses the CAPPED ratio (1.0 at gem-375, well past the anchor), even though affinity's own ratio for
-        /// the identical spec is the uncapped ~1.897 proven above.
+        /// the identical spec is the uncapped 1.5625 proven above.
         /// </summary>
         [TestMethod]
         public void XpScale_is_capped_by_reward_scale_cap_while_affinity_is_not()
@@ -1304,8 +1305,8 @@ namespace ACE.Server.Tests.ThreadDungeons
             var plan = DungeonPopulationBuilder.Build(LeveledSpec(375), Dungeon(4), Store(), Species(), LevelOf, HealthOf,
                 ScaledLimits(cap: 1.0), new Random(3));
 
-            // ratio capped to 1.0: XpScale = 1 + 1.0 * (2.0 - 1) = 2.0, the flat uncapped-by-scaling total.
-            Assert.AreEqual(2.0, plan.XpScale, 1e-9, "XP's ratio is capped to 1.0 by dynamic_dungeons_reward_scale_cap");
+            // ratio capped to 1.0: XpScale = 1 + 1.0 * (2.7 - 1) = 2.7, the flat uncapped-by-scaling total.
+            Assert.AreEqual(2.7, plan.XpScale, 1e-9, "XP's ratio is capped to 1.0 by dynamic_dungeons_reward_scale_cap");
         }
 
         /// <summary>Below the anchor (185), affinity's own ratio and the shared XP/lum ratio are identical when
@@ -1523,14 +1524,37 @@ namespace ACE.Server.Tests.ThreadDungeons
             double defenseCap = DungeonPopulationLimits.DefaultUpliftDefenseCap,
             double defenseRate = DungeonPopulationLimits.DefaultDefenseCurveRateAbove375,
             double magicRate = DungeonPopulationLimits.DefaultMagicDefenseCurveRateAbove300,
-            double damageRate = DungeonPopulationLimits.DefaultDamageCurveRateAbovePivot)
+            double damageRate = DungeonPopulationLimits.DefaultDamageCurveRateAbovePivot,
+            double weaponAttackRate400 = DungeonPopulationLimits.DefaultWeaponAttackCurveRateAbove400,
+            double meleeDefenseRate400 = DungeonPopulationLimits.DefaultMeleeDefenseCurveRateAbove400)
             => new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5,
                 rewardScalingEnabled: false,
                 minMonsters: 0,
                 reachUp: false, statCurve: false,
                 archetypeUplift: archetypeUplift, upliftOffenseRatio: offense, upliftDefenseRatio: defense, upliftDefenseCap: defenseCap,
                 defenseCurveRateAbove375: defenseRate, magicDefenseCurveRateAbove300: magicRate,
-                damageCurveRateAbovePivot: damageRate);
+                damageCurveRateAbovePivot: damageRate,
+                weaponAttackCurveRateAbove400: weaponAttackRate400, meleeDefenseCurveRateAbove400: meleeDefenseRate400);
+
+        [TestMethod]
+        public void The_archetype_context_receives_each_400_rate_from_its_own_limits_field()
+        {
+            var spec = WideSpec("wide");
+
+            // Distinct, non-default values (defaults are 0.33 and 0.19), so a swap of the two adjacent arguments, or a dropped
+            // argument that falls back to a default, cannot pass.
+            var plan = DungeonPopulationBuilder.Build(spec, Dungeon(20), Store(), WideSpecies(), WideLevelOf, HealthOf,
+                ArchetypeLimits(true, weaponAttackRate400: 0.6, meleeDefenseRate400: 0.4), new Random(4), WideProfileOf, archetypeProfileOf: WideProfileOf);
+
+            Assert.IsNotNull(plan.ArchetypeUplift, "positive control: the fixture builds an archetype context");
+            Assert.AreEqual(0.6, plan.ArchetypeUplift.WeaponAttackRateAbove400, 1e-12, "weapon attack 400 dial");
+            Assert.AreEqual(0.4, plan.ArchetypeUplift.MeleeDefenseRateAbove400, 1e-12, "melee defense 400 dial");
+
+            var shipped = DungeonPopulationBuilder.Build(spec, Dungeon(20), Store(), WideSpecies(), WideLevelOf, HealthOf,
+                ArchetypeLimits(true), new Random(4), WideProfileOf, archetypeProfileOf: WideProfileOf);
+            Assert.AreEqual(DungeonStatCurve.DefaultWeaponAttackRateAbove400, shipped.ArchetypeUplift.WeaponAttackRateAbove400, 1e-12);
+            Assert.AreEqual(DungeonStatCurve.DefaultMeleeDefenseRateAbove400, shipped.ArchetypeUplift.MeleeDefenseRateAbove400, 1e-12);
+        }
 
         [TestMethod]
         public void The_archetype_context_receives_each_defense_rate_from_its_own_limits_field()

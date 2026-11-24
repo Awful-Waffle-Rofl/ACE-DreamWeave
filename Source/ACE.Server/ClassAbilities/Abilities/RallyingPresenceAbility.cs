@@ -46,9 +46,19 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "rallying_presence",
             DisplayName = "Rallying Presence",
-            Description = "Fellows and combat pets within 15 metres take 1/2/3/4/5% less damage (by rank). " +
-                          "You take half that reduction yourself. Higher Assess Person multiplies the " +
-                          "reduction.",
+            // Live text: rank * class_ability_rallyingpresence_percent_per_rank (GetReadout; ReductionFraction); the
+            // radius is class_ability_rallyingpresence_radius. The self share (class_ability_rallyingpresence_self_share, 0.50)
+            // is shown as a percent; it read "half" before, a word that went stale on a retune.
+            DescriptionTemplate = "Fellows and combat pets within {v:class_ability_rallyingpresence_radius|num} metres take less " +
+                          "damage, and you get {fn:self_share@max|pct}% of that reduction yourself.",
+            RankTailTemplate = "-{per:class_ability_rallyingpresence_percent_per_rank|pct}% damage taken",
+            // self_share is RallyingPresenceMath.SelfShareFraction of a full 1.0 reduction over the tunable: the same floor at 0 the handler applies.
+            TextFormulas = new Dictionary<string, TextFormula>
+            {
+                ["self_share"] = new TextFormula(
+                    (values, rank) => RallyingPresenceMath.SelfShareFraction(1.0, RallyingPresenceMath.SelfShare(values)),
+                    "class_ability_rallyingpresence_self_share"),
+            },
             MaxRank = 5,
             CostPerRank = new[] { 1, 1, 1, 1, 1 },
             Implemented = true,
@@ -137,6 +147,9 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// </summary>
         public static double SelfShareFraction(double fullReduction, double selfShare) => fullReduction * Math.Max(0.0, selfShare);
 
+        /// <summary>The class_ability_rallyingpresence_self_share tunable read through <paramref name="values"/>; the handler and the live text both read it here.</summary>
+        public static double SelfShare(ITunableValues values) => values.GetDouble("class_ability_rallyingpresence_self_share");
+
         /// <summary>
         /// The damage multiplier for a given (already self-share-adjusted, if applicable) reduction fraction:
         /// 1.0 - reduction, clamped to [0, 1] so an uncapped stack can never invert into bonus damage or a
@@ -187,7 +200,7 @@ namespace ACE.Server.ClassAbilities.Abilities
 
             var radius = PropertyManager.GetDouble("class_ability_rallyingpresence_radius").Item;
             var perRank = PropertyManager.GetDouble("class_ability_rallyingpresence_percent_per_rank").Item;
-            var selfShare = PropertyManager.GetDouble("class_ability_rallyingpresence_self_share").Item;
+            var selfShare = RallyingPresenceMath.SelfShare(ClassAbilityText.Live);
 
             var best = 0.0;
 

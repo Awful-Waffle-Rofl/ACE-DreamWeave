@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
+using ACE.Entity.Enum.Properties;
 using ACE.Server.Entity;
 using ACE.Server.WorldEvents.Defs;
 using ACE.Server.WorldObjects;
@@ -53,10 +54,61 @@ namespace ACE.Server.WorldEvents.Objectives
             this.nounPlural = !string.IsNullOrWhiteSpace(nounPlural) ? nounPlural : SourceThemeDef.DefaultObjectiveNounPlural;
         }
 
+        /// <summary>
+        /// The phase machine (phased Destroy the Source), or null when phases are off, in which case every member below behaves as it
+        /// always did. Set once by the factory, right after construction.
+        /// </summary>
+        private DestroySourcePhases phases;
+
+        private Func<uint> bossGuid = () => 0;
+
+        private readonly HashSet<uint> guarded = new HashSet<uint>();
+
+        public DestroySourcePhases Phases => phases;
+
+        /// <summary>Attaches the phase machine; <paramref name="bossGuid"/> reads the run's champion guid (0 = none).</summary>
+        public void AttachPhases(DestroySourcePhases machine, Func<uint> bossGuid)
+        {
+            phases = machine;
+            this.bossGuid = bossGuid ?? (() => 0);
+        }
+
         public void OnCreatureDied(Creature creature, DamageHistoryInfo lastDamager, DamageHistoryInfo topDamager)
         {
-            OnDeathCore(creature?.Guid.Full ?? 0, WorldEventMvpResolver.ResolveName(lastDamager),
+            var guid = creature?.Guid.Full ?? 0;
+
+            if (phases != null)
+                OnPhaseDeathCore(guid, creature?.GetProperty(PropertyInt.WorldEventId) != null);
+
+            OnDeathCore(guid, WorldEventMvpResolver.ResolveName(lastDamager),
                 WorldEventMvpResolver.ResolveName(topDamager));
+        }
+
+        /// <summary>Testable core of the phase bookkeeping for one death: a source, the boss, or a counted event creature.</summary>
+        public void OnPhaseDeathCore(uint guid, bool wasEventCreature)
+        {
+            if (phases == null || guid == 0)
+                return;
+
+            var sources = sourceGuids() ?? Array.Empty<uint>();
+
+            phases.OnDeath(guid, wasEventCreature, sources.Contains(guid), guid == bossGuid());
+        }
+
+        /// <summary>
+        /// A source is about to enter the world: with phases on it spawns sealed (immune overlay, health floor = max). A guid is guarded
+        /// once, however many placement attempts reach here. Never reached for the inert scenery objective.
+        /// </summary>
+        public void OnSourceSpawning(Creature source)
+        {
+            if (phases == null || source == null)
+                return;
+
+            if (!guarded.Add(source.Guid.Full))
+                return;
+
+            DestroySourcePhaseWiring.ApplySpawnGuard(source);
+            phases.RegisterSource(source.Guid.Full, guardApplied: true);
         }
 
         /// <summary>Testable core (D6). A guid that is not one of the theme's registered sources is ignored.</summary>
@@ -74,6 +126,7 @@ namespace ACE.Server.WorldEvents.Objectives
 
         public void Tick(double now)
         {
+            phases?.Tick(now);
         }
 
         public bool IsComplete

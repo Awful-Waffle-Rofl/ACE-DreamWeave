@@ -123,13 +123,19 @@ namespace ACE.Server.Tests.KnotLoot
         {
             var text = Source("Source/ACE.Server/WorldObjects/Managers/EnchantmentManager.cs");
 
-            StringAssert.Matches(text, new Regex(@"entry\.StatModValue = spell\.StatModVal;\s*(//[^\n]*\n\s*)*entry\.StatModValue = Cloak\.ProcStatModValue\(weapon, spell\.Id, entry\.StatModValue\);"), "BuildEntry must apply the cloak magnitude right after the spell value");
-            StringAssert.Contains(text, "refreshSpell.StatModValue = Cloak.RefreshedProcStatModValue(weapon, spell.Id, refreshSpell.StatModValue, spell.StatModVal);");
+            StringAssert.Matches(text, new Regex(@"entry\.StatModValue = spell\.StatModVal;\s*(//[^\n]*\n\s*)*entry\.StatModValue = Cloak\.ProcStatModValue\(weapon, spell\.Id, entry\.StatModValue, PvpClassifier\.IsPvp\(caster, WorldObject\), spell\.StatModType\);"), "BuildEntry must apply the cloak magnitude right after the spell value");
+            StringAssert.Contains(text, "refreshSpell.StatModValue = Cloak.RefreshedProcStatModValue(weapon, spell.Id, refreshSpell.StatModValue, spell.StatModVal, PvpClassifier.IsPvp(caster, WorldObject), spell.StatModType);");
         }
 
         [TestMethod]
         public void GetDamageReductionAmount_ReadsTheCloakBase()
-            => StringAssert.Contains(Source("Source/ACE.Server/Entity/Cloak.cs"), "ApplyCloakDamageReduction(source, defender, DamageReductionBase(WornCloak(defender)))");
+        {
+            var text = Source("Source/ACE.Server/Entity/Cloak.cs");
+
+            StringAssert.Contains(text, "var cloak = WornCloak(defender);");
+            StringAssert.Contains(text, "CloakMantleMath.AmplifyReduction(DamageReductionBase(cloak), CloakMantleMath.AmplifierFactor(cloak, Pvp.Rules.PvpClassifier.IsPvp(source, defender)))");
+            StringAssert.Contains(text, "ApplyCloakDamageReduction(source, defender, amplified)");
+        }
 
         internal static string Source(string repoRelativePath)
         {

@@ -264,6 +264,7 @@ namespace ACE.Server.ThreadDungeons
                     BiomeTags = table.BiomeTags,
                     CreatureType = table.CreatureType,
                     Source = table.Source,
+                    Enabled = table.Enabled,
                     Members = members,
                 };
             }

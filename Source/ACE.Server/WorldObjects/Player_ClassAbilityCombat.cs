@@ -118,19 +118,27 @@ namespace ACE.Server.WorldObjects
             {
                 SendClassAbilityCombatMessage($"You block {attacker.Name}'s attack with your shield!");
 
-                // blocked hits trigger Thorns at full strength (base behaviour - the enemy hit the shield)
-                ApplyThornsReflect(attacker, damageType, 1.0);
-
                 // A blocked hit is a hit for the cloak spell proc. FLOOR ONLY, by owner ruling: the block
                 // returns from the damage calculation before any damage figure exists, so there is no
                 // damage_percent to roll on and 0f is passed on purpose. TryProcSpell's chance is therefore
                 // max(cloak_min_proc, Cloaked in Power floor) - 0 at the shipped defaults, so only Cloaked in
                 // Power wearers (or a raised cloak_min_proc) ever proc off a block. Parry is deliberately
                 // excluded.
+                //
+                // THREE STEPS, IN THIS ORDER (Vanguard pass 2026-11-06): roll the proc, reflect, THEN cast it. A
+                // successful roll opens Cloaked in Power's Critical Thorns window and the reflect of this very
+                // block must see it open; the cast stays behind the reflect so the proc spell can neither land
+                // ahead of Thorns nor kill the attacker before it.
                 var blockCloak = EquippedCloak;
 
-                if (blockCloak != null && Cloak.HasProcSpell(blockCloak))
-                    Cloak.TryProcSpell(this, attacker, blockCloak, 0f);
+                var blockProcRolled = blockCloak != null && Cloak.HasProcSpell(blockCloak)
+                    && Cloak.RollSpellProc(this, blockCloak, 0f);
+
+                // blocked hits trigger Thorns at full strength (base behaviour - the enemy hit the shield)
+                ApplyThornsReflect(attacker, damageType, 1.0);
+
+                if (blockProcRolled)
+                    Cloak.CompleteSpellProc(this, attacker, blockCloak);
             }
             else if (outcome == ClassAbilityAvoidanceOutcome.Parry)
             {
@@ -313,10 +321,36 @@ namespace ACE.Server.WorldObjects
             // Defensive Weapon (owner ruling 2026-10-25) adds its armor level to the shield's for Thorns, the same
             // level GetShieldMod adds after the Shield-skill cap. Only here, past the shield check above: with no
             // shield equipped Defensive Weapon does NOT enable Thorns. Stance-bound (0 in NonCombat).
-            var reflectArmorLevel = DefensiveWeaponMath.ThornsArmorLevel(shieldArmorLevel, GetDefensiveWeaponShieldLevel());
+            // A standing Runic or Sanguine Ward adds its shield level too (owner ruling 2026-11-05), read here for the
+            // same reason: past the shield check, so a ward never enables shieldless Thorns. The pool is read now; a
+            // hit whose absorb already drained it reflects without the bonus (accepted).
+            var reflectArmorLevel = DefensiveWeaponMath.ThornsArmorLevel(shieldArmorLevel, GetDefensiveWeaponShieldLevel(), GetWardThornsLevel(attacker));
 
             var baseReflect = ThornsAbility.ComputeReflectDamage(reflectArmorLevel, rank, percentPerRank, shieldScale, gearMod);
-            var reflect = (uint)Math.Round(baseReflect * strengthMultiplier);
+
+            // Damage Resist Rating (Vanguard, 2026-11-06): the reflect is scaled by 1 + fraction x the player's
+            // TOTAL Damage Resist Rating / 100, the fraction coming from the rank recovered off the granted
+            // rating (so suppression, which zeroes the grant, leaves 1.0). This is the single reflect site, so
+            // every trigger gets it. GetDamageResistRating() is called with its defaults: no combat type (so no
+            // spec-defense bonus, which depends on an attack type this site does not carry) and directDamage
+            // true (so a nether DoT's negative term is included, like the plain panel figure). Only read when
+            // there is a grant to convert with, so a player without the rating pays one cached read.
+            //
+            // Thread Shrine mitigation blessing: GetDamageResistRating now carries it too (+25 at 1.25), but it is a
+            // damage-taken blessing, not Damage Resist Rating the player built, so it is taken back out here and never
+            // grows the reflect. One volatile read when no run holds a blessing.
+            var drrGrant = GetClassAbilityRating(ClassAbilityId.DamageResistRating);
+            var drrMultiplier = drrGrant > 0
+                ? RatingAbility.DamageResistRatingThornsMultiplier(drrGrant, GetDamageResistRating() - ACE.Server.ThreadDungeons.ThreadBoons.DamageResistRatingFor(this))
+                : 1.0;
+
+            // Cloaked in Power's Critical Thorns window: while it is open EVERY reflect is critical (2.0 x the
+            // wearer's Critical Damage Rating mod). The window is opened by the cloak spell proc roll BEFORE the
+            // reflect of the very hit that triggered it - see Cloak.RollSpellProc and the call sites.
+            var critical = IsCriticalThornsWindowOpen(Time.GetUnixTime());
+            var critMultiplier = critical ? CloakedInPowerAbility.CritThornsMultiplier(GetCritDamageRating()) : 1.0;
+
+            var reflect = ThornsAbility.ScaleReflect(baseReflect, strengthMultiplier, critMultiplier, drrMultiplier);
 
             if (reflect == 0)
                 return;
@@ -327,7 +361,9 @@ namespace ACE.Server.WorldObjects
             // a logged-in player always has both
             if (Session != null && SquelchManager != null && !SquelchManager.Squelches.Contains(attacker, ChatMessageType.CombatSelf))
                 Session.Network.EnqueueSend(new GameMessageSystemChat(
-                    $"Your thorns reflect {reflect:N0} points of damage back at {attacker.Name}!", ChatMessageType.CombatSelf));
+                    critical
+                        ? $"Your thorns reflect {reflect:N0} points of critical damage back at {attacker.Name}!"
+                        : $"Your thorns reflect {reflect:N0} points of damage back at {attacker.Name}!", ChatMessageType.CombatSelf));
         }
 
         /// <summary>
@@ -352,7 +388,7 @@ namespace ACE.Server.WorldObjects
         /// answer a sword. The close-range gate is inside ApplyThornsReflect.
         ///
         /// Only a DirectHit origin qualifies - the same split the monster reflect effect draws: an item or
-        /// cloak proc, a Cascade hop, a Spell AOE splash and an Echo Cast recast are Secondary and never
+        /// cloak proc, a Cascade hop, a Spell AOE splash and an Echo Cast wisp cast are Secondary and never
         /// trigger Thorns.
         /// </summary>
         public void ApplyThornsOnMagicHit(WorldObject source, DamageType spellDamageType, IncomingDamageOrigin origin)

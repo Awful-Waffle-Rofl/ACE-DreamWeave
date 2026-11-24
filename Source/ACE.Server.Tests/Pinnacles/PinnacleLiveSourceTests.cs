@@ -130,7 +130,7 @@ namespace ACE.Server.Tests.Pinnacles
             // R2 and E2: scale (with the tier) -> immune overlay -> StripKillRewards LAST -> EnterWorld
             var body = PooledLootSourceText.MethodBody(Src("LivePinnacleWorld.cs"), "public PinnacleHandle Spawn(");
 
-            var scale = body.IndexOf("PinnacleScaling.Apply(creature, knotLevel, tier)", StringComparison.Ordinal);
+            var scale = body.IndexOf("PinnacleScaling.Apply(creature, knotLevel, tier, healthMultiplier)", StringComparison.Ordinal);
             var overlay = body.IndexOf("ApplyMonsterEffectOverlay(ImmuneRecord)", StringComparison.Ordinal);
             var strip = body.IndexOf("StripKillRewards(creature)", StringComparison.Ordinal);
             var enter = body.IndexOf("wo.EnterWorld()", StringComparison.Ordinal);
@@ -305,7 +305,7 @@ namespace ACE.Server.Tests.Pinnacles
         {
             var body = PooledLootSourceText.MethodBody(Src("LivePinnacleWorld.cs"), "public PinnacleHandle Spawn(");
 
-            var scale = body.IndexOf("PinnacleScaling.Apply(creature, knotLevel, tier)", StringComparison.Ordinal);
+            var scale = body.IndexOf("PinnacleScaling.Apply(creature, knotLevel, tier, healthMultiplier)", StringComparison.Ordinal);
             var overlay = body.IndexOf("ApplyMonsterEffectOverlay(ImmuneRecord)", StringComparison.Ordinal);
             var enter = body.IndexOf("wo.EnterWorld()", StringComparison.Ordinal);
 
@@ -595,12 +595,41 @@ namespace ACE.Server.Tests.Pinnacles
         }
 
         [TestMethod]
+        public void GrantOwnerBuff_GrantsThroughGrantBuff_ThenTellsTheClient_ThenRunsTheSpellHooks()
+        {
+            // the dat-free companion of PinnacleOwnerBuffGrantTests (which runs GrantBuff on real creatures): the live method's
+            // order is GrantBuff, then the client update, then HandleSpellHooks (Player_Spells.CreateEnchantmentSilent's order)
+            var src = Src("LivePinnacleWorld.cs");
+            var body = PooledLootSourceText.MethodBody(src, "public bool GrantOwnerBuff(");
+
+            var grant = body.IndexOf("GrantBuff(owner, wo, spell, seconds)", StringComparison.Ordinal);
+            var send = body.IndexOf("new GameEventMagicUpdateEnchantment(owner.Session, new Enchantment(owner, entry))", StringComparison.Ordinal);
+            var hooks = body.IndexOf("owner.HandleSpellHooks(spell);", StringComparison.Ordinal);
+
+            Assert.IsTrue(grant >= 0 && send > grant && hooks > send, $"grant {grant} send {send} hooks {hooks}");
+            StringAssert.Contains(body, "FindOwnerOnCopy()");
+            StringAssert.Contains(body, "spell.NotFound");
+
+            // GrantBuff: the enchantment-type refusal BEFORE the Add, then the duration override on the written entry
+            var core = PooledLootSourceText.MethodBody(src, "internal static ACE.Entity.Models.PropertiesEnchantmentRegistry GrantBuff(");
+            var type = core.IndexOf("spell.MetaSpellType != SpellType.Enchantment && spell.MetaSpellType != SpellType.FellowEnchantment", StringComparison.Ordinal);
+            var add = core.IndexOf("owner.EnchantmentManager.Add(spell, caster, null)", StringComparison.Ordinal);
+            var start = core.IndexOf("entry.StartTime = 0;", StringComparison.Ordinal);
+            var duration = core.IndexOf("entry.Duration = seconds;", StringComparison.Ordinal);
+
+            Assert.IsTrue(type >= 0 && add > type && start > add && duration > add, $"type {type} add {add} start {start} duration {duration}");
+        }
+
+        [TestMethod]
         public void StartHazard_UsesThePresetAtTheFightInstance()
         {
             var body = PooledLootSourceText.MethodBody(Src("LivePinnacleWorld.cs"), "public int StartHazard(");
 
-            StringAssert.Contains(body, "HazardRegionPresets.TryGet(hazardPreset, instance, out var region)");
+            // the region choice (options.Area, else options.Region, else this preset) is PinnacleHazardRegions.Resolve, tested
+            // behaviourally in PinnacleHazardRegionsTests
+            StringAssert.Contains(body, "PinnacleHazardRegions.Resolve(options, hazardPreset, instance, out error)");
             StringAssert.Contains(body, "HazardManager.Start(region, kind, args, this, null, pattern, landblock, out error)");
+            Assert.IsFalse(body.Contains("HazardRegionPresets.TryGet("), "no second preset lookup beside the resolver");
         }
 
         [TestMethod]
@@ -706,8 +735,19 @@ namespace ACE.Server.Tests.Pinnacles
         [TestMethod]
         public void Rewards_UnknownOrNullTable_IsEmpty()
         {
-            Assert.AreEqual(0, PinnacleRewards.Roll(200, null, null).Count);
-            Assert.AreEqual(0, PinnacleRewards.Roll(200, null, "nope").Count);
+            // The independent Foolproof roll ships at 50%, so it is switched off here to see the table's own (empty) roll.
+            var key = ACE.Server.ThreadDungeons.FoolproofSalvage.PinnacleCacheChanceKey;
+
+            try
+            {
+                Assert.IsTrue(ACE.Server.Managers.PropertyManager.ModifyDouble(key, 0.0));
+                Assert.AreEqual(0, PinnacleRewards.Roll(200, null, null).Count);
+                Assert.AreEqual(0, PinnacleRewards.Roll(200, null, "nope").Count);
+            }
+            finally
+            {
+                ACE.Server.Managers.PropertyManager.ModifyDouble(key, ACE.Server.ThreadDungeons.FoolproofSalvage.DefaultPinnacleCacheChance);
+            }
         }
 
         [TestMethod]

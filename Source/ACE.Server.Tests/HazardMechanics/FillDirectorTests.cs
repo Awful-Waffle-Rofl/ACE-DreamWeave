@@ -140,6 +140,39 @@ namespace ACE.Server.Tests.HazardMechanics
         }
 
         [TestMethod]
+        public void Start_SaysTheRisingLine_ByDefault_AndNothingWithQuiet()
+        {
+            // the default (and quiet=0) is the long-standing line: Matron and Grael pass no quiet
+            foreach (var args in new[] { "", "quiet=0" })
+            {
+                var (d, p, s) = Make(args);
+
+                Assert.IsFalse(s.Quiet, args);
+                d.Start(0);
+                CollectionAssert.AreEqual(new[] { "The acid is rising." }, p.Says, args);
+            }
+
+            var (dq, pq, sq) = Make("quiet=1");
+
+            Assert.IsTrue(sq.Quiet);
+            dq.Start(0);
+            dq.Tick(1.0);
+            dq.Tick(2.5);
+            Assert.AreEqual(0, pq.Says.Count, "quiet: no line at all");
+            Assert.IsTrue(pq.Spawns.Any(x => x.Kind == "tile"), "control: the run did start");
+        }
+
+        [TestMethod]
+        public void Validate_RefusesAQuietValueThatIsNotAYesOrNo()
+        {
+            var region = HazardRegionPresets.Pinnacle(0);
+
+            Assert.IsNull(FillRules.Validate(region, HazardArgs.Parse("quiet=1")));
+            Assert.IsNull(FillRules.Validate(region, HazardArgs.Parse("quiet=0")));
+            StringAssert.Contains(FillRules.Validate(region, HazardArgs.Parse("quiet=maybe")), "quiet");
+        }
+
+        [TestMethod]
         public void Doubled_Start_SpawnsAnUpAndADownPanelPerTileAtTheSameXy()
         {
             var (d, p, s) = MakeDoubled();

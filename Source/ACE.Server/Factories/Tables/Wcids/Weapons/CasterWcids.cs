@@ -21,10 +21,15 @@ namespace ACE.Server.Factories.Tables.Wcids
         // sceptre (1000242), baton (1000247) and staff (1000244), each at the same weight as every
         // other element's member of that shape, and the orb is gone from the pool entirely.
         //
-        // FUNDING: the plain four go back to their retail weights and the NINE elements each take 8/9
-        // of the retail per-member weight, so total elemental supply is unchanged and every existing
-        // element becomes ~11% rarer rather than the plain casters being squeezed. Residual rounding is
-        // absorbed by the plain four, whose deviation from retail is at most 0.4%.
+        // FUNDING: the elements each take a fraction of the retail per-member weight, so total elemental
+        // supply is unchanged and the plain casters are not squeezed. T3-T6 carry NINE elements (eight
+        // retail plus Sanguine) at 8/9 of retail; there the plain four sit within 0.4% of their retail
+        // weights, because they absorb the residual rounding. T7-T8 carry TEN elements (the nine plus the
+        // Summoner family, 2026-11-21) at 8/10 of retail, which reproduces exactly: the plain four are at
+        // their exact retail weights and nothing is left to absorb. T7 is 0.16 plain + 0.72 sceptre/baton
+        // + 0.12 staff, T8 0.144 + 0.576 + 0.28. The Summoner sceptre (1008550), baton (1008551) and staff
+        // (1008552) drop in T7 and T8 ONLY (owner ruling), each at the same weight as the Sanguine member
+        // of its shape.
         //
         // Every table must sum to exactly 1.0. ChanceTable.Roll walks a cumulative sum against a
         // uniform [0,1) draw and hands any shortfall to the LAST non-zero entry, and VerifyTable only
@@ -121,78 +126,84 @@ namespace ACE.Server.Factories.Tables.Wcids
             ( WeenieClassName.driftwardensanguinebaton,   0.0444f ),
         };
 
-        // T7: plain 4 x 0.040075 = 0.1603, sceptres+batons 18 x 0.04 = 0.72, staves 9 x 0.0133 = 0.1197.
+        // T7: plain 4 x 0.04 = 0.16, sceptres+batons 20 x 0.036 = 0.72, staves 10 x 0.012 = 0.12.
         // (retail: 0.04 plain / 0.045 sceptre+baton / 0.015 staff)
         private static ChanceTable<WeenieClassName> T7_Chances = new ChanceTable<WeenieClassName>()
         {
-            ( WeenieClassName.orb,                        0.040075f ),
-            ( WeenieClassName.sceptre,                    0.040075f ),
-            ( WeenieClassName.staff,                      0.040075f ),
-            ( WeenieClassName.wand,                       0.040075f ),
-            ( WeenieClassName.wandslashing,               0.04f ),
-            ( WeenieClassName.wandpiercing,               0.04f ),
-            ( WeenieClassName.wandblunt,                  0.04f ),
-            ( WeenieClassName.wandacid,                   0.04f ),
-            ( WeenieClassName.wandfire,                   0.04f ),
-            ( WeenieClassName.wandfrost,                  0.04f ),
-            ( WeenieClassName.wandelectric,               0.04f ),
-            ( WeenieClassName.ace43381_nethersceptre,     0.04f ),
-            ( WeenieClassName.driftwardensanguinesceptre, 0.04f ),
-            ( WeenieClassName.ace31819_slashingbaton,     0.04f ),
-            ( WeenieClassName.ace31825_piercingbaton,     0.04f ),
-            ( WeenieClassName.ace31821_bluntbaton,        0.04f ),
-            ( WeenieClassName.ace31820_acidbaton,         0.04f ),
-            ( WeenieClassName.ace31823_firebaton,         0.04f ),
-            ( WeenieClassName.ace31824_frostbaton,        0.04f ),
-            ( WeenieClassName.ace31822_electricbaton,     0.04f ),
-            ( WeenieClassName.ace43382_netherbaton,       0.04f ),
-            ( WeenieClassName.driftwardensanguinebaton,   0.04f ),
-            ( WeenieClassName.ace37223_slashingstaff,     0.0133f ),
-            ( WeenieClassName.ace37222_piercingstaff,     0.0133f ),
-            ( WeenieClassName.ace37225_bluntstaff,        0.0133f ),
-            ( WeenieClassName.ace37224_acidstaff,         0.0133f ),
-            ( WeenieClassName.ace37220_firestaff,         0.0133f ),
-            ( WeenieClassName.ace37221_froststaff,        0.0133f ),
-            ( WeenieClassName.ace37219_electricstaff,     0.0133f ),
-            ( WeenieClassName.ace43383_netherstaff,       0.0133f ),
-            ( WeenieClassName.driftwardensanguinestaff,   0.0133f ),
+            ( WeenieClassName.orb,                        0.04f ),
+            ( WeenieClassName.sceptre,                    0.04f ),
+            ( WeenieClassName.staff,                      0.04f ),
+            ( WeenieClassName.wand,                       0.04f ),
+            ( WeenieClassName.wandslashing,               0.036f ),
+            ( WeenieClassName.wandpiercing,               0.036f ),
+            ( WeenieClassName.wandblunt,                  0.036f ),
+            ( WeenieClassName.wandacid,                   0.036f ),
+            ( WeenieClassName.wandfire,                   0.036f ),
+            ( WeenieClassName.wandfrost,                  0.036f ),
+            ( WeenieClassName.wandelectric,               0.036f ),
+            ( WeenieClassName.ace43381_nethersceptre,     0.036f ),
+            ( WeenieClassName.driftwardensanguinesceptre, 0.036f ),
+            ( WeenieClassName.summonersceptre,            0.036f ),
+            ( WeenieClassName.ace31819_slashingbaton,     0.036f ),
+            ( WeenieClassName.ace31825_piercingbaton,     0.036f ),
+            ( WeenieClassName.ace31821_bluntbaton,        0.036f ),
+            ( WeenieClassName.ace31820_acidbaton,         0.036f ),
+            ( WeenieClassName.ace31823_firebaton,         0.036f ),
+            ( WeenieClassName.ace31824_frostbaton,        0.036f ),
+            ( WeenieClassName.ace31822_electricbaton,     0.036f ),
+            ( WeenieClassName.ace43382_netherbaton,       0.036f ),
+            ( WeenieClassName.driftwardensanguinebaton,   0.036f ),
+            ( WeenieClassName.summonerbaton,              0.036f ),
+            ( WeenieClassName.ace37223_slashingstaff,     0.012f ),
+            ( WeenieClassName.ace37222_piercingstaff,     0.012f ),
+            ( WeenieClassName.ace37225_bluntstaff,        0.012f ),
+            ( WeenieClassName.ace37224_acidstaff,         0.012f ),
+            ( WeenieClassName.ace37220_firestaff,         0.012f ),
+            ( WeenieClassName.ace37221_froststaff,        0.012f ),
+            ( WeenieClassName.ace37219_electricstaff,     0.012f ),
+            ( WeenieClassName.ace43383_netherstaff,       0.012f ),
+            ( WeenieClassName.driftwardensanguinestaff,   0.012f ),
+            ( WeenieClassName.summonerstaff,              0.012f ),
         };
 
-        // T8: plain 4 x 0.036025 = 0.1441, sceptres+batons 18 x 0.032 = 0.576, staves 9 x 0.0311 = 0.2799.
+        // T8: plain 4 x 0.036 = 0.144, sceptres+batons 20 x 0.0288 = 0.576, staves 10 x 0.028 = 0.28.
         // (retail: 0.036 plain / 0.036 sceptre+baton / 0.035 staff)
         private static ChanceTable<WeenieClassName> T8_Chances = new ChanceTable<WeenieClassName>()
         {
-            ( WeenieClassName.orb,                        0.036025f ),
-            ( WeenieClassName.sceptre,                    0.036025f ),
-            ( WeenieClassName.staff,                      0.036025f ),
-            ( WeenieClassName.wand,                       0.036025f ),
-            ( WeenieClassName.wandslashing,               0.032f ),
-            ( WeenieClassName.wandpiercing,               0.032f ),
-            ( WeenieClassName.wandblunt,                  0.032f ),
-            ( WeenieClassName.wandacid,                   0.032f ),
-            ( WeenieClassName.wandfire,                   0.032f ),
-            ( WeenieClassName.wandfrost,                  0.032f ),
-            ( WeenieClassName.wandelectric,               0.032f ),
-            ( WeenieClassName.ace43381_nethersceptre,     0.032f ),
-            ( WeenieClassName.driftwardensanguinesceptre, 0.032f ),
-            ( WeenieClassName.ace31819_slashingbaton,     0.032f ),
-            ( WeenieClassName.ace31825_piercingbaton,     0.032f ),
-            ( WeenieClassName.ace31821_bluntbaton,        0.032f ),
-            ( WeenieClassName.ace31820_acidbaton,         0.032f ),
-            ( WeenieClassName.ace31823_firebaton,         0.032f ),
-            ( WeenieClassName.ace31824_frostbaton,        0.032f ),
-            ( WeenieClassName.ace31822_electricbaton,     0.032f ),
-            ( WeenieClassName.ace43382_netherbaton,       0.032f ),
-            ( WeenieClassName.driftwardensanguinebaton,   0.032f ),
-            ( WeenieClassName.ace37223_slashingstaff,     0.0311f ),
-            ( WeenieClassName.ace37222_piercingstaff,     0.0311f ),
-            ( WeenieClassName.ace37225_bluntstaff,        0.0311f ),
-            ( WeenieClassName.ace37224_acidstaff,         0.0311f ),
-            ( WeenieClassName.ace37220_firestaff,         0.0311f ),
-            ( WeenieClassName.ace37221_froststaff,        0.0311f ),
-            ( WeenieClassName.ace37219_electricstaff,     0.0311f ),
-            ( WeenieClassName.ace43383_netherstaff,       0.0311f ),
-            ( WeenieClassName.driftwardensanguinestaff,   0.0311f ),
+            ( WeenieClassName.orb,                        0.036f ),
+            ( WeenieClassName.sceptre,                    0.036f ),
+            ( WeenieClassName.staff,                      0.036f ),
+            ( WeenieClassName.wand,                       0.036f ),
+            ( WeenieClassName.wandslashing,               0.0288f ),
+            ( WeenieClassName.wandpiercing,               0.0288f ),
+            ( WeenieClassName.wandblunt,                  0.0288f ),
+            ( WeenieClassName.wandacid,                   0.0288f ),
+            ( WeenieClassName.wandfire,                   0.0288f ),
+            ( WeenieClassName.wandfrost,                  0.0288f ),
+            ( WeenieClassName.wandelectric,               0.0288f ),
+            ( WeenieClassName.ace43381_nethersceptre,     0.0288f ),
+            ( WeenieClassName.driftwardensanguinesceptre, 0.0288f ),
+            ( WeenieClassName.summonersceptre,            0.0288f ),
+            ( WeenieClassName.ace31819_slashingbaton,     0.0288f ),
+            ( WeenieClassName.ace31825_piercingbaton,     0.0288f ),
+            ( WeenieClassName.ace31821_bluntbaton,        0.0288f ),
+            ( WeenieClassName.ace31820_acidbaton,         0.0288f ),
+            ( WeenieClassName.ace31823_firebaton,         0.0288f ),
+            ( WeenieClassName.ace31824_frostbaton,        0.0288f ),
+            ( WeenieClassName.ace31822_electricbaton,     0.0288f ),
+            ( WeenieClassName.ace43382_netherbaton,       0.0288f ),
+            ( WeenieClassName.driftwardensanguinebaton,   0.0288f ),
+            ( WeenieClassName.summonerbaton,              0.0288f ),
+            ( WeenieClassName.ace37223_slashingstaff,     0.028f ),
+            ( WeenieClassName.ace37222_piercingstaff,     0.028f ),
+            ( WeenieClassName.ace37225_bluntstaff,        0.028f ),
+            ( WeenieClassName.ace37224_acidstaff,         0.028f ),
+            ( WeenieClassName.ace37220_firestaff,         0.028f ),
+            ( WeenieClassName.ace37221_froststaff,        0.028f ),
+            ( WeenieClassName.ace37219_electricstaff,     0.028f ),
+            ( WeenieClassName.ace43383_netherstaff,       0.028f ),
+            ( WeenieClassName.driftwardensanguinestaff,   0.028f ),
+            ( WeenieClassName.summonerstaff,              0.028f ),
         };
 
         private static readonly List<ChanceTable<WeenieClassName>> casterTiers = new List<ChanceTable<WeenieClassName>>()

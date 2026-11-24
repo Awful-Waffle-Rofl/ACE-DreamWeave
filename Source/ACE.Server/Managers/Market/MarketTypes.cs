@@ -76,7 +76,7 @@ namespace ACE.Server.Managers.Market
 
         /// <summary>
         /// A FULL-CHARGE multi-charge salvage Hammer (SalvageToolCharges above 0, Structure at
-        /// MaxStructure). Only the five materials in SalvageForge.MaterialTable have one.
+        /// MaxStructure). Only the materials in SalvageForge.MaterialTable (every row) have one.
         /// </summary>
         SalvageHammer = 1,
     }
@@ -153,9 +153,9 @@ namespace ACE.Server.Managers.Market
         ItemListed,
 
         /// <summary>
-        /// The account's barrel container could not be reached - it has not finished loading, could
-        /// not be created, or is full. Transient in every case except the last, and the client is
-        /// told to try again in a moment either way.
+        /// The account's barrel container could not be reached - it has not finished loading or could
+        /// not be created. Transient, so the client is told to try again in a moment. A barrel that
+        /// is reachable but has no room is <see cref="BarrelFull"/>, not this.
         /// </summary>
         BarrelUnavailable,
 
@@ -301,6 +301,39 @@ namespace ACE.Server.Managers.Market
 
         /// <summary>Suit transfers (a rejected transfer's reason): the character is in a PvP match or under a PvP template, the facet switch's first two gates.</summary>
         InPvp,
+
+        /// <summary>Web launch (POST /v1/session/launch): the web_launch_enabled kill switch is off.</summary>
+        LaunchDisabled,
+
+        /// <summary>Class ability panel POST only: the session was not created by POST /v1/session/launch, or that launch code was issued by a different character than {guid}.</summary>
+        NotLaunchSession,
+
+        /// <summary>Class ability panel POST only: from_rank is not the live rank. The envelope carries a fresh panel.</summary>
+        Stale,
+
+        /// <summary>Class ability panel POST only: a class ability rule refused the change. message is the server's own sentence; the envelope carries a fresh panel.</summary>
+        RuleRefused,
+
+        /// <summary>Class ability panel POST only: the body is unreadable, the ability is unknown or outside the panel set, or to_rank is not from_rank + 1, from_rank - 1 or 0.</summary>
+        InvalidChange,
+
+        /// <summary>Class ability panel routes only: class_ability_web_panel_enabled or class_abilities_enabled is off.</summary>
+        PanelDisabled,
+
+        /// <summary>
+        /// POST /v1/accounts/me/vault/barrel only: the account's barrel has no room for what was
+        /// named (AccountVaultStore.BarrelFullMessage). A refusal, not a transient condition like
+        /// <see cref="BarrelUnavailable"/>: it does not clear within a retry window, because space
+        /// frees only when an administrator restores or empties items or retention eventually purges
+        /// them, so a client must not invite an immediate retry. The refusal destroys nothing.
+        ///
+        /// A web app older than this code does not know it and shows the envelope's message, which
+        /// is <see cref="MarketErrorCodes.ToMessage"/>'s sentence below.
+        /// </summary>
+        BarrelFull,
+
+        /// <summary>GET .../characters/{guid}/details only: character_details_web_enabled is off.</summary>
+        DetailsDisabled,
     }
 
     /// <summary>
@@ -376,6 +409,14 @@ namespace ACE.Server.Managers.Market
                 case MarketError.InvalidTransfer:   return "invalid_transfer";
                 case MarketError.TransferNotFound:  return "transfer_not_found";
                 case MarketError.InPvp:             return "in_pvp";
+                case MarketError.LaunchDisabled:    return "launch_disabled";
+                case MarketError.NotLaunchSession:  return "not_launch_session";
+                case MarketError.Stale:             return "stale";
+                case MarketError.RuleRefused:       return "rule_refused";
+                case MarketError.InvalidChange:     return "invalid_change";
+                case MarketError.PanelDisabled:     return "panel_disabled";
+                case MarketError.BarrelFull:        return "barrel_full";
+                case MarketError.DetailsDisabled:   return "details_disabled";
                 default:                            return "server_error";
             }
         }
@@ -447,6 +488,14 @@ namespace ACE.Server.Managers.Market
                 case MarketError.InvalidTransfer:    return "That transfer request is missing a field or has one out of range.";
                 case MarketError.TransferNotFound:   return "There is no such transfer on this account.";
                 case MarketError.InPvp:              return "That character is in a PvP match or under a PvP template and cannot receive items from the vault.";
+                case MarketError.LaunchDisabled:     return "Signing in from the game is turned off on this server.";
+                case MarketError.NotLaunchSession:   return "Changing class abilities needs a page opened with /weblogin from that character in game.";
+                case MarketError.Stale:              return "That ability changed since the page last read it. The panel has been refreshed.";
+                case MarketError.RuleRefused:        return "The server refused that class ability change.";
+                case MarketError.InvalidChange:      return "That class ability change is not valid.";
+                case MarketError.PanelDisabled:      return "The class ability panel is turned off on this server.";
+                case MarketError.DetailsDisabled:    return "Character details are turned off on this server.";
+                case MarketError.BarrelFull:         return "Your barrel is full, or has no room for that many items. Trying again will not help until an administrator empties it.";
                 default:                            return "The market could not complete that request.";
             }
         }
@@ -614,7 +663,11 @@ namespace ACE.Server.Managers.Market
         /// </summary>
         public int? SalvageToolCharges { get; set; }
 
-        /// <summary>The item's own description text, shown under the panel lines. Null when it has none.</summary>
+        /// <summary>
+        /// The item's own description text, shown under the panel lines. Null when it has none. A Paragon weapon
+        /// (while weapon_mods_enabled is on) gets one more line appended, "Paragon 53/55: Devastation x2, ..."
+        /// (projection version 7).
+        /// </summary>
         public string LongDesc { get; set; }
 
         public uint IconId { get; set; }
@@ -694,6 +747,10 @@ namespace ACE.Server.Managers.Market
         /// Each group appears only while its switch is on (weapon_mods_enabled, equipment_mods_enabled),
         /// matching AppraiseInfo, so the web never shows a mod the game hides.
         ///
+        /// PARAGON (projection version 7): a weapon with Paragon gems also lists them. A mod held from both sources
+        /// carries the combined (Tourmaline + Paragon, clamped) magnitude, and Paragon-only mods follow the Tourmaline
+        /// rows. Paragon rows do NOT count toward <see cref="WeaponQualityTier"/>.
+        ///
         /// ADDED 2026-09-14, in projection version 4. A snapshot below version 4 carries null whether or
         /// not the item is modded; an ACTIVE listing is repaired by the backfill, a CLOSED one carries null
         /// forever.
@@ -709,8 +766,8 @@ namespace ACE.Server.Managers.Market
 
         /// <summary>
         /// WeaponQualityTiers.NameFor(Evaluate(item)) - Exceptional, Elite or God - when the tier is not
-        /// None and weapon_mods_enabled is on; otherwise null. Same ADDED / version rule as
-        /// <see cref="Mods"/>.
+        /// None and weapon_mods_enabled is on; otherwise null. Tourmaline-only: Paragon mods never count toward
+        /// it. Same ADDED / version rule as <see cref="Mods"/>.
         /// </summary>
         public string WeaponQualityTier { get; set; }
 
@@ -746,7 +803,7 @@ namespace ACE.Server.Managers.Market
     /// </summary>
     public sealed class ItemMod
     {
-        /// <summary>"weapon" for a WeaponModId row, "armor" for an EquipmentModId row (MarketItemMods.KindWeapon / KindArmor).</summary>
+        /// <summary>"weapon" for a WeaponModId row, "armor" for an EquipmentModId row or a cloak Mantle row, "jewelry" for a Jewelry Aspect row (MarketItemMods.KindWeapon / KindArmor / KindJewelry).</summary>
         public string Kind { get; set; }
 
         /// <summary>
@@ -764,6 +821,17 @@ namespace ACE.Server.Managers.Market
 
         /// <summary>The effect text alone, without name or bracket, e.g. "+4 critical damage rating".</summary>
         public string Effect { get; set; }
+
+        /// <summary>
+        /// How many aspects of this row's type the piece carries (1-10), on a "jewelry" row only; null on every weapon,
+        /// armor and cloak row (omitted from the JSON). Serialized as "count".
+        /// </summary>
+        public int? Count { get; set; }
+
+        /// <summary>
+        /// Ability requirement text on an equipment-mod row only (EquipmentModDisplay.AbilityRequirement): "Works without the ability" or "Requires &lt;Ability&gt; trained". Null (omitted from the JSON) on weapon, cloak and jewelry rows. Serialized as "requirement".
+        /// </summary>
+        public string Requirement { get; set; }
     }
 
     /// <summary>

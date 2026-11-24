@@ -287,7 +287,7 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             Check(ThreadGuideText.RefuseDisabled, false, 80, 0, false, false);
             Check(ThreadGuideText.RefuseLevel, true, 49, 0, false, false);
-            Check(ThreadGuideText.RefuseComplete, true, 400, 375, false, false);
+            Check(ThreadGuideText.RefuseComplete, true, 400, 500, false, false);
             Check(ThreadGuideText.RefuseOutstanding, true, 80, 0, true, false);
             Check(ThreadGuideText.RefuseOutstanding, true, 80, 0, false, true);
         }
@@ -676,7 +676,7 @@ namespace ACE.Server.Tests.ThreadDungeons
                 "Guide Fragment (Level 50)\n\n1. Buy a Lead Scarab from the Reagent-Steward - it is the gentlest; most other Scarabs raise the thread's level.\n2. Use this fragment on the Scarab.\n3. Use the fragment on the Fragment Press. Pressing Guide Fragments is free.\n\nThen use the finished gem to enter your thread alone, and clear it for your reward and your next fragment.",
                 ThreadGuideText.ComposePopup(50));
             StringAssert.Contains(ThreadGuideText.ComposePopup(75), "1. Buy a Taper from the Reagent-Steward.\nAny colour except Orange.\n2. Use this fragment on the Taper.\n");
-            StringAssert.Contains(ThreadGuideText.ComposePopup(125), "1. Buy a Powder such as Powdered Amber or Powdered Azurite from the Reagent-Steward.\nChoose a named Powder; Agate, Bloodstone, Carnelian and Moonstone pick at random.\n2. Use this fragment on the Powder.\n");
+            StringAssert.Contains(ThreadGuideText.ComposePopup(125), "1. Buy a Powder such as Powdered Amber or Powdered Azurite from the Reagent-Steward.\nChoose a named Powder; Agate, Carnelian and Moonstone pick at random.\n2. Use this fragment on the Powder.\n");
             StringAssert.Contains(ThreadGuideText.ComposePopup(150), "1. Buy a Red Taper and a Hazel Talisman from the Reagent-Steward.\n2. Use this fragment on the Red Taper, then on the Hazel Talisman.\n");
             StringAssert.Contains(ThreadGuideText.ComposePopup(175), "1. Buy a Potion such as Brimstone or Cadmia from the Reagent-Steward.\n2. Use this fragment on the Potion.\n");
             StringAssert.Contains(ThreadGuideText.ComposePopup(100), "1. Buy an Herb such as Hyssop or Mandrake from the Reagent-Steward.\n2. Use this fragment on the Herb.\n");
@@ -760,7 +760,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         public void Grant_tells_and_required_lines_name_examples_for_herb_powder_and_potion()
         {
             Assert.AreEqual("Level 100. Use the fragment on an Herb such as Hyssop or Mandrake, then press it.", ThreadGuideText.Grant100);
-            Assert.AreEqual("Level 125. Use the fragment on a Powder such as Powdered Amber or Powdered Azurite. Choose a named one; Agate, Bloodstone, Carnelian and Moonstone pick at random. Then press it.", ThreadGuideText.Grant125);
+            Assert.AreEqual("Level 125. Use the fragment on a Powder such as Powdered Amber or Powdered Azurite. Choose a named one; Agate, Carnelian and Moonstone pick at random. Then press it.", ThreadGuideText.Grant125);
             Assert.AreEqual("Level 175. Use the fragment on a Potion such as Brimstone or Cadmia, then press it.", ThreadGuideText.Grant175);
 
             Assert.AreEqual("REQUIRED: Use this fragment on an Herb such as Hyssop or Mandrake, then use it on the Fragment Press.", ThreadGuideText.ComposeRequirementLine(GuideFragment(100), Doses()));
@@ -1021,7 +1021,8 @@ namespace ACE.Server.Tests.ThreadDungeons
         {
             Assert.IsTrue(ThreadGuideFlow.ShouldSendLoginReminder(true, 50, 2, false, false));
             Assert.IsFalse(ThreadGuideFlow.ShouldSendLoginReminder(false, 50, 2, false, false), "guide unavailable");
-            Assert.IsFalse(ThreadGuideFlow.ShouldSendLoginReminder(true, 375, 2, false, false), "ladder complete");
+            Assert.IsFalse(ThreadGuideFlow.ShouldSendLoginReminder(true, 500, 2, false, false), "ladder complete");
+            Assert.IsTrue(ThreadGuideFlow.ShouldSendLoginReminder(true, 375, 2, false, false), "375 is no longer the top rung");
             Assert.IsFalse(ThreadGuideFlow.ShouldSendLoginReminder(true, 0, 0, false, false), "never had a fragment");
             Assert.IsFalse(ThreadGuideFlow.ShouldSendLoginReminder(true, 50, 2, true, false), "holds a current item");
             Assert.IsFalse(ThreadGuideFlow.ShouldSendLoginReminder(true, 50, 2, false, true), "has a live guide run");

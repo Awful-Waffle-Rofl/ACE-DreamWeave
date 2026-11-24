@@ -67,13 +67,16 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "kinetic_charge",
             DisplayName = "Kinetic Charge",
-            Description = "Every attack that reaches you builds a charge - any damage type, whether it " +
-                          "lands, is blocked, or is parried. At 5 charges your next attack spends them all " +
-                          "for 20/40/60% more damage (by rank), and a melee attack that spends them also " +
-                          "cleaves up to 2 more nearby enemies, even with a weapon that does not normally " +
-                          "cleave; every enemy that attack cleaves takes the bonus damage too. Charges fade " +
-                          "after 10 seconds without being hit. Higher Armor Tinkering multiplies the damage " +
-                          "bonus.",
+            // Live text: rank * class_ability_kineticcharge_percent_per_rank (SpendBonus / GetReadout); the cleave
+            // count is read where the spend raises the cleave (the damage modifier in this file), the charge threshold and fade time in Player_ClassAbilityPreWriteBuffs.
+            DescriptionTemplate = "Every attack that reaches you builds a charge, whatever its damage type and whether it lands, is " +
+                          "blocked or is parried. At {v:class_ability_kineticcharge_charge_threshold|int} charges your next attack " +
+                          "spends them all for extra damage. A melee attack that spends them also cleaves up to " +
+                          "{v:class_ability_kineticcharge_cleave_targets|int} more nearby enemies, even with a weapon that cannot " +
+                          "cleave, and each of them takes the extra damage too. Charges fade after " +
+                          "{v:class_ability_kineticcharge_expire_seconds|num} seconds without being hit.",
+            RankTailTemplate = "+{per:class_ability_kineticcharge_percent_per_rank|pct}% on a full charge",
+            TunableSourceFiles = new[] { "WorldObjects/Player_ClassAbilityPreWriteBuffs.cs" },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,

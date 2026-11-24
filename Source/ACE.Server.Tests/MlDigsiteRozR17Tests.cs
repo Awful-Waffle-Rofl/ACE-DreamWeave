@@ -163,13 +163,17 @@ namespace ACE.Server.Tests
             var stack = body.IndexOf("currency.SetStackSize(count);", StringComparison.Ordinal);
             var line = body.IndexOf("You unearth {count} treasure coins!", StringComparison.Ordinal);
             var full = body.IndexOf("Your pack is too full to hold the treasure.", StringComparison.Ordinal);
-            var start = body.IndexOf("MlDigsite.MlDigsiteManager.TryStart(player, forcedType, forcedMechanicSetId, out var startRefusal,", StringComparison.Ordinal);
+            // The 2026-11-16 separation fix hands the payout-and-consume step to TryStart as its commit, so
+            // the call now carries PayAndConsume and sits after the local function that defines it.
+            var start = body.IndexOf("MlDigsite.MlDigsiteManager.TryStart(player, forcedType, forcedMechanicSetId, zone, PayAndConsume, out startRefusal);", StringComparison.Ordinal);
             var lastConsume = body.LastIndexOf("player.TryConsumeFromInventoryWithNetworking(wo, 1)", StringComparison.Ordinal);
 
             Assert.IsTrue(gate >= 0, "the zero-roll gate is missing");
             Assert.IsTrue(create > gate && stack > gate && line > gate && full > gate,
                 "the currency object, its stack size, the coin line and the full-pack refusal must all sit behind the gate");
-            Assert.IsTrue(lastConsume > line, "the ordinary branch's map consumption must come after (outside) the payout block");
+            // Code review 2026-11-16 reversed this: the map is consumed BEFORE the coins are paid, so a failed
+            // consume declines the dig with nothing paid (MlDigsiteSeparationRefusalTests pins that branch).
+            Assert.IsTrue(lastConsume < line, "the ordinary branch's map consumption must come before the coin line");
             Assert.IsTrue(start > lastConsume, "the digsite encounter must still open after a zero roll");
 
             StringAssert.Contains(body, "PropertyManager.GetLong(\"ml_treasure_payout_min\", 0)");

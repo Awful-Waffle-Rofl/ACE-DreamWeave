@@ -106,20 +106,44 @@ namespace ACE.Server.Entity
         /// Rolls for a chance at procing a cloak spell
         /// If successful, casts the spell
         ///
-        /// THE SINGLE ENTRY POINT FOR A CLOAK SPELL PROC, and deliberately so. All six call sites (the
-        /// melee/missile/hotspot path in Player.TakeDamage, the spell-projectile path in
-        /// SpellProjectile.DamageTarget, the Harm and Drain Health paths in WorldObject_Magic, the Reflect
-        /// bounce in Player.TryReflectProjectile, and the Shield Block in Player.OnClassAbilityAttackAvoided,
-        /// which passes 0f because a block has no damage figure) reach
-        /// HandleProcSpell only through here, so the two class-ability integrations below - Cloaked in Power's
-        /// chance floor and the Taunt hook - are applied once, for every site, and a SEVENTH site added later
-        /// inherits both without having to remember anything. CloakProcWiringSourceScanTests pins that as a source scan.
+        /// THE TWO-PHASE API FOR A CLOAK SPELL PROC, and deliberately the only way in. A proc is
+        /// <see cref="RollSpellProc"/> (the chance roll, Cloaked in Power's floor, and the Critical Thorns window
+        /// it opens) followed by <see cref="CompleteSpellProc"/> (the Taunt hook and the cast through
+        /// HandleProcSpell). TryProcSpell runs the two back to back. Six sites proc a cloak: the Reflect bounce
+        /// (Player.TryReflectProjectile) and the Shield Block (Player.OnClassAbilityAttackAvoided, which passes 0f
+        /// because a block has no damage figure) split the phases around their Thorns reflect (roll, reflect,
+        /// complete), as do Player.TakeDamage, SpellProjectile.DamageTarget and the Harm and Drain Health paths in
+        /// WorldObject_Magic (roll ahead of Thorns, complete where the cast always was). Every one of them reaches
+        /// HandleProcSpell only through CompleteSpellProc, so the floor, the window and the Taunt hook are applied
+        /// once for every site and a SEVENTH site inherits them. CloakProcWiringSourceScanTests pins that as a
+        /// source scan, including that each file completes exactly as many procs as it rolls.
         ///
         /// <paramref name="defender"/> is the cloak's WEARER at every call site (each one reads
         /// <c>defender.EquippedCloak</c>, or is the player in Player.TakeDamage), which is what makes reading
         /// the wearer's ability floor from here correct.
         /// </summary>
         public static bool TryProcSpell(Creature defender, WorldObject attacker, WorldObject cloak, float damage_percent)
+        {
+            if (!RollSpellProc(defender, cloak, damage_percent))
+                return false;
+
+            return CompleteSpellProc(defender, attacker, cloak);
+        }
+
+        /// <summary>
+        /// PHASE ONE of a cloak spell proc: the roll. Split out of <see cref="TryProcSpell"/> (Vanguard pass
+        /// 2026-11-06) so a call site whose Thorns reflect runs BEFORE the cast can learn the proc decision
+        /// first: a successful roll opens Cloaked in Power's Critical Thorns window, and the reflect of the very
+        /// hit that triggered the proc must see it open. Sites that have no earlier reflect call TryProcSpell,
+        /// which runs both phases back to back. A site that calls this MUST call
+        /// <see cref="CompleteSpellProc"/> on a true result (or deliberately skip the cast, as a killing blow
+        /// does), and nothing else may reach HandleProcSpell.
+        ///
+        /// ACCEPTED EDGE: the cooldown stamp (cloak.UseTimestamp, set inside RollProc) and the Critical Thorns
+        /// window are committed AT ROLL TIME. A wearer who dies between the roll and CompleteSpellProc (or a
+        /// bad-body-part early return in Player.TakeDamage) loses that proc's cast but keeps the cooldown.
+        /// </summary>
+        public static bool RollSpellProc(Creature defender, WorldObject cloak, float damage_percent)
         {
             if (cloak == null) return false;
 
@@ -132,6 +156,21 @@ namespace ACE.Server.Entity
             if (!RollProc(cloak, damage_percent, abilityFloor))
                 return false;
 
+            // Cloaked in Power ranks 1-3: any successful cloak SPELL proc roll opens (or refreshes) the Critical
+            // Thorns window. Not a separate roll, and the damage-reduction roll (CloakWeaveProc = 2, which calls
+            // RollProc directly) never reaches here.
+            if (defender is Player windowPlayer)
+                windowPlayer.OpenCriticalThornsWindow();
+
+            return true;
+        }
+
+        /// <summary>
+        /// PHASE TWO of a cloak spell proc: the class-ability hook and the cast, after a successful
+        /// <see cref="RollSpellProc"/>.
+        /// </summary>
+        public static bool CompleteSpellProc(Creature defender, WorldObject attacker, WorldObject cloak)
+        {
             // Class abilities that ride along with a successful cloak proc ROLL (Taunt). Placed here, after
             // the roll and BEFORE the spell is constructed in HandleProcSpell, to match the aetheria
             // precedent at WorldObject.TryProcItem - "the roll succeeded" and "the spell landed" are
@@ -301,7 +340,13 @@ namespace ACE.Server.Entity
         /// </summary>
         public static int GetDamageReductionAmount(WorldObject source, Creature defender)
         {
-            return Pvp.Rules.PvpRules.ApplyCloakDamageReduction(source, defender, DamageReductionBase(WornCloak(defender)));
+            var cloak = WornCloak(defender);
+
+            // Proc Amplifier: scale the base BEFORE the PvP choke point. The pvp gate is explicit because, with the PvP
+            // dials off, PvpRules passes the base through unchanged, so it would not strip the amplifier on its own.
+            var amplified = CloakMantleMath.AmplifyReduction(DamageReductionBase(cloak), CloakMantleMath.AmplifierFactor(cloak, Pvp.Rules.PvpClassifier.IsPvp(source, defender)));
+
+            return Pvp.Rules.PvpRules.ApplyCloakDamageReduction(source, defender, amplified);
         }
 
         /// <summary>
@@ -330,14 +375,39 @@ namespace ACE.Server.Entity
         /// is stamped (the upgraded Knot cloak's Cloaked in Skill); otherwise <paramref name="baseValue"/> unchanged,
         /// so a retail cloak, a non-cloak carrying the property, and any other spell are all untouched.
         /// </summary>
-        public static float ProcStatModValue(WorldObject weapon, uint spellId, float baseValue)
+        public static float ProcStatModValue(WorldObject weapon, uint spellId, float baseValue, bool pvp = false, EnchantmentTypeFlags statModType = 0)
         {
             if (weapon == null || !IsCloak(weapon) || weapon.ProcSpell != spellId)
                 return baseValue;
 
             var stamped = weapon.GetProperty(PropertyFloat.CloakProcStatModValue);
 
-            return stamped.HasValue ? (float)stamped.Value : baseValue;
+            // Proc Amplifier (PropertyFloat.CloakProcAmplifier): PvE only. The caller passes pvp = IsPvp(caster, target),
+            // which is false for a self-cast, so the Cloaked in Skill self-buff stays amplified even when a PvP hit
+            // triggered it, while a Shroud landing on another player is not. The refresh path recomputes from the spell value through
+            // this method, so the factor is applied exactly once there too.
+            var magnitude = stamped.HasValue ? (float)stamped.Value : baseValue;
+
+            return AmplifyStatMod(magnitude, CloakMantleMath.AmplifierFactor(weapon, pvp), statModType);
+        }
+
+        /// <summary>
+        /// Applies the Proc Amplifier factor (1 + CloakProcAmplifier) to a stat mod. An ADDITIVE mod (Cloaked in Skill)
+        /// is v * factor. A MULTIPLICATIVE mod (EnchantmentTypeFlags.Multiplicative, e.g. Shroud of Darkness at 0.5, which
+        /// scales its target's skill) is v ^ factor (owner ruling 2026-11-10): v * factor would turn a 0.5 debuff into
+        /// 1.0 or more at +100%, a no-op or a buff, while the power keeps a debuff deeper (0.5 -> 0.25 -> 0.125) and
+        /// applies the same way to a value above 1. A non-finite or non-positive v, or a factor at or below 1 (PvP,
+        /// no amplifier), returns v unchanged.
+        /// </summary>
+        public static float AmplifyStatMod(float value, double factor, EnchantmentTypeFlags statModType)
+        {
+            if (!statModType.HasFlag(EnchantmentTypeFlags.Multiplicative))
+                return value * (float)factor;
+
+            if (float.IsNaN(value) || float.IsInfinity(value) || value <= 0f || double.IsNaN(factor) || factor <= 1.0)
+                return value;
+
+            return (float)Math.Pow(value, factor);
         }
 
         /// <summary>
@@ -351,12 +421,13 @@ namespace ACE.Server.Entity
         /// cloak's other procs, keeps <paramref name="existingValue"/>, so a value BuildEntry transformed (the DoT
         /// recompute, the Malediction boost) is never overwritten by the raw spell value.
         /// </summary>
-        public static float RefreshedProcStatModValue(WorldObject weapon, uint spellId, float existingValue, float spellValue)
+        public static float RefreshedProcStatModValue(WorldObject weapon, uint spellId, float existingValue, float spellValue, bool pvp = false, EnchantmentTypeFlags statModType = 0)
         {
             if (spellId != (uint)SpellId.CloakAllSkill || weapon == null || !IsCloak(weapon) || weapon.ProcSpell != spellId)
                 return existingValue;
 
-            return ProcStatModValue(weapon, spellId, spellValue);
+            // same stat-mod type as the build path, so a refresh neither resets nor double-applies the amplified value
+            return ProcStatModValue(weapon, spellId, spellValue, pvp, statModType);
         }
 
         /// <summary>

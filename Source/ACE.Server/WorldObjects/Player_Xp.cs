@@ -5,6 +5,7 @@ using ACE.Common.Extensions;
 using ACE.DatLoader;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Server.Avatars;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Managers;
@@ -124,9 +125,23 @@ namespace ACE.Server.WorldObjects
 
                 // this will divy up the XP, and re-call this function
                 // with ShareType.Fellowship removed
-                Fellowship.SplitXp((ulong)amount, xpType, shareType, this);
+                var splitPrev = AvatarFeed.EnterSplit(this);
+                try
+                {
+                    Fellowship.SplitXp((ulong)amount, xpType, shareType, this);
+                }
+                finally
+                {
+                    AvatarFeed.ExitSplit(splitPrev);
+                }
                 return;
             }
+
+            // Allegiance Avatar feed: what THIS member receives from their own kill or quest, including a fellow's share
+            // (which re-enters here as Kill + combatShare or Fellowship). Before the offline and alt bonuses and the Thread
+            // boon so none of them is counted; allegiance pass-up arrives as XpType.Allegiance and is ignored by the rules.
+            // Lock free and store free: it only enqueues.
+            AvatarFeed.Capture(this, amount, xpType);
 
             // Boost this player's own combat XP by their offline bonus, if any. This runs after the fellowship
             // split, so it only ever scales what THIS player receives - their own kill (XpType.Kill) or their
@@ -150,6 +165,14 @@ namespace ACE.Server.WorldObjects
             // never leaks into vassal passup or item leveling. See Player_AltCharacterBonus.
             if (xpType == XpType.Kill || xpType == XpType.Quest || combatShare)
                 levelAmount = ApplyAltCharacterBonus(levelAmount);
+
+            // Thread Shrine XP blessing (Docs/Threads/ENCOUNTERS.md "Shrine"): this player's OWN combat XP - their kill or
+            // their share of a fellow's kill - while they stand inside the run that granted it. Receiver side, after the
+            // fellowship split, for the reason the offline bonus above gives: it scales only what THIS player receives, so
+            // a holder's blessing never reaches a fellow's share and a fellow's never reaches theirs. Character XP only:
+            // item XP was captured above, and the allegiance passup below keeps the un-boosted amount.
+            if (xpType == XpType.Kill || combatShare)
+                levelAmount = ACE.Server.ThreadDungeons.ThreadBoons.ScaleAmount(levelAmount, ACE.Server.ThreadDungeons.ThreadBoons.For(this, ACE.Server.ThreadDungeons.ThreadBoonKind.Xp));
 
             // Make sure UpdateXpAndLevel is done on this players thread
             EnqueueAction(new ActionEventDelegate(() => UpdateXpAndLevel(levelAmount, xpType)));
@@ -189,6 +212,10 @@ namespace ACE.Server.WorldObjects
                 AvailableExperience += addAmount;
                 TotalExperience += addAmount;
 
+                // Allegiance Avatar level pool: a share of what this member actually received (after the bonuses and the
+                // level-cap clamp above). Lock free and store free: it only enqueues.
+                AvatarFeed.CaptureLevel(this, addAmount, xpType);
+
                 // Monitoring: aggregate, server-wide XP firehose (ServerMetrics -> dotnet-monitor ->
                 // Prometheus). Counts the amount actually added, post fellowship split and offline bonus.
                 // Per-player rates belong to ace_analytics, not here (cardinality). See DESIGN.md §4.1.
@@ -196,6 +223,10 @@ namespace ACE.Server.WorldObjects
 
                 // Analytics: per-character xp rate (Tier-1). Lock-free Interlocked.Add, flushed off-thread.
                 AnalyticsManager.RecordXp(this, addAmount);
+
+                // Balance Trials recorder: the XP actually added, the run row's xp_earned. One field read otherwise.
+                if (TrialActive)
+                    ACE.Server.BalanceTrials.TrialHooks.OnXpGranted(this, addAmount);
 
                 var xpTotalUpdate = new GameMessagePrivateUpdatePropertyInt64(this, PropertyInt64.TotalExperience, TotalExperience ?? 0);
                 var xpAvailUpdate = new GameMessagePrivateUpdatePropertyInt64(this, PropertyInt64.AvailableExperience, AvailableExperience ?? 0);

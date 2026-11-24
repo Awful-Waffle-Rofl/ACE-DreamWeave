@@ -21,6 +21,13 @@ namespace ACE.Server.Managers.Market
     {
         private static void MapClassAbilityRoutes(WebApplication a)
         {
+            // Key-only public GET, the same guard as /v1/materials (no session, a read, no write bucket): the
+            // planner and wiki show every ability's text with the numbers the server is using RIGHT NOW. Pure
+            // projection in ClassAbilityDescriptionFeed; Live values, so a @modifydouble retune shows on the
+            // next request.
+            a.MapGet("/v1/class-abilities/descriptions", (HttpContext ctx) => Guard(ctx, requireSession: false, isWrite: false, handler: _ =>
+                Results.Json(ClassAbilities.ClassAbilityDescriptionFeed.Build(ClassAbilities.ClassAbilityText.Live), Json)));
+
             // TryResolveCharacter FAILS CLOSED, exactly as on the suit-profile route. The quest query parameter
             // (repeated, max 32 values, each ^[A-Za-z0-9_]{1,64}$) selects which CAP quest stamps to report;
             // excess and malformed values are ignored, never an error.

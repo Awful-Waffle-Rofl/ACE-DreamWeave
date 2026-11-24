@@ -12,8 +12,8 @@ namespace ACE.Server.WorldEvents.Objectives
     /// <summary>
     /// goals.json type "Hold" - protect the knights. SKELETON (World Events Hold slice H0): the success / fail / progress rules
     /// and the run state it owns (<see cref="Run"/>), but no spawning, no wave cadence and no knights placed - those are later
-    /// slices. The factory builds it only while world_events_hold_enabled is on, and no source lists a Hold goal yet, so no
-    /// run can reach it in production.
+    /// slices. The factory builds it only while world_events_hold_enabled is on (the ambush source lists defend_envoys, so
+    /// with the switch on a pinned start or a random roll can reach it).
     ///
     ///   * SUCCEEDS once holdSeconds have passed since the run went Active with at least minSurvivors knights still standing
     ///     (minSurvivors is clamped to the number actually placed), or, for a wave-based hold, once every counted wave has
@@ -233,7 +233,7 @@ namespace ACE.Server.WorldEvents.Objectives
             // H6: the run's death reactions first (a knight's last words, the corrupted-kill and rescue heals), on this thread.
             try
             {
-                Run.OnCreatureDied(creature, lastDamager?.IsPlayer ?? false, lastDamager?.TryGetPetOwner() != null);
+                Run.OnCreatureDied(creature, lastDamager?.IsPlayer ?? false, KillerHasLiveOwner(lastDamager));
             }
             catch (Exception ex)
             {
@@ -243,6 +243,12 @@ namespace ACE.Server.WorldEvents.Objectives
             OnDeathCore(creature?.Guid.Full ?? 0, creature != null,
                 WorldEventMvpResolver.ResolveName(lastDamager), WorldEventMvpResolver.ResolveName(topDamager));
         }
+
+        /// <summary>
+        /// Whether the killer is a combat pet whose owner is still live. PetOwner is null for every non-pet attacker, so it is
+        /// tested first; the death reactions run on every kill and this must never throw.
+        /// </summary>
+        internal static bool KillerHasLiveOwner(DamageHistoryInfo killer) => killer?.PetOwner != null && killer.TryGetPetOwner() != null;
 
         /// <summary>
         /// Testable core (D6). A knight's own death changes nothing here - <see cref="Alive"/> reads the live set, which the

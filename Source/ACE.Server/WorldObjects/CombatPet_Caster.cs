@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 using ACE.Entity.Enum;
 using ACE.Entity.Models;
 using ACE.Server.Entity;
+using ACE.Server.Pvp.Rules;
 
 namespace ACE.Server.WorldObjects
 {
@@ -44,6 +46,10 @@ namespace ACE.Server.WorldObjects
         private readonly CasterContext casterContext = new CasterContext();
 
         private Func<IReadOnlyDictionary<SpellCategory, CarriedEnchantment>> casterOwnerLayers;
+        private Func<IReadOnlyDictionary<SpellCategory, CarriedEnchantment>> casterPetLayers;
+
+        /// <summary>TRUE when a bound spell is a strip, so an enemy snapshot also resolves each layer's alignment and school.</summary>
+        private bool casterHasStrip;
         private Func<int, VulnerabilityProfile> casterEnemyProfile;
         private Func<int, bool> casterEnemyHasLos;
 
@@ -107,7 +113,7 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
-            var target = decision.Target == CasterTargetKind.Owner ? (WorldObject)P_PetOwner : casterSiblingPets[decision.TargetIndex];
+            var target = decision.Target == CasterTargetKind.Self ? this : decision.Target == CasterTargetKind.Owner ? (WorldObject)P_PetOwner : casterSiblingPets[decision.TargetIndex];
 
             ClearCasterAttack();
 
@@ -261,13 +267,40 @@ namespace ACE.Server.WorldObjects
                 AbandonCurrentApproach();
         }
 
-        /// <summary>The same gate MagicAttack's cadence sets: the magic delay has passed and no animation is playing.</summary>
+        /// <summary>
+        /// The same gate MagicAttack's cadence sets: the magic delay has passed and no animation is playing. The
+        /// magic delay here is <see cref="CasterMagicDelay"/>, which a cast-speed effect (Mana Rush, ramp
+        /// axis=castspeed on=cast) shortens; an ordinary monster's NextMagicAttackTime does not.
+        ///
+        /// The physics step before the IsAnimating read is load-bearing, exactly as in AttackReady and MoveReady.
+        /// Nothing else steps an animating awake monster's physics: the landblock skips it
+        /// (WorldObject.ShouldRunCreaturePhysics), and a caster that is not following never calls UpdatePosition.
+        /// Cutting a follow MoveTo (PrepareExplicitCast's StopFollowingOwner) or arriving at the owner leaves stop
+        /// motions pending, so IsAnimating stays true until physics is stepped. A gate that only READ it stalled
+        /// forever: the pet cast its first spell, then neither cast nor moved again while an enemy stayed in range.
+        /// </summary>
         private bool CasterCastReady()
         {
             var now = Timers.RunningTime;
 
-            return now >= NextMagicAttackTime && now >= NextAttackTime && !PhysicsObj.IsAnimating;
+            var cooledDown = now >= PrevAttackTime + CasterMagicDelay && now >= NextAttackTime;
+
+            if (!cooledDown)
+                return false;
+
+            PhysicsObj.update_object(Location.Instance);
+            UpdatePosition_SyncLocation();
+
+            return !PhysicsObj.IsAnimating;
         }
+
+        /// <summary>
+        /// The caster pet's magic-delay gate in seconds: AiUseMagicDelay (3 s unset, Weakened Blood slow
+        /// included) divided by the cast-axis monster-effect multiplier (capped by monster_effect_speed_cap), so
+        /// Mana Rush speeds the whole cast cycle and not only the wind-up and recovery animations. With no
+        /// effects it is exactly NextMagicAttackTime - PrevAttackTime.
+        /// </summary>
+        internal double CasterMagicDelay => ScaleMonsterEffectCastDelayForPet();
 
         /// <summary>
         /// Reads the world into the reused CasterContext. See the class remarks for the guard on every read.
@@ -311,11 +344,13 @@ namespace ACE.Server.WorldObjects
             CollectSiblings(owner.SecondaryActivePet);
 
             casterOwnerLayers ??= ReadOwnerTopLayers;
+            casterPetLayers ??= ReadPetTopLayers;
+            ctx.PetTopLayers = casterPetLayers;
             ctx.OwnerTopLayers = casterOwnerLayers;
 
             CollectCasterEnemies(PhysicsObj.ObjMaint.GetVisibleTargetsValuesOfTypeCreature(), GetCylinderDistance, casterEnemies, casterEnemyDistances);
 
-            casterEnemyProfile ??= i => BuildVulnerabilityProfile(casterEnemies[i]);
+            casterEnemyProfile ??= i => BuildVulnerabilityProfile(casterEnemies[i], casterHasStrip);
             ctx.EnemyProfile = casterEnemyProfile;
 
             // the projectile line-of-sight test Monster_Combat.GetMaxRange makes (IsDirectVisible), asked lazily
@@ -324,6 +359,49 @@ namespace ACE.Server.WorldObjects
 
             return ctx;
         }
+
+        /// <summary>
+        /// FALSE when <paramref name="spell"/> is a Heal-kind spell (PetCasterBrain.ClassifySpell) whose target no
+        /// longer needs it at release: the vital is back at or above PetCasterBrain.HealThreshold, or the target
+        /// can no longer be read safely (the owner or sibling left this pet's tick thread). Likewise a cleanse
+        /// (Cleanse or CleanseSelf) whose target no longer carries a harmful layer it can remove
+        /// (PetCasterBrain.CleanseStillNeeded). Every other spell is TRUE - buffs and harmful spells keep their own rules. Monster_Magic.TryStartExplicitCast asks this when
+        /// the pre-cast ends, before CastSpellAt.
+        /// </summary>
+        internal bool FriendlyCastStillWanted(Spell spell, WorldObject target)
+        {
+            // classified from the Spell in hand, the same rule CasterSpellFactsCache memoizes
+            var kind = PetCasterBrain.ClassifySpell(spell.MetaSpellType, spell.IsBeneficial, spell.IsSelfTargeted, spell.Boost, spell.VitalDamageType, spell.Align, out var vital);
+
+            // a cleanse is wanted only while its target still carries something it can remove; the target's snapshot is
+            // read behind the same guard the decision used (the owner: CanFollowOwner; the pet itself: its own thread)
+            if (kind == CasterSpellKind.Cleanse || kind == CasterSpellKind.CleanseSelf)
+            {
+                var forOwner = kind == CasterSpellKind.Cleanse;
+
+                if (forOwner ? !ReferenceEquals(target, P_PetOwner) || !CanFollowOwner(P_PetOwner) : !ReferenceEquals(target, this))
+                    return false;
+
+                return PetCasterBrain.CleanseStillNeeded(forOwner ? ReadOwnerTopLayers() : ReadPetTopLayers(), spell.DispelSchool, spell.MinPower, spell.MaxPower);
+            }
+
+            if (kind != CasterSpellKind.Heal)
+                return true;
+
+            if (!(target is Creature creature))
+                return false;
+
+            // the same thread guards the decision used: nothing of a creature in another landblock group is read
+            var readable = ReferenceEquals(creature, P_PetOwner) ? CanFollowOwner(P_PetOwner) : SharesCasterTickThread(creature);
+
+            if (!readable)
+                return false;
+
+            return PetCasterBrain.HealStillNeeded(VitalsOf(creature), vital);
+        }
+
+        /// <summary>The pet's mana after a dropped cast returns <paramref name="used"/>, capped at the maximum.</summary>
+        internal static uint RefundedMana(uint current, uint max, uint used) => (uint)Math.Min((ulong)current + used, max);
 
         private static CasterVitals VitalsOf(Creature creature) => new CasterVitals(
             CasterVitals.Fraction(creature.Health.Current, creature.Health.MaxValue),
@@ -363,15 +441,66 @@ namespace ACE.Server.WorldObjects
             if (owner?.EnchantmentManager == null || !owner.EnchantmentManager.HasEnchantments)
                 return null;
 
-            return VulnerabilityProfile.BuildTopLayers(owner.Biota.PropertiesEnchantmentRegistry.Clone(owner.BiotaDatabaseLock));
+            return BuildDispelLayers(owner);
+        }
+
+        /// <summary>
+        /// <paramref name="subject"/>'s enchantment top layers from one copy of its registry, each with its alignment, school
+        /// and dispellability resolved (EnchantmentDispelFactsCache.Resolve), and with the PvP dispel vulnerability lock
+        /// applied the way EnchantmentManager.SelectDispel applies it: while subject (a Player) is inside its PK lock window,
+        /// a vulnerability ANOTHER player cast on it is not dispellable. The lock's own predicate decides
+        /// (PvpRules.ExcludeLockedVulnerabilities), without the applied-count Report a real dispel makes. A non-player
+        /// subject is never locked. The caller has already made the read safe (CanFollowOwner for the owner).
+        /// </summary>
+        internal static IReadOnlyDictionary<SpellCategory, CarriedEnchantment> BuildDispelLayers(Creature subject)
+        {
+            if (subject?.EnchantmentManager == null || !subject.EnchantmentManager.HasEnchantments)
+                return null;
+
+            return BuildDispelLayers(subject, subject.Biota.PropertiesEnchantmentRegistry.Clone(subject.BiotaDatabaseLock));
+        }
+
+        /// <summary>The registry half of <see cref="BuildDispelLayers(Creature)"/>, over an already-cloned registry.</summary>
+        internal static IReadOnlyDictionary<SpellCategory, CarriedEnchantment> BuildDispelLayers(WorldObject subject, List<PropertiesEnchantmentRegistry> registry)
+        {
+            var open = PvpRules.ExcludeLockedVulnerabilities(subject, registry);
+
+            if (ReferenceEquals(open, registry))
+                return VulnerabilityProfile.BuildTopLayers(registry, EnchantmentDispelFactsCache.Resolve);
+
+            var locked = new HashSet<PropertiesEnchantmentRegistry>(registry.Except(open));
+
+            return VulnerabilityProfile.BuildTopLayers(registry, e =>
+            {
+                var facts = EnchantmentDispelFactsCache.Resolve(e);
+
+                return facts.HasValue && locked.Contains(e)
+                    ? new EnchantmentDispelFacts(facts.Value.IsBeneficial, facts.Value.School, false)
+                    : facts;
+            });
+        }
+
+        /// <summary>
+        /// The pet's OWN enchantment top layers, each with its alignment, school and dispellability resolved (a
+        /// CleanseSelf's question). The pet's registry belongs to this tick thread, so no thread guard is needed.
+        /// </summary>
+        private IReadOnlyDictionary<SpellCategory, CarriedEnchantment> ReadPetTopLayers()
+        {
+            if (EnchantmentManager == null || !EnchantmentManager.HasEnchantments)
+                return null;
+
+            return BuildDispelLayers(this);
         }
 
         /// <summary>
         /// The harmful-spell candidates, in preference order, into <paramref name="enemies"/> (with their
         /// distances alongside): only monsters engaged with the owner's side (AcceptsPetTarget with the
-        /// never-initiates rule forced on, whatever the weenie says - a caster never starts a fight), only those
-        /// on this pet's tick thread, inside MaxChaseRange (as IsValidAssistTarget requires - Movement() abandons
-        /// any chase past it), the current AttackTarget first, then the rest nearest first, at most MaxCasterEnemies.
+        /// never-initiates rule, which a caster always carries by design - it never starts a fight - unless its
+        /// owner has turned /summonaggro on, when any valid monster qualifies - a caster then starts a fight only by
+        /// casting, it does not wake monsters), only those on this pet's tick thread, inside MaxChaseRange (as
+        /// IsValidAssistTarget requires - Movement() abandons any chase past it); with /summonaggro on, an UNENGAGED
+        /// candidate must also be inside this pet's VisualAwarenessRangeSq, the same bound FindNextTarget applies
+        /// (an engaged one keeps the MaxChaseRange bound alone), the current AttackTarget first, then the rest nearest first, at most MaxCasterEnemies.
         /// The thread check runs first, so nothing of a monster in another landblock group is read.
         /// </summary>
         internal void CollectCasterEnemies(IEnumerable<Creature> visible, Func<WorldObject, float> distanceTo, List<Creature> enemies, List<float> distances)
@@ -382,14 +511,24 @@ namespace ACE.Server.WorldObjects
             Creature current = null;
             var currentDistance = 0.0f;
 
+            // read once: the owner's /summonaggro setting is live and the same answer must apply to every candidate
+            var neverInitiates = NeverInitiates;
+
+            // by design but released by the owner's toggle: unengaged candidates are then fair game, but only inside awareness range
+            var aggroOn = NeverInitiatesByDesign && !neverInitiates;
+
             foreach (var creature in visible)
             {
-                if (creature == null || ReferenceEquals(creature, this) || !SharesCasterTickThread(creature) || !AcceptsPetTarget(creature, true))
+                if (creature == null || ReferenceEquals(creature, this) || !SharesCasterTickThread(creature) || !AcceptsPetTarget(creature, neverInitiates))
                     continue;
 
                 var distance = distanceTo(creature);
 
                 if (distance >= MaxChaseRange)
+                    continue;
+
+                // FindNextTarget's own test: squared cylinder distance against VisualAwarenessRangeSq, rejected when greater
+                if (aggroOn && distance * distance > VisualAwarenessRangeSq && !PetEngagement.IsEngagedWithOwner(creature, P_PetOwner))
                     continue;
 
                 if (ReferenceEquals(creature, AttackTarget))
@@ -455,7 +594,10 @@ namespace ACE.Server.WorldObjects
                 // Cached once. Deterministic only because caster pets never train ManaConversion (pinned by CustomSummonWeenieTests.Casters_DoNotTrainManaConversion); with it trained this would freeze one random roll.
                 var manaCost = CalculateManaUsage(this, new Spell(spellId), null);
 
-                result.Add(new CasterSpell(spellId, facts.Kind, facts.Vital, facts.Category, facts.Power, facts.Shape, range, manaCost, facts.IsProjectile));
+                result.Add(new CasterSpell(spellId, facts.Kind, facts.Vital, facts.Category, facts.Power, facts.Shape, range, manaCost, facts.IsProjectile, facts.DispelSchool, facts.MinPower, facts.MaxPower));
+
+                if (facts.Kind == CasterSpellKind.Strip)
+                    casterHasStrip = true;
             }
 
             return result;

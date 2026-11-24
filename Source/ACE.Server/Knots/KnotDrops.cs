@@ -89,6 +89,17 @@ namespace ACE.Server.Knots
             => !isGuide && knotLevel.HasValue && knotLevel.Value > 0 && pooledLoot && spawned > 0 && fiberEnabled;
 
         /// <summary>
+        /// May this run hand out Knots items at all? The one gate for the clear's Knot drop roll (<see cref="RollFor"/>)
+        /// and the encounter prize's Fiber and Pattern entries (ThreadEncounterPrize.Grant), so the two cannot drift:
+        /// <see cref="ShouldRoll"/> over the run's state first (so a run that fails it reads no tunable), then
+        /// dynamic_dungeons_fiber_enabled.
+        /// </summary>
+        internal static bool KnotsAvailableFor(ThreadDungeonRun run)
+            => run != null
+               && ShouldRoll(ThreadGuideRules.IsGuide(run.Spec), run.KnotLevel, run.PooledLoot, run.Spawned, true)
+               && KnotTunables.FiberEnabled;
+
+        /// <summary>
         /// The whole roll for one run (pure over its draws): the Fiber roll first, then an independent Pattern roll at
         /// <paramref name="patternChance"/>, skipped outright (no draw) when no pinnacle is enabled. The Pattern picks
         /// uniformly among the <paramref name="enabledPinnacles"/> through <paramref name="pick"/>.
@@ -149,11 +160,9 @@ namespace ACE.Server.Knots
         {
             var level = run.KnotLevel;
 
-            // The cheap run-state gates first, so a test run that never stamped a level reads no tunable at all.
-            if (!ShouldRoll(ThreadGuideRules.IsGuide(run.Spec), level, run.PooledLoot, run.Spawned, true))
-                return;
-
-            if (!KnotTunables.FiberEnabled)
+            // The cheap run-state gates first, so a test run that never stamped a level reads no tunable at all; then the
+            // switch. Shared with the encounter prize's Knots entries.
+            if (!KnotsAvailableFor(run))
                 return;
 
             // Available, not merely enabled: a Pattern for a pinnacle with no encounter would bind a Knot that can never enter.
@@ -293,7 +302,7 @@ namespace ACE.Server.Knots
             return fiber;
         }
 
-        private static WorldObject CreatePattern(PinnacleDef def)
+        internal static WorldObject CreatePattern(PinnacleDef def)
         {
             var pattern = WorldObjectFactory.CreateNewWorldObject(KnotItems.PatternWcid);
 

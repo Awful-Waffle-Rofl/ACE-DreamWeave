@@ -463,6 +463,27 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>
+        /// True for the kind whose placement calls IWorldEventObjective.OnSourceSpawning: the damageable Source only. The inert
+        /// (scenery) objective pillar of a non-destroy_source run is never told, so it never gets a shield, floor or overlay.
+        /// </summary>
+        internal static bool NotifiesObjectiveOfSource(WorldEventSpawnKind kind) => kind == WorldEventSpawnKind.Source;
+
+        /// <summary>
+        /// The live source creature with this guid, or null when it is not placed yet, dead or gone. Any thread (locks); the caller
+        /// touches the creature on the world thread.
+        /// </summary>
+        public Creature TryGetLiveSource(uint guid)
+        {
+            lock (sync)
+            {
+                if (!liveSourceGuids.Contains(guid))
+                    return null;
+
+                return liveObjective.FirstOrDefault(c => c.Guid.Full == guid);
+            }
+        }
+
+        /// <summary>
         /// Spawn-time npc guids (WP-15). WP-16's KillCount exclusion reads this, unioned with
         /// <see cref="SourceGuids"/>, via <see cref="Objectives.WorldEventObjectiveFactory"/> - belt and
         /// braces alongside the withheld P_WorldEvent back-reference that is the primary guard (see
@@ -627,6 +648,29 @@ namespace ACE.Server.WorldEvents
             {
                 lock (sync)
                     return bossAdoptedAt > 0 && bossDiedAt > bossAdoptedAt ? bossDiedAt - bossAdoptedAt : 0;
+            }
+        }
+
+        /// <summary>
+        /// Seconds the boss has been fighting, on this spawner's clock: adopt to death when it died, adopt to
+        /// now while it stands. 0 when it never stood. Read only by the finish telemetry line.
+        /// </summary>
+        public double BossFightSeconds
+        {
+            get
+            {
+                lock (sync)
+                {
+                    if (bossAdoptedAt <= 0)
+                        return 0;
+
+                    if (bossDiedAt > bossAdoptedAt)
+                        return bossDiedAt - bossAdoptedAt;
+
+                    var now = clock();
+
+                    return now > bossAdoptedAt ? now - bossAdoptedAt : 0;
+                }
             }
         }
 
@@ -1047,7 +1091,7 @@ namespace ACE.Server.WorldEvents
         /// plain decor made unusable, a shrine configured by <see cref="ConfigureHoldShrine"/>) and placed Stuck. False is the
         /// original sky-decor path, unchanged.
         /// </summary>
-        private void SpawnDecor(WorldEvent evt, IReadOnlyList<DecorDef> decor, Position centre, bool holdScene)
+        private void SpawnDecor(WorldEvent evt, IReadOnlyList<DecorDef> decor, Position centre, bool holdScene, Action<WorldObject> onPlaced = null, Landblock targetBlock = null)
         {
             if (evt == null || decor == null || decor.Count == 0)
                 return;
@@ -1055,14 +1099,17 @@ namespace ACE.Server.WorldEvents
             if (centre == null)
             {
                 log.Warn($"[WORLDEVENT] run={evt.RunId} decor skipped: the composition has no anchor position");
+                onPlaced?.Invoke(null);
                 return;
             }
 
-            var landblock = evt.AnchorLandblock;
+            // targetBlock: the landblock that OWNS the position (a neighbour's pendingAdditions is not safe to touch from the anchor's queue).
+            var landblock = targetBlock ?? evt.AnchorLandblock;
 
             if (landblock == null)
             {
                 log.Warn($"[WORLDEVENT] run={evt.RunId} decor skipped: no anchor landblock is held");
+                onPlaced?.Invoke(null);
                 return;
             }
 
@@ -1099,7 +1146,10 @@ namespace ACE.Server.WorldEvents
             }
 
             if (candidates.Count == 0)
+            {
+                onPlaced?.Invoke(null);
                 return;
+            }
 
             var runId = evt.RunId;
             var centreSnapshot = new Position(centre);
@@ -1115,6 +1165,8 @@ namespace ACE.Server.WorldEvents
                     {
                         if (!candidate.Object.IsDestroyed)
                             candidate.Object.Destroy();
+
+                        onPlaced?.Invoke(candidate.Object);
                     }
 
                     return;
@@ -1127,6 +1179,20 @@ namespace ACE.Server.WorldEvents
                 catch (Exception ex)
                 {
                     log.Error($"[WORLDEVENT] run={runId} decor placement threw", ex);
+
+                    // Whatever the throw left unprocessed is thrown away, so "destroyed" means "failed" to onPlaced.
+                    foreach (var candidate in candidates)
+                    {
+                        if (!candidate.Object.IsDestroyed && candidate.Object.CurrentLandblock == null)
+                            candidate.Object.Destroy();
+                    }
+                }
+
+                // The object is destroyed when its placement failed; the caller reads that.
+                if (onPlaced != null)
+                {
+                    foreach (var candidate in candidates)
+                        onPlaced(candidate.Object);
                 }
             }));
         }
@@ -1899,6 +1965,9 @@ namespace ACE.Server.WorldEvents
             // World Events Hold H5: the entry's index in the batch, for holdPrepare (a skipped entry keeps its index).
             var entryIndex = -1;
 
+            // Constructed creatures whose damage the ceiling lowered (world_events_damage_ceiling): one Info summary per batch.
+            var ceilingLowered = 0;
+
             foreach (var entry in entries)
             {
                 entryIndex++;
@@ -1965,14 +2034,33 @@ namespace ACE.Server.WorldEvents
                 // crowd x pace multiplier below (Threads' order: floor, then multiplier). Placed ahead of the
                 // authored-health capture so a boss ratchet recomputes from the floored base. A named boss is
                 // never uplifted - it reaches this method with UpliftLevel 0.
+                //
+                // ONE band standard per creature (SlotStandardFor), read by the uplift, its effective-skill top-up
+                // and the combat guard below: the curve standard when world_events_stat_curve is on. With
+                // world_events_threads_uplift on, the uplift also raises the spell tier and the attributes, tops up
+                // the effective skills and sets health exactly (ApplyBandUplift's remarks carry the order).
+                var upliftDials = WorldEventUplift.Current();
+                var slotStandard = SlotStandardFor(evt, entry, kind, upliftDials);
+
                 if (entry.UpliftLevel > 0)
-                    ApplyBandUplift(evt, creature, entry.UpliftLevel, kind);
+                    ApplyBandUplift(evt, creature, entry.UpliftLevel, kind, slotStandard, upliftDials);
 
                 // Combat-trait guard (world_events_strip_combat_traits): strips the bypass/immunity traits and
                 // applies the category-immunity guard to every roster-drawn wave monster and the family
                 // champion, uplifted or not, against the slot level's band standard. After the uplift so the
                 // defense ceiling sees the final skills. A named boss is exempt.
-                ApplyCombatGuard(evt, creature, entry.SlotLevel, kind);
+                ApplyCombatGuard(evt, creature, entry.SlotLevel, kind, slotStandard);
+
+                // Magic attack ceiling (world_events_magic_attack_skill_cap, 0 = off) on every guarded creature,
+                // uplifted or not, after every step that can raise a magic attack skill (Threads' position).
+                ApplyWorldEventMagicAttackCeiling(evt, creature, entry.SlotLevel, kind, upliftDials);
+
+                // Damage ceiling (world_events_damage_ceiling): the Threads per-hit ceiling against the slot level's
+                // median, on the same creatures as the magic attack ceiling, uplifted or not, AFTER every step that can
+                // write base damage (the uplift's body parts; Threads' position: after its uplifts and its magic attack
+                // ceiling). Nothing below writes body-part DVal or item Damage. A named boss is exempt.
+                if (Lowered(ApplyWorldEventDamageCeiling(evt, creature, entry.SlotLevel, kind, upliftDials)))
+                    ceilingLowered++;
 
                 var candidate = new SpawnCandidate(creature, entry.OverflowChampion, entry.Kind, entry.Synthetic);
 
@@ -2033,6 +2121,9 @@ namespace ACE.Server.WorldEvents
 
                 candidates.Add(candidate);
             }
+
+            if (ceilingLowered > 0)
+                log.Info($"[WORLDEVENT] run={evt.RunId} {kind} damage ceiling lowered {ceilingLowered} creature(s) of {entries.Count} entries (per-creature detail at Debug)");
 
             if (candidates.Count == 0)
             {
@@ -2323,6 +2414,10 @@ namespace ACE.Server.WorldEvents
 
                 if (objectiveHealth != null)
                     ApplyObjectiveHealth(evt, creature, objectiveHealth);
+
+                // The objective's say over a damageable source, after its health is final and before it is visible to anyone.
+                if (NotifiesObjectiveOfSource(kind))
+                    evt.NotifyObjectiveSourceSpawning(creature);
             }
 
             // 2026-08-19: the same objective weenie placed as SCENERY, because this run's goal is not
@@ -3175,16 +3270,155 @@ namespace ACE.Server.WorldEvents
             return bandMedian > currentMax ? bandMedian : 0u;
         }
 
-        private static DungeonStatProfile LiveProfileOf(uint wcid)
+        internal static DungeonStatProfile LiveProfileOf(uint wcid)
             => DungeonStatProfile.FromWeenie(DatabaseManager.World.GetCachedWeenie(wcid));
 
         /// <summary>
-        /// Applies the band uplift (BandUplift.Apply against the slot-level band standard, then the band
-        /// median health floor) to one freshly constructed creature, before EnterWorld. Never throws: a
-        /// failure is logged and the creature spawns as authored. Authored XP is deliberately untouched
-        /// (owner ruling), and the creature is not renamed.
+        /// The level the ONE per-creature band standard is measured at (pure): the uplift level when the entry
+        /// is uplifted, else the slot level. Every current construction sets an uplifted entry's UpliftLevel to
+        /// its SlotLevel (WorldEventRosterSelector.UpliftLevelFor returns the slot level; a Hold level offset
+        /// zeroes the uplift), so the uplift and the combat guard measure at the same level either way.
         /// </summary>
-        private void ApplyBandUplift(WorldEvent evt, Creature creature, int upliftLevel, WorldEventSpawnKind kind)
+        internal static int StandardLevelFor(int upliftLevel, int slotLevel) => upliftLevel > 0 ? upliftLevel : slotLevel;
+
+        /// <summary>
+        /// The Avatar fighter's stat basis at <paramref name="level"/> (WorldEventHooks.AvatarFighterBasisAt): the slot standard
+        /// a wave creature of that level is built against, the band median health and the median per-hit damage, from the same
+        /// memo the spawner reads. World thread.
+        /// </summary>
+        internal static (DungeonBandStandard Standard, double MedianHealth, double PerHitMedian) FighterBasisAt(int level)
+        {
+            level = Math.Max(1, level);
+
+            var dials = WorldEventUplift.Current();
+            var tables = WorldEventManager.Store?.SpeciesTables;
+            var (low, high) = WorldEventRosterSelector.EffectiveTrashMultipliers();
+
+            var standard = SlotStandardAt(level, dials);
+            var median = WorldEventBandMemo.CurveMedianHealthFor(tables, level, low, high, LiveProfileOf, dials.StatCurve);
+            var baseline = WorldEventBandMemo.DamageCeilingFor(tables, level, () => WorldEventDamageCeiling.ComputeLiveCached(tables, level));
+
+            return (standard, median, baseline?.Median ?? 0);
+        }
+
+        /// <summary>
+        /// The band standard at <paramref name="level"/> under the live WE band and the stat-curve dial: the
+        /// curve standard when world_events_stat_curve is on (WorldEventBandMemo.CurveStandardFor), else
+        /// exactly today's WorldEventBandMemo.StandardFor. Computed ONCE per creature and handed to the uplift,
+        /// its top-up and the combat guard, so all three read the same object.
+        /// </summary>
+        private static DungeonBandStandard SlotStandardAt(int level, WorldEventUpliftDials upliftDials)
+        {
+            var (low, high) = WorldEventRosterSelector.EffectiveTrashMultipliers();
+
+            return WorldEventBandMemo.CurveStandardFor(WorldEventManager.Store?.SpeciesTables, level, low, high,
+                WorldEventRosterSelector.CurrentUpliftDials().LowFloor, LiveProfileOf, upliftDials.StatCurve);
+        }
+
+        /// <summary>
+        /// The per-creature standard for one spawn entry, or null when nothing will read it: an entry that is
+        /// not uplifted and whose combat guard would not build a standard (not guarded, guard off, negative
+        /// defense-cap offset, or no slot level) - the same gate ApplyCombatGuard had, so a run that needs no
+        /// standard still pays for no sample walk.
+        /// </summary>
+        private DungeonBandStandard SlotStandardFor(WorldEvent evt, SpawnEntry entry, WorldEventSpawnKind kind, WorldEventUpliftDials upliftDials)
+        {
+            try
+            {
+                var named = kind == WorldEventSpawnKind.Boss && evt?.Composition?.Boss?.Kind == BossKind.Named;
+                var guard = WorldEventCombatGuard.Current();
+                var guardNeeds = entry.SlotLevel > 0 && WorldEventCombatGuard.AppliesTo(kind, named) && guard.Enabled && guard.DefenseSkillCapOffset >= 0;
+
+                if (entry.UpliftLevel <= 0 && !guardNeeds)
+                    return null;
+
+                var level = StandardLevelFor(entry.UpliftLevel, entry.SlotLevel);
+
+                return level > 0 ? SlotStandardAt(level, upliftDials) : null;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={evt?.RunId} could not build the band standard for wcid {entry.Wcid}", ex);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Whether the Threads-style attribute raise keeps the uplift's health target reachable (pure): the target
+        /// is max(<paramref name="authoredMax"/>, <paramref name="floor"/>), and raising Endurance to the band
+        /// median must leave it above the raised Endurance's own health term
+        /// (ThreadDungeonSpawner.UpliftAttributeRaiseKeepsHealthReachable). False = skip the raise and the top-up.
+        /// </summary>
+        internal static bool UpliftAttributeRaiseKeepsHealthReachable(uint authoredMax, uint floor, uint currentEndurance, uint enduranceMedian)
+            => ThreadDungeonSpawner.UpliftAttributeRaiseKeepsHealthReachable(
+                ThreadDungeonSpawner.NonBossHealthTarget(authoredMax, 0.0, 1.0, floor),
+                BandUplift.RaisedEndurance(currentEndurance, enduranceMedian));
+
+        /// <summary>
+        /// The Threads-style uplift health write (pure): target max(<paramref name="authoredMax"/>,
+        /// <paramref name="floor"/>) computed from the AUTHORED max (captured before the attribute raise), or null
+        /// when the LIVE max already equals it - ThreadDungeonSpawner.NonBossHealthWrite with no normalization and
+        /// no multiplier (WE's crowd x pace multiplier is applied later, by ApplyHealthMultiplier).
+        /// </summary>
+        internal static int? UpliftHealthWrite(uint authoredMax, uint liveMax, uint floor)
+            => ThreadDungeonSpawner.NonBossHealthWrite(authoredMax, liveMax, 0.0, 1.0, floor);
+
+        /// <summary>
+        /// The order-sensitive core of the Threads-style uplift's health handling, as state captured by
+        /// <see cref="BeginUpliftHealth"/>: the AUTHORED max (read before the attribute raise), whether the raise ran
+        /// (the reachability gate), how many attributes it raised, and the floor the final write aims at.
+        /// </summary>
+        internal sealed class UpliftHealthSequence
+        {
+            public UpliftHealthSequence(uint authoredMax, uint floor, bool attributesRan, int attributesRaised)
+            {
+                AuthoredMax = authoredMax;
+                Floor = floor;
+                AttributesRan = attributesRan;
+                AttributesRaised = attributesRaised;
+            }
+
+            public uint AuthoredMax { get; }
+            public uint Floor { get; }
+            public bool AttributesRan { get; }
+            public int AttributesRaised { get; }
+
+            /// <summary>The final health write against the LIVE max after every other step: max(authored, floor), or null when already there.</summary>
+            public int? FinalWrite(uint liveMax) => UpliftHealthWrite(AuthoredMax, liveMax, Floor);
+        }
+
+        /// <summary>
+        /// Steps 2-3 of the Threads-style uplift (pure over delegates): reads the authored max through
+        /// <paramref name="liveMax"/> FIRST, then runs <paramref name="raiseAttributes"/> only when
+        /// <see cref="UpliftAttributeRaiseKeepsHealthReachable"/> allows it. The caller writes health last through
+        /// <see cref="UpliftHealthSequence.FinalWrite"/>.
+        /// </summary>
+        internal static UpliftHealthSequence BeginUpliftHealth(Func<uint> liveMax, uint currentEndurance, uint enduranceMedian, uint floor,
+            Func<int> raiseAttributes)
+        {
+            var authoredMax = liveMax();
+
+            if (!UpliftAttributeRaiseKeepsHealthReachable(authoredMax, floor, currentEndurance, enduranceMedian))
+                return new UpliftHealthSequence(authoredMax, floor, false, 0);
+
+            return new UpliftHealthSequence(authoredMax, floor, true, raiseAttributes());
+        }
+
+        /// <summary>
+        /// Applies the band uplift to one freshly constructed creature, before EnterWorld, against
+        /// <paramref name="standard"/> (the per-creature standard the combat guard also reads). Never throws: a
+        /// failure is logged and the creature spawns as authored. Authored XP is deliberately untouched (owner
+        /// ruling), and the creature is not renamed.
+        ///
+        /// With world_events_threads_uplift OFF: BandUplift.Apply, then the band median health floor - exactly
+        /// the pre-dial behaviour. ON (the Threads per-creature pull-up, archetype uplift off), in this order:
+        /// spell tier raise to the standard's tier; authored max health captured; the six attributes raised to the
+        /// band medians unless that would make the health target unreachable; BandUplift.Apply; the
+        /// effective-skill top-up and defense-ceiling re-check (only when the attribute raise ran, as Threads
+        /// gates it); then health SET to max(authored, floor) against the live max.
+        /// </summary>
+        private void ApplyBandUplift(WorldEvent evt, Creature creature, int upliftLevel, WorldEventSpawnKind kind,
+            DungeonBandStandard standard, WorldEventUpliftDials upliftDials)
         {
             if (creature == null || upliftLevel <= 0)
                 return;
@@ -3198,10 +3432,34 @@ namespace ACE.Server.WorldEvents
             {
                 var tables = WorldEventManager.Store?.SpeciesTables;
                 var (low, high) = WorldEventRosterSelector.EffectiveTrashMultipliers();
-                var dials = WorldEventRosterSelector.CurrentUpliftDials();
+                standard ??= DungeonBandStandard.Empty;
 
-                var standard = WorldEventBandMemo.StandardFor(tables, upliftLevel, low, high, dials.LowFloor, LiveProfileOf);
                 var authoredLevel = creature.Level ?? 0;
+                var median = WorldEventBandMemo.CurveMedianHealthFor(tables, upliftLevel, low, high, LiveProfileOf, upliftDials.StatCurve);
+                var threads = upliftDials.ThreadsUplift && !standard.IsEmpty;
+
+                // 1. Spell tier, before anything else reads the book (Threads' position).
+                var spellsRaised = threads && standard.SpellTier > 0
+                    ? DungeonSpellTier.Raise(creature.Biota.PropertiesSpellBook, standard.SpellTier)
+                    : 0;
+
+                // 2-3. Authored max health captured BEFORE the attribute raise (Endurance feeds max health), then the
+                // raise, skipped when it would leave the health target unreachable (BeginUpliftHealth owns the order).
+                var authoredMax = creature.Health.MaxValue;
+                UpliftHealthSequence healthSequence = null;
+
+                if (threads)
+                {
+                    var endurance = creature.Attributes.TryGetValue(PropertyAttribute.Endurance, out var enduranceAttribute) && enduranceAttribute != null
+                        ? enduranceAttribute.Base : 0u;
+
+                    healthSequence = BeginUpliftHealth(() => creature.Health.MaxValue, endurance, standard.AttributeMedianFor(PropertyAttribute.Endurance), median,
+                        () => BandUplift.RaiseAttributes(creature, standard));
+                    authoredMax = healthSequence.AuthoredMax;
+                }
+
+                var attributesRan = healthSequence?.AttributesRan ?? false;
+                var attributesRaised = healthSequence?.AttributesRaised ?? 0;
 
                 // Rare-drop eligibility reads the AUTHORED level, not the raised one (owner ruling): record it
                 // BEFORE Apply raises Level, and only when the uplift will actually raise it. Threads never does
@@ -3209,17 +3467,52 @@ namespace ACE.Server.WorldEvents
                 if (BandUplift.LevelFloor(creature.Level, upliftLevel).HasValue)
                     creature.LootGateLevel = authoredLevel;
 
+                // 4. Level, skill InitLevel floors, body parts.
                 var (skillsRaised, partsScaled) = BandUplift.Apply(creature, upliftLevel, standard);
 
-                var median = WorldEventBandMemo.MedianHealthFor(tables, upliftLevel, low, high, LiveProfileOf);
-                var floorTarget = HealthFloorTarget(creature.Health.MaxValue, median);
+                // 5. Effective-skill top-up and defense-ceiling re-check, after Apply and the attribute raise. The
+                // ceiling half runs under WE's own guard dials (world_events_strip_combat_traits / _defense_skill_cap_offset).
+                var toppedUp = 0;
+                var ceilingsSet = 0;
 
-                if (floorTarget > 0)
-                    ApplyHealth(creature, (int)Math.Min(floorTarget, (uint)int.MaxValue));
+                if (attributesRan)
+                {
+                    var guard = WorldEventCombatGuard.Current();
+                    (toppedUp, ceilingsSet) = BandUplift.TopUpEffectiveSkillsAndCeil(creature, standard, guard.DefenseSkillCapOffset, guard.Enabled);
+                }
+
+                // 6. Health.
+                string health;
+
+                if (healthSequence != null)
+                {
+                    var write = healthSequence.FinalWrite(creature.Health.MaxValue);
+
+                    if (write.HasValue && ApplyHealth(creature, write.Value))
+                        log.Warn($"[WORLDEVENT] run={evt?.RunId} wcid={creature.WeenieClassId} uplift health target {write.Value} unreachable; StartingValue clamped to 1 (MaxValue={creature.Health.MaxValue})");
+
+                    health = $"health {authoredMax} -> {creature.Health.MaxValue} (floor {(median > 0 ? median.ToString() : "none")})";
+                }
+                else
+                {
+                    var floorTarget = HealthFloorTarget(creature.Health.MaxValue, median);
+
+                    if (floorTarget > 0)
+                        ApplyHealth(creature, (int)Math.Min(floorTarget, (uint)int.MaxValue));
+
+                    health = $"health floor {(floorTarget > 0 ? floorTarget.ToString() : "none")}";
+                }
 
                 log.Info($"[WORLDEVENT] run={evt?.RunId} uplift wcid={creature.WeenieClassId} to level {upliftLevel} (authored {authoredLevel}): " +
-                         $"{skillsRaised} skill(s) raised, {partsScaled} body part(s) scaled, health floor {(floorTarget > 0 ? floorTarget.ToString() : "none")}" +
-                         (standard == null || standard.IsEmpty ? " (no band standard: level only)" : ""));
+                         $"{skillsRaised} skill(s) raised, {partsScaled} body part(s) scaled, {health}" +
+                         (threads
+                             ? $", {spellsRaised} spell(s) to tier {standard.SpellTier}, {attributesRaised} attribute(s) raised" +
+                               (attributesRan ? "" : " (attribute raise skipped: health target unreachable)") +
+                               $", {toppedUp} skill(s) topped up, {ceilingsSet} defense ceiling(s) set"
+                             : "") +
+                         $", magic attack ceiling {DungeonCombatNormalizer.MagicAttackCeilingFor(upliftDials.MagicAttackSkillCap)?.ToString() ?? "off"}" +
+                         $", damage ceiling {(upliftDials.DamageCeiling ? $"x{upliftDials.DamageCeilingRatio:0.##} ref {(upliftDials.DamageCeilingReferenceRatio > 0 ? $"x{upliftDials.DamageCeilingReferenceRatio:0.##}" : "auto")}" : "off")}" +
+                         (standard.IsEmpty ? " (no band standard: level only)" : ""));
             }
             catch (Exception ex)
             {
@@ -3228,13 +3521,88 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>
+        /// The World Events magic attack ceiling (world_events_magic_attack_skill_cap, 0 = off): set on every
+        /// creature the combat guard covers (WorldEventCombatGuard.AppliesTo with a slot level), uplifted or not,
+        /// as Threads sets it on every creature it places. Independent of world_events_strip_combat_traits. The
+        /// clamp is read-time (CreatureSkill.Base/Current), so its position after the uplift only keeps the uplift
+        /// measuring the creature's uncapped skill. Returns the ceiling set, or null for none.
+        /// </summary>
+        private uint? ApplyWorldEventMagicAttackCeiling(WorldEvent evt, Creature creature, int slotLevel, WorldEventSpawnKind kind, WorldEventUpliftDials upliftDials)
+        {
+            if (creature == null || creature is Player || slotLevel < 0)
+                return null;
+
+            var named = kind == WorldEventSpawnKind.Boss && evt?.Composition?.Boss?.Kind == BossKind.Named;
+
+            if (!WorldEventCombatGuard.AppliesTo(kind, named))
+                return null;
+
+            var ceiling = DungeonCombatNormalizer.MagicAttackCeilingFor(upliftDials.MagicAttackSkillCap);
+
+            if (ceiling.HasValue)
+                creature.MagicAttackSkillCeiling = ceiling;
+
+            return ceiling;
+        }
+
+        /// <summary>
+        /// The World Events damage ceiling (world_events_damage_ceiling, WorldEventDamageCeiling): every melee and missile
+        /// source of a guarded creature with a known slot level (WorldEventDamageCeiling.Applies) compressed against the
+        /// slot level's median per-hit, the Threads construction memoized in WorldEventBandMemo. Never throws: a failure is
+        /// logged and the creature keeps its damage. One Debug line per creature the ceiling actually lowered (the batch
+        /// summary is Spawn's). A level whose baseline compute threw is tried and logged once per WorldEventBandMemo
+        /// generation (DamageCeilingFor's failed set); its creatures then spawn uncapped.
+        /// </summary>
+        private DamageCeilingResult ApplyWorldEventDamageCeiling(WorldEvent evt, Creature creature, int slotLevel, WorldEventSpawnKind kind, WorldEventUpliftDials upliftDials)
+        {
+            if (creature == null || creature is Player)
+                return null;
+
+            var named = kind == WorldEventSpawnKind.Boss && evt?.Composition?.Boss?.Kind == BossKind.Named;
+
+            if (!WorldEventDamageCeiling.Applies(upliftDials, kind, named, slotLevel))
+                return null;
+
+            try
+            {
+                var tables = WorldEventManager.Store?.SpeciesTables;
+                var baseline = WorldEventBandMemo.DamageCeilingFor(tables, slotLevel, () => WorldEventDamageCeiling.ComputeLiveCached(tables, slotLevel));
+                var result = WorldEventDamageCeiling.Apply(creature, baseline, upliftDials);
+
+                // Debug per creature, as Threads logs its own ceiling (ThreadDungeonSpawner.ApplyDamageCeiling); Spawn writes
+                // one Info summary per batch from the returned results.
+                if (log.IsDebugEnabled && Lowered(result))
+                {
+                    var (cap, top) = WorldEventDamageCeiling.CapAndTop(baseline, upliftDials);
+
+                    log.Debug($"[WORLDEVENT] run={evt?.RunId} damage ceiling wcid={creature.WeenieClassId} slotLevel={slotLevel}: median {baseline.Median:0.#} " +
+                             $"(n {baseline.SampleSize}) cap x{cap:0.##} top x{top:0.##}, melee {result.MeleeBefore:0.#} -> {result.MeleeTarget:0.#}, " +
+                             $"missile {result.MissileBefore:0.#} -> {result.MissileTarget:0.#}; body x{result.BodyFactor:0.###} ({result.PartsScaled} part(s)), " +
+                             $"items [{string.Join(", ", result.Items.Select(i => $"{i.Wcid} {i.From}->{i.To}"))}]");
+                }
+
+                return result;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={evt?.RunId} could not apply the damage ceiling to wcid {creature.WeenieClassId} (slotLevel={slotLevel})", ex);
+                return null;
+            }
+        }
+
+        /// <summary>True when the ceiling lowered at least one damage source (a body part or an item).</summary>
+        internal static bool Lowered(DamageCeilingResult result)
+            => result != null && (result.PartsScaled > 0 || result.Items.Count > 0);
+
+        /// <summary>
         /// Runs the shared CombatTraitGuard on one freshly constructed roster monster, before EnterWorld.
         /// Never throws: a failure is logged and the creature spawns as authored. The band standard it needs
-        /// for the defense ceiling is the memoized standard at the SLOT level; a slot with no known level
-        /// (0) gets the empty standard, which skips only the ceiling - the trait strip and the category
+        /// for the defense ceiling is <paramref name="slotStandard"/>, the SAME per-creature object the uplift
+        /// read (SlotStandardFor: the curve standard when world_events_stat_curve is on); a slot with no known
+        /// level (0) gets the empty standard, which skips only the ceiling - the trait strip and the category
         /// guard need no standard.
         /// </summary>
-        private void ApplyCombatGuard(WorldEvent evt, Creature creature, int slotLevel, WorldEventSpawnKind kind)
+        private void ApplyCombatGuard(WorldEvent evt, Creature creature, int slotLevel, WorldEventSpawnKind kind, DungeonBandStandard slotStandard)
         {
             // No slot level at all (the wcid-list SpawnWave overload): skip, see that overload's remarks.
             if (creature == null || slotLevel < 0)
@@ -3252,16 +3620,10 @@ namespace ACE.Server.WorldEvents
 
             try
             {
-                var standard = DungeonBandStandard.Empty;
-
-                // A negative offset disables the ceiling, so the standard (a sample walk) is not worth building.
-                if (slotLevel > 0 && dials.DefenseSkillCapOffset >= 0)
-                {
-                    var (low, high) = WorldEventRosterSelector.EffectiveTrashMultipliers();
-
-                    standard = WorldEventBandMemo.StandardFor(WorldEventManager.Store?.SpeciesTables, slotLevel, low, high,
-                        WorldEventRosterSelector.CurrentUpliftDials().LowFloor, LiveProfileOf);
-                }
+                // A negative offset disables the ceiling, so no standard was built for it (SlotStandardFor's gate).
+                var standard = slotLevel > 0 && dials.DefenseSkillCapOffset >= 0
+                    ? slotStandard ?? DungeonBandStandard.Empty
+                    : DungeonBandStandard.Empty;
 
                 var changes = CombatTraitGuard.Apply(creature, dials.ToCombatDials(), standard, isBoss: false);
 
@@ -3332,8 +3694,10 @@ namespace ACE.Server.WorldEvents
         ///   * it RATCHETS. The new StartingValue is recomputed from the AUTHORED pair captured at Adopt,
         ///     so re-applying the same multiplier is a no-op, and a multiplier that came back DOWN never
         ///     shrinks the bar. Nothing here ever lowers StartingValue.
-        ///   * the increase goes to Current as well as to Max, so a late arrival adds health rather than
-        ///     handing the crowd a boss that is suddenly missing half its bar. The delta is measured from
+        ///   * the increase goes to Current as well as to Max, scaled by the share of the bar the boss still
+        ///     has (<see cref="WorldEventBossBudget.KeepPercentageDelta"/>), so a late arrival keeps the
+        ///     health-bar PERCENTAGE instead of handing the crowd a boss that is suddenly missing half its
+        ///     bar - or, the other way, a boss that jumps back up the bar. The delta is measured from
         ///     two MaxValue reads rather than computed from the multiplier, because MaxValue also carries
         ///     the enchantment multiplier and additives, which StartingValue knows nothing about.
         ///   * it ONLY EVER runs on the boss's own landblock queue. There is deliberately no inline
@@ -3389,13 +3753,17 @@ namespace ACE.Server.WorldEvents
                         return;
 
                     var before = creature.Health.MaxValue;
+                    var currentBefore = creature.Health.Current;
 
                     creature.Health.StartingValue = scaled;
 
                     var after = creature.Health.MaxValue;
 
+                    // Keep the bar's PERCENTAGE: the raise adds the max-health increase scaled by the share
+                    // of the bar the boss still has (owner ruling), not the whole increase.
                     if (after > before)
-                        creature.UpdateVitalDelta(creature.Health, ClampVitalDelta(after - before));
+                        creature.UpdateVitalDelta(creature.Health,
+                            ClampVitalDelta(WorldEventBossBudget.KeepPercentageDelta(currentBefore, before, after)));
 
                     log.Info($"[WORLDEVENT] run={runId} boss health=x{newMult:F2} max={after}");
                 }

@@ -88,6 +88,10 @@ namespace ACE.Server.Tests.ThreadDungeons
                 var stamp = StampOf(e);
                 if (stamp != 0)
                     sb.Append(":s").Append(stamp);
+
+                // Appended ONLY for a stretched entry, so every plan without one hashes as it always did.
+                if (StretchedOf(e))
+                    sb.Append(":x");
             }
 
             foreach (var note in plan.Notes)
@@ -111,6 +115,13 @@ namespace ACE.Server.Tests.ThreadDungeons
         {
             var p = typeof(DungeonSpawnPlanEntry).GetProperty("StampLevel");
             return p == null ? 0 : (int)p.GetValue(e);
+        }
+
+        /// <summary>The entry's Stretched flag, read by reflection like <see cref="StampOf"/>; false when the property does not exist.</summary>
+        private static bool StretchedOf(DungeonSpawnPlanEntry e)
+        {
+            var p = typeof(DungeonSpawnPlanEntry).GetProperty("Stretched");
+            return p != null && (bool)p.GetValue(e);
         }
 
         private static void EnsureLoaded()

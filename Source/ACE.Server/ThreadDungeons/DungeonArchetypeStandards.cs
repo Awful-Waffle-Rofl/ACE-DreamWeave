@@ -485,16 +485,31 @@ namespace ACE.Server.ThreadDungeons
         /// skills, body parts and weapons only), so a curve-carried output standard would overshoot every natural pick.
         /// </summary>
         public static ArchetypeAxes Extrapolate(ArchetypeAxes measured, int pivot, int level, double defenseRate, double magicDefenseRate, double damageRate,
-            Func<Skill, SkillFormula> formulaOf = null)
+            double weaponAttackRateAbove400, double meleeDefenseRateAbove400, Func<Skill, SkillFormula> formulaOf = null)
+            => measured == null || measured.Core.IsEmpty || pivot <= 0 || level <= pivot
+                ? measured ?? ArchetypeAxes.Empty
+                : Carry(measured, pivot, level, pivot, defenseRate, magicDefenseRate, damageRate, weaponAttackRateAbove400,
+                    meleeDefenseRateAbove400, formulaOf);
+
+        /// <summary>
+        /// <paramref name="from"/> carried from <paramref name="fromLevel"/> to <paramref name="toLevel"/> with the damage curve
+        /// splitting at <paramref name="damagePivot"/> (see <see cref="DungeonStatCurve.Carry"/>); <see cref="Extrapolate"/> is the
+        /// fromLevel == damagePivot case. Returns <paramref name="from"/> (or Empty) for a null or empty input, equal levels, or
+        /// a level &lt;= 0.
+        /// </summary>
+        public static ArchetypeAxes Carry(ArchetypeAxes from, int fromLevel, int toLevel, int damagePivot, double defenseRate, double magicDefenseRate,
+            double damageRate, double weaponAttackRateAbove400, double meleeDefenseRateAbove400, Func<Skill, SkillFormula> formulaOf = null)
         {
-            if (measured == null || measured.Core.IsEmpty || pivot <= 0 || level <= pivot)
-                return measured ?? ArchetypeAxes.Empty;
+            if (from == null || from.Core.IsEmpty || fromLevel == toLevel || fromLevel <= 0 || toLevel <= 0)
+                return from ?? ArchetypeAxes.Empty;
 
-            var damageRatio = DungeonStatCurve.Ratio(DungeonStatAxis.Damage, pivot, level, defenseRate, magicDefenseRate, damageRate, pivot);
+            var damageRatio = DungeonStatCurve.Ratio(DungeonStatAxis.Damage, fromLevel, toLevel, defenseRate, magicDefenseRate, damageRate, damagePivot,
+                weaponAttackRateAbove400, meleeDefenseRateAbove400);
 
-            return measured.With(
-                core: DungeonStatCurve.Extrapolate(measured.Core, pivot, level, defenseRate, magicDefenseRate, damageRate, formulaOf),
-                effectiveDamage: measured.EffectiveDamage * damageRatio);
+            return from.With(
+                core: DungeonStatCurve.Carry(from.Core, fromLevel, toLevel, damagePivot, defenseRate, magicDefenseRate, damageRate,
+                    weaponAttackRateAbove400, meleeDefenseRateAbove400, formulaOf),
+                effectiveDamage: from.EffectiveDamage * damageRatio);
         }
 
         /// <summary>The level step of the ratio-transfer walk below a thin band (orchestrator ruling 2026-10-23).</summary>
@@ -631,6 +646,12 @@ namespace ACE.Server.ThreadDungeons
         public string SourceDescription
             => $"n {Run?.SampleCount}@L{(RunSourceLevel > 0 ? $" via ratio at l{RunSourceLevel}" : "")} " +
                $"{Own?.SampleCount}@l{OwnLevel}{(OwnSourceLevel > 0 ? $" via ratio at l{OwnSourceLevel}" : "")}";
+
+        /// <summary>
+        /// A shallow copy (<see cref="ArchetypeUpliftContext.ForAt"/> re-points the run-level fields of the copy). Safe because
+        /// every reference field is an immutable standard (ArchetypeAxes, DungeonBandStandard) that no reader mutates.
+        /// </summary>
+        internal ArchetypeUpliftInfo Clone() => (ArchetypeUpliftInfo)MemberwiseClone();
     }
 
     /// <summary>
@@ -661,11 +682,22 @@ namespace ACE.Server.ThreadDungeons
         /// <param name="defenseRate">dynamic_dungeons_defense_curve_rate_above_375: the melee/missile softening above 300.</param>
         /// <param name="magicDefenseRate">dynamic_dungeons_magic_defense_curve_rate_above_300: the retail magic curve's rate above 300.</param>
         /// <param name="damageRate">dynamic_dungeons_damage_curve_rate_above_pivot: the Damage axis's rate above the pivot.</param>
-        public ArchetypeUpliftContext(int runLevel, int referenceLevel, bool extrapolate, double defenseRate, double magicDefenseRate, double damageRate, bool retailMagicDefense,
+        /// <param name="weaponAttackRateAbove400">dynamic_dungeons_weapon_attack_curve_rate_above_400: the WeaponAttack axis's rate above level 400.</param>
+        /// <param name="meleeDefenseRateAbove400">dynamic_dungeons_melee_defense_curve_rate_above_400: the MeleeDefense axis's rate above level 400.</param>
+        /// <param name="curvePivot">
+        /// The stat curve's pivot when the curve is on, else 0: what <see cref="ForAt"/> carries a stretched pick's run-level
+        /// standards along (0 = do not carry, ForAt is For).
+        /// </param>
+        public ArchetypeUpliftContext(int runLevel, int referenceLevel, bool extrapolate, double defenseRate, double magicDefenseRate, double damageRate,
+            double weaponAttackRateAbove400, double meleeDefenseRateAbove400, bool retailMagicDefense,
             DungeonArchetypeStandards runMeasured, Func<int, DungeonArchetypeStandards> measureOwn, RosterArchetypes roster,
             Func<int, double> healthCurve, double offenseRatio, double defenseRatio, double capRatio, Func<Skill, SkillFormula> formulaOf = null,
-            Func<int, DungeonArchetypeStandards> measureRunReference = null, double defenseCapRatio = DungeonPopulationLimits.DefaultUpliftDefenseCap)
+            Func<int, DungeonArchetypeStandards> measureRunReference = null, double defenseCapRatio = DungeonPopulationLimits.DefaultUpliftDefenseCap,
+            int curvePivot = 0)
         {
+            CurvePivot = curvePivot;
+            WeaponAttackRateAbove400 = weaponAttackRateAbove400;
+            MeleeDefenseRateAbove400 = meleeDefenseRateAbove400;
             this.measureRunReference = measureRunReference ?? measureOwn;
             DefenseCapRatio = defenseCapRatio;
             RunLevel = runLevel;
@@ -685,14 +717,38 @@ namespace ACE.Server.ThreadDungeons
             this.formulaOf = formulaOf;
         }
 
+        /// <summary>
+        /// A test seam: a context at <paramref name="runLevel"/> with no roster and the stat curve off (CurvePivot 0, so
+        /// ForAt is For), whose For returns exactly the hand-built <paramref name="infos"/> (by their Wcid) and null otherwise.
+        /// </summary>
+        internal static ArchetypeUpliftContext ForTest(int runLevel, params ArchetypeUpliftInfo[] infos)
+        {
+            var ctx = new ArchetypeUpliftContext(runLevel, runLevel, false, 1.0, 1.0, 1.0, 1.0, 1.0, false,
+                null, null, null, null, 1.0, 1.0, 0.0);
+
+            foreach (var info in infos ?? Array.Empty<ArchetypeUpliftInfo>())
+                ctx.infos[info.Wcid] = info;
+
+            return ctx;
+        }
+
         public int RunLevel { get; }
         public int ReferenceLevel { get; }
+
+        /// <summary>The stat curve's pivot as <see cref="ForAt"/> carries along it; 0 = the stat curve is off, nothing is carried.</summary>
+        public int CurvePivot { get; }
         public bool Extrapolated { get; }
         public double DefenseRate { get; }
         public double MagicDefenseRate { get; }
 
         /// <summary>dynamic_dungeons_damage_curve_rate_above_pivot: the Damage axis's rate above the pivot (<see cref="ReferenceLevel"/> when extrapolated).</summary>
         public double DamageRate { get; }
+
+        /// <summary>dynamic_dungeons_weapon_attack_curve_rate_above_400: the WeaponAttack axis's rate above level 400.</summary>
+        public double WeaponAttackRateAbove400 { get; }
+
+        /// <summary>dynamic_dungeons_melee_defense_curve_rate_above_400: the MeleeDefense axis's rate above level 400.</summary>
+        public double MeleeDefenseRateAbove400 { get; }
         public bool RetailMagicDefense { get; }
         public double OffenseRatio { get; }
         public double DefenseRatio { get; }
@@ -715,7 +771,8 @@ namespace ACE.Server.ThreadDungeons
             {
                 var measured = runMeasured.Get(s);
                 var resolved = Extrapolated
-                    ? DungeonArchetypeStandards.Extrapolate(measured, ReferenceLevel, RunLevel, DefenseRate, MagicDefenseRate, DamageRate, formulaOf)
+                    ? DungeonArchetypeStandards.Extrapolate(measured, ReferenceLevel, RunLevel, DefenseRate, MagicDefenseRate, DamageRate,
+                        WeaponAttackRateAbove400, MeleeDefenseRateAbove400, formulaOf)
                     : RetailMagicDefense ? measured.With(core: DungeonStatCurve.WithRetailMagicDefense(measured.Core, RunLevel, MagicDefenseRate, formulaOf)) : measured;
 
                 return resolved.With(health: HealthStandard(RunLevel, measured.Health, runMeasured.All.Health));
@@ -847,7 +904,8 @@ namespace ACE.Server.ThreadDungeons
                 double RatioOf(Skill skill)
                 {
                     var axis = DungeonStatCurve.AxisOf(skill);
-                    return Extrapolated && axis.HasValue ? DungeonStatCurve.Ratio(axis.Value, ReferenceLevel, RunLevel, DefenseRate, MagicDefenseRate, DamageRate, ReferenceLevel) : 1.0;
+                    return Extrapolated && axis.HasValue ? DungeonStatCurve.Ratio(axis.Value, ReferenceLevel, RunLevel, DefenseRate, MagicDefenseRate, DamageRate, ReferenceLevel,
+                        WeaponAttackRateAbove400, MeleeDefenseRateAbove400) : 1.0;
                 }
 
                 var value = DungeonArchetypeStandards.AttackSkillCeiling(runMeasured.All.AttackSkillSample, RatioOf);
@@ -855,6 +913,74 @@ namespace ACE.Server.ThreadDungeons
 
                 return value;
             }
+        }
+
+        private readonly ConcurrentDictionary<int, uint> attackSkillCeilingsAt = new ConcurrentDictionary<int, uint>();
+
+        /// <summary>
+        /// The attack-skill ceiling at another run level (a stretched pick's mapped level): the same cross-archetype sample
+        /// as <see cref="AttackSkillCeiling"/>, each value carried on its own axis from where it was measured
+        /// (<see cref="ReferenceLevel"/> when extrapolated, else <see cref="RunLevel"/>) to <paramref name="runLevel"/>, with the
+        /// damage curve splitting at <see cref="CurvePivot"/>. <see cref="AttackSkillCeiling"/> itself at the run level or when
+        /// the curve is off (<see cref="CurvePivot"/> 0, nothing to carry along). Memoised per level.
+        /// </summary>
+        public uint AttackSkillCeilingAt(int runLevel)
+            => runLevel == RunLevel || CurvePivot <= 0 ? AttackSkillCeiling : attackSkillCeilingsAt.GetOrAdd(runLevel, level =>
+            {
+                var from = Extrapolated ? ReferenceLevel : RunLevel;
+
+                double RatioOf(Skill skill)
+                {
+                    var axis = DungeonStatCurve.AxisOf(skill);
+                    return axis.HasValue ? DungeonStatCurve.Ratio(axis.Value, from, level, DefenseRate, MagicDefenseRate, DamageRate, CurvePivot,
+                        WeaponAttackRateAbove400, MeleeDefenseRateAbove400) : 1.0;
+                }
+
+                return DungeonArchetypeStandards.AttackSkillCeiling(runMeasured.All.AttackSkillSample, RatioOf);
+            });
+
+        private readonly ConcurrentDictionary<(uint, int), ArchetypeUpliftInfo> infosAt = new ConcurrentDictionary<(uint, int), ArchetypeUpliftInfo>();
+
+        /// <summary>
+        /// The uplift info for one wcid normalized at another run level (Thread family stretch: a stretched pick's MAPPED
+        /// level, so the family's spread survives): <see cref="For"/>'s info with its run-level standards carried from
+        /// <see cref="RunLevel"/> to <paramref name="runLevel"/> along the stat curve - Run per axis
+        /// (<see cref="DungeonArchetypeStandards.Carry"/>) with health rescaled on the health curve, AllRun
+        /// (<see cref="DungeonStatCurve.Carry"/>), and the attack-skill ceiling (<see cref="AttackSkillCeilingAt"/>). The own
+        /// end is untouched. A CLONE: the For instance is shared by every entry of the wcid at the run level and is never
+        /// mutated. For itself when <paramref name="runLevel"/> is the run level or the curve is off
+        /// (<see cref="CurvePivot"/> 0); null when For is null. Memoised per (wcid, level).
+        /// </summary>
+        public ArchetypeUpliftInfo ForAt(uint wcid, int runLevel)
+        {
+            if (runLevel == RunLevel || CurvePivot <= 0)
+                return For(wcid);
+
+            if (infosAt.TryGetValue((wcid, runLevel), out var cached))
+                return cached;
+
+            var at = For(wcid);
+
+            if (at == null)
+                return null;
+
+            var run = DungeonArchetypeStandards.Carry(at.Run, RunLevel, runLevel, CurvePivot, DefenseRate, MagicDefenseRate, DamageRate,
+                WeaponAttackRateAbove400, MeleeDefenseRateAbove400, formulaOf);
+
+            var healthFrom = healthCurve(RunLevel);
+            var healthTo = healthCurve(runLevel);
+
+            if (run != null && healthFrom > 0 && healthTo > 0)
+                run = run.With(health: run.Health * healthTo / healthFrom);
+
+            var info = at.Clone();
+            info.Run = run;
+            info.AllRun = DungeonStatCurve.Carry(at.AllRun, RunLevel, runLevel, CurvePivot, DefenseRate, MagicDefenseRate, DamageRate,
+                WeaponAttackRateAbove400, MeleeDefenseRateAbove400, formulaOf);
+            info.AttackSkillCeiling = AttackSkillCeilingAt(runLevel);
+            info.RunLevel = runLevel;
+
+            return infosAt.GetOrAdd((wcid, runLevel), info);
         }
 
         /// <summary>
@@ -871,11 +997,13 @@ namespace ACE.Server.ThreadDungeons
         /// </summary>
         public ArchetypeUpliftInfo For(uint wcid)
         {
-            if (roster == null || measureOwn == null)
-                return null;
-
+            // The cache first: it is only ever filled by this method (and by ForTest), so with no roster it is empty and the
+            // null return below is unchanged.
             if (infos.TryGetValue(wcid, out var cached))
                 return cached;
+
+            if (roster == null || measureOwn == null)
+                return null;
 
             var profile = roster.ProfileOf(wcid);
             var result = roster.Classify(wcid);

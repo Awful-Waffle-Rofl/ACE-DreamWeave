@@ -25,12 +25,18 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "attackspeed",
             DisplayName = "Attack Speed",
-            Description = "Permanently increases your attack speed by 6% per rank (+18% at rank 3), any weapon. " +
-                          "Higher Lockpick increases the bonus. Stacks with Frenzy up to the attack-speed ceiling.",
+            // Live text: rank * class_ability_attackspeed_percent_per_rank (Multiplier / GetReadout). The
+            // "(+18% at rank 3)" total is the top rank's value: the @max selector renders that one rank.
+            DescriptionTemplate = "Raises your attack speed with any weapon. It stacks with Frenzy up to the attack speed ceiling.",
+            RankTailTemplate = "+{per:class_ability_attackspeed_percent_per_rank|pct}% attack speed",
             MaxRank = 3,
             CostPerRank = new[] { 2, 2, 2 },   // premium reprice 2026-09-13: 1/rank -> 2/rank
             Implemented = true,
             AffinitySkill = Skill.Lockpick,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "attackspeed", Bounds = CeilingBounds.Total, Source = CeilingSource.Tunable, Key = "class_ability_attack_speed_ceiling", Label = "max attack speed", Format = "x", ZeroIsLimit = true },
+            },
         };
 
         /// <summary>
@@ -80,7 +86,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             var total = skill + affinity + gear;
 
             var referenceBaseAnimSpeed = (float)Creature.MaxAttackSpeed;
-            var composedMod = player.GetFrenzyAttackSpeedMod() * player.GetAttackSpeedSkillMod() * player.GetWeaponModAttackSpeedMod();
+            var composedMod = player.GetFrenzyAttackSpeedMod() * player.GetAttackSpeedSkillMod() * player.GetWeaponModAttackSpeedMod() * player.GetKnotCelerityAttackSpeedMod();
             var uncappedSpeed = referenceBaseAnimSpeed * composedMod;
             var appliedSpeed = player.ApplyClassAbilityAttackSpeed(referenceBaseAnimSpeed);
             var ceilingBit = appliedSpeed < uncappedSpeed - 0.0001f;
@@ -96,6 +102,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "atk speed",
                 Per = null,
                 CapNote = ceilingBit ? "anim ceiling" : null,
+                Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "attackspeed", uncappedSpeed, rank, ClassAbilityText.Live) },
             };
         }
     }

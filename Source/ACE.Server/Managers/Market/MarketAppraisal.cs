@@ -54,10 +54,23 @@ namespace ACE.Server.Managers.Market
 
         /// <summary>The item's own description text, which the client draws under the panel.</summary>
         public static string Description(WorldObject item)
-            => Trim(item?.GetProperty(PropertyString.LongDesc));
+            => Description(item, ClassAbilities.ClassAbilityText.Live);
 
         public static string Description(Weenie weenie)
-            => Trim(weenie?.GetProperty(PropertyString.LongDesc));
+            => Description(weenie, ClassAbilities.ClassAbilityText.Live);
+
+        /// <summary>
+        /// A class ability token's listing text is its live rendering (the committed LongDesc is a snapshot at
+        /// the code defaults), so the market shows the numbers the server is using now. Any other item keeps
+        /// its own LongDesc.
+        /// </summary>
+        public static string Description(WorldObject item, ClassAbilities.ITunableValues values)
+            => item == null ? null : Trim(ClassAbilities.ClassAbilityTokenAppraisal.LongDesc(item.GetProperty(PropertyString.LongDesc),
+                item.GetProperty(PropertyInt.ClassAbilityTokenId) ?? 0, item.GetProperty(PropertyInt.ClassAbilityTokenTier) ?? 0, values));
+
+        public static string Description(Weenie weenie, ClassAbilities.ITunableValues values)
+            => weenie == null ? null : Trim(ClassAbilities.ClassAbilityTokenAppraisal.LongDesc(weenie.GetProperty(PropertyString.LongDesc),
+                weenie.GetProperty(PropertyInt.ClassAbilityTokenId) ?? 0, weenie.GetProperty(PropertyInt.ClassAbilityTokenTier) ?? 0, values));
 
         // ---- the one line set, over either source ----
 

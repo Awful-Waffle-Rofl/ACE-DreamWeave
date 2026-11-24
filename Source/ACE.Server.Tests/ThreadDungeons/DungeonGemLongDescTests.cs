@@ -258,15 +258,15 @@ namespace ACE.Server.Tests.ThreadDungeons
         /// EXACTLY, flavour line included. Asserted against the file itself rather than a literal, so the
         /// composer and the ten shipped rung weenies cannot drift apart unnoticed.
         ///
-        /// Carries the Experience/Luminance lines at the shipped 2.0 default scale, GEM-LEVEL SCALED (owner
-        /// requirement, 2026-09-07): this fragment is level 185, so the total is 1 + ratio(185) * (2.0 - 1) =
-        /// x1.25, not the flat x2.00 every rung showed before that feature. Even though this fragment's spec
+        /// Carries the Experience/Luminance lines at the shipped 2.7 default scale, GEM-LEVEL SCALED (owner
+        /// requirement, 2026-09-07): this fragment is level 185, so the total is 1 + ratio(185) * (2.7 - 1) =
+        /// x1.65 (1 + 0.38 * 1.7 = 1.646, the ratio being (185/300)^2 = 0.3803), not the flat x2.70 every rung showed before that feature. Even though this fragment's spec
         /// has mods= empty: with the total (not the bare product) driving the differs-from-1.00 rule (owner
         /// follow-up, 2026-09-06, see the reward block on ComposeLongDesc), an empty modifier set still totals
         /// something other than 1.00 on both axes, and the ten shipped rung rows were regenerated from this
         /// exact composer output to keep P2-R20 intact - each rung now carries a DIFFERENT total from its
-        /// neighbours (level 185 = x1.25, level 275 = x1.78), where before this feature all ten read the same
-        /// flat x2.00.
+        /// neighbours (level 185 = x1.65, level 275 = x2.43), where before this feature all ten read the same
+        /// flat x2.70.
         ///
         /// There is no "Stability" line any more. Removing the instability mechanic (owner ruling,
         /// 2026-09-07) dropped it from the composer, which left this assertion RED for the length of the
@@ -302,8 +302,8 @@ namespace ACE.Server.Tests.ThreadDungeons
                 "Loot Tier: 7",
                 "Modifiers: none",
                 "Pressed: nothing",
-                "Experience: x1.25",
-                "Luminance: x1.25",
+                "Experience: x1.65",
+                "Luminance: x1.65",
                 "Entries: 3 of 3",
                 "Unpressed. Load spell components onto it, then press it at the Fragment Press.",
             });
@@ -315,7 +315,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         /// <summary>
         /// gem-ceiling-375: the level-300 rung (wcid 1003626), tier 8 (DungeonGemSpec.MaxTier - the ceiling
         /// raise adds no new tier, only new levels above it). Level 300 is the reward-scale anchor
-        /// (DungeonPopulationLimits.DefaultRewardScaleAnchor), so its total is the flat x2.00 the composer
+        /// (DungeonPopulationLimits.DefaultRewardScaleAnchor), so its total is the flat x2.70 the composer
         /// falls back to at the anchor.
         /// </summary>
         [TestMethod]
@@ -333,8 +333,8 @@ namespace ACE.Server.Tests.ThreadDungeons
                 "Loot Tier: 8",
                 "Modifiers: none",
                 "Pressed: nothing",
-                "Experience: x2.00",
-                "Luminance: x2.00",
+                "Experience: x2.70",
+                "Luminance: x2.70",
                 "Entries: 3 of 3",
                 "Unpressed. Load spell components onto it, then press it at the Fragment Press.",
             });
@@ -359,8 +359,8 @@ namespace ACE.Server.Tests.ThreadDungeons
                 "Loot Tier: 8",
                 "Modifiers: none",
                 "Pressed: nothing",
-                "Experience: x2.26",
-                "Luminance: x2.26",
+                "Experience: x3.00",
+                "Luminance: x3.00",
                 "Entries: 3 of 3",
                 "Unpressed. Load spell components onto it, then press it at the Fragment Press.",
             });
@@ -385,8 +385,8 @@ namespace ACE.Server.Tests.ThreadDungeons
                 "Loot Tier: 8",
                 "Modifiers: none",
                 "Pressed: nothing",
-                "Experience: x2.56",
-                "Luminance: x2.56",
+                "Experience: x3.31",
+                "Luminance: x3.31",
                 "Entries: 3 of 3",
                 "Unpressed. Load spell components onto it, then press it at the Fragment Press.",
             });
@@ -411,14 +411,128 @@ namespace ACE.Server.Tests.ThreadDungeons
                 "Loot Tier: 8",
                 "Modifiers: none",
                 "Pressed: nothing",
-                "Experience: x2.90",
-                "Luminance: x2.90",
+                "Experience: x3.66",
+                "Luminance: x3.66",
                 "Entries: 3 of 3",
                 "Unpressed. Load spell components onto it, then press it at the Fragment Press.",
             });
 
             Assert.AreEqual(expected, desc);
             Assert.AreEqual(ShippedRungLongDesc(1003629, "1003629 Raw Fragment Level 375.sql"), desc);
+        }
+
+        /// <summary>gem-ceiling-500: the level-400 rung (wcid 1003630), tier 8.</summary>
+        [TestMethod]
+        public void Fragment_shows_Pressed_nothing_and_matches_the_shipped_400_rung_row()
+        {
+            SeedRewardScaleProperties();
+
+            var desc = ThreadDungeonGemHandler.ComposeLongDesc(Fragment(level: 400, tier: 8), "any dungeon", 3, 3);
+
+            var expected = string.Join("\n", new[]
+            {
+                "Meridian issue. A fragment of a door with no wall behind it.",
+                "Dungeon: Any",
+                "Level: 400",
+                "Loot Tier: 8",
+                "Modifiers: none",
+                "Pressed: nothing",
+                "Experience: x4.02",
+                "Luminance: x4.02",
+                "Entries: 3 of 3",
+                "Unpressed. Load spell components onto it, then press it at the Fragment Press.",
+            });
+
+            Assert.AreEqual(expected, desc);
+            Assert.AreEqual(ShippedRungLongDesc(1003630, "1003630 Raw Fragment Level 400.sql"), desc);
+        }
+
+        /// <summary>gem-ceiling-500: the level-450 rung (wcid 1003631), tier 8.</summary>
+        [TestMethod]
+        public void Fragment_shows_Pressed_nothing_and_matches_the_shipped_450_rung_row()
+        {
+            SeedRewardScaleProperties();
+
+            var desc = ThreadDungeonGemHandler.ComposeLongDesc(Fragment(level: 450, tier: 8), "any dungeon", 3, 3);
+
+            var expected = string.Join("\n", new[]
+            {
+                "Meridian issue. A fragment of a door with no wall behind it.",
+                "Dungeon: Any",
+                "Level: 450",
+                "Loot Tier: 8",
+                "Modifiers: none",
+                "Pressed: nothing",
+                "Experience: x4.83",
+                "Luminance: x4.83",
+                "Entries: 3 of 3",
+                "Unpressed. Load spell components onto it, then press it at the Fragment Press.",
+            });
+
+            Assert.AreEqual(expected, desc);
+            Assert.AreEqual(ShippedRungLongDesc(1003631, "1003631 Raw Fragment Level 450.sql"), desc);
+        }
+
+        /// <summary>gem-ceiling-500: the level-500 rung (wcid 1003632), tier 8.</summary>
+        [TestMethod]
+        public void Fragment_shows_Pressed_nothing_and_matches_the_shipped_500_rung_row()
+        {
+            SeedRewardScaleProperties();
+
+            var desc = ThreadDungeonGemHandler.ComposeLongDesc(Fragment(level: 500, tier: 8), "any dungeon", 3, 3);
+
+            var expected = string.Join("\n", new[]
+            {
+                "Meridian issue. A fragment of a door with no wall behind it.",
+                "Dungeon: Any",
+                "Level: 500",
+                "Loot Tier: 8",
+                "Modifiers: none",
+                "Pressed: nothing",
+                "Experience: x5.72",
+                "Luminance: x5.72",
+                "Entries: 3 of 3",
+                "Unpressed. Load spell components onto it, then press it at the Fragment Press.",
+            });
+
+            Assert.AreEqual(expected, desc);
+            Assert.AreEqual(ShippedRungLongDesc(1003632, "1003632 Raw Fragment Level 500.sql"), desc);
+        }
+
+        /// <summary>
+        /// Every shipped Raw Fragment rung, not just the seven with a dedicated pin above: the composer's output
+        /// at the shipped defaults must equal each rung SQL's LongDesc exactly. The nine rungs 195 to 275 had no
+        /// pin of their own, so a change to the reward defaults could have left their text stale without any
+        /// test noticing. Tiers are the shipped ones (7 up to level 235, 8 from 245); wcid 1003625 sits inside
+        /// this range but is the "Thread Gems What We Know" book, not a fragment, so it is not in the table.
+        /// </summary>
+        [TestMethod]
+        public void Every_shipped_raw_fragment_rung_matches_the_composer_at_the_shipped_defaults()
+        {
+            var rungs = new (int Wcid, int Level, int Tier)[]
+            {
+                (1003615, 185, 7), (1003616, 195, 7), (1003617, 205, 7), (1003618, 215, 7), (1003619, 225, 7),
+                (1003620, 235, 7), (1003621, 245, 8), (1003622, 255, 8), (1003623, 265, 8), (1003624, 275, 8),
+                (1003626, 300, 8), (1003627, 325, 8), (1003628, 350, 8), (1003629, 375, 8), (1003630, 400, 8),
+                (1003631, 450, 8), (1003632, 500, 8),
+            };
+
+            Assert.AreEqual(17, rungs.Length, "guard: the ladder has 17 fragment rungs");
+
+            SeedRewardScaleProperties();
+
+            // Collect every drifted rung rather than stopping at the first, so one run names all of them.
+            var drifted = new List<string>();
+
+            foreach (var (wcid, level, tier) in rungs)
+            {
+                var desc = ThreadDungeonGemHandler.ComposeLongDesc(Fragment(level: level, tier: tier), "any dungeon", 3, 3);
+
+                if (ShippedRungLongDesc(wcid, $"{wcid} Raw Fragment Level {level}.sql") != desc)
+                    drifted.Add($"{wcid} (level {level})");
+            }
+
+            Assert.AreEqual(0, drifted.Count, "rung LongDesc drifted from the composer: " + string.Join(", ", drifted));
         }
 
         /// <summary>
@@ -441,14 +555,14 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             try
             {
-                // Level 185 is deliberately non-anchor: with the switch on this level's total is x1.25 (see
-                // Fragment_shows_Pressed_nothing_and_matches_the_shipped_rung_row above), so a flat x2.00 here
+                // Level 185 is deliberately non-anchor: with the switch on this level's total is x1.65 (see
+                // Fragment_shows_Pressed_nothing_and_matches_the_shipped_rung_row above), so a flat x2.70 here
                 // proves the switch, not a coincidental match at the anchor level (300).
                 var desc = ThreadDungeonGemHandler.ComposeLongDesc(Fragment(level: 185), "any dungeon", 3, 3);
 
-                StringAssert.Contains(desc, "Experience: x2.00");
-                StringAssert.Contains(desc, "Luminance: x2.00");
-                Assert.IsFalse(desc.Contains("x1.25"), "the switch is off - no level-scaled total should appear");
+                StringAssert.Contains(desc, "Experience: x2.70");
+                StringAssert.Contains(desc, "Luminance: x2.70");
+                Assert.IsFalse(desc.Contains("x1.65"), "the switch is off - no level-scaled total should appear");
             }
             finally
             {
@@ -1050,8 +1164,8 @@ namespace ACE.Server.Tests.ThreadDungeons
         /// THE INVARIANT this feature stands or falls on: the composer's printed Experience/Luminance/Loot
         /// Quantity totals must equal what DungeonPopulationBuilder.Build actually computes for the SAME
         /// spec, at more than one level - not a pinned string, which would let the two silently drift apart
-        /// again the way they did before this fix (a level-185 gem advertised "Experience: x2.00" while the
-        /// run it opened paid x1.25).
+        /// again the way they did before this fix (a level-185 gem advertised "Experience: x2.70" while the
+        /// run it opened paid x1.65).
         ///
         /// No modifiers on the spec, so XpMultiplier/LumMultiplier/the loot-quantity product are all exactly
         /// 1.0 on both sides (the same DungeonRewardMath functions, called with the same inputs) - which
@@ -1112,8 +1226,8 @@ namespace ACE.Server.Tests.ThreadDungeons
                     DungeonPopulationLimits.DefaultXpCap, DungeonPopulationLimits.DefaultLumCap, DungeonPopulationLimits.DefaultLootQuantityCap,
                     null, DungeonPopulationLimits.DefaultXpScale, DungeonPopulationLimits.DefaultLumScale, rewardScaleRatio: 1.0);
 
-                StringAssert.Contains(desc, "Experience: x2.00", $"level {level}:\n{desc}");
-                StringAssert.Contains(desc, "Luminance: x2.00", $"level {level}:\n{desc}");
+                StringAssert.Contains(desc, "Experience: x2.70", $"level {level}:\n{desc}");
+                StringAssert.Contains(desc, "Luminance: x2.70", $"level {level}:\n{desc}");
             }
         }
 
@@ -1132,9 +1246,9 @@ namespace ACE.Server.Tests.ThreadDungeons
         /// This test is written to FAIL if either side forgets to apply the scale: reverting
         /// DungeonPopulationBuilder.Build's ApplyModifierRewardScale calls back to the raw
         /// DungeonRewardMath.LumMultiplier(...) makes plan.LumMultiplier 1.75 instead of 1.60, which pays
-        /// x3.50 instead of x3.20 while the description still prints x3.20 - a mismatch this test catches.
+        /// x4.73 instead of x4.32 while the description still prints x4.32 - a mismatch this test catches.
         /// Reverting ThreadDungeonGemHandler.AddRewardLines' modifierRewardScale application instead makes the
-        /// description print x3.50 while the plan still pays x3.20 - the same mismatch from the other side.
+        /// description print x4.73 while the plan still pays x4.32 - the same mismatch from the other side.
         /// Both reversions were run by hand against this test during implementation and both failed it; both
         /// were then restored and the test passes again (see the PR description's discrimination proof).
         /// </summary>
@@ -1183,8 +1297,9 @@ namespace ACE.Server.Tests.ThreadDungeons
             // actually multiplies luminance by.
             var expectedTotal = (plan.LumMultiplier * plan.LumScale).ToString("0.00", CultureInfo.InvariantCulture);
             var expectedGemOnly = plan.LumMultiplier.ToString("0.00", CultureInfo.InvariantCulture);
+            // 4.32 = LumMultiplier 1.60 (1 + 0.8 * 0.75) times the flat LumScale 2.70 (ratio 1.0, scaling disabled).
 
-            Assert.AreEqual("3.20", expectedTotal, "guard: the worked numbers assume plan.LumScale is the flat 2.00 default (rewardScalingEnabled: false)");
+            Assert.AreEqual("4.32", expectedTotal, "guard: the worked numbers assume plan.LumScale is the flat 2.70 default (rewardScalingEnabled: false)");
             StringAssert.Contains(desc, $"Luminance: x{expectedTotal} (x{expectedGemOnly} from this gem)", desc);
         }
     }

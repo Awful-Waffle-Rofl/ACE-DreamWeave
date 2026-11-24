@@ -624,5 +624,40 @@ namespace ACE.Server.Tests.HazardMechanics
             Assert.AreEqual(0, WispRules.MaxCyclesWithin(Pinnacle(), args, "scatter", double.NaN));
             Assert.IsTrue(WispRules.MaxCyclesWithin(Pinnacle(), null, "scatter") > 0, "null args read as the defaults");
         }
+
+        // ---- follow_target ------------------------------------------------------------------------------------------
+
+        [TestMethod]
+        public void FollowTarget_DefaultsToFirst_ParsesRandom_AndSurvivesTheRamp()
+        {
+            Assert.AreEqual(WispFollowTarget.First, S().FollowTarget);
+            Assert.AreEqual(WispFollowTarget.First, S(HazardDefaults.Wisps).FollowTarget, "no shipped settings string sets it");
+            Assert.AreEqual(WispFollowTarget.First, S("follow_target=first").FollowTarget);
+            Assert.AreEqual(WispFollowTarget.Random, S("follow=1 follow_target=random").FollowTarget);
+            Assert.AreEqual(WispFollowTarget.Random, S("follow_target=RANDOM").FollowTarget, "case-insensitive, like the other choice keys");
+
+            // the ramped per-cycle copy must carry it
+            var ramped = S("follow=1 follow_target=random move=3 move_end=2 cycles=4");
+            Assert.AreEqual(WispFollowTarget.Random, ramped.ForCycle(2).FollowTarget);
+        }
+
+        [TestMethod]
+        public void FollowTarget_Validate_AcceptsFirstAndRandom_RefusesAnythingElse_InOneLine()
+        {
+            var region = Pinnacle();
+
+            Assert.IsNull(V(region, "follow=1 follow_target=first"));
+            Assert.IsNull(V(region, "follow=1 follow_target=random"));
+            Assert.IsNull(V(region, "follow_target=random"), "checked even without follow=1, like the other enums");
+
+            foreach (var bad in new[] { "nearest", "1" })
+            {
+                var refusal = V(region, $"follow=1 follow_target={bad}");
+
+                Assert.IsNotNull(refusal, $"follow_target='{bad}'");
+                StringAssert.Contains(refusal, $"follow_target='{bad}' is not one of first|random");
+                Assert.IsFalse(refusal.Contains('\n'));
+            }
+        }
     }
 }

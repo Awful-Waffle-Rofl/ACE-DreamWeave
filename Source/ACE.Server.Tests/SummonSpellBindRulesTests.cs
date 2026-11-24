@@ -93,16 +93,17 @@ namespace ACE.Server.Tests
             var convertTarget = SummonSpellBindRules.FactsFrom(MagicSchool.LifeMagic, false, SpellType.Transfer, TransferFlags.TargetSource | TransferFlags.TargetDestination, true);
             Assert.AreEqual(BindVerdict.RefusedSelfDrain, SummonSpellBindRules.Classify(convertTarget, spec));
 
-            // allowed: Infuse-style, the pet pays from its own vitals and the owner receives
+            // not a self-drain, but refused as Unusable: Infuse-style (the pet pays from its own vitals, the owner receives)
+            // is a beneficial Transfer, which PetCasterBrain.ClassifySpell never casts, so binding it would only waste the scroll
             var infuse = SummonSpellBindRules.FactsFrom(MagicSchool.LifeMagic, false, SpellType.Transfer, TransferFlags.CasterSource | TransferFlags.TargetDestination, true);
-            Assert.AreEqual(BindVerdict.Allowed, SummonSpellBindRules.Classify(infuse, spec));
+            Assert.AreEqual(BindVerdict.RefusedUnusable, SummonSpellBindRules.Classify(infuse, spec));
 
             // allowed: a HARMFUL target-to-target transfer is not the beneficial conversion the ruling names
             var harmfulTargetOnly = SummonSpellBindRules.FactsFrom(MagicSchool.LifeMagic, false, SpellType.Transfer, TransferFlags.TargetSource | TransferFlags.TargetDestination, false);
             Assert.AreEqual(BindVerdict.Allowed, SummonSpellBindRules.Classify(harmfulTargetOnly, spec));
 
-            // allowed: a Transfer with no flags, and any non-Transfer (a harmful self-targeted Boost is no longer refused)
-            Assert.AreEqual(BindVerdict.Allowed, SummonSpellBindRules.Classify(SummonSpellBindRules.FactsFrom(MagicSchool.LifeMagic, false, SpellType.Transfer, none, true), spec));
+            // allowed: a harmful Transfer with no flags, and a harmful Boost (the brain casts both as Harmful)
+            Assert.AreEqual(BindVerdict.Allowed, SummonSpellBindRules.Classify(SummonSpellBindRules.FactsFrom(MagicSchool.LifeMagic, false, SpellType.Transfer, none, false), spec));
             Assert.AreEqual(BindVerdict.Allowed, SummonSpellBindRules.Classify(SummonSpellBindRules.FactsFrom(MagicSchool.LifeMagic, false, SpellType.Boost, none, false), spec));
         }
 
@@ -142,12 +143,65 @@ namespace ACE.Server.Tests
             Assert.AreEqual(2, SummonSpellBindRules.BoundCount(1u, 2u));
         }
 
+        // ---- dispels: a spell the brain can use binds, one it can never cast is refused -------------------
+
+        private static SpellBindFacts DispelFacts(bool beneficial, bool selfTargeted, DispelType align) =>
+            SummonSpellBindRules.FactsFrom(MagicSchool.LifeMagic, false, SpellType.Dispel, 0, beneficial, selfTargeted, 0, DamageType.Undef, align);
+
+        [TestMethod]
+        public void Dispels_TheBrainCanUse_AreAllowed()
+        {
+            var spec = SkillAdvancementClass.Specialized;
+
+            // 4345 / 4336: Other, align Negative (a cleanse)
+            Assert.AreEqual(BindVerdict.Allowed, SummonSpellBindRules.Classify(DispelFacts(true, false, DispelType.Negative), spec), "Other cleanse");
+
+            // 4346 / 4337: Self, align Negative, NOT flagged beneficial in the dat
+            Assert.AreEqual(BindVerdict.Allowed, SummonSpellBindRules.Classify(DispelFacts(false, true, DispelType.Negative), spec), "Self cleanse");
+
+            // 4347 / 4349 / 4330: Other, align Positive or All (a strip)
+            Assert.AreEqual(BindVerdict.Allowed, SummonSpellBindRules.Classify(DispelFacts(false, false, DispelType.Positive), spec), "Other, Positive");
+            Assert.AreEqual(BindVerdict.Allowed, SummonSpellBindRules.Classify(DispelFacts(false, false, DispelType.All), spec), "Other, All");
+        }
+
+        [TestMethod]
+        public void SelfStripDispel_IsRefusedAsUnusable_AndConsumesNothing()
+        {
+            var spec = SkillAdvancementClass.Specialized;
+
+            foreach (var align in new[] { DispelType.Positive, DispelType.All })
+            {
+                var verdict = SummonSpellBindRules.Classify(DispelFacts(false, true, align), spec);
+
+                Assert.AreEqual(BindVerdict.RefusedUnusable, verdict, align.ToString());
+
+                var r = SummonSpellBindRules.Apply(2076u, null, 5000u, verdict);
+                Assert.IsFalse(r.ConsumeScroll, align.ToString());
+                Assert.AreEqual(2076u, r.Spell1, align.ToString());
+                Assert.IsNull(r.Spell2, align.ToString());
+            }
+        }
+
+        [TestMethod]
+        public void Unusable_IsCheckedAfterEveryExistingRefusal_TheSkillTestIncluded()
+        {
+            var selfStrip = DispelFacts(false, true, DispelType.All);
+
+            Assert.AreEqual(BindVerdict.RefusedCannotCast, SummonSpellBindRules.Classify(new SpellBindFacts(false, false, false, false), SkillAdvancementClass.Untrained), "control: untrained, usable");
+            Assert.AreEqual(BindVerdict.RefusedCannotCast, SummonSpellBindRules.Classify(selfStrip, SkillAdvancementClass.Untrained), "the skill test is named before unusable");
+            Assert.AreEqual(BindVerdict.RefusedUnusable, SummonSpellBindRules.Classify(selfStrip, SkillAdvancementClass.Trained), "trained, so only unusable is left");
+            Assert.AreEqual(BindVerdict.RefusedItemTarget, SummonSpellBindRules.Classify(new SpellBindFacts(true, false, false, true), SkillAdvancementClass.Specialized), "item target stays first");
+            Assert.AreEqual(BindVerdict.RefusedPortal, SummonSpellBindRules.Classify(new SpellBindFacts(false, true, false, true), SkillAdvancementClass.Specialized), "portal stays before unusable");
+            Assert.AreEqual(BindVerdict.RefusedSelfDrain, SummonSpellBindRules.Classify(new SpellBindFacts(false, false, true, true), SkillAdvancementClass.Specialized), "self-drain stays before unusable");
+            Assert.AreEqual(BindVerdict.RefusedFull, SummonSpellBindRules.Classify(2, selfStrip, SkillAdvancementClass.Specialized), "a full device is still named first");
+        }
+
         // ---- every refusal leaves scroll and blank untouched ---------------------------------------------
 
         [TestMethod]
         public void EveryRefusal_ConsumesNothing_AndLeavesTheBlankUnchanged()
         {
-            foreach (var v in new[] { BindVerdict.RefusedItemTarget, BindVerdict.RefusedPortal, BindVerdict.RefusedSelfDrain, BindVerdict.RefusedCannotCast, BindVerdict.RefusedFull })
+            foreach (var v in new[] { BindVerdict.RefusedItemTarget, BindVerdict.RefusedPortal, BindVerdict.RefusedSelfDrain, BindVerdict.RefusedCannotCast, BindVerdict.RefusedFull, BindVerdict.RefusedUnusable })
             {
                 var r = SummonSpellBindRules.Apply(2076u, null, 5000u, v);
 
@@ -182,6 +236,7 @@ namespace ACE.Server.Tests
             StringAssert.Contains(SummonSpellBindRules.Message(BindVerdict.RefusedSelfDrain, "Infuse Health"), "vital");
             StringAssert.Contains(SummonSpellBindRules.Message(BindVerdict.RefusedCannotCast, "Fire Bolt"), "trained");
             StringAssert.Contains(SummonSpellBindRules.Message(BindVerdict.RefusedFull, "Fire Bolt"), "two");
+            Assert.AreEqual("Nullify is not a spell a summon can use, so it cannot bind it.", SummonSpellBindRules.Message(BindVerdict.RefusedUnusable, "Nullify"));
         }
 
         // ---- element --------------------------------------------------------------------------------------

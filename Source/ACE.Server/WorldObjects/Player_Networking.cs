@@ -195,6 +195,9 @@ namespace ACE.Server.WorldObjects
             // catch up the one-time Thread-Guide notice for a character already at level 50 or more
             SendThreadGuideNoticeIfDue();
 
+            // a Salvage Roller batch row: a chat reminder only; reconcile runs at the station (Docs/SalvageRoller/DESIGN.md 5.6)
+            SalvageRoller.SalvageRollerManager.OnLogin(this);
+
             // catch up the one-time PvP eligibility notice for a character who had cleared a Thread before this login
             // (including a veteran whose clears pre-date ThreadClearsLifetime)
             SendPvpEligibleNoticeIfDue();
@@ -369,6 +372,9 @@ namespace ACE.Server.WorldObjects
             // (pvpBinding is in memory only and a relog does not rebind, so PvpMatchComponentsWaived is false here in practice.)
             if (PvpMatchComponentsWaived || !PropertyManager.GetBool("require_spell_comps").Item)
                 Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyBool(this, PropertyBool.SpellComponentsRequired, false));
+
+            // Earned-luminance baseline for client tools (ephemeral Int64 9102); see Player_Luminance.
+            SendLuminanceEarnedOnLogin();
         }
 
         /// <summary>

@@ -151,11 +151,11 @@ namespace ACE.Server.WorldObjects
 
             var aimDir = Vector3.Normalize(aimVector);
 
-            var maxRange = GetMaxMissileRange();
+            var maxRange = GetMultiShotMaxRange();
             var spreadRate = (float)Math.Tan(weapon.MultiShotSpreadAngle * Math.PI / 180.0);
 
-            // sort visible objects by ascending distance, same source GetCleaveTarget uses
-            var visible = PhysicsObj.ObjMaint.GetVisibleObjectsValuesWhere(o => o.WeenieObj.WorldObject != null);
+            // sort the shooter's candidates by ascending distance (GetMultiShotCandidates: what this shooter can see)
+            var visible = GetMultiShotCandidates();
             visible.Sort(DistanceComparator);
 
             foreach (var obj in visible)
@@ -224,6 +224,15 @@ namespace ACE.Server.WorldObjects
         /// CombatPet overrides it.
         /// </summary>
         public virtual bool AcceptsMultiShotExtraTarget(Creature creature) => true;
+
+        /// <summary>
+        /// The objects GetMultiShotTargets picks extra targets from, before its filters. For a player this is
+        /// ObjMaint's VisibleObjects, the same source GetCleaveTarget uses. ObjectMaint maintains VisibleObjects
+        /// for players only (PhysicsObj.enter_cell_server runs handle_visible_cells only when IsPlayer), so any
+        /// other shooter reads an empty list here. CombatPet overrides this with the list it already targets from.
+        /// </summary>
+        internal virtual List<PhysicsObj> GetMultiShotCandidates() =>
+            PhysicsObj.ObjMaint.GetVisibleObjectsValuesWhere(o => o.WeenieObj.WorldObject != null);
 
         /// <summary>
         /// One damage multiplier per extra arrow the weapon itself grants: MultiShotCount entries at the
@@ -334,9 +343,21 @@ namespace ACE.Server.WorldObjects
             impactChain.AddDelaySeconds(flightTime);
             // DamageTarget scales the procs by damageMultiplier too: an extra-target arrow carries its own
             // fraction, while the Double Volley re-fire at the primary target passes 1.0 and so is unscaled.
-            impactChain.AddAction(this, () => ResolveMultiShotArrowImpact(target, cosmeticProjectile, damageMultiplier, primaryTarget));
+            impactChain.AddAction(MultiShotImpactActor, () => ResolveMultiShotArrowImpact(target, cosmeticProjectile, damageMultiplier, primaryTarget));
             impactChain.EnqueueChain();
         }
+
+        /// <summary>
+        /// Whose action queue a multishot arrow's impact runs on: this shooter, for every creature and player. The
+        /// Hunter's Echo overrides it with its owner (CombatPet_HuntersEcho), so its arrows outlive it.
+        /// </summary>
+        protected virtual IActor MultiShotImpactActor => this;
+
+        /// <summary>
+        /// How far a multishot volley looks for extra targets: the shooter's own missile range for every creature and
+        /// player. The Hunter's Echo overrides it with its full-radar engage range (CombatPet_HuntersEcho).
+        /// </summary>
+        protected virtual float GetMultiShotMaxRange() => GetMaxMissileRange();
 
         /// <summary>
         /// PROTOTYPE: spawns a purely visual arrow flying at an extra multi-shot target, and returns it so the
@@ -419,6 +440,13 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// Set by ThreadDungeons.CombatTraitGuard.Apply (Threads and World Events run creatures, while their
+        /// strip_combat_traits tunable is on): every projectile this creature fires gets the same per-item special-modifier
+        /// strip its equipped ammo got at spawn. Runtime only, never persisted; false for every other creature.
+        /// </summary>
+        public bool StripProjectileCombatTraits { get; set; }
+
+        /// <summary>
         /// Launches a projectile from player to target
         ///
         /// <paramref name="cosmetic"/>: a purely visual projectile (a Reflect return arrow). It is flagged
@@ -445,6 +473,17 @@ namespace ACE.Server.WorldObjects
 
             var proj = WorldObjectFactory.CreateNewWorldObject(ammo.WeenieClassId);
 
+            // Threads / World Events combat-trait strip (CombatTraitGuard.Apply sets the flag): the projectile is a FRESH copy
+            // of the ammo wcid, so the strip on the equipped ammo never reaches it, and ProjectileCollisionHelper fires the
+            // projectile's own ProcSpell on impact. Same per-item strip, before the projectile can collide with anything.
+            if (StripProjectileCombatTraits)
+            {
+                ACE.Server.ThreadDungeons.DungeonCreatureNormalizer.StripItemCombatTraits(proj);
+
+                // its damage spells too; a projectile casts nothing, so there is no applied enchantment to take back
+                ACE.Server.ThreadDungeons.DungeonCreatureNormalizer.StripItemDamageSpells(proj, ACE.Server.ThreadDungeons.DungeonCreatureNormalizer.LiveSpellStat, null);
+            }
+
             proj.ProjectileSource = this;
             proj.IsCosmeticProjectile = cosmetic;
             proj.ProjectileTarget = cosmetic ? null : target;
@@ -452,6 +491,11 @@ namespace ACE.Server.WorldObjects
             // stamped before AddObject, for the same reason as the flags above: a spawn that overlaps its
             // target can resolve during the add itself
             proj.ClassAbilityVolleyPinRoll = volleyPinRoll;
+
+            // Hunter's Echo: its owner's shot (hit-line name, accuracy bar) rides every arrow it fires; null for
+            // every other shooter, so nothing else reads differently
+            proj.HuntersEchoShot = (this as CombatPet)?.HuntersEchoShotStamp;
+            proj.HuntersEchoLaunchOrigin = (this as CombatPet)?.HuntersEchoLaunchOriginStamp;
 
             proj.ProjectileLauncher = weapon;
             proj.ProjectileAmmo = ammo;

@@ -86,7 +86,7 @@ namespace ACE.Server.ThreadDungeons
         /// </summary>
         public DungeonStatProfile(int level, uint health, IReadOnlyDictionary<Skill, uint> skills, uint maxBodyDamage, uint maxBaseArmor,
             int maxSpellTier = 0, double healthRate = 0.0, IReadOnlyDictionary<ACE.Entity.Enum.Properties.PropertyAttribute, uint> attributes = null,
-            ArchetypeFacts archetype = null)
+            ArchetypeFacts archetype = null, uint critResistRating = 0)
         {
             Level = level;
             Health = health;
@@ -97,7 +97,15 @@ namespace ACE.Server.ThreadDungeons
             HealthRate = double.IsNaN(healthRate) || double.IsInfinity(healthRate) || healthRate < 0 ? 0.0 : healthRate;
             Attributes = attributes ?? EmptyAttributes;
             Archetype = archetype ?? ArchetypeFacts.Empty;
+            CritResistRating = critResistRating;
         }
+
+        /// <summary>
+        /// PropertyInt.CritResistRating as authored (0 when absent, or negative). Unlike every axis above, a 0 here IS a
+        /// genuine value - most creatures carry no crit resist at all - so DungeonBandStandard's median over it keeps
+        /// zeros. NOT counted by <see cref="HasData"/>. Read by the Character Details baseline only.
+        /// </summary>
+        public uint CritResistRating { get; }
 
         /// <summary>
         /// The facts <see cref="ArchetypeClassifier"/> needs beyond the band-standard axes (skill ranks, wielded
@@ -125,7 +133,7 @@ namespace ACE.Server.ThreadDungeons
         /// sample needs a projected profile. Returns this same instance when the level is unchanged.
         /// </summary>
         public DungeonStatProfile WithLevel(int level)
-            => level == Level ? this : new DungeonStatProfile(level, Health, Skills, MaxBodyDamage, MaxBaseArmor, MaxSpellTier, HealthRate, Attributes, Archetype);
+            => level == Level ? this : new DungeonStatProfile(level, Health, Skills, MaxBodyDamage, MaxBaseArmor, MaxSpellTier, HealthRate, Attributes, Archetype, CritResistRating);
 
         private static readonly IReadOnlyDictionary<Skill, uint> EmptySkills = new Dictionary<Skill, uint>();
 
@@ -295,7 +303,8 @@ namespace ACE.Server.ThreadDungeons
             return new DungeonStatProfile(level, HealthOf(weenie), skills,
                 (uint)Math.Max(0, maxDamage), (uint)Math.Max(0, maxArmor), maxSpellTier,
                 weenie.GetProperty(ACE.Entity.Enum.Properties.PropertyFloat.HealthRate) ?? 0.0, attributes,
-                readFacts ? ArchetypeFacts.FromWeenie(weenie, resolver) : null);
+                readFacts ? ArchetypeFacts.FromWeenie(weenie, resolver) : null,
+                (uint)Math.Max(0, weenie.GetProperty(ACE.Entity.Enum.Properties.PropertyInt.CritResistRating) ?? 0));
         }
 
         private bool HasAnySkill

@@ -80,6 +80,13 @@ namespace ACE.Server.WorldEvents.Hold
         /// <summary>A knight shows its health bar to players.</summary>
         public bool ShowHealthBar { get; init; }
 
+        /// <summary>
+        /// A knight whose assessment never says its health in chat (WorldEventHooks.SendHoldKnightHealthLine). False, the
+        /// World Events behaviour, unless a host opts in: the Threads Defense pillar does (ThreadDefenseHold.PreparePillar),
+        /// because its health is told only by the encounter's own once-each milestones.
+        /// </summary>
+        public bool NoAssessHealthLine { get; init; }
+
         /// <summary>The owning run, as the read-only view every engine hook may consult from any thread.</summary>
         public IWorldEventHoldRunView Run { get; init; }
     }

@@ -39,7 +39,13 @@ namespace ACE.Server.KnotLoot
                     effect = $"left wrist +{g} damage resist rating, -{c} damage rating; right wrist +{g} damage rating, -{c} damage resist rating";
                     break;
                 case KnotTraitId.OverpoweringIntent:
-                    effect = $"+{Pct(e.Primary)}% War and Void Magic skill against monster resistance";
+                    effect = $"+{Pct(e.Primary)}% War, Void and Life Magic skill against monster resistance";
+                    break;
+                case KnotTraitId.HarbingerGuard:
+                    effect = $"+{Whole(e.Primary)} shield armor";
+                    break;
+                case KnotTraitId.HarbingerCelerity:
+                    effect = $"+{Pct(e.Primary)}% attack speed, +{Pct(e.Secondary)}% cast speed";
                     break;
                 default:
                     effect = string.Empty;

@@ -1170,7 +1170,27 @@ namespace ACE.Entity.Enum.Properties
         // Upgraded Knot cloak: on a set item, the summed set level up to which the set's top dat tier keeps scaling past the
         // dat's HighestTier (StatModValue x level / HighestTier). Absent or at most HighestTier = retail.
         SetBonusMaxLevel                          = 9097,
-        // (next free id is 9100)
+        // Jewelry Aspects (Docs/JewelryAspects/DESIGN.md): on a ring, bracelet or necklace, how many of its aspects (1 to 10 once aspected) are Attack.
+        JewelryAspectAttack                       = 9100,
+        // Jewelry Aspects: on a ring, bracelet or necklace, how many of its aspects (1 to 10 once aspected) are Defense.
+        JewelryAspectDefense                      = 9101,
+        // Jewelry Aspects: on a ring, bracelet or necklace, how many of its aspects (1 to 10 once aspected) are Utility.
+        JewelryAspectUtility                      = 9102,
+        // Paragon weapon mods (Paragon 51-55): on a Paragon weapon, the WeaponModId granted by each Paragon gem, filled in order
+        // 1-5 with no gaps (a WeaponModId may repeat). Read only by ACE.Server.WeaponMods.WeaponModParagon - never by the
+        // Tourmaline/Amethyst/ClearSpecials/SpecialCount/quality-tier paths.
+        ParagonModSlot1                           = 9103,
+        ParagonModSlot2                           = 9104,
+        ParagonModSlot3                           = 9105,
+        ParagonModSlot4                           = 9106,
+        ParagonModSlot5                           = 9107,
+        // Paragon weapon mods: on a Paragon weapon, the summed token cost paid for its Paragon gems (for a later refund).
+        ParagonModTokensSpent                     = 9108,
+        // Paragon weapon mods: on a Paragon gem weenie, the WeaponModId the gem grants.
+        ParagonModGemModifier                     = 9109,
+        // Paragon weapon mods: on a Paragon gem weenie, its token price.
+        ParagonModGemTokenCost                    = 9110,
+        // (next free id is 9111)
     }
 
     public static class PropertyIntExtensions

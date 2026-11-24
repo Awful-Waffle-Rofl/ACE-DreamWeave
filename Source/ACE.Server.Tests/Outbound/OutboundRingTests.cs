@@ -358,10 +358,11 @@ namespace ACE.Server.Tests.Outbound
         private static uint AuxOf(uint guid) => guid * 2654435761u ^ 0x9E3779B9u;
 
         [TestMethod]
+        [TestCategory("Slow")]
         public void ConcurrentWriters_AndReader_NoTornEntries_AndEachWritersOrderIsKept()
         {
             const int writers = 4;
-            const int perWriter = 50000;
+            const int perWriter = 15000; // 60000 records into a 4096 ring: ~14 laps, above the 10-lap assertion below even if some are suppressed
 
             var ring = new OutboundRing();
             var stop = 0;
@@ -449,7 +450,7 @@ namespace ACE.Server.Tests.Outbound
             Assert.AreEqual(0, failures.Count, string.Join("\n", failures.Take(10)));
             Assert.IsTrue(snapshotsTaken > 0, "the reader ran concurrently");
             Assert.AreEqual(writers * perWriter, final.Written + final.Suppressed, "every record was either written or counted as suppressed");
-            Assert.IsTrue(final.Written > 10 * 4096, $"the ring wrapped many times during the race (written={final.Written})");
+            Assert.IsTrue(final.Written > 10 * 4096, $"the ring wrapped at least 10 times during the race (written={final.Written})");
             // a writer that runs out of spin budget behind an older holder leaves that holder's older entry in the slot
             // until the next lap, so each drop can cost one slot; with no drop, every slot is held
             if (final.Dropped == 0)

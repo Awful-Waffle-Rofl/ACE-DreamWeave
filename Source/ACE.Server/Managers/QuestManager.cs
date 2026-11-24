@@ -207,15 +207,13 @@ namespace ACE.Server.Managers
                     // a brand new registry row is worth a quest stamp - only here, never on the update path
                     // (see Player_QuestStamps)
                     player.HandleQuestStampRowCreated(quest.QuestName, notify: true);
-
-                    // Bluespire ladder: a brand new registry row is the ONE event that means "this character
-                    // has done this for the first time, ever", which is exactly the once-per-character-ever
-                    // payout rule - re-running a cleared rung reaches the else branch below and pays nothing.
-                    // A SIBLING of the stamp call above, deliberately not a line inside it: that method is
-                    // gated on quest_stamps_enabled, and the ladder reward must not stop when an unrelated
-                    // feature is switched off.
-                    player.TryPayBluespireLadderReward(quest.QuestName);
                 }
+
+                // Bluespire ladder: a brand new registry row is the ONE event that means "this character has
+                // done this for the first time, ever" - the first-clear payout. A SIBLING of the stamp call
+                // above, deliberately not a line inside it: that method is gated on quest_stamps_enabled, and
+                // the ladder reward must not stop when an unrelated feature is switched off.
+                PayBluespireLadderReward(quest.QuestName, firstClear: true);
             }
             else
             {
@@ -224,6 +222,18 @@ namespace ACE.Server.Managers
                     if (Debug) Console.WriteLine($"{Name}.QuestManager.Update({quest}): can not update existing quest. IsMaxSolves({questName}) is true.");
                     return;
                 }
+
+                // Bluespire ladder repeat payout: decided HERE, before LastTimeCompleted moves, because the
+                // question is "had this rung's MinDelta elapsed when the re-clear landed". Update itself
+                // enforces MaxSolves only, never MinDelta, so without this read any caller that restamps a
+                // rung inside its cooldown (an admin stamp, an IncrementQuest amount > 1, a second Use racing
+                // the first) would pay again. Every live clearing path already checks the cooldown before it
+                // stamps - the D1/D2 NPCs' outer InqQuest (EmoteManager: success = hasQuest && !canSolve) and
+                // the kill path's ApplyKillStamp OnCooldown gate - so on those paths this is always true and
+                // costs nothing; it exists so the payout defends itself rather than trusting every caller.
+                // The rung test short-circuits first, so a non-ladder quest pays one dictionary miss and
+                // never reaches CanSolve.
+                var ladderRepeatPayable = BluespireLadderRewards.RungForQuestName(questName) != 0 && CanSolve(questName);
 
                 // update existing quest
                 quest.LastTimeCompleted = (uint)Time.GetUnixTime();
@@ -237,7 +247,41 @@ namespace ACE.Server.Managers
 
                     player.ContractManager.NotifyOfQuestUpdate(quest.QuestName);
                 }
+
+                // The SINGLE owner of the ladder's repeat payout, for every clearing path: the D1/D2 emote
+                // StampQuest reaches here through Stamp, and so does the D3-D6 kill path (HandleKillTask ->
+                // ApplyKillStamp -> Stamp -> Update), which therefore pays nothing of its own. Reached only
+                // after the mule guard, the PvP template guard and IsMaxSolves have all let the row advance,
+                // so a silent no-op can never pay.
+                if (ladderRepeatPayable)
+                    PayBluespireLadderReward(quest.QuestName, firstClear: false);
             }
+        }
+
+        /// <summary>
+        /// Test seam (WaffleACE): invoked with (questName, firstClear) every time this QuestManager decides a
+        /// Bluespire ladder payout is due, whether or not its Creature is a Player. ACE.Server.Tests cannot
+        /// construct a Player, so this is the only way a test can observe the payout decision made inside
+        /// Update / SetQuestCompletions. Per-instance, never static, so it cannot leak between tests. Null in
+        /// production.
+        /// </summary>
+        internal Action<string, bool> BluespirePayoutObserver { get; set; }
+
+        /// <summary>
+        /// The one place QuestManager hands a Bluespire ladder payout to the Player. Returns at once for a
+        /// quest that is not one of the six rung clears (a dictionary miss), so the observer above only ever
+        /// sees real ladder payouts. BluespireLadderRewards.Pay re-checks the rung, the kill switch and the
+        /// configured amount itself.
+        /// </summary>
+        private void PayBluespireLadderReward(string questName, bool firstClear)
+        {
+            if (BluespireLadderRewards.RungForQuestName(questName) == 0)
+                return;
+
+            BluespirePayoutObserver?.Invoke(questName, firstClear);
+
+            if (Creature is Player player)
+                player.TryPayBluespireLadderReward(questName, firstClear);
         }
 
         /// <summary>
@@ -287,17 +331,25 @@ namespace ACE.Server.Managers
                     // SetQuestBits routes through here too, but only creates a row on the FIRST bit set, so a
                     // bitfield quest produces at most one message ever.
                     player.HandleQuestStampRowCreated(quest.QuestName, notify: true);
-
-                    // Bluespire ladder: mirrored from Update's created-row branch above, for the same reason
-                    // and on the same terms - a created row here is equally a first-ever clear, so content
-                    // that stamps a rung clear with SetQuestCompletions rather than Update must pay
-                    // identically. See the note at the Update call site.
-                    player.TryPayBluespireLadderReward(quest.QuestName);
                 }
+
+                // Bluespire ladder: mirrored from Update's created-row branch above, for the same reason
+                // and on the same terms - a created row here is equally a first-ever clear, so content
+                // that stamps a rung clear with SetQuestCompletions rather than Update must pay
+                // identically. See the note at the Update call site.
+                PayBluespireLadderReward(quest.QuestName, firstClear: true);
             }
             else
             {
                 // update existing quest
+                //
+                // Bluespire ladder: deliberately NOT a repeat payer. This branch is an absolute SET, not a
+                // clear event: it can lower the count, leave it unchanged, or raise it by any amount, and it
+                // refreshes LastTimeCompleted regardless. No ladder content sets a rung name this way (the
+                // six rungs clear by StampQuest or by KillQuest, both of which reach Update), and the callers
+                // that do reach here for an arbitrary name are admin repair commands (/qst setcomp) and
+                // SetQuestBits - paying on them would turn a correction into a currency faucet. Re-clears pay
+                // in exactly one place, Update's existing-row branch.
                 quest.LastTimeCompleted = (uint)Time.GetUnixTime();
                 quest.NumTimesCompleted = numTimesCompleted;
 
@@ -632,9 +684,10 @@ namespace ACE.Server.Managers
         /// <summary>
         /// The result of a single kill-task stamp attempt, as decided by <see cref="ApplyKillStamp"/>.
         ///
-        /// Bluespire ladder (WaffleACE): this exists so the daily-cooldown gate and the repeat-payout
-        /// decision can both be made from one return value instead of re-deriving "did this kill actually
-        /// advance anything" from GetQuest state at two separate call sites.
+        /// Bluespire ladder (WaffleACE): this exists so the daily-cooldown gate and the kill-task message
+        /// can be decided from one return value instead of re-deriving "did this kill actually advance
+        /// anything" from GetQuest state at separate call sites. It no longer drives any payout: both ladder
+        /// payouts are owned by Update (see the note at the end of HandleKillTask).
         /// </summary>
         internal enum KillStampOutcome
         {
@@ -651,7 +704,9 @@ namespace ACE.Server.Managers
             Created,
 
             /// <summary>The registry row already existed and was incremented again (the pre-existing,
-            /// non-ladder behaviour for every other kill task, and the ladder's post-cooldown re-clear).</summary>
+            /// non-ladder behaviour for every other kill task, and the ladder's post-cooldown re-clear).
+            /// A ladder re-clear was already paid inside Update's existing-row branch; never pay again
+            /// here.</summary>
             Restamped,
 
             /// <summary>Either a bootstrap creation or an existing-row restamp was silently declined by
@@ -701,13 +756,13 @@ namespace ACE.Server.Managers
                 return KillStampOutcome.OnCooldown;
 
             // Classify by COMPLETION STATE, never by row existence alone. Update() has two silent
-            // no-op paths on an EXISTING row - the mule guard (:179 above, MuleBlocked(AdvanceQuest)) and
-            // IsMaxSolves (:216-220) - and in both, the row is left in place with NumTimesCompleted and
-            // LastTimeCompleted untouched. Existence-only classification would read that as a Restamp, and
-            // a bootstrap Restamp is exactly what pays the ladder's repeat reward - so a muled character
-            // (whose fellowship membership is not re-checked after conversion, and who is still credited by
-            // OnDeath_HandleKillTask's fellow-in-range branch) would be paid on every fellow's re-clear with
-            // no cooldown, because LastTimeCompleted never advances and CanSolve stays true forever.
+            // no-op paths on an EXISTING row - the mule guard (MuleBlocked(AdvanceQuest)) and
+            // IsMaxSolves - and in both, the row is left in place with NumTimesCompleted and
+            // LastTimeCompleted untouched. Existence-only classification would read that as a Restamp and
+            // report a kill that made no progress. (This classification once also drove the ladder's repeat
+            // payout, where it mattered more: a muled fellow would have been paid on every re-clear. That
+            // payout now lives in Update's existing-row branch, which those same guards return in front of,
+            // so a refused restamp cannot pay whatever this method returns.)
             var rowBefore = GetQuest(questName);
             var hadRowBefore = rowBefore != null;
             var numBefore = rowBefore?.NumTimesCompleted;
@@ -816,14 +871,11 @@ namespace ACE.Server.Managers
 
             player.Session.Network.EnqueueSend(new GameMessageSystemChat(msg, ChatMessageType.Broadcast));
 
-            // Bluespire ladder daily repeat payout (WaffleACE): only Restamped - an existing bootstrap row
-            // re-stamped after its cooldown elapsed - pays here. Created already paid inside Update's
-            // created-row branch (TryPayBluespireLadderReward), so paying again on Created would double-pay
-            // the character's first-ever clear. The bootstrapRow guard keeps this call scoped to the
-            // ladder's own six rung names; BluespireLadderRewards.Pay would no-op for anything else anyway,
-            // via its own RungForQuestName check.
-            if (bootstrapRow && BluespireLadderRewards.ShouldPayOnKillStamp(outcome))
-                player.TryPayBluespireLadderReward(questName, firstClear: false);
+            // Bluespire ladder (WaffleACE): this method pays NOTHING itself. Both of a rung's payouts were
+            // already decided inside the Update call that ApplyKillStamp's Stamp made - Created by Update's
+            // created-row branch (first clear), Restamped by its existing-row branch (repeat clear). A
+            // payout here as well would double-pay every kill re-clear; Update is the single owner so the
+            // emote-cleared rungs (D1/D2 StampQuest) and the kill-cleared ones (D3-D6) pay identically.
         }
 
         /// <summary>

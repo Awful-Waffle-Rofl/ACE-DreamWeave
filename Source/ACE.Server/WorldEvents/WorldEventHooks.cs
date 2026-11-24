@@ -35,6 +35,8 @@ namespace ACE.Server.WorldEvents
     /// </summary>
     public static class WorldEventHooks
     {
+        private static readonly log4net.ILog log = log4net.LogManager.GetLogger(typeof(WorldEventHooks));
+
         // ---- lifecycle -------------------------------------------------------------------------------------
 
         /// <summary>Program startup: loads the axis store and builds the catalog. Never throws.</summary>
@@ -45,6 +47,26 @@ namespace ACE.Server.WorldEvents
 
         /// <summary>Server shutdown: ends any run cleanly.</summary>
         public static void OnShutdown() => WorldEventManager.OnShutdown();
+
+        // ---- reward crates (the Allegiance Gauntlet pays a World Event crate) ----------------------------------
+
+        /// <summary>
+        /// The loaded rewards.json profile named <paramref name="id"/>, or null when the store is not loaded or has no such row.
+        /// The Allegiance Gauntlet reads its gauntlet_t0 to gauntlet_t6 rows here (crate wcid, cache wcid, claim window, gates).
+        /// </summary>
+        public static Defs.RewardDef TryGetRewardProfile(string id)
+            => WorldEventRewardCrate.TryGetProfile(id);
+
+        /// <summary>True when the axis store is loaded (a missing profile is then a content error, not a startup race).</summary>
+        public static bool RewardStoreLoaded => WorldEventRewardCrate.ProfileStoreLoaded;
+
+        /// <summary>
+        /// Stamps a World Event reward crate with the profile and multiplier its opening reads
+        /// (WorldEventRewardCrate.Open: PropertyString.WorldEventRewardProfile, PropertyFloat.WorldEventRewardMultiplier).
+        /// Stamp BEFORE the crate is given, so the object a player receives already carries what its roll needs.
+        /// </summary>
+        public static void StampRewardCrate(ACE.Server.WorldObjects.WorldObject crate, string profile, double multiplier)
+            => WorldEventRewardCrate.Stamp(crate, profile, multiplier);
 
         /// <summary>
         /// The loaded axis store, never null (it starts as WorldEventAxisStore.Empty). Read by systems that
@@ -100,7 +122,10 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void OnDamageRecorded(Creature victim, WorldObject attacker, uint amount)
-            => WorldEventCombatCreditHook.OnDamageRecorded(victim, attacker, amount);
+        {
+            ACE.Server.Avatars.Gauntlet.GauntletHooks.OnContact(victim, attacker);
+            WorldEventCombatCreditHook.OnDamageRecorded(victim, attacker, amount);
+        }
 
         /// <summary>
         /// A landed hit that wrote no health (fully absorbed, or a stamina/mana attack). Same direction rules
@@ -108,7 +133,10 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void OnCombatContact(Creature victim, WorldObject attacker)
-            => WorldEventCombatCreditHook.OnCombatContact(victim, attacker);
+        {
+            ACE.Server.Avatars.Gauntlet.GauntletHooks.OnContact(victim, attacker);
+            WorldEventCombatCreditHook.OnCombatContact(victim, attacker);
+        }
 
         /// <summary>
         /// Pure: true when a player victim in this state never actually takes the recorded damage
@@ -117,6 +145,13 @@ namespace ACE.Server.WorldEvents
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool VictimStateRefusesCredit(bool invincible, bool underLifestoneProtection)
             => WorldEventCombatCreditHook.VictimStateRefusesCredit(invincible, underLifestoneProtection);
+
+        /// <summary>
+        /// Pure: the player behind a hit's attacker (the attacker itself, or a CombatPet's owner), the resolution the
+        /// combat credit uses. Reused by the Allegiance Gauntlet contact hook so both agree on whose pet's hit is whose.
+        /// </summary>
+        public static Player ResolveAttackingPlayer(WorldObject attacker)
+            => WorldEventCombatCreditHook.ResolveAttackingPlayer(attacker);
 
         /// <summary>
         /// Measured boss damage scaling: a hit landed on <paramref name="defender"/>. Inert (two field reads)
@@ -194,6 +229,140 @@ namespace ACE.Server.WorldEvents
 
         /// <summary>Presence payout: a player died. One field read when no run exists; never throws.</summary>
         public static void OnPlayerDied(Player player) => WorldEventManager.OnPlayerDied(player);
+
+        /// <summary>
+        /// Allegiance Avatar feed: whether the running event has a participation record for this character, and if so
+        /// whether it is an Avatar's private event (AvatarId set). Memory only; reads <see cref="WorldEventManager.Current"/> once.
+        /// </summary>
+        public static (bool Participant, bool PrivateAvatarEvent) AvatarFeedState(uint characterGuid) => AvatarFeedState(WorldEventManager.Current, characterGuid);
+
+        internal static (bool Participant, bool PrivateAvatarEvent) AvatarFeedState(WorldEvent current, uint characterGuid)
+        {
+            if (current == null || !current.Participation.Contains(characterGuid))
+                return (false, false);
+
+            return (true, current.AvatarId != null);
+        }
+
+        /// <summary>Allegiance Avatar purchase: true while a World Event is running (the manager's own TryStart refusal test).</summary>
+        public static bool IsEventRunning() => WorldEventManager.Current != null;
+
+        /// <summary>Allegiance Avatar purchase: starts a private event through <see cref="WorldEventManager.TryStart(WorldEventRequest, out WorldEvent, out string)"/>. World thread.</summary>
+        public static bool TryStartPrivate(WorldEventRequest request, out string error) => WorldEventManager.TryStart(request, out _, out error);
+
+        /// <summary>
+        /// Allegiance Avatar purchase: true when <paramref name="request"/> is the request of the run that is Current now (so a
+        /// start that threw after the run took hold must not refund the price the run will settle itself).
+        /// </summary>
+        public static bool IsCurrentRequest(WorldEventRequest request) => request != null && ReferenceEquals(WorldEventManager.Current?.Request, request);
+
+        /// <summary>
+        /// Test seam: settles a private Avatar event's reserved Favor (avatar id, price, commit). Defaults to
+        /// <see cref="ACE.Server.Avatars.AvatarEventPurchase.Settle"/>. A test must restore this in a finally block.
+        /// </summary>
+        internal static Action<uint, ulong, bool> AvatarFavorSettleSink = ACE.Server.Avatars.AvatarEventPurchase.Settle;
+
+        // ---- the private Avatar event's host (the Avatar fighter) -----------------------------------------------------------
+
+        /// <summary>
+        /// The host sink: the Avatar side that puts the Avatar's fighter into its own private event. Defaults to
+        /// <see cref="ACE.Server.Avatars.Gauntlet.AvatarEventFighterHost.Live"/>. A test must restore this in a finally block.
+        /// </summary>
+        internal static IAvatarEventHost AvatarEventHost = ACE.Server.Avatars.Gauntlet.AvatarEventFighterHost.Live;
+
+        /// <summary>
+        /// WorldEvent.Transition (the one place State is written) and the forced-Done path: tells the host about a private
+        /// Avatar event's state change. Nothing for an ordinary run (AvatarId null), after one field read. Never throws. World thread.
+        /// </summary>
+        internal static void NotifyAvatarEventState(WorldEvent evt, WorldEventState from, WorldEventState to)
+        {
+            if (evt?.AvatarId == null)
+                return;
+
+            try
+            {
+                AvatarEventHost?.OnStateChanged(evt, from, to);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={evt.RunId} the Avatar event host threw on {from} -> {to}", ex);
+            }
+        }
+
+        /// <summary>
+        /// WorldEvent's wave spawn: tells the host the band this private Avatar event's wave drew from (its top level). Nothing
+        /// for an ordinary run, after one field read. Never throws. World thread.
+        /// </summary>
+        internal static void NotifyAvatarEventWave(WorldEvent evt, int wave, int bandTop)
+        {
+            if (evt?.AvatarId == null)
+                return;
+
+            try
+            {
+                AvatarEventHost?.OnWave(evt, wave, bandTop);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={evt.RunId} the Avatar event host threw on wave {wave}", ex);
+            }
+        }
+
+        /// <summary>
+        /// The Avatar fighter's stat basis at <paramref name="level"/> under the live World Events band: the band standard, the
+        /// band median health, and the median per-hit damage, the inputs the Gauntlet fighter's stats function reads from a wave
+        /// plan (GauntletFighterStats.Compute). World thread.
+        /// </summary>
+        public static (ACE.Server.ThreadDungeons.DungeonBandStandard Standard, double MedianHealth, double PerHitMedian) AvatarFighterBasisAt(int level)
+            => WorldEventSpawner.FighterBasisAt(level);
+
+        /// <summary>The players in <paramref name="evt"/>'s anchor instance within <paramref name="radius"/> of its anchor, the living and the dead (a snapshot). Any thread.</summary>
+        public static List<Player> PlayersNearEvent(WorldEvent evt, float radius) => WorldEventAudienceSampler.PlayersNear(evt?.Composition?.AnchorPosition, radius);
+
+        /// <summary>True for an announced (server-wide) run; false for a quiet one (a private event bought quiet). Any thread.</summary>
+        public static bool IsAnnouncedEvent(WorldEvent evt) => evt != null && evt.AnnounceServerWide;
+
+        /// <summary>True when the character has a participation record (combat or contact credit) in <paramref name="evt"/>. Any thread.</summary>
+        public static bool IsEventParticipant(WorldEvent evt, uint characterGuid) =>
+            evt?.Participation != null && evt.Participation.TryGetRecord(characterGuid, out _);
+
+        /// <summary>
+        /// The private Avatar event's people (pure over its inputs): each distinct non-null player in <paramref name="near"/>
+        /// who is credited in the event or sworn to the Avatar's allegiance. A bystander near the anchor is neither.
+        /// </summary>
+        public static List<Player> SelectAvatarEventPlayers(IEnumerable<Player> near, Func<uint, bool> credited, Func<Player, bool> sworn)
+        {
+            var picked = new List<Player>();
+            var seen = new HashSet<uint>();
+
+            if (near == null)
+                return picked;
+
+            foreach (var p in near)
+            {
+                if (p == null || !seen.Add(p.Guid.Full))
+                    continue;
+
+                if ((credited != null && credited(p.Guid.Full)) || (sworn != null && sworn(p)))
+                    picked.Add(p);
+            }
+
+            return picked;
+        }
+
+        /// <summary>
+        /// True when <paramref name="creature"/> is a live objective source of the running event (a Destroy the Source rift or
+        /// pillar). The Avatar fighter never takes one as a target, so it can never complete that objective by itself. Any thread.
+        /// </summary>
+        public static bool IsLiveEventSource(Creature creature)
+        {
+            if (creature == null)
+                return false;
+
+            var spawner = WorldEventManager.Current?.Spawner;
+
+            return spawner != null && spawner.TryGetLiveSource(creature.Guid.Full) != null;
+        }
 
         // ---- use handlers ----------------------------------------------------------------------------------
 
@@ -400,6 +569,27 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>
+        /// Allegiance Gauntlet, the Avatar fighter's damage intake cap (GauntletAvatarFighter.CapIncomingHit): the Hold knight's
+        /// token bucket, WorldEventHoldRules.CapProtectedHit, reached through this seam. Pure.
+        /// </summary>
+        public static float CapProtectedHit(float requested, uint maxHealth, double minDeathSeconds, double burstSeconds, ref double tokens, ref double lastAt, double now)
+            => WorldEventHoldRules.CapProtectedHit(requested, maxHealth, minDeathSeconds, burstSeconds, ref tokens, ref lastAt, now);
+
+        /// <summary>
+        /// Allegiance Gauntlet, a healing kit on the Avatar fighter (GauntletAvatarFighter.ApplyKitHeal): the Hold knight's
+        /// player-heal conversion, WorldEventHoldRules.ConvertPlayerHeal, reached through this seam. Pure.
+        /// </summary>
+        public static int ConvertPlayerHeal(double rawHeal, uint maxHealth, double maxHealPerTenSeconds, ref double tokens, ref double lastAt, double now)
+            => WorldEventHoldRules.ConvertPlayerHeal(rawHeal, maxHealth, maxHealPerTenSeconds, ref tokens, ref lastAt, now);
+
+        /// <summary>The raw points of a typical player heal (the conversion's scale), for the Gauntlet kit tests. Pure.</summary>
+        public const double TypicalPlayerHeal = WorldEventHoldRules.TypicalPlayerHeal;
+
+        /// <summary>Allegiance Gauntlet: the line a member gets for a kit on the fighter, the knight's wording. Pure. ASCII.</summary>
+        public static string PlayerHealLine(string name, int healed, Hold.HoldHealOutcome outcome, bool critical, string kitRemaining)
+            => WorldEventHoldRules.PlayerHealLine(name, healed, outcome, critical, kitRemaining);
+
+        /// <summary>
         /// Monster TakeDamage, SpellProjectile.DamageTarget and life-magic Harm: a run monster's hit on knight
         /// <paramref name="knight"/>, re-sized to the run's pacing (undefended_seconds, min_death_seconds, the corrupted
         /// factor, the role and finale multipliers). <paramref name="amount"/> unchanged for every creature that is not a
@@ -488,6 +678,82 @@ namespace ACE.Server.WorldEvents
                 Reply(new WorldEventHoldHeals.Result(0, HoldHealOutcome.Refused));
 
             return true;
+        }
+
+        /// <summary>
+        /// Blood Mage Transfusion: the knights a Drain Health surplus may feed - those a player's heal spell would be accepted on
+        /// (<see cref="HoldAcceptsPlayerHeal"/>, so a Thread Defense pillar, which has every heal source off, is skipped), alive,
+        /// on the caster's own landblock and within the Transfusion reach of the caster. Null (no allocation) when none, after one
+        /// scan of the caster's visible creatures. Caster's thread.
+        /// </summary>
+        public static List<Creature> HoldTransfusionKnights(Creature caster)
+        {
+            // no run up, no envoy: ordinary Drains never pay for the visible-creature scan
+            if (!WorldEventHoldRun.AnyActive)
+                return null;
+
+            var landblock = caster?.CurrentLandblock;
+            var location = caster?.Location;
+            var objMaint = caster?.PhysicsObj?.ObjMaint;
+
+            if (landblock == null || location == null || objMaint == null)
+                return null;
+
+            return SelectTransfusionKnights(objMaint.GetVisibleObjectsValuesOfTypeCreature(), c =>
+            {
+                // landblock first, so no other landblock's Location is ever read on this thread
+                if (c.CurrentLandblock != landblock || c.Location == null)
+                    return null;
+
+                return location.DistanceTo(c.Location);
+            });
+        }
+
+        /// <summary>Core of <see cref="HoldTransfusionKnights"/>: the candidates that are knights and qualify. Null when none.</summary>
+        internal static List<Creature> SelectTransfusionKnights(IEnumerable<Creature> candidates, Func<Creature, double?> distanceOnSameLandblock)
+        {
+            List<Creature> found = null;
+
+            foreach (var c in candidates)
+            {
+                if (c?.WorldEventHold == null || !IsHoldKnight(c))
+                    continue;
+
+                // landblock and reach FIRST: a knight on another landblock (or far away) is never asked about its state, which
+                // belongs to that landblock's thread.
+                var distance = distanceOnSameLandblock(c);
+
+                if (!distance.HasValue || distance.Value > WorldObject.DrainSurplusRange)
+                    continue;
+
+                if (!WorldEventHoldRules.TransfusionKnightQualifies(c.AcceptsHoldPlayerHeal, !c.IsDead && !c.IsDestroyed, distance, WorldObject.DrainSurplusRange))
+                    continue;
+
+                (found ??= new List<Creature>()).Add(c);
+            }
+
+            return found;
+        }
+
+        /// <summary>Blood Mage Transfusion: what a hurt knight asks of the surplus, in raw player-heal points (0 when it is not hurt or its run refuses heals).</summary>
+        public static uint HoldTransfusionKnightDemand(Creature knight)
+        {
+            var t = knight?.WorldEventHold?.Run?.Tuning;
+            var max = knight?.Health?.MaxValue ?? 0;
+
+            if (t == null || max == 0)
+                return 0;
+
+            var demand = WorldEventHoldRules.KnightTransfusionDemand((double)knight.Health.Missing / max, t.PlayerHealCap, t.PlayerHealMult);
+
+            if (demand == 0)
+                return 0;
+
+            // never bid more than the knight can take right now (bucket, wave budget, after-hit window), or the surplus
+            // meant for others is spent on a heal the knight then refuses
+            var room = knight.HoldPlayerHealRoom(ACE.Common.Time.GetUnixTime(), out var factor);
+
+            return Math.Min(demand, WorldEventHoldRules.RawPointsForHealth(room, max, t.PlayerHealMult, factor));
         }
 
         /// <summary>Pure core of <see cref="IsInvalidHoldSpellTarget"/>: only a health heal, and only while the knight accepts player heals.</summary>
@@ -624,7 +890,11 @@ namespace ACE.Server.WorldEvents
             player.SendHoldKnightHealthLine((Creature)target, ACE.Common.Time.GetUnixTime());
         }
 
-        /// <summary>Pure core of <see cref="SendHoldKnightHealthLine"/>: only a Hold knight gets a health line.</summary>
-        public static bool IsHoldKnightHealthLineTarget(WorldObject target) => target is Creature knight && knight.WorldEventHold?.Kind == HoldUnitKind.Knight;
+        /// <summary>
+        /// Pure core of <see cref="SendHoldKnightHealthLine"/>: only a Hold knight gets a health line, and never one whose
+        /// tag opts out (NoAssessHealthLine, the Threads Defense pillar). Every World Events knight leaves it false.
+        /// </summary>
+        public static bool IsHoldKnightHealthLineTarget(WorldObject target)
+            => target is Creature knight && knight.WorldEventHold is { Kind: HoldUnitKind.Knight, NoAssessHealthLine: false };
     }
 }

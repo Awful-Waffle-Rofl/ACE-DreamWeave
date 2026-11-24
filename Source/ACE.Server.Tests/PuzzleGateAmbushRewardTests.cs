@@ -41,6 +41,7 @@ namespace ACE.Server.Tests
             {
                 "ApplyCreatureDeathClassAbilities(this)",
                 "ApplyWeaponModCreatureDeath(this)",
+                "ApplyWeaponModPetKill(this)",
                 "ApplyKillFillVesselCreatureDeath(this)",
                 "ApplyMuleFormTokenCreatureDeath(this)",
                 "OnDeath_HandleKillTask(KillQuest,",

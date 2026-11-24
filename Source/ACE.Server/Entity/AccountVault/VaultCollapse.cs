@@ -12,6 +12,7 @@ using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
 using ACE.Server.Factories;
+using ACE.Server.Physics;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.Entity.AccountVault
@@ -35,6 +36,25 @@ namespace ACE.Server.Entity.AccountVault
     /// Any change that makes <see cref="IgnoredIntKeys"/> and friends longer is moving in the wrong
     /// direction. Every exemption below is a property of where the object currently sits or how it
     /// got there, never of what it is.
+    ///
+    /// Two exemptions are DERIVATIONS rather than ignored keys, and neither lengthens those lists.
+    /// Each is checked against the candidate's own data, so a value that does not match what the
+    /// engine would have computed is still a difference:
+    /// - the stack-derived trio (<see cref="StackDerivationHolds"/>): Value and EncumbranceVal are
+    ///   arithmetic on StackSize;
+    /// - the physics-state bools (<see cref="PhysicsDerivedBools"/>, added 2026-11-02): an object
+    ///   that has stood in the world went through InitPhysicsObj -> CalculatedPhysicsState, which
+    ///   persists one PropertyBool = true per PropertyBool-backed flag of its PhysicsState, when that
+    ///   bool was null. A fresh reference never enters the world and carries none, so before this
+    ///   anything ever picked up off the ground (the reported case: dye plants) could never collapse
+    ///   and every deposit became its own entry. The exemption holds for a bool only when the
+    ///   reference lacks it, the candidate's value is true, and the candidate's own PhysicsState
+    ///   (PhysicsState itself is diffed normally) carries the matching flag - exactly the write
+    ///   CalculatedPhysicsState makes, and nothing else. The bool-to-flag table is
+    ///   WorldObject.PersistedPhysicsStateBools, pinned to the accessors in source by a test, rather
+    ///   than a list kept here. It applies ONLY where the other side is a fresh reference
+    ///   (IsPristine, the public Diff overloads, TryDescribeClass). AreGroupable compares two stored
+    ///   items and switches it off, because a one-sided allowance there is an asymmetric relation.
     ///
     /// This type deliberately knows nothing about vendors, containers or the network, so it stays
     /// unit-testable with no world database.
@@ -302,7 +322,9 @@ namespace ACE.Server.Entity.AccountVault
         /// </summary>
         public static bool AreGroupable(Biota candidate, Biota representative)
         {
-            foreach (var difference in Diff(candidate, representative, candidateIsStackable: false))
+            // physicsDerivation FALSE: both sides are stored items, and the allowance is one-sided by
+            // construction, so leaving it on makes this relation asymmetric.
+            foreach (var difference in Diff(candidate, representative, candidateIsStackable: false, physicsDerivation: false))
             {
                 var separator = difference.IndexOf(':');
 
@@ -841,7 +863,9 @@ namespace ACE.Server.Entity.AccountVault
                 // anything not already cached, which runs an unguarded EF query. If ace_world drops
                 // mid-session the retry strategy eventually surfaces a MySqlException, and that must
                 // not escape into the deposit handler.
-                var reference = WorldObjectFactory.CreateNewWorldObject(item.WeenieClassId);
+                // rollNewCopy: false. A rolling reference (CreationRoll) can land on the item's own
+                // roll and make a rolled item look pristine, which destroys it and re-mints a fresh roll.
+                var reference = WorldObjectFactory.CreateNewWorldObject(item.WeenieClassId, rollNewCopy: false);
 
                 if (reference == null)
                     return false;   // cannot prove it pristine, so it keeps its biota
@@ -906,7 +930,8 @@ namespace ACE.Server.Entity.AccountVault
             if (item?.Biota == null)
                 return new List<string> { "item has no biota" };
 
-            var reference = WorldObjectFactory.CreateNewWorldObject(item.WeenieClassId);
+            // Same as IsPristine: the reference must not roll.
+            var reference = WorldObjectFactory.CreateNewWorldObject(item.WeenieClassId, rollNewCopy: false);
 
             if (reference == null)
                 return new List<string> { $"could not instantiate a reference weenie for wcid {item.WeenieClassId}" };
@@ -971,8 +996,24 @@ namespace ACE.Server.Entity.AccountVault
             }
         }
 
-        /// <summary>Diff overload taking an explicit reference, so tests need no world database.</summary>
+        /// <summary>
+        /// Diff overload taking an explicit reference, so tests need no world database. The reference is
+        /// a FRESH weenie here, so the physics-state derivation applies; see
+        /// <see cref="Diff(Biota, Biota, bool, bool)"/>.
+        /// </summary>
         public static List<string> Diff(Biota candidate, Biota reference, bool candidateIsStackable)
+        {
+            return Diff(candidate, reference, candidateIsStackable, physicsDerivation: true);
+        }
+
+        /// <summary>
+        /// The diff itself. <paramref name="physicsDerivation"/> switches on <see cref="PhysicsDerivedBools"/>,
+        /// which is decided from the candidate side alone and is only sound when the other side is a fresh
+        /// reference that never entered the world. <see cref="AreGroupable"/> compares two STORED items and
+        /// passes false: with it on, AreGroupable(touched, fresh) and AreGroupable(fresh, touched) disagreed,
+        /// and AccountVaultStore's grouping assumes an equivalence relation.
+        /// </summary>
+        private static List<string> Diff(Biota candidate, Biota reference, bool candidateIsStackable, bool physicsDerivation)
         {
             AssertBiotaCoverage();
 
@@ -1003,7 +1044,13 @@ namespace ACE.Server.Entity.AccountVault
             // three properties are diffed like anything else.
             var stackExempt = candidateIsStackable && StackDerivationHolds(candidate);
 
-            DiffDictionary(diffs, ctx, nameof(Biota.PropertiesBool), candidate.PropertiesBool, reference.PropertiesBool, null);
+            // Decided once, before the bools are compared, from the candidate's own PhysicsState and the
+            // reference's ABSENCE of each bool. Empty for nearly everything that never stood in the world,
+            // and always empty when the caller is not comparing against a fresh reference.
+            var physicsDerived = physicsDerivation ? PhysicsDerivedBools(candidate, reference) : new HashSet<PropertyBool>();
+
+            DiffDictionary(diffs, ctx, nameof(Biota.PropertiesBool), candidate.PropertiesBool, reference.PropertiesBool,
+                physicsDerived.Count == 0 ? null : (Func<PropertyBool, bool>)physicsDerived.Contains);
             DiffDictionary(diffs, ctx, nameof(Biota.PropertiesDID), candidate.PropertiesDID, reference.PropertiesDID, null);
             DiffDictionary(diffs, ctx, nameof(Biota.PropertiesFloat), candidate.PropertiesFloat, reference.PropertiesFloat, IgnoredFloatKeys.Contains);
             DiffDictionary(diffs, ctx, nameof(Biota.PropertiesIID), candidate.PropertiesIID, reference.PropertiesIID, IgnoredIidKeys.Contains);
@@ -1080,6 +1127,58 @@ namespace ACE.Server.Entity.AccountVault
 
             return value == (long)unitValue * stackSize
                 && encumbrance == (long)unitEncumbrance * stackSize;
+        }
+
+        #endregion
+
+        #region Physics-state derivation
+
+        /// <summary>
+        /// The candidate's PropertyBools that are provably CalculatedPhysicsState's own write, and so
+        /// not a modification. Same shape as <see cref="StackDerivationHolds"/>: guarded on the
+        /// candidate's own data, never a blanket ignore.
+        ///
+        /// A bool qualifies only when ALL of these hold:
+        /// - it is one of WorldObject.PersistedPhysicsStateBools (the accessors that persist);
+        /// - the REFERENCE does not carry it. A weenie that authors the bool is never overwritten
+        ///   (CalculatedPhysicsState writes only a null bool), so any mismatch there is real;
+        /// - the candidate's value is TRUE, the only value CalculatedPhysicsState ever writes;
+        /// - the candidate's PhysicsState carries the matching flag. That is PropertyInt.PhysicsState
+        ///   when present, else PhysicsGlobals.DefaultState, mirroring GetPhysicsStateOrDefault for an
+        ///   object with no PhysicsObj (InitPhysicsObj runs the derivation before building one).
+        ///
+        /// PropertyInt.PhysicsState is itself diffed normally, so a candidate whose PhysicsState was
+        /// rewritten has a difference whatever this returns.
+        /// </summary>
+        private static HashSet<PropertyBool> PhysicsDerivedBools(Biota candidate, Biota reference)
+        {
+            var derived = new HashSet<PropertyBool>();
+
+            var candidateBools = candidate.PropertiesBool;
+
+            if (candidateBools == null || candidateBools.Count == 0)
+                return derived;
+
+            var state = PhysicsGlobals.DefaultState;
+
+            if (candidate.PropertiesInt != null && candidate.PropertiesInt.TryGetValue(PropertyInt.PhysicsState, out var authoredState))
+                state = (PhysicsState)authoredState;
+
+            foreach (var pair in WorldObject.PersistedPhysicsStateBools)
+            {
+                if (!candidateBools.TryGetValue(pair.Key, out var value) || !value)
+                    continue;
+
+                if (reference.PropertiesBool != null && reference.PropertiesBool.ContainsKey(pair.Key))
+                    continue;
+
+                if ((state & pair.Value) == 0)
+                    continue;
+
+                derived.Add(pair.Key);
+            }
+
+            return derived;
         }
 
         #endregion

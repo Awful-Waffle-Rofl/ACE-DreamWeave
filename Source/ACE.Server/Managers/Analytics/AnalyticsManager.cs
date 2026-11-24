@@ -83,6 +83,24 @@ namespace ACE.Server.Managers.Analytics
         private static readonly ConcurrentQueue<AnalyticsDatabase.KnotEventRow> knotEventQueue = new ConcurrentQueue<AnalyticsDatabase.KnotEventRow>();
         private static long knotEventDropped;
 
+        // Balance Trials telemetry (trial_run, trial_event). Their OWN caps, queues and drop counters, like the
+        // Knot stream: a trial is a burst of events (one row per hit, miss and kill) that must neither starve nor
+        // be starved by the other streams. Trials are stage-only, so reaching the event cap would mean the
+        // analytics DB has been unreachable for a long time; at the cap an event is dropped and counted.
+        // Run rows are one per rep, so they share no cap: the queue cannot outgrow the events that built it.
+        internal const int TrialEventQueueCap = 50_000;
+        private static readonly ConcurrentQueue<AnalyticsDatabase.TrialRunRow> trialRunQueue = new ConcurrentQueue<AnalyticsDatabase.TrialRunRow>();
+        private static readonly ConcurrentQueue<AnalyticsDatabase.TrialEventRow> trialEventQueue = new ConcurrentQueue<AnalyticsDatabase.TrialEventRow>();
+        private static long trialEventDropped;
+
+        // Player deaths (player_death_event). Their OWN cap, queue and drop counter, like the Knot stream: deaths are
+        // driven by combat and must neither starve nor be starved by the other streams. One row per player death, so
+        // reaching the cap would mean the analytics DB has been unreachable for a long time; at the cap a row is dropped
+        // and counted, never blocked on.
+        internal const int PlayerDeathQueueCap = 20_000;
+        private static readonly ConcurrentQueue<AnalyticsDatabase.PlayerDeathRow> playerDeathQueue = new ConcurrentQueue<AnalyticsDatabase.PlayerDeathRow>();
+        private static long playerDeathDropped;
+
         // Character sessions (login/logout), for the IP integrity dashboard. One FIFO queue for both kinds so a
         // character's close always reaches the writer after its open. Volume is bounded by logins, not
         // gameplay, so this is the smallest stream; the cap only matters if the analytics DB is unreachable
@@ -510,6 +528,60 @@ namespace ACE.Server.Managers.Analytics
         /// <summary>Knot events dropped because the queue was full, since process start.</summary>
         internal static long KnotEventsDropped => Interlocked.Read(ref knotEventDropped);
 
+        /// <summary>
+        /// One Balance Trials run (one rep of one character), fully materialised by the recorder. Unbounded by
+        /// design: one row per rep is tiny, and losing a run row would orphan its events.
+        /// </summary>
+        internal static void RecordTrialRun(AnalyticsDatabase.TrialRunRow row)
+        {
+            if (!enabled || row == null)
+                return;
+
+            trialRunQueue.Enqueue(row);
+        }
+
+        /// <summary>
+        /// One Balance Trials event, fully materialised by the recorder. Bounded: at <see cref="TrialEventQueueCap"/>
+        /// the row is dropped and counted, never blocked on.
+        /// </summary>
+        internal static void RecordTrialEvent(AnalyticsDatabase.TrialEventRow row)
+        {
+            if (!enabled || row == null)
+                return;
+
+            if (trialEventQueue.Count >= TrialEventQueueCap)
+            {
+                Interlocked.Increment(ref trialEventDropped);
+                return;
+            }
+
+            trialEventQueue.Enqueue(row);
+        }
+
+        /// <summary>Trial events dropped because the queue was full, since process start.</summary>
+        internal static long TrialEventsDropped => Interlocked.Read(ref trialEventDropped);
+
+        /// <summary>
+        /// One player death, fully materialised by DeathTelemetry (nothing is read off a live object here). Bounded: at
+        /// <see cref="PlayerDeathQueueCap"/> the row is dropped and counted, never blocked on.
+        /// </summary>
+        internal static void RecordPlayerDeath(AnalyticsDatabase.PlayerDeathRow row)
+        {
+            if (!enabled || row == null)
+                return;
+
+            if (playerDeathQueue.Count >= PlayerDeathQueueCap)
+            {
+                Interlocked.Increment(ref playerDeathDropped);
+                return;
+            }
+
+            playerDeathQueue.Enqueue(row);
+        }
+
+        /// <summary>Player death rows dropped because the queue was full, since process start.</summary>
+        internal static long PlayerDeathsDropped => Interlocked.Read(ref playerDeathDropped);
+
         // --- session capture (IP integrity) ---
 
         /// <summary>
@@ -626,6 +698,52 @@ namespace ACE.Server.Managers.Analytics
             Interlocked.Exchange(ref knotEventDropped, 0);
         }
 
+        internal static void ResetTrialQueuesForTests()
+        {
+            while (trialRunQueue.TryDequeue(out _))
+            {
+            }
+
+            while (trialEventQueue.TryDequeue(out _))
+            {
+            }
+
+            Interlocked.Exchange(ref trialEventDropped, 0);
+        }
+
+        internal static List<AnalyticsDatabase.TrialRunRow> DrainTrialRunQueueForTests()
+        {
+            var rows = new List<AnalyticsDatabase.TrialRunRow>();
+            while (trialRunQueue.TryDequeue(out var row))
+                rows.Add(row);
+            return rows;
+        }
+
+        internal static List<AnalyticsDatabase.TrialEventRow> DrainTrialEventQueueForTests()
+        {
+            var rows = new List<AnalyticsDatabase.TrialEventRow>();
+            while (trialEventQueue.TryDequeue(out var row))
+                rows.Add(row);
+            return rows;
+        }
+
+        internal static void ResetPlayerDeathQueueForTests()
+        {
+            while (playerDeathQueue.TryDequeue(out _))
+            {
+            }
+
+            Interlocked.Exchange(ref playerDeathDropped, 0);
+        }
+
+        internal static List<AnalyticsDatabase.PlayerDeathRow> DrainPlayerDeathQueueForTests()
+        {
+            var rows = new List<AnalyticsDatabase.PlayerDeathRow>();
+            while (playerDeathQueue.TryDequeue(out var row))
+                rows.Add(row);
+            return rows;
+        }
+
         internal static List<AnalyticsDatabase.KnotEventRow> DrainKnotQueueForTests()
         {
             var rows = new List<AnalyticsDatabase.KnotEventRow>();
@@ -668,6 +786,9 @@ namespace ACE.Server.Managers.Analytics
                 DrainChat();
                 DrainDungeonRuns();
                 DrainKnotEvents();
+                DrainTrialRuns();
+                DrainTrialEvents();
+                DrainPlayerDeaths();
                 DrainSessions();
 
                 if (DateTime.UtcNow - lastFlushUtc < flushInterval)
@@ -767,6 +888,76 @@ namespace ACE.Server.Managers.Analytics
             catch (Exception ex)
             {
                 log.Error("AnalyticsManager: knot event write failed.", ex);
+            }
+        }
+
+        /// <summary>
+        /// Drains player death rows, at most 500 a tick (one multi-row INSERT of 35 parameters a row). Its own try/catch:
+        /// a failed player_death_event write loses that batch and nothing else.
+        /// </summary>
+        private static void DrainPlayerDeaths()
+        {
+            if (playerDeathQueue.IsEmpty)
+                return;
+
+            var rows = new List<AnalyticsDatabase.PlayerDeathRow>();
+            while (rows.Count < 500 && playerDeathQueue.TryDequeue(out var row))
+                rows.Add(row);
+
+            try
+            {
+                AnalyticsDatabase.WritePlayerDeaths(rows);
+            }
+            catch (Exception ex)
+            {
+                log.Error("AnalyticsManager: player death write failed.", ex);
+            }
+        }
+
+        /// <summary>
+        /// Drains Balance Trials run rows, at most 500 a tick (one multi-row INSERT of 57 parameters a row). Runs
+        /// drain BEFORE events within a tick so a run row never trails its own events. Its own try/catch: a failed
+        /// trial_run write loses that batch and nothing else.
+        /// </summary>
+        private static void DrainTrialRuns()
+        {
+            if (trialRunQueue.IsEmpty)
+                return;
+
+            var rows = new List<AnalyticsDatabase.TrialRunRow>();
+            while (rows.Count < 500 && trialRunQueue.TryDequeue(out var row))
+                rows.Add(row);
+
+            try
+            {
+                AnalyticsDatabase.WriteTrialRuns(rows);
+            }
+            catch (Exception ex)
+            {
+                log.Error("AnalyticsManager: trial run write failed.", ex);
+            }
+        }
+
+        /// <summary>
+        /// Drains Balance Trials event rows, at most 1000 a tick (one multi-row INSERT of 16 parameters a row). Its
+        /// own try/catch: a failed trial_event write loses that batch and nothing else.
+        /// </summary>
+        private static void DrainTrialEvents()
+        {
+            if (trialEventQueue.IsEmpty)
+                return;
+
+            var rows = new List<AnalyticsDatabase.TrialEventRow>();
+            while (rows.Count < 1000 && trialEventQueue.TryDequeue(out var row))
+                rows.Add(row);
+
+            try
+            {
+                AnalyticsDatabase.WriteTrialEvents(rows);
+            }
+            catch (Exception ex)
+            {
+                log.Error("AnalyticsManager: trial event write failed.", ex);
             }
         }
 
@@ -970,6 +1161,19 @@ namespace ACE.Server.Managers.Analytics
             var knotGuard = 0;
             while (!knotEventQueue.IsEmpty && knotGuard++ < 10)
                 DrainKnotEvents();
+
+            // Same for Balance Trials: runs first, then their events.
+            var trialGuard = 0;
+            while (!trialRunQueue.IsEmpty && trialGuard++ < 10)
+                DrainTrialRuns();
+            trialGuard = 0;
+            while (!trialEventQueue.IsEmpty && trialGuard++ < 50)
+                DrainTrialEvents();
+
+            // Same for player deaths, so a death in the last second before a shutdown is not lost with the queue.
+            var deathGuard = 0;
+            while (!playerDeathQueue.IsEmpty && deathGuard++ < 10)
+                DrainPlayerDeaths();
 
             if (sessionWriter == null)
                 return;

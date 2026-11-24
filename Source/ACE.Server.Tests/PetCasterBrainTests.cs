@@ -89,7 +89,8 @@ namespace ACE.Server.Tests
 
         private static CasterContext Ctx(CasterVitals owner, float ownerDistance = 3.0f, IEnumerable<CasterSpell> spells = null,
             IEnumerable<CasterAlly> siblings = null, IEnumerable<float> enemies = null,
-            Func<int, VulnerabilityProfile> profile = null, IReadOnlyDictionary<SpellCategory, CarriedEnchantment> ownerLayers = null)
+            Func<int, VulnerabilityProfile> profile = null, IReadOnlyDictionary<SpellCategory, CarriedEnchantment> ownerLayers = null,
+            IReadOnlyDictionary<SpellCategory, CarriedEnchantment> petLayers = null)
         {
             return new CasterContext
             {
@@ -100,6 +101,7 @@ namespace ACE.Server.Tests
                 EnemyDistances = (enemies ?? Enumerable.Empty<float>()).ToList(),
                 EnemyProfile = profile ?? (_ => VulnerabilityProfile.None),
                 OwnerTopLayers = () => ownerLayers,
+                PetTopLayers = () => petLayers,
             };
         }
 
@@ -371,7 +373,7 @@ namespace ACE.Server.Tests
         /// <summary>A Self spell's CasterSpell as BuildCasterSpells makes it: classified, then ranged (Self spells are 0 / 0).</summary>
         private static CasterSpell SelfSpell(int id, SpellType type, DamageType vital, SpellCategory category = SpellCategory.Undef, uint power = 0)
         {
-            var kind = PetCasterBrain.ClassifySpell(type, true, true, type == SpellType.Boost ? 100 : 0, vital, out var casterVital);
+            var kind = PetCasterBrain.ClassifySpell(type, true, true, type == SpellType.Boost ? 100 : 0, vital, DispelType.All, out var casterVital);
             var range = PetCasterBrain.ResolveRange(kind, 0.0f, 0.0f, 400, Player.MaxRadarRange_Outdoors);
             return new CasterSpell(id, kind, casterVital, category, power, default, range);
         }
@@ -446,29 +448,442 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void ClassifySpell_Table()
         {
-            Assert.AreEqual(CasterSpellKind.Heal, PetCasterBrain.ClassifySpell(SpellType.Boost, true, false, 100, DamageType.Health, out var v1));
+            Assert.AreEqual(CasterSpellKind.Heal, PetCasterBrain.ClassifySpell(SpellType.Boost, true, false, 100, DamageType.Health, DispelType.All, out var v1));
             Assert.AreEqual(CasterVital.Health, v1);
-            Assert.AreEqual(CasterSpellKind.Heal, PetCasterBrain.ClassifySpell(SpellType.Boost, true, false, 100, DamageType.Stamina, out var v2));
+            Assert.AreEqual(CasterSpellKind.Heal, PetCasterBrain.ClassifySpell(SpellType.Boost, true, false, 100, DamageType.Stamina, DispelType.All, out var v2));
             Assert.AreEqual(CasterVital.Stamina, v2);
-            Assert.AreEqual(CasterSpellKind.Heal, PetCasterBrain.ClassifySpell(SpellType.Boost, true, false, 100, DamageType.Mana, out var v3));
+            Assert.AreEqual(CasterSpellKind.Heal, PetCasterBrain.ClassifySpell(SpellType.Boost, true, false, 100, DamageType.Mana, DispelType.All, out var v3));
             Assert.AreEqual(CasterVital.Mana, v3);
 
-            Assert.AreEqual(CasterSpellKind.Harmful, PetCasterBrain.ClassifySpell(SpellType.Boost, false, false, -100, DamageType.Health, out _), "Harm");
-            Assert.AreEqual(CasterSpellKind.Buff, PetCasterBrain.ClassifySpell(SpellType.Enchantment, true, false, 0, DamageType.Undef, out _));
-            Assert.AreEqual(CasterSpellKind.Harmful, PetCasterBrain.ClassifySpell(SpellType.Enchantment, false, false, 0, DamageType.Undef, out _), "a debuff");
-            Assert.AreEqual(CasterSpellKind.Harmful, PetCasterBrain.ClassifySpell(SpellType.Projectile, false, false, 0, DamageType.Undef, out _), "war/void");
-            Assert.AreEqual(CasterSpellKind.Harmful, PetCasterBrain.ClassifySpell(SpellType.Transfer, false, false, 0, DamageType.Undef, out _), "drain other");
+            Assert.AreEqual(CasterSpellKind.Harmful, PetCasterBrain.ClassifySpell(SpellType.Boost, false, false, -100, DamageType.Health, DispelType.All, out _), "Harm");
+            Assert.AreEqual(CasterSpellKind.Buff, PetCasterBrain.ClassifySpell(SpellType.Enchantment, true, false, 0, DamageType.Undef, DispelType.All, out _));
+            Assert.AreEqual(CasterSpellKind.Harmful, PetCasterBrain.ClassifySpell(SpellType.Enchantment, false, false, 0, DamageType.Undef, DispelType.All, out _), "a debuff");
+            Assert.AreEqual(CasterSpellKind.Harmful, PetCasterBrain.ClassifySpell(SpellType.Projectile, false, false, 0, DamageType.Undef, DispelType.All, out _), "war/void");
+            Assert.AreEqual(CasterSpellKind.Harmful, PetCasterBrain.ClassifySpell(SpellType.Transfer, false, false, 0, DamageType.Undef, DispelType.All, out _), "drain other");
 
             // a self-targeted BENEFICIAL spell is friendly, like its Other twin (ruling 2026-11-02); a self-targeted
             // harmful one is never cast
-            Assert.AreEqual(CasterSpellKind.Heal, PetCasterBrain.ClassifySpell(SpellType.Boost, true, true, 100, DamageType.Health, out var v4), "Heal Self");
+            Assert.AreEqual(CasterSpellKind.Heal, PetCasterBrain.ClassifySpell(SpellType.Boost, true, true, 100, DamageType.Health, DispelType.All, out var v4), "Heal Self");
             Assert.AreEqual(CasterVital.Health, v4);
-            Assert.AreEqual(CasterSpellKind.Buff, PetCasterBrain.ClassifySpell(SpellType.Enchantment, true, true, 0, DamageType.Undef, out _), "Strength Self");
-            Assert.AreEqual(CasterSpellKind.Unusable, PetCasterBrain.ClassifySpell(SpellType.Enchantment, false, true, 0, DamageType.Undef, out _), "a harmful self spell");
-            Assert.AreEqual(CasterSpellKind.Unusable, PetCasterBrain.ClassifySpell(SpellType.Boost, false, true, -100, DamageType.Health, out _), "a harmful self boost");
-            Assert.AreEqual(CasterSpellKind.Unusable, PetCasterBrain.ClassifySpell(SpellType.Transfer, true, false, 0, DamageType.Undef, out _), "a self-drain");
-            Assert.AreEqual(CasterSpellKind.Unusable, PetCasterBrain.ClassifySpell(SpellType.Dispel, true, false, 0, DamageType.Undef, out _));
-            Assert.AreEqual(CasterSpellKind.Unusable, PetCasterBrain.ClassifySpell(SpellType.PortalRecall, true, false, 0, DamageType.Undef, out _));
+            Assert.AreEqual(CasterSpellKind.Buff, PetCasterBrain.ClassifySpell(SpellType.Enchantment, true, true, 0, DamageType.Undef, DispelType.All, out _), "Strength Self");
+            Assert.AreEqual(CasterSpellKind.Unusable, PetCasterBrain.ClassifySpell(SpellType.Enchantment, false, true, 0, DamageType.Undef, DispelType.All, out _), "a harmful self spell");
+            Assert.AreEqual(CasterSpellKind.Unusable, PetCasterBrain.ClassifySpell(SpellType.Boost, false, true, -100, DamageType.Health, DispelType.All, out _), "a harmful self boost");
+            Assert.AreEqual(CasterSpellKind.Unusable, PetCasterBrain.ClassifySpell(SpellType.Transfer, true, false, 0, DamageType.Undef, DispelType.All, out _), "a self-drain");
+            Assert.AreEqual(CasterSpellKind.Unusable, PetCasterBrain.ClassifySpell(SpellType.PortalRecall, true, false, 0, DamageType.Undef, DispelType.All, out _));
+        }
+
+        // ---- dispels: Cleanse (owner / self) and Strip (enemy) ---------------------------------------------------
+
+        private const int CleanseCreature = 40;
+        private const int CleanseLife = 41;
+        private const int CleanseAll = 42;
+        private const int CleanseSelfCreature = 43;
+        private const int StripAll = 44;
+        private const int StripLife = 45;
+
+        private static CasterSpell Cleanse(int id = CleanseCreature, MagicSchool school = MagicSchool.CreatureEnchantment, float range = 30.0f) =>
+            new CasterSpell(id, CasterSpellKind.Cleanse, range: range, dispelSchool: school);
+
+        private static CasterSpell CleanseSelfSpell(int id = CleanseSelfCreature, MagicSchool school = MagicSchool.CreatureEnchantment) =>
+            new CasterSpell(id, CasterSpellKind.CleanseSelf, range: 75.0f, dispelSchool: school);
+
+        private static CasterSpell Strip(int id = StripAll, MagicSchool school = MagicSchool.None, float range = 30.0f) =>
+            new CasterSpell(id, CasterSpellKind.Strip, range: range, dispelSchool: school);
+
+        private static IReadOnlyDictionary<SpellCategory, CarriedEnchantment> Layer(SpellCategory category, bool beneficial, MagicSchool school, bool dispellable = true, uint power = 100) =>
+            new Dictionary<SpellCategory, CarriedEnchantment>
+            {
+                [category] = new CarriedEnchantment(VulnType, 0, 1.0f, power, 0.0, beneficial, school, dispellable),
+            };
+
+        private static VulnerabilityProfile ProfileWith(IReadOnlyDictionary<SpellCategory, CarriedEnchantment> layers) =>
+            new VulnerabilityProfile(1, 1, 1, 1, 1, 1, 1, 0, layers);
+
+        [TestMethod]
+        public void ClassifySpell_DispelTable()
+        {
+            // the retail Other cleanse (4345 / 4336: align Negative, Beneficial flag set)
+            Assert.AreEqual(CasterSpellKind.Cleanse, PetCasterBrain.ClassifySpell(SpellType.Dispel, true, false, 0, DamageType.Undef, DispelType.Negative, out _), "Other, Negative");
+
+            // the retail Self cleanse (4346 / 4337: SelfTargeted, NOT Beneficial in the dat) - must not fall to the
+            // harmful-self refusal
+            Assert.AreEqual(CasterSpellKind.CleanseSelf, PetCasterBrain.ClassifySpell(SpellType.Dispel, false, true, 0, DamageType.Undef, DispelType.Negative, out _), "Self, Negative, not flagged beneficial");
+            Assert.AreEqual(CasterSpellKind.CleanseSelf, PetCasterBrain.ClassifySpell(SpellType.Dispel, true, true, 0, DamageType.Undef, DispelType.Negative, out _), "Self, Negative, flagged beneficial");
+
+            // strips: Other, Positive or All, whatever the Beneficial flag says
+            Assert.AreEqual(CasterSpellKind.Strip, PetCasterBrain.ClassifySpell(SpellType.Dispel, false, false, 0, DamageType.Undef, DispelType.Positive, out _), "Other, Positive");
+            Assert.AreEqual(CasterSpellKind.Strip, PetCasterBrain.ClassifySpell(SpellType.Dispel, false, false, 0, DamageType.Undef, DispelType.All, out _), "Other, All");
+            Assert.AreEqual(CasterSpellKind.Strip, PetCasterBrain.ClassifySpell(SpellType.Dispel, true, false, 0, DamageType.Undef, DispelType.All, out _), "Other, All, flagged beneficial");
+
+            // a Self strip would strip the pet's own buffs
+            Assert.AreEqual(CasterSpellKind.Unusable, PetCasterBrain.ClassifySpell(SpellType.Dispel, false, true, 0, DamageType.Undef, DispelType.Positive, out _), "Self, Positive");
+            Assert.AreEqual(CasterSpellKind.Unusable, PetCasterBrain.ClassifySpell(SpellType.Dispel, false, true, 0, DamageType.Undef, DispelType.All, out _), "Self, All");
+
+            Assert.AreEqual(CasterSpellKind.Cleanse, PetCasterBrain.ClassifySpell(SpellType.FellowDispel, true, false, 0, DamageType.Undef, DispelType.Negative, out _), "fellowship cleanse");
+        }
+
+        [TestMethod]
+        public void ResolveRange_StripClosesInLikeAHarmfulSpell()
+        {
+            Assert.AreEqual(PetCasterBrain.UnboundedHarmfulReach, PetCasterBrain.ResolveRange(CasterSpellKind.Strip, 0.0f, 0.0f, 400, 75.0f));
+            Assert.AreEqual(75.0f, PetCasterBrain.ResolveRange(CasterSpellKind.Cleanse, 0.0f, 0.0f, 400, 75.0f));
+        }
+
+        [TestMethod]
+        public void Cleanse_ChosenWhenTheOwnerCarriesAHarmfulLayerInItsSchool()
+        {
+            var ctx = Ctx(Full, spells: new[] { Cleanse() },
+                ownerLayers: Layer(SpellCategory.StrengthLowering, false, MagicSchool.CreatureEnchantment));
+
+            Assert.AreEqual(CasterDecision.Cast(CleanseCreature, CasterTargetKind.Owner), PetCasterBrain.Decide(ctx));
+        }
+
+        [TestMethod]
+        public void Cleanse_NotChosen_OnlyABeneficialLayer()
+        {
+            var ctx = Ctx(Full, spells: new[] { Cleanse() },
+                ownerLayers: Layer(SpellCategory.StrengthRaising, true, MagicSchool.CreatureEnchantment));
+
+            Assert.AreEqual(CasterDecision.Follow, PetCasterBrain.Decide(ctx));
+        }
+
+        [TestMethod]
+        public void Cleanse_NotChosen_HarmfulLayerInAnotherSchool()
+        {
+            var ctx = Ctx(Full, spells: new[] { Cleanse() },
+                ownerLayers: Layer(SpellCategory.HealthLowering, false, MagicSchool.LifeMagic));
+
+            Assert.AreEqual(CasterDecision.Follow, PetCasterBrain.Decide(ctx));
+        }
+
+        [TestMethod]
+        public void Cleanse_NotChosen_UndispellableHarmfulLayer()
+        {
+            // vitae and item entries (Duration -1) are never removed by a dispel
+            var ctx = Ctx(Full, spells: new[] { Cleanse() },
+                ownerLayers: Layer(SpellCategory.StrengthLowering, false, MagicSchool.CreatureEnchantment, dispellable: false));
+
+            Assert.AreEqual(CasterDecision.Follow, PetCasterBrain.Decide(ctx));
+        }
+
+        [TestMethod]
+        public void Cleanse_NotChosen_UnresolvedLayerNeverMatches()
+        {
+            var unresolved = new Dictionary<SpellCategory, CarriedEnchantment>
+            {
+                [SpellCategory.StrengthLowering] = new CarriedEnchantment(VulnType, 0, 1.0f, 100),
+            };
+
+            var ctx = Ctx(Full, spells: new[] { Cleanse() }, ownerLayers: unresolved);
+
+            Assert.AreEqual(CasterDecision.Follow, PetCasterBrain.Decide(ctx));
+        }
+
+        [TestMethod]
+        public void Cleanse_AllSchoolSpell_MatchesAnySchool()
+        {
+            var all = Cleanse(CleanseAll, MagicSchool.None);
+
+            Assert.AreEqual(CasterDecision.Cast(CleanseAll, CasterTargetKind.Owner),
+                PetCasterBrain.Decide(Ctx(Full, spells: new[] { all }, ownerLayers: Layer(SpellCategory.HealthLowering, false, MagicSchool.LifeMagic))));
+
+            Assert.AreEqual(CasterDecision.Cast(CleanseAll, CasterTargetKind.Owner),
+                PetCasterBrain.Decide(Ctx(Full, spells: new[] { all }, ownerLayers: Layer(SpellCategory.StrengthLowering, false, MagicSchool.CreatureEnchantment))));
+        }
+
+        [TestMethod]
+        public void Cleanse_PicksTheSpellWhoseSchoolMatches()
+        {
+            var ctx = Ctx(Full, spells: new[] { Cleanse(CleanseCreature, MagicSchool.CreatureEnchantment), Cleanse(CleanseLife, MagicSchool.LifeMagic) },
+                ownerLayers: Layer(SpellCategory.HealthLowering, false, MagicSchool.LifeMagic));
+
+            Assert.AreEqual(CasterDecision.Cast(CleanseLife, CasterTargetKind.Owner), PetCasterBrain.Decide(ctx));
+        }
+
+        [TestMethod]
+        public void Cleanse_HealStillBeatsIt()
+        {
+            var ctx = Ctx(new CasterVitals(0.4f), spells: new[] { Cleanse(), HealSpell() },
+                ownerLayers: Layer(SpellCategory.StrengthLowering, false, MagicSchool.CreatureEnchantment));
+
+            Assert.AreEqual(CasterDecision.Cast(Heal, CasterTargetKind.Owner), PetCasterBrain.Decide(ctx));
+        }
+
+        [TestMethod]
+        public void Cleanse_BeatsABuff()
+        {
+            var ctx = Ctx(Full, spells: new[] { Buff(), Cleanse() },
+                ownerLayers: Layer(SpellCategory.StrengthLowering, false, MagicSchool.CreatureEnchantment));
+
+            Assert.AreEqual(CasterDecision.Cast(CleanseCreature, CasterTargetKind.Owner), PetCasterBrain.Decide(ctx));
+        }
+
+        [TestMethod]
+        public void Cleanse_NothingToCleanse_TheBuffGoesAhead()
+        {
+            var ctx = Ctx(Full, spells: new[] { Cleanse(), Buff() }, ownerLayers: null);
+
+            Assert.AreEqual(CasterDecision.Cast(StrengthBuff, CasterTargetKind.Owner), PetCasterBrain.Decide(ctx));
+        }
+
+        [TestMethod]
+        public void Cleanse_OwnerOutOfRange_MovesToTheOwner()
+        {
+            var ctx = Ctx(Full, ownerDistance: 40.0f, spells: new[] { Cleanse(range: 25.0f) },
+                ownerLayers: Layer(SpellCategory.StrengthLowering, false, MagicSchool.CreatureEnchantment));
+
+            Assert.AreEqual(CasterDecision.MoveInRange(CleanseCreature, CasterTargetKind.Owner), PetCasterBrain.Decide(ctx));
+        }
+
+        [TestMethod]
+        public void Cleanse_UnaffordableNeverReadsTheOwnerSnapshot()
+        {
+            var read = 0;
+            var ctx = Ctx(Full, spells: new[] { new CasterSpell(CleanseCreature, CasterSpellKind.Cleanse, range: 30.0f, manaCost: 50, dispelSchool: MagicSchool.CreatureEnchantment) });
+            ctx.PetMana = 10;
+            ctx.OwnerTopLayers = () => { read++; return Layer(SpellCategory.StrengthLowering, false, MagicSchool.CreatureEnchantment); };
+
+            Assert.AreEqual(CasterDecision.Follow, PetCasterBrain.Decide(ctx));
+            Assert.AreEqual(0, read, "an unaffordable cleanse never clones the owner's registry");
+        }
+
+        [TestMethod]
+        public void Cleanse_OwnerUnavailable_ReadsNothing()
+        {
+            var read = 0;
+            var ctx = Ctx(Full, spells: new[] { Cleanse() });
+            ctx.OwnerAvailable = false;
+            ctx.OwnerTopLayers = () => { read++; return null; };
+
+            Assert.AreEqual(CasterDecision.Follow, PetCasterBrain.Decide(ctx));
+            Assert.AreEqual(0, read);
+        }
+
+        [TestMethod]
+        public void CleanseSelf_CastOnThePetWhenThePetCarriesAHarmfulLayer()
+        {
+            var ctx = Ctx(Full, spells: new[] { CleanseSelfSpell() },
+                petLayers: Layer(SpellCategory.StrengthLowering, false, MagicSchool.CreatureEnchantment));
+
+            Assert.AreEqual(CasterDecision.Cast(CleanseSelfCreature, CasterTargetKind.Self), PetCasterBrain.Decide(ctx));
+        }
+
+        [TestMethod]
+        public void CleanseSelf_NotChosen_PetCleanOrWrongSchool_EvenIfTheOwnerIsAfflicted()
+        {
+            var afflictedOwner = Layer(SpellCategory.StrengthLowering, false, MagicSchool.CreatureEnchantment);
+
+            Assert.AreEqual(CasterDecision.Follow,
+                PetCasterBrain.Decide(Ctx(Full, spells: new[] { CleanseSelfSpell() }, ownerLayers: afflictedOwner, petLayers: null)),
+                "a Self cleanse is about the pet");
+
+            Assert.AreEqual(CasterDecision.Follow,
+                PetCasterBrain.Decide(Ctx(Full, spells: new[] { CleanseSelfSpell() }, petLayers: Layer(SpellCategory.HealthLowering, false, MagicSchool.LifeMagic))),
+                "wrong school");
+
+            Assert.AreEqual(CasterDecision.Follow,
+                PetCasterBrain.Decide(Ctx(Full, spells: new[] { CleanseSelfSpell() }, petLayers: Layer(SpellCategory.StrengthRaising, true, MagicSchool.CreatureEnchantment))),
+                "only a beneficial layer");
+        }
+
+        [TestMethod]
+        public void CleanseSelf_HealStillBeatsIt_AndItBeatsABuff()
+        {
+            var petAfflicted = Layer(SpellCategory.StrengthLowering, false, MagicSchool.CreatureEnchantment);
+
+            Assert.AreEqual(CasterDecision.Cast(Heal, CasterTargetKind.Owner),
+                PetCasterBrain.Decide(Ctx(new CasterVitals(0.4f), spells: new[] { CleanseSelfSpell(), HealSpell() }, petLayers: petAfflicted)));
+
+            Assert.AreEqual(CasterDecision.Cast(CleanseSelfCreature, CasterTargetKind.Self),
+                PetCasterBrain.Decide(Ctx(Full, spells: new[] { Buff(), CleanseSelfSpell() }, petLayers: petAfflicted)));
+        }
+
+        [TestMethod]
+        public void Strip_ChosenOnAnEnemyCarryingABeneficialLayer()
+        {
+            var ctx = Ctx(Full, spells: new[] { Strip() }, enemies: new[] { 10.0f },
+                profile: _ => ProfileWith(Layer(SpellCategory.StrengthRaising, true, MagicSchool.CreatureEnchantment)));
+
+            Assert.AreEqual(CasterDecision.Cast(StripAll, CasterTargetKind.Enemy, 0), PetCasterBrain.Decide(ctx));
+        }
+
+        [TestMethod]
+        public void Strip_RedundantOnAnEnemyWithNothingToStrip()
+        {
+            var harmfulOnly = Ctx(Full, spells: new[] { Strip() }, enemies: new[] { 10.0f },
+                profile: _ => ProfileWith(Layer(SpellCategory.StrengthLowering, false, MagicSchool.CreatureEnchantment)));
+            Assert.AreEqual(CasterDecision.Follow, PetCasterBrain.Decide(harmfulOnly), "only a harmful layer");
+
+            var bare = Ctx(Full, spells: new[] { Strip() }, enemies: new[] { 10.0f });
+            Assert.AreEqual(CasterDecision.Follow, PetCasterBrain.Decide(bare), "no layers at all");
+
+            var wrongSchool = Ctx(Full, spells: new[] { Strip(StripLife, MagicSchool.LifeMagic) }, enemies: new[] { 10.0f },
+                profile: _ => ProfileWith(Layer(SpellCategory.StrengthRaising, true, MagicSchool.CreatureEnchantment)));
+            Assert.AreEqual(CasterDecision.Follow, PetCasterBrain.Decide(wrongSchool), "a Life strip against a Creature buff");
+
+            var undispellable = Ctx(Full, spells: new[] { Strip() }, enemies: new[] { 10.0f },
+                profile: _ => ProfileWith(Layer(SpellCategory.StrengthRaising, true, MagicSchool.CreatureEnchantment, dispellable: false)));
+            Assert.AreEqual(CasterDecision.Follow, PetCasterBrain.Decide(undispellable), "an exempt or permanent buff");
+        }
+
+        [TestMethod]
+        public void Strip_FallsThroughToTheNextEnemy()
+        {
+            var ctx = Ctx(Full, spells: new[] { Strip() }, enemies: new[] { 10.0f, 12.0f },
+                profile: i => i == 1
+                    ? ProfileWith(Layer(SpellCategory.StrengthRaising, true, MagicSchool.CreatureEnchantment))
+                    : VulnerabilityProfile.None);
+
+            Assert.AreEqual(CasterDecision.Cast(StripAll, CasterTargetKind.Enemy, 1), PetCasterBrain.Decide(ctx));
+        }
+
+        [TestMethod]
+        public void Strip_OutOfRange_ClosesIn()
+        {
+            var ctx = Ctx(Full, spells: new[] { Strip(range: 5.0f) }, enemies: new[] { 20.0f },
+                profile: _ => ProfileWith(Layer(SpellCategory.StrengthRaising, true, MagicSchool.CreatureEnchantment)));
+
+            Assert.AreEqual(CasterDecision.MoveInRange(StripAll, CasterTargetKind.Enemy, 0), PetCasterBrain.Decide(ctx));
+        }
+
+        [TestMethod]
+        public void Strip_NeverTargetsTheOwnerOrASibling_EvenWithNoEnemies()
+        {
+            // the owner and the pet carry beneficial layers, which a strip must never be aimed at
+            var buffed = Layer(SpellCategory.StrengthRaising, true, MagicSchool.CreatureEnchantment);
+
+            var ctx = Ctx(Full, spells: new[] { Strip() }, ownerLayers: buffed, petLayers: buffed,
+                siblings: new[] { new CasterAlly(new CasterVitals(0.1f), 2.0f) });
+
+            Assert.AreEqual(CasterDecision.Follow, PetCasterBrain.Decide(ctx));
+        }
+
+        [TestMethod]
+        public void Strip_NoHarmfulOrStripBound_NeverReadsAnEnemyProfile()
+        {
+            var read = 0;
+            var ctx = Ctx(Full, spells: new[] { Cleanse() }, enemies: new[] { 10.0f }, profile: _ => { read++; return VulnerabilityProfile.None; });
+
+            Assert.AreEqual(CasterDecision.Follow, PetCasterBrain.Decide(ctx));
+            Assert.AreEqual(0, read, "a pet with no harmful spell never clones an enemy's registry");
+        }
+
+        [TestMethod]
+        public void Strip_AgainstABolt_SpellbookOrderBreaksTheTie_AndABareEnemyGetsTheBolt()
+        {
+            var buffedEnemy = ProfileWith(Layer(SpellCategory.StrengthRaising, true, MagicSchool.CreatureEnchantment));
+
+            // a bolt is Neutral, the same tier as a strip on a buffed enemy
+            Assert.AreEqual(CasterDecision.Cast(StripAll, CasterTargetKind.Enemy, 0),
+                PetCasterBrain.Decide(Ctx(Full, spells: new[] { Strip(), Bolt() }, enemies: new[] { 10.0f }, profile: _ => buffedEnemy)));
+
+            Assert.AreEqual(CasterDecision.Cast(FlameBolt, CasterTargetKind.Enemy, 0),
+                PetCasterBrain.Decide(Ctx(Full, spells: new[] { Bolt(), Strip() }, enemies: new[] { 10.0f }, profile: _ => buffedEnemy)));
+
+            // a strip with nothing to strip never blocks the bolt
+            Assert.AreEqual(CasterDecision.Cast(FlameBolt, CasterTargetKind.Enemy, 0),
+                PetCasterBrain.Decide(Ctx(Full, spells: new[] { Strip(), Bolt() }, enemies: new[] { 10.0f })));
+        }
+
+        [TestMethod]
+        public void BuildTopLayers_CarriesTheResolvedDispelFacts()
+        {
+            var entries = new List<PropertiesEnchantmentRegistry>
+            {
+                new PropertiesEnchantmentRegistry { SpellId = 11, SpellCategory = SpellCategory.StrengthRaising, PowerLevel = 100, StatModType = VulnType },
+                new PropertiesEnchantmentRegistry { SpellId = 12, SpellCategory = SpellCategory.StrengthLowering, PowerLevel = 100, StatModType = VulnType },
+                new PropertiesEnchantmentRegistry { SpellId = 13, SpellCategory = SpellCategory.HealthLowering, PowerLevel = 100, StatModType = VulnType },
+            };
+
+            EnchantmentDispelFacts? Resolve(PropertiesEnchantmentRegistry e) =>
+                e.SpellId == 11 ? new EnchantmentDispelFacts(true, MagicSchool.CreatureEnchantment, true)
+                : e.SpellId == 12 ? new EnchantmentDispelFacts(false, MagicSchool.CreatureEnchantment, false)
+                : (EnchantmentDispelFacts?)null;
+
+            var layers = VulnerabilityProfile.BuildTopLayers(entries, Resolve);
+
+            Assert.IsTrue(layers[SpellCategory.StrengthRaising].IsDispellableBy(true, MagicSchool.None));
+            Assert.IsFalse(layers[SpellCategory.StrengthRaising].IsDispellableBy(false, MagicSchool.None), "a beneficial layer is not a cleanse target");
+            Assert.IsFalse(layers[SpellCategory.StrengthLowering].IsDispellableBy(false, MagicSchool.None), "not dispellable");
+            Assert.IsFalse(layers[SpellCategory.HealthLowering].IsDispellableBy(false, MagicSchool.None), "unresolved never matches");
+            Assert.IsFalse(layers[SpellCategory.HealthLowering].IsDispellableBy(true, MagicSchool.None), "unresolved never matches");
+
+            // the one-argument overload keeps every layer unresolved
+            Assert.IsFalse(VulnerabilityProfile.BuildTopLayers(entries)[SpellCategory.StrengthRaising].IsBeneficial.HasValue);
+        }
+
+        // ---- the dispel power window (SelectDispel: min_power <= PowerLevel <= max_power, before school and align) ----
+        //
+        // Real data: every Incantation of Nullify spell (ids 4330-4350) has min_Power 0 and max_Power 435
+        // (local ace_world: SELECT id,name,dispel_School,align,number,max_Power FROM spell WHERE name LIKE
+        // 'Incantation of Nullify%'). The window is carried per spell, so a spell with a narrower one is judged by it.
+
+        private const int NullifyMinPower = 0;
+        private const int NullifyMaxPower = 435;
+
+        [DataTestMethod]
+        [DataRow(100u, true)]
+        [DataRow(0u, true)]
+        [DataRow(435u, true)]
+        [DataRow(436u, false)]
+        [DataRow(500u, false)]
+        public void Cleanse_OnlyALayerInsideThePowerWindowIsCleansed(uint layerPower, bool chosen)
+        {
+            var spell = new CasterSpell(CleanseCreature, CasterSpellKind.Cleanse, range: 30.0f, dispelSchool: MagicSchool.CreatureEnchantment, minPower: NullifyMinPower, maxPower: NullifyMaxPower);
+            var ctx = Ctx(Full, spells: new[] { spell }, ownerLayers: Layer(SpellCategory.StrengthLowering, false, MagicSchool.CreatureEnchantment, power: layerPower));
+
+            Assert.AreEqual(chosen ? CasterDecision.Cast(CleanseCreature, CasterTargetKind.Owner) : CasterDecision.Follow, PetCasterBrain.Decide(ctx));
+        }
+
+        [TestMethod]
+        public void Cleanse_LayerBelowMinPower_IsNotChosen()
+        {
+            var spell = new CasterSpell(CleanseCreature, CasterSpellKind.Cleanse, range: 30.0f, dispelSchool: MagicSchool.CreatureEnchantment, minPower: 200, maxPower: 435);
+            var ctx = Ctx(Full, spells: new[] { spell }, ownerLayers: Layer(SpellCategory.StrengthLowering, false, MagicSchool.CreatureEnchantment, power: 100));
+
+            Assert.AreEqual(CasterDecision.Follow, PetCasterBrain.Decide(ctx));
+        }
+
+        [TestMethod]
+        public void CleanseSelf_LayerAboveMaxPower_IsNotChosen()
+        {
+            var spell = new CasterSpell(CleanseSelfCreature, CasterSpellKind.CleanseSelf, range: 75.0f, dispelSchool: MagicSchool.CreatureEnchantment, minPower: NullifyMinPower, maxPower: NullifyMaxPower);
+
+            Assert.AreEqual(CasterDecision.Follow,
+                PetCasterBrain.Decide(Ctx(Full, spells: new[] { spell }, petLayers: Layer(SpellCategory.StrengthLowering, false, MagicSchool.CreatureEnchantment, power: 500))));
+
+            Assert.AreEqual(CasterDecision.Cast(CleanseSelfCreature, CasterTargetKind.Self),
+                PetCasterBrain.Decide(Ctx(Full, spells: new[] { spell }, petLayers: Layer(SpellCategory.StrengthLowering, false, MagicSchool.CreatureEnchantment, power: 300))));
+        }
+
+        [TestMethod]
+        public void Strip_EnemyLayerAboveMaxPower_IsRedundant()
+        {
+            var spell = new CasterSpell(StripAll, CasterSpellKind.Strip, range: 30.0f, minPower: NullifyMinPower, maxPower: NullifyMaxPower);
+
+            Assert.AreEqual(CasterDecision.Follow,
+                PetCasterBrain.Decide(Ctx(Full, spells: new[] { spell }, enemies: new[] { 10.0f },
+                    profile: _ => ProfileWith(Layer(SpellCategory.StrengthRaising, true, MagicSchool.CreatureEnchantment, power: 500)))));
+
+            Assert.AreEqual(CasterDecision.Cast(StripAll, CasterTargetKind.Enemy, 0),
+                PetCasterBrain.Decide(Ctx(Full, spells: new[] { spell }, enemies: new[] { 10.0f },
+                    profile: _ => ProfileWith(Layer(SpellCategory.StrengthRaising, true, MagicSchool.CreatureEnchantment, power: 400)))));
+        }
+
+        // ---- a cleanse already in its pre-cast is dropped when its target was cleaned meanwhile ----------------
+
+        [TestMethod]
+        public void CleanseStillNeeded_Table()
+        {
+            var afflicted = Layer(SpellCategory.StrengthLowering, false, MagicSchool.CreatureEnchantment, power: 300);
+
+            Assert.IsTrue(PetCasterBrain.CleanseStillNeeded(afflicted, MagicSchool.CreatureEnchantment, NullifyMinPower, NullifyMaxPower));
+            Assert.IsTrue(PetCasterBrain.CleanseStillNeeded(afflicted, MagicSchool.None, NullifyMinPower, NullifyMaxPower), "an all-school cleanse");
+
+            Assert.IsFalse(PetCasterBrain.CleanseStillNeeded(null, MagicSchool.None, NullifyMinPower, NullifyMaxPower), "the other pet already cleansed it");
+            Assert.IsFalse(PetCasterBrain.CleanseStillNeeded(Layer(SpellCategory.StrengthRaising, true, MagicSchool.CreatureEnchantment), MagicSchool.None, NullifyMinPower, NullifyMaxPower), "only a beneficial layer is left");
+            Assert.IsFalse(PetCasterBrain.CleanseStillNeeded(afflicted, MagicSchool.LifeMagic, NullifyMinPower, NullifyMaxPower), "wrong school");
+            Assert.IsFalse(PetCasterBrain.CleanseStillNeeded(afflicted, MagicSchool.CreatureEnchantment, NullifyMinPower, 200), "above the power window");
         }
 
         [TestMethod]
@@ -742,6 +1157,111 @@ namespace ACE.Server.Tests
 
             Assert.AreEqual(35u, caster.Health.Current, "a non-friendly Self spell is redirected onto the caster, as before");
             Assert.AreEqual(35u, sibling.Health.Current);
+        }
+
+        // ---- friendly fire and the heal re-check at release (2026-11-04) ----------------------------------------
+
+        [TestMethod]
+        public void CanDamage_ACombatPetNeverDamagesAPlayer()
+        {
+            var owner = Owner();
+            var pet = CasterPet(owner);
+
+            Assert.IsFalse(pet.CanDamage(owner), "a pet's ring/blast/volley colliding with its owner lands nothing");
+            Assert.IsFalse(pet.CanDamage(Owner()), "nor on any other player");
+
+            // nor on a friendly pet: the owner's other summon, or another player's pet
+            Assert.IsFalse(pet.CanDamage(CasterPet(owner, casterFlag: false)), "the owner's other pet is never damaged");
+            Assert.IsFalse(pet.CanDamage(CasterPet(Owner(), casterFlag: false)), "another player's pet is never damaged");
+
+            // control: a monster still damages a player, and the pet still damages a monster
+            var monster = Monster(null, 55.0f, BareLandblock());
+
+            Assert.IsTrue(monster.CanDamage(owner), "a monster attacking a player is unchanged");
+            Assert.IsTrue(pet.CanDamage(monster), "a pet attacking a monster is unchanged");
+        }
+
+        [DataTestMethod]
+        [DataRow(0.10f, true)]
+        [DataRow(0.749f, true)]
+        [DataRow(0.75f, false)]
+        [DataRow(1.0f, false)]
+        public void HealStillNeeded_IsBelowTheHealThreshold(float health, bool expected)
+        {
+            Assert.AreEqual(expected, PetCasterBrain.HealStillNeeded(new CasterVitals(health), CasterVital.Health));
+            Assert.AreEqual(expected, PetCasterBrain.HealStillNeeded(new CasterVitals(1.0f, stamina: health), CasterVital.Stamina), "per vital");
+            Assert.IsFalse(PetCasterBrain.HealStillNeeded(new CasterVitals(health), CasterVital.Stamina), "a full vital never needs its heal");
+        }
+
+        [TestMethod]
+        public void FriendlyCastStillWanted_DropsAHealOnceTheTargetIsToppedUp()
+        {
+            var owner = Owner();
+            var landblock = BareLandblock();
+
+            var caster = CasterPet(owner);
+            caster.CurrentLandblock = landblock;
+
+            var sibling = CasterPet(owner, casterFlag: false);
+            sibling.CurrentLandblock = landblock;
+
+            var max = sibling.Health.MaxValue;
+
+            sibling.Health.Current = max / 10;
+            Assert.IsTrue(caster.FriendlyCastStillWanted(FakeHeal(25), sibling), "still low at release: the heal goes out");
+
+            sibling.Health.Current = max;
+            Assert.IsFalse(caster.FriendlyCastStillWanted(FakeHeal(25), sibling), "topped up during the pre-cast: the heal is dropped");
+
+            sibling.Health.Current = (uint)Math.Ceiling(max * PetCasterBrain.HealThreshold);
+            Assert.IsFalse(caster.FriendlyCastStillWanted(FakeHeal(25), sibling), "at the threshold: not needed");
+
+            // a target no longer on this pet's tick thread is never read, and never healed
+            sibling.Health.Current = max / 10;
+            sibling.CurrentLandblock = null;
+            Assert.IsFalse(caster.FriendlyCastStillWanted(FakeHeal(25), sibling), "an unreadable target is not healed");
+        }
+
+        [TestMethod]
+        public void FriendlyCastStillWanted_LeavesNonHealSpellsAlone()
+        {
+            var owner = Owner();
+            var caster = CasterPet(owner);
+            var sibling = CasterPet(owner, casterFlag: false);
+
+            sibling.Health.Current = sibling.Health.MaxValue;
+
+            // a harmful Boost (Harm) is not a Heal-kind spell: the re-check never applies to it
+            Assert.IsTrue(caster.FriendlyCastStillWanted(FakeHeal(-25), sibling));
+        }
+
+        [TestMethod]
+        public void TryStartExplicitCast_RechecksAFriendlyCastBeforeReleasingIt()
+        {
+            var source = File.ReadAllText(Path.Combine(ClassAbilityAffinityDeclarationTests.RepoRoot(), "Source", "ACE.Server", "WorldObjects", "Monster_Magic.cs")).Replace("\r\n", "\n");
+
+            var method = source.IndexOf("internal bool TryStartExplicitCast(", StringComparison.Ordinal);
+            Assert.IsTrue(method >= 0, "TryStartExplicitCast was not found");
+
+            var recheck = source.IndexOf("FriendlyCastStillWanted(spell, target)", method, StringComparison.Ordinal);
+            var release = source.IndexOf("CastSpellAt(spell, target, friendly);", method, StringComparison.Ordinal);
+
+            Assert.IsTrue(recheck > method, "the release action re-checks a friendly cast");
+            Assert.IsTrue(release > recheck, "before CastSpellAt releases it");
+
+            var drop = source.Substring(recheck, release - recheck);
+            StringAssert.Contains(drop, "CombatPet.RefundedMana(Mana.Current, Mana.MaxValue, manaUsed)", "a dropped heal refunds its mana");
+            StringAssert.Contains(drop, "NextAttackTime = Timers.RunningTime", "and releases the post-cast cooldown");
+        }
+
+        [DataTestMethod]
+        [DataRow(50u, 100u, 0u, 50u)]
+        [DataRow(50u, 100u, 30u, 80u)]
+        [DataRow(90u, 100u, 30u, 100u)]
+        [DataRow(uint.MaxValue - 1, uint.MaxValue, 30u, uint.MaxValue)]
+        public void RefundedMana_ReturnsTheCostCappedAtMax(uint current, uint max, uint used, uint expected)
+        {
+            Assert.AreEqual(expected, CombatPet.RefundedMana(current, max, used));
         }
 
         /// <summary>

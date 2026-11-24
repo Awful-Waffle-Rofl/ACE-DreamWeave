@@ -174,6 +174,19 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
+        public void OnlyTheDamageableSource_IsHandedToTheObjective_NeverTheInertPillar()
+        {
+            Assert.IsTrue(WorldEventSpawner.NotifiesObjectiveOfSource(WorldEventSpawnKind.Source));
+
+            foreach (var kind in new[]
+            {
+                WorldEventSpawnKind.InertObjective, WorldEventSpawnKind.Wave, WorldEventSpawnKind.Boss,
+                WorldEventSpawnKind.Decor, WorldEventSpawnKind.Npc
+            })
+                Assert.IsFalse(WorldEventSpawner.NotifiesObjectiveOfSource(kind), kind.ToString());
+        }
+
+        [TestMethod]
         public void ProgressText_NothingPlaced_UsesTheSourceNoun()
         {
             var pillars = new DestroySourceObjective(DestroySourceGoal(), Guids(), "pillar", "pillars");
@@ -412,13 +425,13 @@ namespace ACE.Server.Tests
         private const string ComposerBosses =
             @"{ ""bosses"": [ { ""id"": ""ember_boss"", ""displayName"": ""Ember Boss"", ""wcid"": 1002619 } ] }";
 
-        private static WorldEventAxisStore ComposerStore()
+        internal static WorldEventAxisStore ComposerStore(string anchorsJson = null)
         {
             return WorldEventAxisStore.Parse(ComposerSources, ValidationFamilies, ComposerGoals, ComposerRewards,
-                null, ComposerBosses);
+                anchorsJson, ComposerBosses);
         }
 
-        private static WorldEventCatalog ComposerCatalog()
+        internal static WorldEventCatalog ComposerCatalog()
         {
             var weenie = new Weenie
             {

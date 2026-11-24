@@ -74,6 +74,13 @@ namespace ACE.Server.MonsterEffects.Effects
             if (attacker == null || attacker.IsDead || defender.IsDead)
                 return;
 
+            // Hunter's Echo: the counter to an avoided Echo arrow is aimed at the Echo that fired it, resolved NOW
+            // (the swing itself runs later, outside the Echo hit), or dropped when that Echo is gone
+            attacker = Creature.ResolveHuntersEchoRetaliationTarget(attacker, defender);
+
+            if (attacker == null)
+                return;
+
             var pct = spec.GetDouble("pct", 0.0);
             if (pct <= 0.0)
                 return;
@@ -90,7 +97,15 @@ namespace ACE.Server.MonsterEffects.Effects
             chain.AddDelaySeconds(0.1);
             chain.AddAction(defender, () =>
             {
-                if (defender.IsDead || attacker.IsDead)
+                // IsDestroyed: a Hunter's Echo target can be removed from the world before the counter lands
+                if (defender.IsDead || attacker.IsDead || attacker.IsDestroyed)
+                    return;
+
+                // Hunter's Echo: this runs on the MONSTER's queue and writes the Echo, so the two must still share a
+                // landblock group at swing time (it may have moved since the counter was scheduled); otherwise dropped.
+                // Not routed through the Echo's queue instead: the swing also reads the monster (its weapon, skills,
+                // effects), which would then be the cross-thread read.
+                if (attacker is CombatPet counterEcho && counterEcho.IsHuntersEcho && !Creature.SharesLandblockGroup(counterEcho, defender))
                     return;
 
                 DealCounterDamage(defender, attacker, weapon, pct);

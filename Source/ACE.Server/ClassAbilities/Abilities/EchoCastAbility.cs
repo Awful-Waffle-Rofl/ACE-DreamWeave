@@ -1,6 +1,5 @@
 using System;
 
-using ACE.Common;
 using ACE.Entity.Enum;
 using ACE.Server.EquipmentMods;
 using ACE.Server.Managers;
@@ -9,28 +8,27 @@ using ACE.Server.WorldObjects;
 namespace ACE.Server.ClassAbilities.Abilities
 {
     /// <summary>
-    /// Archmage T3 game-changer: a landed damaging spell projectile of ANY school has an 8/16/24% chance
-    /// (by rank) to immediately re-cast itself at the same target - no mana, no wind-up. It was War Magic
-    /// only until 2026-09-13, when the school test came off the shared spell-hit dispatch in
-    /// SpellProjectile.OnCollideObject. The echo chance scales with Magic Item
-    /// Tinkering (a finely tuned casting implement holds the echo). The recast reuses the normal
-    /// projectile machinery (WorldObject.CreateSpellProjectiles), so it is a faithful copy of the
-    /// original spell (all its projectiles, full damage, its own resist/crit rolls) and still benefits
-    /// from Overchannel / Void Damage. Since 2026-09-21 (owner ruling: an echo is a full second cast with
-    /// all modifiers, AOE included) it is flagged IsEchoCopy rather than IsClassAbilitySpawned, so Spell AOE
-    /// radiates off it while it still never echoes again; fromProc keeps it from re-firing item procs.
+    /// Archmage T3 game-changer, the Echo Wisp rework (2026-11-22, Docs/ClassAbilities/ARCHMAGE-ECHO-CAST-WISP-DESIGN.md):
+    /// each committed harmful cast of any school, and each Heal or Revitalize cast at the caster or a fellow (owner,
+    /// 2026-11-23), rolls this ability's chance once and, on a success, leaves an Echo Wisp
+    /// beside the caster (<see cref="EchoWisp"/>) that recasts the same spell for its life as the caster's own
+    /// first-hand cast. The roll lives in Player.TryTriggerEchoWisp, called from the hand-cast commit
+    /// (Player.DoCastSpell_Inner) and the three Spellsword proc handlers; this class owns the definition, the chance
+    /// ladder and the readout.
     ///
-    /// ISpellHitAbility: dispatched from SpellProjectile.OnCollideObject for every landed damaging-spell
-    /// hit, any school; this handler self-restricts to a projectile that is neither an echo nor a Spell AOE
-    /// child (no cascade) - see <see cref="CanEcho"/>.
+    /// NOT A HOOK HANDLER. IPassiveStatAbility marks it as read directly off the player at its call sites (the
+    /// Overchannel and Volatile Wall precedent), which exempts it from the "Implemented skills hook something" rule.
+    /// Until the rework this was an ISpellHitAbility that recast a landed damaging projectile
+    /// (OnSpellHit, StampEchoCopy, CanEcho and SpellProjectile.IsEchoCopy). That path is deleted, in the same change
+    /// that first arms the wisp latch: while both existed, a legacy echo copy of a wisp bolt would have carried no
+    /// wisp mark and escaped the wisp PvP guard (plan ruling on #2297).
     ///
-    /// Magic Item Tinkering is MULTIPLICATIVE on this ability's OWN rank bonus (2026-09-12 overhaul), not
-    /// an additive rider fed straight into EchoChance. EchoChance's fraction parameter stays additive in
-    /// its own units, so OnSpellHit/GetReadout feed it the AMOUNT the multiplier adds
-    /// (rankBonus * affinity - rankBonus) rather than the multiplier itself - mathematically identical to
-    /// rankBonus * affinity + gear, just expressed through the pre-existing additive helper shape.
+    /// Magic Item Tinkering is MULTIPLICATIVE on this ability's OWN rank bonus (2026-09-12 overhaul), not an additive
+    /// rider fed straight into EchoChance. EchoChance's fraction parameter stays additive in its own units, so
+    /// <see cref="ChanceFor"/> and GetReadout feed it the AMOUNT the multiplier adds (rankBonus * affinity - rankBonus)
+    /// rather than the multiplier itself - mathematically identical to rankBonus * affinity + gear.
     /// </summary>
-    public class EchoCastAbility : ISpellHitAbility, IAbilityReadout
+    public class EchoCastAbility : IClassAbility, IPassiveStatAbility, IAbilityReadout
     {
         public ClassAbilityDefinition Definition { get; } = new ClassAbilityDefinition
         {
@@ -39,20 +37,34 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "echocast",
             DisplayName = "Echo Cast",
-            Description = "Your landed damaging spell projectiles, of any school, have an 8/16/24% chance " +
-                          "(by rank) to immediately cast again at the same target for free - no mana, no " +
-                          "wind-up. The echo is a full second cast with all your bonuses, and Spell AOE can " +
-                          "spread it; an echo never echoes. Higher Magic Item Tinkering increases the chance.",
+            // Live text: the ladder is chanceBase + (rank - 1) * chanceStep, exactly EchoChance / ChanceFor /
+            // GetReadout below (class_ability_echocast_chance_base / _step). The wisp numbers are the wisp tunables.
+            // Heal and Revitalize joined the qualifying casts on 2026-11-23 (owner); the text is orchestrator-written.
+            DescriptionTemplate = "Your harmful spells from any school, and your Heal and Revitalize spells, can leave an Echo Wisp beside you. For " +
+                          "{v:class_ability_echocast_wisp_duration_seconds|num} seconds it recasts the same spell every " +
+                          "{v:class_ability_echocast_wisp_interval_min_seconds|num} to {v:class_ability_echocast_wisp_interval_max_seconds|num} seconds " +
+                          "as if you cast it, with your skill, bonuses and procs, at no cost. A debuff moves on to enemies that lack it; " +
+                          "a damage spell stays on its target until it dies, then moves on; a heal moves on to the most hurt member of " +
+                          "your fellowship once its target is full. Up to " +
+                          "{v:class_ability_echocast_wisp_max_active|int} wisps at once. A wisp's cast never echoes.",
+            RankTailTemplate = "{ladder:class_ability_echocast_chance_base,class_ability_echocast_chance_step|pct}% chance",
             MaxRank = 3,
             // Archmage pass 2026-10-24 (reprice wave 6): 2/rank -> 1/rank. It was 1/2/3 until the 2026-09-13
             // premium reprice moved it to flat 2/rank.
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
             AffinitySkill = Skill.MagicItemTinkering,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "wisps", Bounds = CeilingBounds.Stacks, Source = CeilingSource.Tunable, Key = "class_ability_echocast_wisp_max_active", Label = "max wisps at once", Format = "int", ZeroIsLimit = true },
+                new ClassAbilityCeiling { Id = "gear", Bounds = CeilingBounds.Gear, Source = CeilingSource.GearStackCap, GearMod = EquipmentModId.EchoCast, Label = "max from gear", Format = "pct" },
+            },
+            // the wisp tunables the description quotes are read by Player.TryTriggerEchoWisp
+            TunableSourceFiles = new[] { "WorldObjects/Player_EchoWisp.cs" },
         };
 
         /// <summary>
-        /// The echo chance at a given rank: base + step*(rank-1) + the Magic Item Tinkering rider + the
+        /// The wisp chance at a given rank: base + step*(rank-1) + the Magic Item Tinkering rider + the
         /// equipment-mod term. Pure for testability (mirrors the other reactive-chance handlers). Returns 0
         /// for rank &lt;= 0.
         ///
@@ -69,102 +81,26 @@ namespace ACE.Server.ClassAbilities.Abilities
         }
 
         /// <summary>
-        /// TRUE when a landed projectile may roll for an echo: not an echo itself (<paramref name="isEchoCopy"/>
-        /// - which also covers a Spell AOE child radiated off an echo, since the child inherits the flag) and
-        /// not any other class-ability-spawned secondary copy (<paramref name="isClassAbilitySpawned"/> - a
-        /// Spell AOE child). Pure so the recursion guard is unit-testable without a live projectile.
+        /// <paramref name="player"/>'s live wisp chance at <paramref name="rank"/>: <see cref="EchoChance"/> over the live
+        /// tunables, the Magic Item Tinkering multiplier (no-arg overload = the shared 0.12/0.17 rate pair) and the Echo
+        /// Cast equipment mod (MACHINERY, outside the affinity multiply). Read by Player.TryTriggerEchoWisp, which only
+        /// calls it for a player who holds a rank.
         /// </summary>
-        public static bool CanEcho(bool isClassAbilitySpawned, bool isEchoCopy)
+        public static float ChanceFor(Player player, int rank)
         {
-            return !isClassAbilitySpawned && !isEchoCopy;
-        }
-
-        public void OnSpellHit(Player caster, int rank, Creature primaryTarget, SpellProjectile projectile)
-        {
-            // No cascade: an echo never echoes again, and neither does any class-ability-spawned copy.
-            if (!CanEcho(projectile.IsClassAbilitySpawned, projectile.IsEchoCopy))
-                return;
-
-            // Don't echo at a corpse (the primary hit frequently kills the target) or a torn-down target.
-            if (primaryTarget.IsDead || primaryTarget.PhysicsObj == null || caster.PhysicsObj == null)
-                return;
-
             var chanceBase = PropertyManager.GetDouble("class_ability_echocast_chance_base").Item;
             var chanceStep = PropertyManager.GetDouble("class_ability_echocast_chance_step").Item;
 
             var rankBonus = rank <= 0 ? 0.0 : chanceBase + (rank - 1) * chanceStep;
 
-            // Magic Item Tinkering (MULTIPLICATIVE, no-arg overload = the shared 0.12/0.17 rate pair).
-            var affinity = caster.GetClassAbilityAffinityMultiplier(Skill.MagicItemTinkering);
+            var affinity = player.GetClassAbilityAffinityMultiplier(Skill.MagicItemTinkering);
             var tinker = rankBonus * affinity - rankBonus;
 
-            // Echo Cast equipment mod (MACHINERY): +pp on this ability's own recast roll, OUTSIDE the
-            // affinity multiply. Read inside the handler, which only runs for a caster who owns Echo Cast.
-            var chance = EchoChance(rank, chanceBase, chanceStep, tinker,
-                caster.GetEquippedModValue(EquipmentModId.EchoCast));
-
-            if (ThreadSafeRandom.Next(0.0f, 1.0f) > chance)
-                return;
-
-            // Re-cast the same spell at the same target: no mana, no wind-up. fromProc suppresses
-            // item procs. The life-projectile basis goes in here too; this call does NOT go through
-            // HandleCastSpell_Projectile, so it neither drains the caster's vital again nor re-resolves the
-            // Blood Charge pool - both stay paid once, by the original cast. CreateSpellProjectiles snapshots
-            // the player's CURRENT per-cast values onto the echo, which by now may belong to a later cast, so
-            // StampEchoCopy then overwrites them with the parent's own launch-time snapshots.
-            var echoes = caster.CreateSpellProjectiles(projectile.Spell, primaryTarget, projectile.ProjectileLauncher,
-                projectile.IsWeaponSpell, fromProc: true, lifeProjectileDamage: projectile.LifeProjectileDamage, suppressPetAssist: true);
-
-            foreach (var echo in echoes)
-                StampEchoCopy(echo, projectile);
+            return EchoChance(rank, chanceBase, chanceStep, tinker, player.GetEquippedModValue(EquipmentModId.EchoCast));
         }
 
         /// <summary>
-        /// Stamps an echo with everything it inherits from the cast it copies. A FULL second cast (owner
-        /// ruling 2026-09-21): the echo is deliberately NOT flagged IsClassAbilitySpawned, so every spell-hit
-        /// handler treats it like a normal cast - Spell AOE radiates off it - and its damage runs the same
-        /// CalculateDamage path (own crit roll, Overchannel / Void Damage via GetClassAbilitySpellDamageMod).
-        ///
-        ///  - IsEchoCopy: the one thing that differs. It stops the echo, and any AOE child radiated off it,
-        ///    from echoing again, and it stops the echo granting a Blood Charge (see
-        ///    SpellProjectile.GrantsLifeProjectileCharge).
-        ///  - SpellweaveDamageMod: the PARENT's captured stamp. CreateSpellProjectiles stamped it from the live
-        ///    player field, which by now may belong to a later cast.
-        ///  - LifeProjectileDamage: the PARENT's damage basis (Martyr's Hecatomb, Curse of Raven Fury). That
-        ///    basis is the health the ORIGINAL cast drained at cast time (WorldObject_Magic
-        ///    .HandleCastSpell_Projectile); an echo never re-runs that path, so without this copy its basis was
-        ///    0 and the echo landed for 0 (SpellProjectile.CalculateDamage: LifeProjectileDamage x
-        ///    DamageRatio). The echo pays nothing for it - the drain happened once.
-        ///  - InheritsProcCasterSkill: set when the parent is a Spellsword proc (or an echo of one), so the echo
-        ///    reads Item Enchantment like its parent. IsClassAbilityProc itself is NOT copied (Cascade's gate).
-        ///  - VolatileWallCounter: NOT inherited (CopyPerCastStamps never copies it). The echo keeps the fresh
-        ///    counter its own launch created, so a wall echo ramps Volatile Wall from its own first landed
-        ///    projectile.
-        ///  - LifeProjectileStamp: the PARENT's Blood Price multiplier, Blood Charge ramp or Exsanguinate burst,
-        ///    and outcome, snapshotted when the parent launched. The live player fields belong to the caster's
-        ///    most recent cast, so an echo reading them could take a burst multiplier and resistance-ignore
-        ///    from a later Exsanguinate it never earned (PR #1271 review).
-        ///
-        /// Public and static so the inheritance rule is unit-testable on two plain projectiles.
-        /// </summary>
-        public static void StampEchoCopy(SpellProjectile echo, SpellProjectile parent)
-        {
-            if (echo == null || parent == null)
-                return;
-
-            echo.IsEchoCopy = true;
-
-            // An echo of a Spellsword proc reads the proc's caster skill (Item Enchantment) for resist, skill
-            // bonus and imbue scaling, without becoming a proc itself (which would let it cascade).
-            echo.InheritsProcCasterSkill = parent.IsClassAbilityProc || parent.InheritsProcCasterSkill;
-
-            // Volatile Wall: an echo is a SEPARATE cast (owner ruling 2026-10-24). CopyPerCastStamps leaves
-            // VolatileWallCounter alone, so the echo keeps the fresh counter its own launch gave it.
-            SpellProjectile.CopyPerCastStamps(echo, parent);
-        }
-
-        /// <summary>
-        /// Mirrors the terms fed into EchoChance() above (x100 for display) - the two must stay in step.
+        /// Mirrors the terms fed into EchoChance() by ChanceFor above (x100 for display) - the two must stay in step.
         /// EchoChance takes no affinity-cap parameter, so this readout never clamps the Magic Item
         /// Tinkering rider and CapNote is always null.
         ///
@@ -196,9 +132,14 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Gear = gear,
                 Effective = total,
                 Unit = "%",
-                Label = "recast",
+                Label = "wisp",
                 Per = null,
                 CapNote = null,
+                Ceilings = new[]
+                {
+                    ClassAbilityCeilings.Read(Definition, "wisps", player.ActiveEchoWispCount, rank, ClassAbilityText.Live),
+                    ClassAbilityCeilings.Read(Definition, "gear", gear, rank, ClassAbilityText.Live),
+                },
             };
         }
     }

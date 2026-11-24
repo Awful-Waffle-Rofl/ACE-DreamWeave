@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.CompilerServices;
 
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
@@ -106,6 +107,42 @@ namespace ACE.Server.Tests
 
             var sealedBlockEnd = text.IndexOf("return;", sealedCheck, StringComparison.Ordinal);
             Assert.IsTrue(sealedBlockEnd > sealedCheck && sealedBlockEnd < behind, "the SealedShut block must return before `behind` is computed");
+        }
+
+        [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "FinalizeClose")]
+        private static extern void FinalizeClose(Door door, double closeTimestamp);
+
+        /// <summary>A door as Open left it, now closing: not open, still ethereal, with a CloseTimestamp the finalize matches.</summary>
+        private static Door ClosingDoor(bool alwaysEthereal)
+        {
+            var door = ClosedDoor();
+            door.Ethereal = true;
+            door.CloseTimestamp = 1234.5;
+            door.AlwaysEthereal = alwaysEthereal;
+            return door;
+        }
+
+        [TestMethod]
+        public void AlwaysEthereal_door_stays_ethereal_when_its_close_finalizes()
+        {
+            var door = ClosingDoor(alwaysEthereal: true);
+
+            FinalizeClose(door, door.CloseTimestamp);
+
+            Assert.AreEqual(true, door.Ethereal, "an AlwaysEthereal door (the Matron's pit doors) never turns solid on close");
+        }
+
+        [TestMethod]
+        public void Control_plain_door_turns_solid_when_its_close_finalizes()
+        {
+            var door = ClosingDoor(alwaysEthereal: false);
+
+            // past the Ethereal = false the plain path reads allow_door_hold and the PhysicsObj this harness door lacks;
+            // either may throw here, after the flag this control is about has already been cleared
+            try { FinalizeClose(door, door.CloseTimestamp); }
+            catch (Exception) { }
+
+            Assert.AreEqual(false, door.Ethereal, "control: without the flag the same finalize clears Ethereal, so the AlwaysEthereal test discriminates");
         }
     }
 }

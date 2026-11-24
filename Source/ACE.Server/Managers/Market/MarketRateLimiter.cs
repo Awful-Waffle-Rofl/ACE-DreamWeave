@@ -19,6 +19,7 @@ namespace ACE.Server.Managers.Market
 
         private readonly int maxInFlight;
         private readonly double writePerMinute;
+        private readonly double writeBurst;
         private readonly double loginPerMinutePerAccount;
         private readonly double loginPerMinutePerIp;
 
@@ -28,10 +29,16 @@ namespace ACE.Server.Managers.Market
         private readonly ConcurrentDictionary<string, Bucket> loginAccountBuckets = new ConcurrentDictionary<string, Bucket>(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, Bucket> loginIpBuckets = new ConcurrentDictionary<string, Bucket>(StringComparer.Ordinal);
 
-        public MarketRateLimiter(int maxInFlight, int writeRatePerMinute, int loginRatePerMinutePerAccount, int loginRatePerMinutePerIp)
+        /// <param name="writeBurst">
+        /// The write bucket's capacity, when it should differ from its per-minute refill; null (every caller but the
+        /// class ability panel) keeps capacity equal to the refill, as before.
+        /// </param>
+        public MarketRateLimiter(int maxInFlight, int writeRatePerMinute, int loginRatePerMinutePerAccount, int loginRatePerMinutePerIp,
+            int? writeBurst = null)
         {
             this.maxInFlight = Math.Max(1, maxInFlight);
             writePerMinute = Math.Max(1, writeRatePerMinute);
+            this.writeBurst = Math.Max(1, writeBurst ?? writeRatePerMinute);
             loginPerMinutePerAccount = Math.Max(1, loginRatePerMinutePerAccount);
             loginPerMinutePerIp = Math.Max(1, loginRatePerMinutePerIp);
         }
@@ -70,12 +77,12 @@ namespace ACE.Server.Managers.Market
             }
         }
 
-        public bool TryWrite(uint accountId) => TryTake(writeBuckets, accountId, writePerMinute);
+        public bool TryWrite(uint accountId) => TryTake(writeBuckets, accountId, writePerMinute, writeBurst);
 
         public bool TryLoginAccount(string accountName)
-            => TryTake(loginAccountBuckets, accountName ?? string.Empty, loginPerMinutePerAccount);
+            => TryTake(loginAccountBuckets, accountName ?? string.Empty, loginPerMinutePerAccount, loginPerMinutePerAccount);
 
-        public bool TryLoginIp(string ip) => TryTake(loginIpBuckets, ip ?? string.Empty, loginPerMinutePerIp);
+        public bool TryLoginIp(string ip) => TryTake(loginIpBuckets, ip ?? string.Empty, loginPerMinutePerIp, loginPerMinutePerIp);
 
         public void Reset()
         {
@@ -85,9 +92,9 @@ namespace ACE.Server.Managers.Market
             Volatile.Write(ref inFlight, 0);
         }
 
-        private static bool TryTake<TKey>(ConcurrentDictionary<TKey, Bucket> buckets, TKey key, double perMinute)
+        private static bool TryTake<TKey>(ConcurrentDictionary<TKey, Bucket> buckets, TKey key, double perMinute, double capacity)
         {
-            var bucket = buckets.GetOrAdd(key, _ => new Bucket { Tokens = perMinute, LastRefillUtc = DateTime.UtcNow });
+            var bucket = buckets.GetOrAdd(key, _ => new Bucket { Tokens = capacity, LastRefillUtc = DateTime.UtcNow });
 
             lock (bucket)
             {
@@ -96,7 +103,7 @@ namespace ACE.Server.Managers.Market
 
                 if (elapsedMinutes > 0)
                 {
-                    bucket.Tokens = Math.Min(perMinute, bucket.Tokens + elapsedMinutes * perMinute);
+                    bucket.Tokens = Math.Min(capacity, bucket.Tokens + elapsedMinutes * perMinute);
                     bucket.LastRefillUtc = now;
                 }
 

@@ -76,16 +76,24 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "reflect_magic",
             DisplayName = "Reflect",
-            Description = "Incoming projectile hits that would land, of every kind - arrows, bolts, thrown weapons, war bolts, " +
-                          "and void projectiles - have a 6/12/18% chance (by rank) to bounce straight back " +
-                          "at whoever fired them. You take nothing; the projectile resolves against them " +
-                          "instead. In addition, after a creature's spell damages you, you are immune to " +
-                          "creature spell damage for 0.15/0.3/0.45 seconds (by rank). Higher Magic Defense " +
-                          "multiplies both the chance and the immunity window.",
+            // Live text: both ladders are base + (rank - 1) * step (chance: rankBonus in this file; immunity seconds:
+            // ImmunityWindowSeconds).
+            DescriptionTemplate = "Incoming projectiles that would hit you (arrows, bolts, thrown weapons, war bolts and void " +
+                          "projectiles) can bounce straight back at whoever fired them. You take nothing, and the projectile hits " +
+                          "them instead. After a creature's spell damages you, you are also briefly immune to creature spell " +
+                          "damage.",
+            RankTailTemplate = "{ladder:class_ability_reflectmagic_chance_base,class_ability_reflectmagic_chance_step|pct}% reflect " +
+                          "chance, " +
+                          "{ladder:class_ability_reflectmagic_immunity_seconds_base,class_ability_reflectmagic_immunity_seconds_step|num} " +
+                          "seconds of spell immunity",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
             AffinitySkill = Skill.MagicDefense,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "affinity", Bounds = CeilingBounds.Affinity, Source = CeilingSource.Tunable, Key = "class_ability_affinity_chance_cap", Label = "max chance from affinity", Format = "pct" },
+            },
         };
 
         /// <summary>
@@ -326,6 +334,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "projectile reflect",
                 Per = null,
                 CapNote = affinityCapBites ? "affinity cap" : null,
+                Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "affinity", rawAdded * 100.0, rank, ClassAbilityText.Live) },
                 Secondary = rank > 0 ? new List<ClassAbilityReadout> { ImmunitySecondary(rank, multiplier) } : null,
             };
         }

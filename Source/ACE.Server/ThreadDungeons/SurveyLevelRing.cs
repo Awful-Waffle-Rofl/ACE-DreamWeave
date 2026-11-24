@@ -14,7 +14,7 @@ namespace ACE.Server.ThreadDungeons
     /// Survey-Archivist pay a reward scaled to the difficulty actually run rather than to a constant derived
     /// from the level cap: a level-275 character farming cheap level-185 gems is paid at the level-185 rate.
     ///
-    /// Format v1:  v1|lv=&lt;n&gt;,&lt;n&gt;,...   - 0..<see cref="Depth"/> entries, each 1..DungeonGemSpec.MaxGemLevel,
+    /// Format v1:  v1|lv=&lt;n&gt;,&lt;n&gt;,...   - 0..<see cref="Depth"/> entries, each 1..DungeonGemSpec.MaxGemLevel (500),
     /// NEWEST FIRST. Serialize ALWAYS emits the lv= field even when the ring is empty, so there is exactly one
     /// canonical on-character form (the same all-or-nothing codec discipline DungeonGemSpec uses).
     ///
@@ -180,9 +180,9 @@ namespace ACE.Server.ThreadDungeons
 
         public override string ToString() => Serialize();
 
-        // The GEM ceiling, deliberately (owner ruling 2026-10-08: no survey change). A run pressed above 375
-        // (DungeonGemSpec.MaxRunLevel) files at 375, so the survey's payout curve is exactly what it was before the
-        // run ceiling was split from the gem one.
+        // The GEM ceiling (500 since the 2026-11-16 raise). A ring entry above 375 is legal and is kept as is;
+        // the payout does not change because the luminance ratio reads the separate reference level (375,
+        // DungeonGemSpec.SurveyReferenceLevelDefault) and clamps to 1.0.
         private static int Clamp(int level) => Math.Clamp(level, 1, DungeonGemSpec.MaxGemLevel);
     }
 }

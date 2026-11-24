@@ -143,10 +143,22 @@ namespace ACE.Server.Tests.Pvp
         [TestMethod]
         public void S6_UnlearnClassAbility_RefusesInAMatch_BeforeAnythingMoves()
         {
+            // The refusals moved into ValidateClassAbilityRankRemoval, shared with LowerClassAbilityRank and the web
+            // panel's CanLower: unlearning runs it first, and it refuses in a match first.
             var body = Squash(MethodBody(ClassAbilities, "public bool UnlearnClassAbility(ClassAbilityDefinition skill, out string error, out int refunded, bool ignoreFee = false,"));
 
-            Assert.IsTrue(body.StartsWith(Squash("{ error = null; refunded = 0; if (IsInPvpMatch) { error = PvpArenaText.AbilitySpendRefused; return false; }"), StringComparison.Ordinal),
-                "UnlearnClassAbility must refuse in a match before any rank, refund or fee moves");
+            Assert.IsTrue(body.StartsWith(Squash("{ error = null; refunded = 0; if (!ValidateClassAbilityRankRemoval(skill, lowerOneRank: false, reason, out var rank, out _, out error)) return false;"), StringComparison.Ordinal),
+                "UnlearnClassAbility must run the shared removal refusals before any rank, refund or fee moves");
+
+            var core = Squash(MethodBody(ClassAbilities, "private bool ValidateClassAbilityRankRemoval(ClassAbilityDefinition skill, bool lowerOneRank, CapLedgerReason reason,"));
+
+            Assert.IsTrue(core.StartsWith(Squash("{ error = null; rank = 0; newRank = 0; if (IsInPvpMatch) { error = PvpArenaText.AbilitySpendRefused; return false; }"), StringComparison.Ordinal),
+                "the shared removal core must refuse in a match before anything else");
+
+            var lower = Squash(MethodBody(ClassAbilities, "public bool LowerClassAbilityRank(ClassAbilityDefinition skill, out string error, out int refunded)"));
+
+            Assert.IsTrue(lower.StartsWith(Squash("{ error = null; refunded = 0; if (!ValidateClassAbilityRankRemoval(skill, lowerOneRank: true, CapLedgerReason.Lower, out var rank, out var newRank, out error)) return false;"), StringComparison.Ordinal),
+                "LowerClassAbilityRank must run the shared removal refusals before any rank, refund or fee moves");
         }
 
         /// <summary>S6, the full respec: its flat fee is charged before the per-ability loop, so it refuses before the charge.</summary>
@@ -173,7 +185,7 @@ namespace ACE.Server.Tests.Pvp
             Assert.IsTrue(gates.StartsWith(Squash("{ refusal = null; if (IsInPvpMatch) { refusal = PvpArenaText.FacetSwitchRefused; return false; }"), StringComparison.Ordinal),
                 "CheckFacetGates must refuse in a match before any other gate");
 
-            var trySwitch = Squash(MethodBody(Facets, "public bool TrySwitchFacet(int targetSlot, bool confirmed, bool trim, out string refusal, out bool needsConfirmation, out bool awaitingVault)"));
+            var trySwitch = Squash(MethodBody(Facets, "public bool TrySwitchFacet(int targetSlot, bool confirmed, bool trim, out string refusal, out bool needsConfirmation, out bool awaitingVault"));
 
             Assert.IsTrue(trySwitch.StartsWith(Squash("{ needsConfirmation = false; awaitingVault = false; if (!CheckFacetGates(targetSlot, out refusal)) return false;"), StringComparison.Ordinal),
                 "TrySwitchFacet must run CheckFacetGates before any state changes");

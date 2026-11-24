@@ -48,7 +48,7 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             var stamp = body.IndexOf("run.MarkPooledLoot(PropertyManager.GetBool(\"dynamic_dungeons_pooled_loot_enabled\", true).Item);", StringComparison.Ordinal);
             var reached = body.IndexOf("run.MarkPopulateReached();", StringComparison.Ordinal);
-            var plan = body.IndexOf("DungeonSpawnPlan plan;", StringComparison.Ordinal);
+            var plan = body.IndexOf("plan = BuildLivePlan(", StringComparison.Ordinal);
 
             Assert.IsTrue(stamp >= 0, "TryPopulate must stamp the switch");
             Assert.IsTrue(reached >= 0 && plan >= 0, "anchors moved; re-read TryPopulate");

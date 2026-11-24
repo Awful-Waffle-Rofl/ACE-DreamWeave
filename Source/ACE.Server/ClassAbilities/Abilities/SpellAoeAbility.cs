@@ -38,14 +38,20 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "spellaoe",
             DisplayName = "Spell AOE",
-            Description = "When one of your Arc spells of any school damages a monster, the same spell blasts outward from " +
-                          "it to every other nearby enemy (no limit on how many) for 15% / 30% / 50% of the " +
-                          "spell's damage by rank. Qualifying casts cost additional mana. " +
-                          "Higher Mana Conversion increases each blast's damage.",
+            DescriptionTemplate = "When one of your Arc spells, from any school, damages a target, it also blasts out from that " +
+                          "target to every other enemy nearby, with no limit on targets. These casts cost extra mana.",
+            // Live text: the rank's base fraction is BaseDamageMult over class_ability_spellaoe_damage_mult_r1/r2/r3
+            // (RadiatedDamageMult and GetReadout below). The shared cap only bounds the affinity rider above that base,
+            // never the base itself, so no cap is bound here. The tail uses {ranks:} to pick the one rank's key.
+            RankTailTemplate = "{ranks:class_ability_spellaoe_damage_mult_r|pct}% damage per blast",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },   // flat 1/rank (class ability overhaul repricing, 2026-09-12)
             Implemented = true,
             AffinitySkill = Skill.ManaConversion,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "total", Bounds = CeilingBounds.Total, Source = CeilingSource.Tunable, Key = "class_ability_spellaoe_damage_mult_cap", Label = "max radiated damage", Format = "pct", ZeroIsLimit = true },
+            },
         };
 
         /// <summary>
@@ -63,7 +69,7 @@ namespace ACE.Server.ClassAbilities.Abilities
         public void OnSpellHit(Player caster, int rank, Creature primaryTarget, SpellProjectile projectile)
         {
             // The dispatch fires for every landed damaging-spell hit of any school; Spell AOE only
-            // radiates from an Arc cast (a normal cast or an Echo Cast recast) - never a Bolt/Blast/Volley,
+            // radiates from an Arc cast (a normal cast or an Echo Cast wisp cast) - never a Bolt/Blast/Volley,
             // and never a Spell AOE child. See CanRadiate.
             if (!CanRadiate(projectile.IsClassAbilitySpawned, projectile.SpellType))
                 return;
@@ -134,6 +140,15 @@ namespace ACE.Server.ClassAbilities.Abilities
         };
 
         /// <summary>
+        /// The radiated-damage fraction after the cap: the rank's base plus the affinity rider plus the gear term, floored at the
+        /// rank's own base and bounded above by <paramref name="cap"/>. Pure. The one place the clamp is applied:
+        /// <see cref="RadiatedDamageMult"/> and <see cref="GetReadout"/> call it, and the ceiling probe calls it to prove the
+        /// declared ceiling binds.
+        /// </summary>
+        public static double ClampRadiated(double baseMult, double rider, double gearMod, double cap) =>
+            Math.Clamp(baseMult + rider + gearMod, baseMult, cap);
+
+        /// <summary>
         /// The fraction of normal damage each radiated blast lands: the RANK's base fraction (see
         /// <see cref="BaseDamageMult"/>) scaled up with the caster's Mana Conversion toward a shared cap
         /// (class_ability_spellaoe_damage_mult_cap, 75%). The Mana Conversion rider is now the shared
@@ -167,7 +182,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             // otherwise.
             var gearMod = caster.GetEquippedModValue(EquipmentModId.Resonance);
 
-            return (float)Math.Clamp(baseMult + rider + gearMod, baseMult, cap);
+            return (float)ClampRadiated(baseMult, rider, gearMod, cap);
         }
 
         /// <summary>
@@ -177,7 +192,11 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// the same Math.Clamp(baseMult + rider + gearMod, baseMult, cap) RadiatedDamageMult uses.
         /// CapNote is set only when the clamp actually reduced this call's value.
         /// </summary>
-        public ClassAbilityReadout GetReadout(Player player, int rank)
+        public ClassAbilityReadout GetReadout(Player player, int rank) =>
+            BuildReadout(rank, player.GetClassAbilityAffinityMultiplier(Skill.ManaConversion), player.GetEquippedModValue(EquipmentModId.Resonance));
+
+        /// <summary>The pure core of <see cref="GetReadout"/>, taking the live affinity multiplier and gear mod value so the readings can be pinned with fixed inputs.</summary>
+        public ClassAbilityReadout BuildReadout(int rank, double multiplier, double gearModValue)
         {
             var baseMult = BaseDamageMult(rank,
                 PropertyManager.GetDouble("class_ability_spellaoe_damage_mult_r1").Item,
@@ -185,14 +204,12 @@ namespace ACE.Server.ClassAbilities.Abilities
                 PropertyManager.GetDouble("class_ability_spellaoe_damage_mult_r3").Item);
 
             var cap = PropertyManager.GetDouble("class_ability_spellaoe_damage_mult_cap").Item;
-
-            var multiplier = player.GetClassAbilityAffinityMultiplier(Skill.ManaConversion);
             var rider = baseMult * multiplier - baseMult;
 
-            var gearMod = player.GetEquippedModValue(EquipmentModId.Resonance);
+            var gearMod = gearModValue;
 
             var uncapped = baseMult + rider + gearMod;
-            var clamped = Math.Clamp(uncapped, baseMult, cap);
+            var clamped = ClampRadiated(baseMult, rider, gearMod, cap);
 
             var skill = baseMult * 100.0;
             var affinity = rider * 100.0;
@@ -209,6 +226,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "radiated",
                 Per = null,
                 CapNote = clamped < uncapped - 0.0000001 ? "aoe cap" : null,
+                Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "total", uncapped * 100.0, rank, ClassAbilityText.Live) },
             };
         }
     }

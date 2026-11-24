@@ -12,7 +12,7 @@ namespace ACE.Server.WorldObjects
     {
         /// <summary>
         /// The cast number the last "takes hold" line was sent for (MagicState.CastNum), so a cast that marks
-        /// several creatures - a Curse of Raven Fury ring, Spell AOE splashes, an Echo Cast recast, a Crimson
+        /// several creatures - a Curse of Raven Fury ring, Spell AOE splashes, an Echo Cast wisp cast, a Crimson
         /// Harvest fan - announces once. -1 so the very first cast (CastNum 1 after OnCastStart) is not
         /// mistaken for one already announced.
         /// </summary>
@@ -28,7 +28,7 @@ namespace ACE.Server.WorldObjects
         /// ROLLS, and on a proc applies or refreshes, Weakened Blood on a target this player's damaging Life
         /// Magic spell just struck: Harm and every Drain strike (WorldObject_Magic, including each Crimson
         /// Harvest secondary) and every landed Health-damage life projectile (WeakenedBloodAbility.OnSpellHit,
-        /// including Spell AOE and Cascade children and Echo Cast recasts). ONE ROLL PER TARGET PER CAST:
+        /// including Spell AOE and Cascade children and Echo Cast wisp casts). ONE ROLL PER TARGET PER CAST:
         /// the first call for a target in a cast (MagicState.CastNum) rolls, and every later call for that
         /// target in the same cast - a second Raven Fury projectile on a large monster, an AOE child, an Echo
         /// copy - returns without drawing a roll (<see cref="WeakenedBloodCastRollLedger"/>).
@@ -60,7 +60,7 @@ namespace ACE.Server.WorldObjects
             if (!TryGetClassAbility(ClassAbilityId.WeakenedBlood, out var rank))
                 return;
 
-            // ONE ROLL PER TARGET PER CAST: a second projectile (or AOE child, Echo copy, Crimson Harvest
+            // ONE ROLL PER TARGET PER CAST: a second projectile (or AOE child, Crimson Harvest
             // secondary) of the same cast striking a target that already rolled draws no roll at all
             var castNum = MagicState?.CastNum ?? 0;
 
@@ -110,14 +110,8 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public double ComputeWeakenedBloodSpeedFactor(int rank)
         {
-            var rankSlow = WeakenedBloodMath.RankSlow(rank,
-                PropertyManager.GetDouble("class_ability_weakenedblood_slow_r1").Item,
-                PropertyManager.GetDouble("class_ability_weakenedblood_slow_r2").Item,
-                PropertyManager.GetDouble("class_ability_weakenedblood_slow_r3").Item);
-
-            var slow = rankSlow * GetClassAbilityAffinityMultiplier(Skill.CreatureEnchantment);
-
-            return WeakenedBloodMath.SpeedFactor(slow, PropertyManager.GetDouble("class_ability_weakenedblood_slow_floor").Item);
+            // the same method the live Weakened Blood text formula calls (with the neutral affinity 1.0)
+            return WeakenedBloodMath.SpeedFactor(ClassAbilityText.Live, rank, GetClassAbilityAffinityMultiplier(Skill.CreatureEnchantment));
         }
 
         /// <summary>

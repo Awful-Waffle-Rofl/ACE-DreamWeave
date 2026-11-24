@@ -41,7 +41,11 @@ namespace ACE.Server.WorldEvents
     /// <summary>The seam between the /v1/admin/world-events routes and the game, so the route tests can use a fake.</summary>
     public interface IWorldEventAdminService
     {
-        /// <summary>GET catalog. Runs on the request thread: the store and catalog are immutable swapped references.</summary>
+        /// <summary>
+        /// GET catalog. Runs on the request thread: the store and catalog are immutable swapped references, and the one live
+        /// read is world_events_hold_enabled (PropertyManager, concurrent), which leaves Hold goals - and any source offering
+        /// only Hold goals - out while it is off.
+        /// </summary>
         WorldEventAdminOutcome Catalog();
 
         /// <summary>GET status. Runs on the request thread, reading only what StatusText already reads off-thread.</summary>
@@ -349,9 +353,22 @@ namespace ACE.Server.WorldEvents
             var minDuration = body.MinDurationSeconds ?? WorldEvent.DefaultMinDurationSeconds;
 
             // The same rule WorldEvent.ValidateDurations applies inside TryStart, phrased for the web body.
-            if (minDuration < 0 || minDuration >= WorldEvent.DefaultMaxDurationSeconds)
+            // The web body carries no maximum, so the bound is the effective one: the default, or the named
+            // goal's longer run (kill_boss and destroy_source). With no named goal (a random start) the bound is
+            // the default, which every goal's effective maximum meets or exceeds (ResolveMaxDuration takes the larger),
+            // so a minimum that passes here fits every random candidate. WorldEventManager.TryStart still checks each
+            // composed candidate's own ceiling and, on a random start, moves on past one that does not fit.
+            var goalMax = 0;
+            var namedGoal = body.GoalId?.Trim().ToLowerInvariant();
+
+            if (namedGoal != null && store != null && store.Goals.TryGetValue(namedGoal, out var goalDef))
+                goalMax = goalDef.MaxDurationSeconds;
+
+            var effectiveMax = WorldEvent.ResolveMaxDuration(null, goalMax);
+
+            if (minDuration < 0 || minDuration >= effectiveMax)
                 return WorldEventAdminOutcome.Fail(MarketError.WorldEventRefused,
-                    reason: $"min_duration_seconds must be between 0 and {WorldEvent.DefaultMaxDurationSeconds - 1}");
+                    reason: $"min_duration_seconds must be between 0 and {effectiveMax - 1}");
 
             if (!WorldEventHazards.TryNormalizeRequest(body.Hazard, out var hazard, out var hazardError))
                 return WorldEventAdminOutcome.Fail(MarketError.WorldEventRefused, reason: hazardError);
@@ -456,6 +473,16 @@ namespace ACE.Server.WorldEvents
                     return $"goal '{goalId}' needs boss_id {BossDef.FamilyChampion.Id}, {WorldEventComposer.AutoBossId} or a named boss id";
             }
 
+            // A Hold goal brings its own finale boss. A pinned boss would also arm the base champion tick, which places it on
+            // the source's spawn anchors (for envoy_muster, the knights' own centre) and whose placement grace can end the run.
+            if (goalId != null && store != null && store.Goals.TryGetValue(goalId, out var holdGoal) && holdGoal.TypeKind == GoalType.Hold)
+            {
+                var bossId = string.IsNullOrWhiteSpace(body.BossId) ? null : body.BossId.Trim().ToLowerInvariant();
+
+                if (bossId != null && !(store.Bosses.TryGetValue(bossId, out var boss) && boss.Kind == BossKind.None))
+                    return $"goal '{goalId}' brings its own finale boss; leave boss_id as {WorldEventComposer.DefaultBossId}";
+            }
+
             return null;
         }
 
@@ -467,24 +494,35 @@ namespace ACE.Server.WorldEvents
             var catalog = WorldEventManager.Catalog ?? WorldEventCatalog.Empty;
             var running = RunningEvent();
 
+            // A Hold goal is left out while world_events_hold_enabled is off (the start would only be refused), and so is a
+            // source whose every known goal was left out that way (envoy_muster offers defend_envoys only).
             var sources = store.Sources.Values
                 .Where(s => s.WebStartable)
                 .OrderBy(s => s.Id, StringComparer.Ordinal)
-                .Select(s => new
+                .Select(s =>
                 {
-                    id = s.Id,
-                    display_name = s.DisplayName ?? s.Id,
-                    geometry = Snake(s.GeometryKind.ToString()),
-                    geometry_radius = s.GeometryRadius,
-                    clearance_radius = s.ClearanceRadius,
-                    edge_margin_meters = EdgeMarginFor(s),
-                    reward_radius = s.RewardRadius,
-                    compatible_goals = (s.CompatibleGoals ?? new List<string>()).Where(store.Goals.ContainsKey).ToList(),
+                    var known = (s.CompatibleGoals ?? new List<string>()).Where(store.Goals.ContainsKey).ToList();
+                    var offered = known.Where(id => WorldEventComposer.GoalSwitchedOn(store.Goals[id])).ToList();
+                    return (def: s, known, offered);
+                })
+                .Where(t => t.known.Count == 0 || t.offered.Count > 0)
+                .Select(t => new
+                {
+                    id = t.def.Id,
+                    display_name = t.def.DisplayName ?? t.def.Id,
+                    geometry = Snake(t.def.GeometryKind.ToString()),
+                    geometry_radius = t.def.GeometryRadius,
+                    clearance_radius = t.def.ClearanceRadius,
+                    edge_margin_meters = EdgeMarginFor(t.def),
+                    reward_radius = t.def.RewardRadius,
+                    compatible_goals = t.offered,
                 })
                 .ToList();
 
-            // Only goals some listed (web-startable) source offers: a goal no source here can be crossed with (World Events
-            // Hold's defend_envoys, listed by the non-web ambush source only) would be a dead choice in the panel.
+            // Only goals some listed (web-startable) source offers: a goal no source here can be crossed with would be a dead
+            // choice in the panel. World Events Hold's defend_envoys is offered through envoy_muster, whose clearance is 0
+            // because a Hold run places its own knights, portals and waves (WorldEventHoldStartSpotRule moves the start to a
+            // clear spot near a town), so the source's in-town fit says nothing about it.
             var offeredGoals = new HashSet<string>(sources.SelectMany(s => s.compatible_goals), StringComparer.Ordinal);
 
             var goals = store.Goals.Values
@@ -654,8 +692,14 @@ namespace ACE.Server.WorldEvents
 
             request.DryRun = true;
 
-            if (!WorldEventManager.TryCompose(request, out var composition, out var composeError))
+            // TryComposeForStart, not TryCompose, so a random preview shows a candidate the live start could reach (see
+            // the minimum-duration note in TryBuildRequest).
+            if (!WorldEventManager.TryComposeForStart(request, out var composition, out var composeError))
                 return WorldEventAdminOutcome.Fail(MarketError.WorldEventRefused, reason: composeError);
+
+            if (!WorldEvent.ValidateDurations(request.MinDurationSeconds,
+                    WorldEvent.ResolveMaxDuration(request.MaxDurationSeconds, composition.Goal?.MaxDurationSeconds ?? 0), out var durationError))
+                return WorldEventAdminOutcome.Fail(MarketError.WorldEventRefused, reason: durationError);
 
             var radius = composition.Source?.RewardRadius ?? 0f;
             var near = countPlayersNear(request.AnchorPosition, radius);

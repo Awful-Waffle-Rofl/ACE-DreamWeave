@@ -146,6 +146,13 @@ namespace ACE.Server.Tests.ThreadDungeons
             public int BaseDraws;
         }
 
+        // 2026-11-20: the hashes were re-pinned when the shipped reward defaults moved (xp/lum scale 2.0 -> 2.7,
+        // reward-scale exponent 2.87 -> 2.0). The fingerprint is unchanged except its xp0..2 / lum0..2 fields,
+        // and the old hashes were first reproduced by the old defaults, so the structure pin still holds.
+        // Hand-worked new values: plain12 (flat scale, scaling off) xp = 800000 x 2.7 = 2160000, x1.5 = 3240000,
+        // x2.0 = 4320000, lum = 300 x 2.7 = 810 / 1215 / 1620; hardy16min40 xp = 800000 x 1.4 x 2.7 = 3024000;
+        // the scaling-on scenarios (level 100) use 1 + (100/300)^2 x 1.7 = 1.18889, e.g. xp = 800000 x 1.18889 = 951111,
+        // lum = 300 x 1.18889 = 357.
         // FROZEN BASE HASHES. They pin the solo plan to the pre-Group-Threads builder, so they are a one-time
         // proof, not a permanent contract. A later, DELIBERATE change to solo plan behaviour (a new plan field
         // in Fingerprint, a roster or modifier rule, a new rng draw) will fail Solo_plans_are_identical_to_the_
@@ -176,25 +183,25 @@ namespace ACE.Server.Tests.ThreadDungeons
         {
             yield return new SoloScenario { Name = "plain12", Spec = Spec(), Points = 12, Health = HealthOf, Seed = 3,
                 Limits = g => new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5, rewardScalingEnabled: false, healthCurveEnabled: false, minMonsters: 0, modifierLevelExponent: 0.0, group: g),
-                BaseHash = "0e19b626111fc313557c3bdb22a797caeb63e658b0c8cb4edfdd8a71e5536184", BaseDraws = 26 };
+                BaseHash = "5f1a62da8f55f2b3dd24d9de2b625e761b152b20249acd8ad39d6c3df83b8f86", BaseDraws = 26 };
             yield return new SoloScenario { Name = "teeming10", Spec = Spec(("teeming", 1.75)), Points = 10, Health = HealthOf, Seed = 3,
                 Limits = g => new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5, rewardScalingEnabled: false, healthCurveEnabled: false, minMonsters: 0, modifierLevelExponent: 0.0, group: g),
-                BaseHash = "bb30265d303a3fd7a51bdd204f285f78f6a86964ff1ebc3362dfe259166a1a75", BaseDraws = 30 };
+                BaseHash = "b0e08c5f46d436f03b0ca04a5bdd9395d2619eb6dcaba473aba36bdb62e1bda8", BaseDraws = 30 };
             yield return new SoloScenario { Name = "hardy16min40", Spec = Spec(("hardy", 1.6)), Points = 16, Health = TrashHealthOf, Seed = 17,
                 Limits = g => new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5, rewardScalingEnabled: false, trashHealthFloorRatio: 0.5, healthCurveEnabled: false, minMonsters: 40, modifierLevelExponent: 0.0, group: g),
-                BaseHash = "a0526eda304b3874ff1832a871cb62a2408c4704492ce3d13b217dfe340e9db3", BaseDraws = 58 };
+                BaseHash = "2150b2a66691893bea7a3640467b2584bb44d6be7828df0eef71e604cde0b319", BaseDraws = 58 };
             yield return new SoloScenario { Name = "capped50", Spec = Spec(), Points = 50, Health = HealthOf, Seed = 3,
                 Limits = g => new DungeonPopulationLimits(8, 2.0, 3.0, 8, 0.5, rewardScalingEnabled: false, healthCurveEnabled: false, minMonsters: 0, modifierLevelExponent: 0.0, group: g),
-                BaseHash = "9f4eff7a4fc1e826e6c12d7f102c6a13150d11bf10bbc3bbf65037d54545a67a", BaseDraws = 60 };
+                BaseHash = "fa72565b7a1f352e7993c3d7a39db2520919979df9feb145df02222296c26cb8", BaseDraws = 60 };
             yield return new SoloScenario { Name = "curve40", Spec = Spec(("hardy", 1.3)), Points = 40, Health = TrashHealthOf, Seed = 5,
                 Limits = g => new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5, trashHealthFloorRatio: 0.5, minMonsters: 40, modifierLevelExponent: 0.0, group: g),
-                BaseHash = "67d43970b987cfb51c49cb24fc4817ca0eed25f6a2871fb02fcc44c7c18ca7d6", BaseDraws = 82 };
+                BaseHash = "a9a07367b113e3ecd6e575cc7a0ab38af9d1791be0b850b29ea9cfb9c4d275c0", BaseDraws = 82 };
             yield return new SoloScenario { Name = "legacyBoss40", Spec = Spec(), Points = 40, Health = TrashHealthOf, Seed = 9,
                 Limits = g => new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5, bossNormalize: false, minMonsters: 40, modifierLevelExponent: 0.0, group: g),
-                BaseHash = "25b9294347d9f36e48385cd8f27e867c99eb8d1795f2e28aeb071c99ae36463c", BaseDraws = 82 };
+                BaseHash = "7a1b13ce04b43700adeeb3e4703898072f64844112785e5751cca7feaca4b3b1", BaseDraws = 82 };
             yield return new SoloScenario { Name = "empty0", Spec = Spec(), Points = 0, Health = HealthOf, Seed = 3,
                 Limits = g => new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5, minMonsters: 40, modifierLevelExponent: 0.0, group: g),
-                BaseHash = "ae69558f269973cc3ddfe617d0d57b83033462eb2841de622552a66a6eb39b24", BaseDraws = 2 };
+                BaseHash = "7f8fc2b8a03de510b85a146f5338d297f3db0d5a7c3b6e9ab595956121ac247c", BaseDraws = 2 };
         }
 
         private static (string Fingerprint, int Draws) BuildSolo(SoloScenario s, GroupScaling group)
@@ -532,18 +539,23 @@ namespace ACE.Server.Tests.ThreadDungeons
         {
             var body = TryPopulateBody();
 
-            // The limits are built by ReadLimits(run.Group) since the archetype-uplift extraction; ReadLimits hands its
-            // `group` parameter to the limits ("group: group,"), so the lock-time snapshot still reaches them.
-            var limitsArg = body.IndexOf("ReadLimits(run.Group)", StringComparison.Ordinal);
+            // The limits are built by ReadLimits(group) inside BuildLivePlan (which TryPopulate hands run.Group); ReadLimits
+            // hands its `group` parameter to the limits ("group: group,"), so the lock-time snapshot still reaches them.
+            var live = PooledLootSourceText.MethodBody(PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadDungeonSpawner.cs"),
+                "internal static DungeonSpawnPlan BuildLivePlan(");
+            var limitsArg = live.IndexOf("ReadLimits(group)", StringComparison.Ordinal);
+            var liveBuild = live.IndexOf("DungeonPopulationBuilder.Build(", StringComparison.Ordinal);
+            var runGroupArg = body.IndexOf("BuildLivePlan(run.Spec, run.Dungeon, run.Group,", StringComparison.Ordinal);
             var readLimits = PooledLootSourceText.MethodBody(PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadDungeonSpawner.cs"),
                 "internal static DungeonPopulationLimits ReadLimits(GroupScaling group)");
             StringAssert.Contains(readLimits, "group: group,");
-            var build = body.IndexOf("plan = DungeonPopulationBuilder.Build(", StringComparison.Ordinal);
+            var build = body.IndexOf("plan = BuildLivePlan(", StringComparison.Ordinal);
             var resolve = body.IndexOf("run.MarkGroupResolved(plan.GroupCountActual, plan.GroupHealthMult);", StringComparison.Ordinal);
             // The placement queue is the per-landblock group queue since Open World Threads WP3b (one group for a dungeon).
             var queue = body.IndexOf("var placementGroups = new Queue<(Landblock Block, Queue<DungeonSpawnPlanEntry> Entries)>();", StringComparison.Ordinal);
 
-            Assert.IsTrue(limitsArg >= 0 && limitsArg < build, "the limits must carry run.Group, read from the lock-time snapshot");
+            Assert.IsTrue(runGroupArg >= 0 && runGroupArg == build + "plan = ".Length, "TryPopulate must hand the lock-time run.Group to BuildLivePlan");
+            Assert.IsTrue(limitsArg >= 0 && limitsArg < liveBuild, "the limits must carry that group, built before the plan is");
             Assert.IsTrue(resolve > build, "MarkGroupResolved runs after the plan is built");
             Assert.IsTrue(queue > resolve, "and before the placement queue exists");
             Assert.AreEqual(1, CountOf(body, "run.MarkGroupResolved("), "resolved once");

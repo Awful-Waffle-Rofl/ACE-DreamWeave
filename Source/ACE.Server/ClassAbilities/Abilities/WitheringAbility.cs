@@ -23,8 +23,10 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "withering",
             DisplayName = "Withering",
-            Description = "Increases your void damage-over-time tick damage by 9.5% per rank (+28.5% at rank 3). " +
-                          "Higher Leadership increases the bonus.",
+            // Live text: bonus = rank * class_ability_withering_percent_per_rank (GetReadout below; Player_ClassAbilityBuffs.cs:672). "+28.5% at
+            // rank 3" is the top rank's value: the @max selector renders that one rank.
+            DescriptionTemplate = "Your void damage-over-time spells tick harder.",
+            RankTailTemplate = "+{per:class_ability_withering_percent_per_rank|pct}% tick damage",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,

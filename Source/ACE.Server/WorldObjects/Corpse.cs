@@ -387,7 +387,18 @@ namespace ACE.Server.WorldObjects
             if (wo == null)
                 return;
 
-            if (TryAddToInventory(wo))
+            var placed = TryAddToInventory(wo);
+
+            if (!placed)
+            {
+                // The corpse is full. The rare is already rolled, so place it on the ground rather than orphan it
+                // (in no container and not in the world). A rare that reaches the world counts as found: the same
+                // flags and bookkeeping run, so the real-time-rare timer still resets.
+                log.Error($"[RARE] failed to add to corpse inventory; dropping the rare in the world");
+                placed = Creature.DropLootInWorld(new[] { wo }, Location, Guid);
+            }
+
+            if (placed)
             {
                 rareGenerated = wo;
                 killerName = killer.Name.TrimStart('+');
@@ -397,8 +408,6 @@ namespace ACE.Server.WorldObjects
 
                 ApplyRareFoundBookkeeping(killerPlayer, realTimeRares, timestamp, tier);
             }
-            else
-                log.Error($"[RARE] failed to add to corpse inventory");
         }
 
         /// <summary>

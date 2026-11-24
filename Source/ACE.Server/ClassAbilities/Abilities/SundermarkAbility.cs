@@ -74,17 +74,24 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "sundermark",
             DisplayName = "Sundermark",
-            Description = "Your landed hits with any weapon and your damaging spell projectiles have a 7/13/19% " +
-                          "chance (by rank) to inflict the matching element's Vulnerability on the target. The " +
-                          "level applied is set by your Life Magic, and higher Life Magic also increases the chance. " +
-                          "A Nether hit instead inflicts a random void curse - Corruption, Corrosion or Destructive Curse - " +
-                          "at the level your Life Magic sets.",
+            // Live text. Chance ladder is base + (rank - 1) * step (SundermarkAbility.Chance ~108-125; keys read at ~242-243, ~336-337).
+            DescriptionTemplate = "Your weapon hits and damaging spell projectiles can put the matching element's Vulnerability on " +
+                          "the target. Your Life Magic sets its level. A Nether hit puts a random void curse on the target instead " +
+                          "(Corruption, Corrosion or Destructive Curse), at the level your Life Magic sets.",
+            RankTailTemplate = "{ladder:class_ability_sundermark_chance_base,class_ability_sundermark_chance_step|pct}% chance",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },   // Spellsword pass 2026-10-24: 2/rank -> 1/rank (ClassAbilityRepricing wave 4)
             Implemented = true,
             // Life Magic scales EVERY roll, the Nether branch included (owner ruling 2026-10-30, option B; the
             // 2026-10-27 Void Magic rider and its AdditionalAffinitySkills entry are gone).
             AffinitySkill = Skill.LifeMagic,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "affinity", Bounds = CeilingBounds.Affinity, Source = CeilingSource.Tunable, Key = "class_ability_affinity_chance_cap", Label = "max chance from affinity", Format = "pct" },
+                new ClassAbilityCeiling { Id = "level", Bounds = CeilingBounds.Level, Source = CeilingSource.Constant, ConstantValueFor = (v, rank) => VulnerabilityMaxLevel(v.GetLong("class_ability_sundermark_max_level")), ConstantRef = "SundermarkAbility.VulnerabilityMaxLevel", Label = "max vulnerability spell level", Format = "int" },
+                new ClassAbilityCeiling { Id = "level_nether", Bounds = CeilingBounds.Level, Source = CeilingSource.Constant, ConstantValueFor = (v, rank) => NetherMaxLevel(v.GetLong("class_ability_sundermark_nether_max_level")), ConstantRef = "SundermarkAbility.NetherMaxLevel", Label = "max nether curse spell level", Format = "int" },
+                new ClassAbilityCeiling { Id = "gear", Bounds = CeilingBounds.Gear, Source = CeilingSource.GearStackCap, GearMod = EquipmentModId.Sundermark, Label = "max from gear", Format = "pct" },
+            },
         };
 
         /// <summary>
@@ -158,6 +165,29 @@ namespace ACE.Server.ClassAbilities.Abilities
         public static uint NetherMaxLevel(long tunable)
         {
             return (uint)Math.Clamp(tunable, 1L, 8L);
+        }
+
+        /// <summary>
+        /// class_ability_sundermark_max_level clamped to the ladder, 1-8: the safety-valve cap over the vulnerability
+        /// level Life Magic selects. The same clamp as <see cref="NetherMaxLevel"/>, named for the vulnerability path.
+        /// </summary>
+        public static uint VulnerabilityMaxLevel(long tunable)
+        {
+            return (uint)Math.Clamp(tunable, 1L, 8L);
+        }
+
+        /// <summary>
+        /// The vulnerability (and Nether curse) level the Life Magic skill reaches on the 8-rung ladder BEFORE either
+        /// max-level tunable caps it: the same SelectRungIndex call both paths make, with the ladder's own top as the cap.
+        /// </summary>
+        public static int ReachedLevel(uint lifeMagicCurrent, double thresholdScale)
+        {
+            var rungIndex = SpellswordSpellTables.SelectRungIndex(SpellswordSpellTables.VulnerabilityLevels,
+                VulnerabilityMaxLevel(long.MaxValue),
+                lifeMagicCurrent,
+                thresholdScale);
+
+            return (int)SpellswordSpellTables.VulnerabilityLevels[rungIndex];
         }
 
         /// <summary>
@@ -268,7 +298,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             // Magic. The cap is the tunable, not the rank ladder: the user ruled the entry ships uncapped,
             // and class_ability_sundermark_max_level survives only as a safety valve at its permissive
             // default of 8 (design section 4b-i).
-            var maxLevel = (uint)Math.Clamp(PropertyManager.GetLong("class_ability_sundermark_max_level").Item, 1L, 8L);
+            var maxLevel = VulnerabilityMaxLevel(PropertyManager.GetLong("class_ability_sundermark_max_level").Item);
 
             var rungIndex = SpellswordSpellTables.SelectRungIndex(SpellswordSpellTables.VulnerabilityLevels,
                 maxLevel,
@@ -333,15 +363,22 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
+            return BuildReadout(rank, AffinityMultiplier(player), player?.GetCreatureSkill(Skill.LifeMagic).Current ?? 0u, player?.GetEquippedModValue(EquipmentModId.Sundermark) ?? 0.0);
+        }
+
+        /// <summary>
+        /// The pure core of <see cref="GetReadout"/>: every live input is a parameter, so a test can pin the readout (and its ceiling readings) without a Player.
+        /// </summary>
+        public ClassAbilityReadout BuildReadout(int rank, double affinityMultiplier, uint lifeMagicCurrent, double gearModValue)
+        {
             var chanceBase = PropertyManager.GetDouble("class_ability_sundermark_chance_base").Item;
             var chanceStep = PropertyManager.GetDouble("class_ability_sundermark_chance_step").Item;
             var affinityCap = PropertyManager.GetDouble("class_ability_affinity_chance_cap").Item;
 
             var skillChance = rank <= 0 ? 0.0 : chanceBase + (rank - 1) * chanceStep;
 
-            // Life Magic for every roll, Nether included (owner ruling 2026-10-30), through the same helper
-            // the proc uses.
-            var affinityMultiplier = AffinityMultiplier(player);
+            // Life Magic for every roll, Nether included (owner ruling 2026-10-30): GetReadout hands over the same
+            // AffinityMultiplier helper the proc uses.
             var rawAdded = skillChance * affinityMultiplier - skillChance;
 
             var clampedAdded = affinityCap > 0.0 ? Math.Min(rawAdded, affinityCap) : rawAdded;
@@ -351,12 +388,15 @@ namespace ACE.Server.ClassAbilities.Abilities
             // Rank-gated like skillChance above - a machinery mod reports nothing without its ability.
             var gearChance = rank <= 0
                 ? 0.0
-                : Math.Max(0.0, player?.GetEquippedModValue(EquipmentModId.Sundermark) ?? 0.0);
+                : Math.Max(0.0, gearModValue);
 
             var skill = skillChance * 100.0;
             var affinity = clampedAdded * 100.0;
             var gear = gearChance * 100.0;
             var effective = skill + affinity + gear;
+
+            var reachedLevel = ReachedLevel(lifeMagicCurrent,
+                PropertyManager.GetDouble("class_ability_spellsword_level_skill_scale").Item);
 
             return new ClassAbilityReadout
             {
@@ -369,6 +409,13 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "proc",
                 Per = null,
                 CapNote = capBit ? "affinity cap" : null,
+                Ceilings = new[]
+                {
+                    ClassAbilityCeilings.Read(Definition, "affinity", rawAdded * 100.0, rank, ClassAbilityText.Live),
+                    ClassAbilityCeilings.Read(Definition, "level", reachedLevel, rank, ClassAbilityText.Live),
+                    ClassAbilityCeilings.Read(Definition, "level_nether", reachedLevel, rank, ClassAbilityText.Live),
+                    ClassAbilityCeilings.Read(Definition, "gear", gear, rank, ClassAbilityText.Live),
+                },
             };
         }
     }

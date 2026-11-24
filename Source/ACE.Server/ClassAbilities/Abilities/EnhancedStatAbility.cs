@@ -57,12 +57,11 @@ namespace ACE.Server.ClassAbilities.Abilities
         private static readonly int[] AttributeCost = { 1, 1, 1 };
         private static readonly int[] VitalCost     = { 1, 1, 1 };
 
-        // ENHANCED HEALTH ALONE IS PREMIUM (2026-09-13 repricing), which is why the vital family needs two
-        // arrays rather than one. It is the only Enhanced entry that buys effective HP, so it is priced with
-        // the other premium entries at 2/rank while Enhanced Stamina and Enhanced Mana stay at 1/rank by
-        // explicit ruling. Selected per vital in GenerateAll below - do NOT collapse these back into one
-        // array, and do not "tidy" Stamina/Mana up to match Health.
-        private static readonly int[] HealthVitalCost = { 2, 2, 2 };
+        // ENHANCED HEALTH WAS PREMIUM (2026-09-13 repricing, 2/rank) and went back to 1/rank in the Vanguard pass
+        // (2026-11-06, owner ruling; ClassAbilityRepricing wave 7 returns owners the difference). The separate
+        // array is kept, selected per vital in GenerateAll below, so Health's price can move on its own again
+        // without touching Stamina and Mana.
+        private static readonly int[] HealthVitalCost = { 1, 1, 1 };
 
         public ClassAbilityDefinition Definition { get; }
 
@@ -137,8 +136,12 @@ namespace ACE.Server.ClassAbilities.Abilities
             PropertyAttribute2nd.MaxHealth, PropertyAttribute2nd.MaxStamina, PropertyAttribute2nd.MaxMana,
         };
 
-        private static string TierText =>
-            $"Adds +{TierBonus[1]}, then +{TierBonus[2]}, then +{TierBonus[3]} at ranks 1-3";
+        /// <summary>
+        /// The per-rank tail of every generated Enhanced entry: "+10" / "+25" / "+50", read from the same
+        /// <see cref="TierBonus"/> table <see cref="BonusForRank"/> applies.
+        /// </summary>
+        private static string[] TierTails =>
+            Enumerable.Range(1, MaxTier).Select(rank => $"+{BonusForRank(rank)}").ToArray();
 
         /// <summary>
         /// Which generated Enhanced skills the class-ability design (SKILL-TABLES-PREVIEW, as amended by the
@@ -264,7 +267,8 @@ namespace ACE.Server.ClassAbilities.Abilities
                     Id = ClassIdForSkill(skill),
                     Name = "enhanced_" + skill.ToString().ToLowerInvariant(),
                     DisplayName = "Enhanced " + skill.ToSentence(),
-                    Description = $"{TierText} to your base {skill.ToSentence()} skill. Counts toward wield requirements.",
+                    DescriptionTemplate = $"Raises your base {skill.ToSentence()} skill. Counts toward wield requirements.",
+                    RankTailTemplate = TierTails,
                     MaxRank = MaxTier,
                     CostPerRank = SkillCost,
                     Implemented = true,
@@ -281,8 +285,9 @@ namespace ACE.Server.ClassAbilities.Abilities
                     Id = ClassIdForAttribute(attribute),
                     Name = "enhanced_" + attribute.ToString().ToLowerInvariant(),
                     DisplayName = "Enhanced " + attribute,
-                    Description = $"{TierText} to your base {attribute} attribute. Not redistributable; counts toward " +
-                                  "wield requirements and raises the skills and vitals it governs.",
+                    DescriptionTemplate = $"Raises your base {attribute}, and with it the skills and vitals built on it. " +
+                                  "Counts toward wield requirements. These points cannot be redistributed.",
+                    RankTailTemplate = TierTails,
                     MaxRank = MaxTier,
                     CostPerRank = AttributeCost,
                     Implemented = true,
@@ -308,7 +313,8 @@ namespace ACE.Server.ClassAbilities.Abilities
                     Id = ClassIdForVital(vital),
                     Name = "enhanced_" + shortName.ToLowerInvariant(),
                     DisplayName = "Enhanced " + shortName,
-                    Description = $"{TierText} to your base maximum {shortName}. Not redistributable; counts toward wield requirements.",
+                    DescriptionTemplate = $"Raises your base maximum {shortName}. Counts toward wield requirements. These points cannot be redistributed.",
+                    RankTailTemplate = TierTails,
                     MaxRank = MaxTier,
                     // Health is the premium vital (2/rank); Stamina and Mana stay at 1/rank.
                     CostPerRank = vital == PropertyAttribute2nd.MaxHealth ? HealthVitalCost : VitalCost,

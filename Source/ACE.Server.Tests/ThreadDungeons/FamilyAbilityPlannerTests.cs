@@ -422,8 +422,8 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreEqual(strip.Key, ThreadDungeonSpawner.StripKeyFor(true, true, strip));
             Assert.IsNull(ThreadDungeonSpawner.StripKeyFor(false, false, strip), "nothing reads it: a strip dial change must not drop the cache");
 
-            var body = PooledLootSourceText.MethodBody(PooledLootSourceText.Read(Spawner), "public static void TryPopulate(ThreadDungeonRun run, Landblock landblock)");
-            StringAssert.Contains(body, "StripKeyFor(archetypeUpliftOn, creatureAbilitiesOn, spellStrip)", "TryPopulate keys the memo through it");
+            var body = PooledLootSourceText.MethodBody(PooledLootSourceText.Read(Spawner), "internal static DungeonSpawnPlan BuildLivePlan(");
+            StringAssert.Contains(body, "StripKeyFor(archetypeUpliftOn, creatureAbilitiesOn, spellStrip)", "BuildLivePlan keys the memo through it");
         }
 
         [TestMethod]
@@ -562,9 +562,14 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         [TestMethod]
-        public void TryPopulate_resolves_the_abilities_once_after_the_plan_is_built()
+        public void BuildLivePlan_resolves_the_abilities_once_after_the_plan_is_built()
         {
-            var body = PooledLootSourceText.MethodBody(PooledLootSourceText.Read(Spawner), "public static void TryPopulate(ThreadDungeonRun run, Landblock landblock)");
+            var source = PooledLootSourceText.Read(Spawner);
+            var body = PooledLootSourceText.MethodBody(source, "internal static DungeonSpawnPlan BuildLivePlan(");
+
+            // TryPopulate goes through BuildLivePlan and must not resolve the abilities a second time itself.
+            Assert.IsFalse(PooledLootSourceText.MethodBody(source, "public static void TryPopulate(ThreadDungeonRun run, Landblock landblock)").Contains("ResolveCreatureAbilities("),
+                "TryPopulate must not resolve the abilities itself: BuildLivePlan does it, once per run");
 
             var build = body.IndexOf("DungeonPopulationBuilder.Build(", StringComparison.Ordinal);
             var resolve = body.IndexOf("plan.CreatureAbilities = ResolveCreatureAbilities(", StringComparison.Ordinal);

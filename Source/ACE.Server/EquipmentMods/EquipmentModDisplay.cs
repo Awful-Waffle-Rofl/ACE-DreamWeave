@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 
 using ACE.Entity.Enum.Properties;
+using ACE.Server.ClassAbilities;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.EquipmentMods
@@ -106,6 +107,28 @@ namespace ACE.Server.EquipmentMods
         }
 
         /// <summary>
+        /// Whether a mod works on an untrained wearer, as appraisal text: "Works without the ability" for a Standalone
+        /// mod, otherwise "Requires &lt;Ability&gt; trained". Static item text - it cannot know a player's state or
+        /// whether the class-ability system is on. The ability name comes from TryGetValue because a mod can link an
+        /// unregistered or retired id; the mod's own DisplayName is the fallback. Describe is deliberately untouched:
+        /// the minting messages share it and must not carry this suffix.
+        /// </summary>
+        public static string AbilityRequirement(EquipmentModDefinition definition)
+        {
+            if (definition.Standalone)
+                return "Works without the ability";
+
+            return $"Requires {LinkedAbilityName(definition)} trained";
+        }
+
+        /// <summary>
+        /// The linked ability's display name. TryGetValue, never the indexer: a mod can link an unregistered or retired id, and the
+        /// mod's own DisplayName is the fallback.
+        /// </summary>
+        public static string LinkedAbilityName(EquipmentModDefinition definition) =>
+            ClassAbilityRegistry.Abilities.TryGetValue(definition.LinkedAbility, out var linked) ? linked.DisplayName : definition.DisplayName;
+
+        /// <summary>
         /// The mod bullet lines for an item's appraisal panel, including its mod capacity when set.
         /// Empty when the item carries nothing - the caller decides whether a block is worth printing.
         /// </summary>
@@ -117,7 +140,7 @@ namespace ACE.Server.EquipmentMods
                 return lines;
 
             foreach (var (definition, potency) in GetMods(item))
-                lines.Add($"- {Describe(definition, potency)}");
+                lines.Add($"- {Describe(definition, potency)} ({AbilityRequirement(definition)})");
 
             var capacity = item.GetProperty(PropertyInt.GearModCapacity) ?? 0;
 

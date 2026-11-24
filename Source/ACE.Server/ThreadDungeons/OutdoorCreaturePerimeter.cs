@@ -28,13 +28,17 @@ namespace ACE.Server.ThreadDungeons
 
         public OutdoorPerimeterSettings Settings { get; }
 
-        public OutdoorCreaturePerimeter(double centreGx, double centreGy, double radius, bool interior, OutdoorPerimeterSettings settings)
+        /// <summary>The line a refused strike sends: <see cref="RefusedStrikeText"/> unless the binding's owner gives its own.</summary>
+        public string RefusedStrikeLine { get; }
+
+        public OutdoorCreaturePerimeter(double centreGx, double centreGy, double radius, bool interior, OutdoorPerimeterSettings settings, string refusedStrikeLine = null)
         {
             CentreGx = centreGx;
             CentreGy = centreGy;
             Radius = radius;
             Interior = interior;
             Settings = settings;
+            RefusedStrikeLine = refusedStrikeLine ?? RefusedStrikeText;
         }
 
         /// <summary>Horizontal metres from the circle centre to a landblock-local position.</summary>

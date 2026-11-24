@@ -93,12 +93,17 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "sanguine_ward",
             DisplayName = "Sanguine Ward",
-            Description = "Martyr's Hecatomb and Curse of Raven Fury still spend their full health basis for " +
-                          "damage, but you only lose 75/55/35% of it by rank, and the health you do lose " +
-                          "returns as a ward worth 60/90/120% of that amount for 15 seconds that absorbs damage " +
-                          "from monsters. While it holds, it also acts as a shield against " +
-                          "monsters' physical attacks from the front. The ward refreshes rather than stacks, and " +
-                          "expires unused. Higher Cooking multiplies the ward, never the health you pay.",
+            // Live text. Self-cost and absorb per rank: SanguineWardAbility.cs ~220-234 and Player_ClassAbilityBuffs.cs ~1903-1928;
+            // ward duration: Player_ClassAbilityBuffs.cs ~1933.
+            DescriptionTemplate = "Martyr's Hecatomb and Curse of Raven Fury still deal damage from their full health cost, but you " +
+                          "lose only part of it, and what you lose comes back as a ward for " +
+                          "{v:class_ability_sanguine_ward_duration_seconds|num} seconds that absorbs damage from creatures. While " +
+                          "the ward holds, it also works as a shield against creatures' physical attacks from the front and adds its " +
+                          "shield level to what Thorns reflects. It refreshes rather than stacks, and fades if unused. " +
+                          "Its affinity never raises the health you pay.",
+            RankTailTemplate = "you lose {ranks:class_ability_sanguine_ward_selfcost_r|pct}% of the cost, ward worth " +
+                          "{ranks:class_ability_sanguine_ward_absorb_r|pct}% of that",
+            TunableSourceFiles = new[] { "WorldObjects/Player_ClassAbilityBuffs.cs" },
             MaxRank = 3,
             // Blood Mage buff pass: 1/2/3 -> 1/1/1. Existing owners are refunded the difference by
             // ClassAbilityRepricing wave 1.

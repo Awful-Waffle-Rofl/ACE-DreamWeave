@@ -302,6 +302,7 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
+        [TestCategory("Slow")]
         public void CharacterStartedSlow_200Timeout_RanTrue()
         {
             var probe = Register("slowchar", Character);
@@ -381,6 +382,7 @@ namespace ACE.Server.Tests
         // ---- single flight and the worker ----
 
         [TestMethod]
+        [TestCategory("Slow")]
         public void CommandBusy_NamesHoldingCommand()
         {
             var slow = Register("slowweb", Web);
@@ -404,6 +406,7 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
+        [TestCategory("Slow")]
         public void SameAccountConcurrent_409()
         {
             var slow = Register("slowweb", Web);
@@ -422,6 +425,7 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
+        [TestCategory("Slow")]
         public void LateOutputOfTimedOutRun_NotInAnotherRunsResult()
         {
             var slow = Register("slowweb", Web);
@@ -823,6 +827,7 @@ namespace ACE.Server.Tests
         [DataRow("not_in_world")]
         [DataRow("handler_replaced")]
         [DataRow("character_flags")]
+        [TestCategory("Slow")]
         public void Refusals_PostNoAuditLine(string scenario)
         {
             var timeoutMs = 5000;

@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
 
@@ -58,6 +59,9 @@ namespace ACE.Server.WorldEvents.Defs
         /// single boss out-damage the same group spread over a wave (decision C16).
         /// </summary>
         public const double DefaultThroughputCalibration = 1.0;
+
+        /// <summary>The C# and shipped default for <see cref="BudgetExponent"/>: linear in power.</summary>
+        public const double DefaultBudgetExponent = 1.0;
 
         /// <summary>The C# and shipped default for <see cref="MinSampleSeconds"/>.</summary>
         public const double DefaultMinSampleSeconds = 120.0;
@@ -170,6 +174,59 @@ namespace ACE.Server.WorldEvents.Defs
         /// </summary>
         [JsonPropertyName("minSampleSeconds")]
         public double MinSampleSeconds { get; set; } = DefaultMinSampleSeconds;
+
+        /// <summary>
+        /// The champion HP budget (kill_boss only, see <see cref="WorldEventBossBudget"/>): health per unit of
+        /// audience power. 0 - the C# default and the absent-key state - means this boss has no budget and
+        /// keeps its throughput or power-curve sizing.
+        /// </summary>
+        [JsonPropertyName("budgetHealthPerPower")]
+        public double BudgetHealthPerPower { get; set; }
+
+        /// <summary>The exponent on audience power in the budget (1.0 = linear).</summary>
+        [JsonPropertyName("budgetExponent")]
+        public double BudgetExponent { get; set; } = DefaultBudgetExponent;
+
+        /// <summary>
+        /// The least health the budget gives, and the health the boss is re-based to before the budget
+        /// multiplier. 0 turns the budget off for this boss (a rebase of 0 means "no override", so there
+        /// would be nothing for the multiplier to be a multiple of).
+        /// </summary>
+        [JsonPropertyName("budgetFloorHealth")]
+        public uint BudgetFloorHealth { get; set; }
+
+        /// <summary>
+        /// The most health the budget gives. Bounded by int.MaxValue for the reason <see cref="BaseHealth"/>
+        /// gives; the store repairs anything above it.
+        /// </summary>
+        [JsonPropertyName("budgetCapHealth")]
+        public uint BudgetCapHealth { get; set; }
+
+        /// <summary><see cref="BudgetHealthPerPower"/>, or world_events_boss_health_per_power when non-zero.</summary>
+        [JsonIgnore]
+        public double EffectiveBudgetHealthPerPower => WorldEventOverrides.Double("world_events_boss_health_per_power", BudgetHealthPerPower);
+
+        /// <summary><see cref="BudgetExponent"/>, or world_events_boss_power_exponent when non-zero.</summary>
+        [JsonIgnore]
+        public double EffectiveBudgetExponent => WorldEventOverrides.Double("world_events_boss_power_exponent", BudgetExponent);
+
+        /// <summary><see cref="BudgetFloorHealth"/>, or world_events_boss_budget_floor_health when non-zero.</summary>
+        [JsonIgnore]
+        public uint EffectiveBudgetFloorHealth => (uint)Math.Min(int.MaxValue, WorldEventOverrides.Long("world_events_boss_budget_floor_health", BudgetFloorHealth));
+
+        /// <summary><see cref="BudgetCapHealth"/>, or world_events_boss_budget_cap_health when non-zero.</summary>
+        [JsonIgnore]
+        public uint EffectiveBudgetCapHealth => (uint)Math.Min(int.MaxValue, WorldEventOverrides.Long("world_events_boss_budget_cap_health", BudgetCapHealth));
+
+        /// <summary>
+        /// The budget's health multiplier on the floor for <paramref name="powerSum"/>, against the EFFECTIVE
+        /// dials (live overrides take effect on the next resolve). See <see cref="WorldEventBossBudget.ResolveMult"/>.
+        /// </summary>
+        public double ResolveBudgetMult(double powerSum)
+        {
+            return WorldEventBossBudget.ResolveMult(EffectiveBudgetHealthPerPower, EffectiveBudgetExponent, powerSum,
+                EffectiveBudgetFloorHealth, EffectiveBudgetCapHealth);
+        }
 
         /// <summary>
         /// <see cref="PerPlayer"/>, or world_events_boss_per_player when that property is non-zero (live

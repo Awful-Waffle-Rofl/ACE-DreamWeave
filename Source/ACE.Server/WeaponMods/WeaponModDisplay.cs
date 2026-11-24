@@ -133,8 +133,14 @@ namespace ACE.Server.WeaponMods
             if (weapon == null)
                 return lines;
 
-            foreach (var (definition, magnitude) in WeaponModTinkerSet.ReadSpecials(weapon))
-                lines.Add($"- {Describe(definition, magnitude, WeaponModValue.MagnitudeScale(), weapon)}");
+            // Tourmaline specials, then Paragon-only mods; a Paragon weapon's lines carry the combined magnitude.
+            // All Paragon formatting lives in WeaponModParagonDisplay.
+            lines.AddRange(WeaponModParagonDisplay.ModLines(weapon, WeaponModValue.MagnitudeScale()));
+
+            var paragonSummary = WeaponModParagonDisplay.SummaryLine(weapon);
+
+            if (paragonSummary.Length > 0)
+                lines.Add(paragonSummary);
 
             if (!WeaponModTinkerSet.IsManaged(weapon))
                 return lines;

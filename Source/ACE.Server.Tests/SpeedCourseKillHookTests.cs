@@ -46,7 +46,7 @@ namespace ACE.Server.Tests
         {
             var src = Read("WorldObjects", "Creature_Death.cs");
 
-            StringAssert.Contains(src, "var feedsProgress = FeedsKillProgressHooks(P_SpeedCourseCreature);");
+            StringAssert.Contains(src, "var feedsProgress = FeedsKillProgressHooks(P_SpeedCourseCreature || P_TrialRep != null);");
             Assert.IsTrue(Regex.IsMatch(src, @"if \(feedsProgress\)\s*\n\s*killingPlayer\.ApplyKillFillVesselCreatureDeath\(this\);"), "the vessel hook is gated");
             Assert.IsTrue(Regex.IsMatch(src, @"if \(feedsProgress\)\s*\n\s*killingPlayer\.ApplyMuleFormTokenCreatureDeath\(this\);"), "the mule-token hook is gated");
 

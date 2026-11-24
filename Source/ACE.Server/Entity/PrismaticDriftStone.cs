@@ -187,6 +187,9 @@ namespace ACE.Server.Entity
                 case ImbuedEffectType.ElectricRending: return "Electric Rending";
                 case ImbuedEffectType.HealthRending:   return "Life Rending";
                 case ImbuedEffectType.CriticalStrike:  return "Critical Strike";
+                // not Drift Stone outcomes; named for the Summoner focus appraisal (SummonerFocusDisplay)
+                case ImbuedEffectType.CripplingBlow:   return "Crippling Blow";
+                case ImbuedEffectType.ArmorRending:    return "Armor Rending";
             }
 
             return rend.ToString();
@@ -225,7 +228,8 @@ namespace ACE.Server.Entity
 
         public static bool IsEligibleWeapon(WorldObject target)
         {
-            return target != null && (target.ItemType & EligibleItemTypes) != 0;
+            // a Summoner focus is refused: the stone would stamp a damage bonus on it that the focus's wielder cut and pet power make meaningless
+            return target != null && (target.ItemType & EligibleItemTypes) != 0 && !SummonerFocus.IsSummonerFocus(target);
         }
 
         /// <summary>
@@ -487,6 +491,12 @@ namespace ACE.Server.Entity
                 return WeenieError.YouDoNotPassCraftingRequirements;
             }
 
+            if (SummonerFocus.IsSummonerFocus(target))
+            {
+                player.SendTransientError($"The {source.Name} cannot be used on a Summoner caster.");
+                return WeenieError.YouDoNotPassCraftingRequirements;
+            }
+
             if (!IsEligibleWeapon(target))
             {
                 player.SendTransientError($"The {source.Name} only works on a melee weapon, a missile launcher, or a caster.");
@@ -613,7 +623,7 @@ namespace ACE.Server.Entity
         /// Mirrors RecipeManager.UpdateObj - the client moves an updated item to the first container
         /// slot, so the server has to mimic that for persistence.
         /// </summary>
-        private static void UpdateObj(Player player, WorldObject obj)
+        internal static void UpdateObj(Player player, WorldObject obj)
         {
             player.EnqueueBroadcast(new GameMessageUpdateObject(obj));
 
@@ -626,7 +636,15 @@ namespace ACE.Server.Entity
             var invObj = player.FindObject(obj.Guid.Full, Player.SearchLocations.MyInventory);
 
             if (invObj != null)
+            {
                 player.MoveItemToFirstContainerSlot(obj);
+
+                // The UpdateObject above plus this container re-slot is the same pair as WeaponModManager.UpdateObj,
+                // which is observed live to rebuild the item client-side and drop its emitters (the note at
+                // WeaponModManager's ResetAuraForRebuild call). The re-slot itself is server-side only and sends
+                // nothing. Reopen the record only; the item is not drawn.
+                VisualEffectManager.Forget(player.Session, obj);
+            }
         }
     }
 }

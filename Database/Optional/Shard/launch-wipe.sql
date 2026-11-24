@@ -129,6 +129,15 @@
 -- character_pvp_rating WIPE
 -- pvp_match WIPE
 -- pvp_match_participant WIPE
+-- character_salvage_batch WIPE
+-- character_salvage_batch_item WIPE
+-- salvage_roller_audit WIPE
+-- allegiance_avatar WIPE
+-- allegiance_avatar_contribution WIPE
+-- allegiance_gauntlet_record WIPE
+-- allegiance_gauntlet_run WIPE
+-- allegiance_gauntlet_wave WIPE
+-- allegiance_gauntlet_claim WIPE
 -- pvp_template KEEP
 -- pvp_template_history KEEP
 -- INVENTORY-END
@@ -145,6 +154,21 @@
 --   pvp_template and pvp_template_history are KEEP: they hold admin-authored PvP template
 --   definitions (frozen JSON), server content rather than character state. source_Character_Id is
 --   informational only and is never resolved, so a wiped template character leaves nothing dangling.
+--   character_salvage_batch, character_salvage_batch_item and salvage_roller_audit are WIPE, not
+--   CLEAN. A batch's items live in escrow containers that are account_vault rows, and account_vault
+--   is WIPE, so a kept character's batch would point at objects this script deletes. The audit
+--   trail is WIPE for the reason account_vault_log is: it names guids, and the guid allocators
+--   restart below the wiped ranges, so a kept audit row would come to name a different object.
+--   allegiance_avatar and allegiance_avatar_contribution are WIPE, not CLEAN, even though an
+--   allegiance whose monarch is kept survives. An Avatar's lifetime XP and Favor are earned
+--   progression, reset at launch like the vault, bank and market tables above, and its seat names
+--   a house guid that may not survive. A kept allegiance founds a new Avatar under the normal
+--   founding rule once it qualifies again.
+--   allegiance_gauntlet_record, allegiance_gauntlet_run, allegiance_gauntlet_wave and
+--   allegiance_gauntlet_claim are WIPE with the Avatar tables they hang off: the record and run rows
+--   are keyed by an avatar_Id the Avatar wipe above removes, the wave rows by a run_Id this wipe
+--   removes, and each claim row names a wiped run_Id and only holds a daily cap that would lapse at
+--   the next UTC midnight anyway.
 
 -- ---------------------------------------------------------------- constants (frozen format)
 -- Decimal on purpose: a 0x literal assigned to a user variable is a BINARY STRING in MySQL, not
@@ -507,6 +531,69 @@ PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt;
 INSERT INTO ace_wipe_scratch.action_count (step, n) VALUES (CONCAT('wipe ', @lw_t), IF(@lw_x = 1, ROW_COUNT(), -1));
 DEALLOCATE PREPARE lw_stmt;
 
+SET @lw_t = 'character_salvage_batch';
+SET @lw_x = (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t);
+SET @lw_sql = IF(@lw_x = 1, CONCAT('DELETE FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt;
+INSERT INTO ace_wipe_scratch.action_count (step, n) VALUES (CONCAT('wipe ', @lw_t), IF(@lw_x = 1, ROW_COUNT(), -1));
+DEALLOCATE PREPARE lw_stmt;
+
+SET @lw_t = 'character_salvage_batch_item';
+SET @lw_x = (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t);
+SET @lw_sql = IF(@lw_x = 1, CONCAT('DELETE FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt;
+INSERT INTO ace_wipe_scratch.action_count (step, n) VALUES (CONCAT('wipe ', @lw_t), IF(@lw_x = 1, ROW_COUNT(), -1));
+DEALLOCATE PREPARE lw_stmt;
+
+SET @lw_t = 'salvage_roller_audit';
+SET @lw_x = (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t);
+SET @lw_sql = IF(@lw_x = 1, CONCAT('DELETE FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt;
+INSERT INTO ace_wipe_scratch.action_count (step, n) VALUES (CONCAT('wipe ', @lw_t), IF(@lw_x = 1, ROW_COUNT(), -1));
+DEALLOCATE PREPARE lw_stmt;
+
+SET @lw_t = 'allegiance_avatar';
+SET @lw_x = (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t);
+SET @lw_sql = IF(@lw_x = 1, CONCAT('DELETE FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt;
+INSERT INTO ace_wipe_scratch.action_count (step, n) VALUES (CONCAT('wipe ', @lw_t), IF(@lw_x = 1, ROW_COUNT(), -1));
+DEALLOCATE PREPARE lw_stmt;
+
+SET @lw_t = 'allegiance_avatar_contribution';
+SET @lw_x = (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t);
+SET @lw_sql = IF(@lw_x = 1, CONCAT('DELETE FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt;
+INSERT INTO ace_wipe_scratch.action_count (step, n) VALUES (CONCAT('wipe ', @lw_t), IF(@lw_x = 1, ROW_COUNT(), -1));
+DEALLOCATE PREPARE lw_stmt;
+
+SET @lw_t = 'allegiance_gauntlet_record';
+SET @lw_x = (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t);
+SET @lw_sql = IF(@lw_x = 1, CONCAT('DELETE FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt;
+INSERT INTO ace_wipe_scratch.action_count (step, n) VALUES (CONCAT('wipe ', @lw_t), IF(@lw_x = 1, ROW_COUNT(), -1));
+DEALLOCATE PREPARE lw_stmt;
+
+SET @lw_t = 'allegiance_gauntlet_run';
+SET @lw_x = (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t);
+SET @lw_sql = IF(@lw_x = 1, CONCAT('DELETE FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt;
+INSERT INTO ace_wipe_scratch.action_count (step, n) VALUES (CONCAT('wipe ', @lw_t), IF(@lw_x = 1, ROW_COUNT(), -1));
+DEALLOCATE PREPARE lw_stmt;
+
+SET @lw_t = 'allegiance_gauntlet_wave';
+SET @lw_x = (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t);
+SET @lw_sql = IF(@lw_x = 1, CONCAT('DELETE FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt;
+INSERT INTO ace_wipe_scratch.action_count (step, n) VALUES (CONCAT('wipe ', @lw_t), IF(@lw_x = 1, ROW_COUNT(), -1));
+DEALLOCATE PREPARE lw_stmt;
+
+SET @lw_t = 'allegiance_gauntlet_claim';
+SET @lw_x = (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t);
+SET @lw_sql = IF(@lw_x = 1, CONCAT('DELETE FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt;
+INSERT INTO ace_wipe_scratch.action_count (step, n) VALUES (CONCAT('wipe ', @lw_t), IF(@lw_x = 1, ROW_COUNT(), -1));
+DEALLOCATE PREPARE lw_stmt;
+
 -- CLEAN fork tables: keep only rows of kept characters. @lw_c is the character-id column.
 SET @lw_t = 'account_bank_fold'; SET @lw_c = 'character_Guid';
 SET @lw_x = (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t);
@@ -793,6 +880,51 @@ SET @lw_sql = IF((SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCH
 PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt; DEALLOCATE PREPARE lw_stmt;
 
 SET @lw_t = 'pvp_match_participant';
+SET @lw_sql = IF((SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t) = 1,
+    CONCAT('INSERT INTO ace_wipe_scratch.check_result (check_name, n) SELECT ''verify_wipe_nonempty ', @lw_t, ''', COUNT(*) FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt; DEALLOCATE PREPARE lw_stmt;
+
+SET @lw_t = 'character_salvage_batch';
+SET @lw_sql = IF((SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t) = 1,
+    CONCAT('INSERT INTO ace_wipe_scratch.check_result (check_name, n) SELECT ''verify_wipe_nonempty ', @lw_t, ''', COUNT(*) FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt; DEALLOCATE PREPARE lw_stmt;
+
+SET @lw_t = 'character_salvage_batch_item';
+SET @lw_sql = IF((SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t) = 1,
+    CONCAT('INSERT INTO ace_wipe_scratch.check_result (check_name, n) SELECT ''verify_wipe_nonempty ', @lw_t, ''', COUNT(*) FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt; DEALLOCATE PREPARE lw_stmt;
+
+SET @lw_t = 'salvage_roller_audit';
+SET @lw_sql = IF((SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t) = 1,
+    CONCAT('INSERT INTO ace_wipe_scratch.check_result (check_name, n) SELECT ''verify_wipe_nonempty ', @lw_t, ''', COUNT(*) FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt; DEALLOCATE PREPARE lw_stmt;
+
+SET @lw_t = 'allegiance_avatar';
+SET @lw_sql = IF((SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t) = 1,
+    CONCAT('INSERT INTO ace_wipe_scratch.check_result (check_name, n) SELECT ''verify_wipe_nonempty ', @lw_t, ''', COUNT(*) FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt; DEALLOCATE PREPARE lw_stmt;
+
+SET @lw_t = 'allegiance_avatar_contribution';
+SET @lw_sql = IF((SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t) = 1,
+    CONCAT('INSERT INTO ace_wipe_scratch.check_result (check_name, n) SELECT ''verify_wipe_nonempty ', @lw_t, ''', COUNT(*) FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt; DEALLOCATE PREPARE lw_stmt;
+
+SET @lw_t = 'allegiance_gauntlet_record';
+SET @lw_sql = IF((SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t) = 1,
+    CONCAT('INSERT INTO ace_wipe_scratch.check_result (check_name, n) SELECT ''verify_wipe_nonempty ', @lw_t, ''', COUNT(*) FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt; DEALLOCATE PREPARE lw_stmt;
+
+SET @lw_t = 'allegiance_gauntlet_run';
+SET @lw_sql = IF((SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t) = 1,
+    CONCAT('INSERT INTO ace_wipe_scratch.check_result (check_name, n) SELECT ''verify_wipe_nonempty ', @lw_t, ''', COUNT(*) FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt; DEALLOCATE PREPARE lw_stmt;
+
+SET @lw_t = 'allegiance_gauntlet_wave';
+SET @lw_sql = IF((SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t) = 1,
+    CONCAT('INSERT INTO ace_wipe_scratch.check_result (check_name, n) SELECT ''verify_wipe_nonempty ', @lw_t, ''', COUNT(*) FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt; DEALLOCATE PREPARE lw_stmt;
+
+SET @lw_t = 'allegiance_gauntlet_claim';
 SET @lw_sql = IF((SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t) = 1,
     CONCAT('INSERT INTO ace_wipe_scratch.check_result (check_name, n) SELECT ''verify_wipe_nonempty ', @lw_t, ''', COUNT(*) FROM `', @lw_t, '`'), 'DO 0');
 PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt; DEALLOCATE PREPARE lw_stmt;

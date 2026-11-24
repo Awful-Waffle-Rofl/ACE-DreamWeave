@@ -641,7 +641,7 @@ namespace ACE.Server.Tests
         public void EveryDepositIsAccountedForWhileAnotherThreadContendsForTheSameStore()
         {
             // The real mechanism, against a real AccountVaultStore. AccountVaultBarrelReaper's sweep
-            // (AccountVaultBarrelReaper.cs:216 starts its thread, :160 enqueues per row) hits the SAME
+            // (AccountVaultBarrelReaper.Start starts its thread, AccountVaultBarrelReaper.TryPurgeRow enqueues per row) hits the SAME
             // per-account store a sale is depositing into, and Drain runs every queued item on whichever
             // thread holds drainLock (AccountVaultStore.cs:2419-2484) - so a sale's deposit closure can
             // execute on the contender's thread.

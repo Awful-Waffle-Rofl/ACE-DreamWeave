@@ -171,7 +171,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(3, def.MaxRank);
             CollectionAssert.AreEqual(new[] { 1, 1, 1 }, def.CostPerRank, "1/2/3 -> 1/1/1 in the 2026-10-24 Archmage pass (reprice wave 6)");
             Assert.IsTrue(def.Implemented);
-            StringAssert.Contains(def.Description, "Magic Defense", "the description must name the affinity skill");
+            Assert.AreEqual("Affinity: Magic Defense", ClassAbilityText.AffinityLine(def), "the affinity line must name the affinity skill");
         }
 
         // ---- Nether Bloom ---------------------------------------------------------------------
@@ -313,7 +313,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(3, def.MaxRank);
             CollectionAssert.AreEqual(new[] { 1, 1, 1 }, def.CostPerRank);
             Assert.IsTrue(def.Implemented);
-            StringAssert.Contains(def.Description, "Loyalty", "the description must name the affinity skill");
+            Assert.AreEqual("Affinity: Loyalty", ClassAbilityText.AffinityLine(def), "the affinity line must name the affinity skill");
         }
 
         // ---- shared contract ------------------------------------------------------------------

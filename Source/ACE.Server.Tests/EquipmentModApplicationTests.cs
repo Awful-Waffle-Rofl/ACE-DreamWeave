@@ -783,8 +783,8 @@ namespace ACE.Server.Tests
             // The capacity line carries none: it is a count, not a roll.
             CollectionAssert.AreEqual(new[]
             {
-                "- Deadeye [100%]: +2.8% missile damage",
-                "- Venom [20%]: +0.82 poison damage per hit",
+                "- Deadeye [100%]: +2.8% missile damage (Works without the ability)",
+                "- Venom [20%]: +0.82 poison damage per hit (Works without the ability)",
                 "- Mod Capacity: 2",
             }, lines);
         }

@@ -120,7 +120,7 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             try
             {
-                // level 185 with the switch on: ratio(185) = (185/300)^2.87, clamped to the 0.10 floor - the
+                // level 185 with the switch on: ratio(185) = (185/300)^2 = 0.38, above the 0.10 floor - the
                 // same value DungeonPopulationBuilderTests pins for the pure DungeonRewardMath.RewardScaleRatio
                 // call, confirming the live PropertyManager path agrees with the pure math it wraps.
                 Assert.AreEqual(DungeonRewardMath.RewardScaleRatio(185, DungeonPopulationLimits.DefaultRewardScaleAnchor,
@@ -383,7 +383,8 @@ namespace ACE.Server.Tests.ThreadDungeons
             var body = PlaceBody();
 
             var capture = body.IndexOf("healthMaxBeforeUplift = preRaiseMax;", System.StringComparison.Ordinal);
-            var raise = body.IndexOf("BandUplift.RaiseAttributes(creature, plan.BandStandard)", System.StringComparison.Ordinal);
+            // 2026-11-18 (Thread family stretch): the raise reads UpliftStandardFor (the mapped standard for a stretched entry).
+            var raise = body.IndexOf("BandUplift.RaiseAttributes(creature, upliftStandard)", System.StringComparison.Ordinal);
             // 2026-10-08: the base also falls back to the reach-up stamp's capture (see the next test).
             var baseRead = body.IndexOf("var authoredMax = AuthoredHealthMax(healthMaxBeforeUplift, healthMaxBeforeStamp, creature.Health.MaxValue);", System.StringComparison.Ordinal);
             var write = body.IndexOf("NonBossHealthWrite(authoredMax, creature.Health.MaxValue", System.StringComparison.Ordinal);

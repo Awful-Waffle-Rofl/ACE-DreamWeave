@@ -149,6 +149,113 @@ namespace ACE.Server.Tests
                 Assert.AreEqual("wisps", WorldEventHazards.NextRunKind(wisps, rng));
         }
 
+        // ---- the shipped defaults (2026-11-17 retune) ----------------------------------------------------------
+
+        [TestMethod]
+        public void ShippedDefaults_ArePinnedExactly()
+        {
+            Assert.AreEqual("burst=1.5 follow=1 follow_lag=2.4 follow_target=random hold=3 mark_dest=1 move=3.5 pct=0.23 pillar_radius=5 rest=2.5", WorldEventHazardSettings.DefaultWisps);
+            Assert.AreEqual("speed=2.5 lead=4 wave_every=6 waves=50", WorldEventHazardSettings.DefaultBalls);
+            Assert.AreEqual("burst_radius=3 duration=300 lead=0.2 speed=7 target_share=0.3 target_spread=8", WorldEventHazardSettings.DefaultRain);
+        }
+
+        [TestMethod]
+        public void ShippedWispsLayer_CarriesItsOwnPct_WhichBeatsTheGlobalOne()
+        {
+            var plan = PlanOf(Source(new HazardDef { Kind = "wisps" }));
+            var start = WorldEventHazards.BuildStart(plan, "wisps", WorldEventHazardElement.Fire, 50f, new Random(1), null);
+
+            Assert.IsFalse(start.Args.Has("pct"));
+            Assert.AreEqual(0.23, HazardArgs.Merge(start.Args, start.SettingsLayer).GetDouble("pct", -1, 0, 1), 1e-9);
+        }
+
+        // ---- kinds (a source that rolls several kinds) ---------------------------------------------------------
+
+        private static HazardDef Portal(params string[] kinds) => new HazardDef { Kind = "wisps", Element = "fire", Kinds = kinds.ToList() };
+
+        [TestMethod]
+        public void Kinds_PlanWispsAndBallsRunsAcrossASeededSequence()
+        {
+            var plan = PlanOf(Source(Portal("wisps", "balls")));
+            var rng = new Random(11);
+            var kinds = Enumerable.Range(0, 200).Select(_ => WorldEventHazards.NextRunKind(plan, rng)).ToList();
+
+            Assert.IsTrue(kinds.Contains("wisps"));
+            Assert.IsTrue(kinds.Contains("balls"));
+            Assert.IsTrue(kinds.Contains("rain"), "a picked balls keeps its balls/rain alternation");
+            Assert.IsTrue(plan.BallPatterns.Count > 0, "balls need a pattern pool");
+
+            foreach (var kind in kinds.Distinct())
+            {
+                var start = WorldEventHazards.BuildStart(plan, kind, WorldEventHazardElement.Fire, 50f, new Random(3), null);
+
+                Assert.AreEqual(kind, start.Kind);
+            }
+        }
+
+        [TestMethod]
+        public void Kinds_WispsAndBallsAreChosenUniformly_BallsHalfRolling()
+        {
+            var plan = PlanOf(Source(Portal("wisps", "balls")));
+            var rng = new Random(21);
+            var counts = new Dictionary<string, int> { ["wisps"] = 0, ["balls"] = 0, ["rain"] = 0 };
+
+            for (var i = 0; i < 4000; i++)
+                counts[WorldEventHazards.NextRunKind(plan, rng)]++;
+
+            Assert.AreEqual(2000, counts["wisps"], 160, "half the runs are wisps");
+            Assert.AreEqual(1000, counts["balls"], 160, "a quarter are rolling balls");
+            Assert.AreEqual(1000, counts["rain"], 160, "a quarter are rain");
+        }
+
+        [TestMethod]
+        public void NoKinds_BehavesAsBefore_EveryRunIsTheSourceKind()
+        {
+            var plan = PlanOf(Source(new HazardDef { Kind = "wisps", Element = "fire" }));
+            var rng = new Random(2);
+
+            Assert.AreEqual(0, plan.KindChoices.Count);
+
+            for (var i = 0; i < 30; i++)
+                Assert.AreEqual("wisps", WorldEventHazards.NextRunKind(plan, rng));
+
+            Assert.AreEqual(0, plan.BallPatterns.Count, "no balls pool for a wisps-only source");
+        }
+
+        [TestMethod]
+        public void Kinds_AnExplicitRequestOverridesThem()
+        {
+            var plan = PlanOf(Source(Portal("wisps", "balls")), "rain");
+            var rng = new Random(2);
+
+            Assert.AreEqual(0, plan.KindChoices.Count);
+
+            for (var i = 0; i < 30; i++)
+                Assert.AreEqual("rain", WorldEventHazards.NextRunKind(plan, rng));
+        }
+
+        [TestMethod]
+        public void Kinds_WithAnEmptyBallPool_TurnABallsPickIntoRain()
+        {
+            var settings = Settings with { Pct = 0.30, Balls = WorldEventHazardSettings.DefaultBalls + " pct=abc" };
+            var plan = WorldEventHazards.Plan(Source(Portal("wisps", "balls")), null, settings, Arena(), new Random(1), out var note);
+            var rng = new Random(4);
+            var kinds = Enumerable.Range(0, 100).Select(_ => WorldEventHazards.NextRunKind(plan, rng)).Distinct().OrderBy(k => k).ToList();
+
+            CollectionAssert.AreEqual(new[] { "rain", "wisps" }, kinds);
+            StringAssert.Contains(note, "rain only");
+        }
+
+        [TestMethod]
+        public void Kinds_ASingleBallsEntry_IsJustAnAlternatingBallsPlan()
+        {
+            var plan = PlanOf(Source(Portal("balls")));
+
+            Assert.AreEqual("balls", plan.Kind);
+            Assert.AreEqual(0, plan.KindChoices.Count);
+            Assert.IsTrue(plan.BallsAlternateWithRain);
+        }
+
         // ---- ball pattern pool --------------------------------------------------------------------------------
 
         [TestMethod]
@@ -316,14 +423,15 @@ namespace ACE.Server.Tests
                 var start = WorldEventHazards.BuildStart(plan, "wisps", element, 50f, new Random(1), null);
                 var visuals = WorldEventHazardElements.For(element);
 
-                Assert.AreEqual("cycles,damage_type,hit_verb,mark_script,pct,script,wisp_wcid", Keys(start.Args));
+                // no pct: the shipped wisps layer carries its own (pct=0.23), so BuildStart omits it and the layer wins
+                Assert.AreEqual("cycles,damage_type,hit_verb,mark_script,script,wisp_wcid", Keys(start.Args));
                 Assert.AreEqual(visuals.MarkerScript.ToString(), start.Args.GetString("mark_script"));
                 Assert.AreEqual("wisps", start.Kind);
                 Assert.AreEqual("mixed", start.Pattern);
                 Assert.AreEqual(visuals.WispWcid.ToString(), start.Args.GetString("wisp_wcid"));
                 Assert.AreEqual(visuals.HitVerb, start.Args.GetString("hit_verb"));
                 Assert.AreEqual(WorldEventHazards.DamageWord(visuals.DamageType), start.Args.GetString("damage_type"));
-                Assert.AreEqual("0.3", start.Args.GetString("pct"));
+                Assert.AreEqual(0.23, plan.WispsLayer.GetDouble("pct", -1, 0, 1), 1e-9);
                 Assert.AreSame(plan.WispsLayer, start.SettingsLayer);
 
                 var merged = HazardArgs.Merge(start.Args, start.SettingsLayer);
@@ -384,9 +492,79 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void BuildStart_UsesThePctSetting()
         {
-            var plan = PlanOf(Source(new HazardDef { Kind = "wisps" }), null, Settings with { Pct = 0.45 });
+            var plan = PlanOf(Source(new HazardDef { Kind = "wisps" }), null, Settings with { Pct = 0.45, Wisps = WispsNoPct });
 
             Assert.AreEqual("0.45", WorldEventHazards.BuildStart(plan, "wisps", WorldEventHazardElement.Fire, 0f, new Random(1), null).Args.GetString("pct"));
+        }
+
+        // ---- per-kind pct ---------------------------------------------------------------------------------------
+
+        private static readonly string[] Kinds = { "wisps", "balls", "rain" };
+
+        /// <summary>The shipped wisps string carries its own pct (0.23); these tests need a layer with none.</summary>
+        private static readonly string WispsNoPct = WorldEventHazardSettings.DefaultWisps.Replace(" pct=0.23", "");
+
+        private static WorldEventHazardSettings WithLayers(string wisps, string balls, string rain)
+            => Settings with { Pct = 0.30, Wisps = wisps, Balls = balls, Rain = rain };
+
+        [TestMethod]
+        public void BuildStart_LayerPctWinsForThatKind_AndOmitsThePctArg()
+        {
+            var plan = PlanOf(Source(new HazardDef { Kind = "wisps" }), null,
+                WithLayers(WispsNoPct + " pct=0.05", WorldEventHazardSettings.DefaultBalls + " pct=0.2", WorldEventHazardSettings.DefaultRain + " pct=0.1"));
+            var expected = new Dictionary<string, double> { ["wisps"] = 0.05, ["balls"] = 0.2, ["rain"] = 0.1 };
+
+            foreach (var kind in Kinds)
+            {
+                var start = WorldEventHazards.BuildStart(plan, kind, WorldEventHazardElement.Fire, 50f, new Random(1), null);
+
+                Assert.IsFalse(start.Args.Has("pct"), kind + ": the event must not pass a pct that would beat the layer's");
+
+                // HazardManager.Start's merge: the event's args over the kind's settings layer
+                var merged = HazardArgs.Merge(start.Args, start.SettingsLayer);
+
+                Assert.AreEqual(expected[kind], merged.GetDouble("pct", -1, 0, 1), 1e-9, kind);
+            }
+        }
+
+        [TestMethod]
+        public void BuildStart_OnlyTheKindWhoseLayerHasPct_Overrides()
+        {
+            var plan = PlanOf(Source(new HazardDef { Kind = "wisps" }), null,
+                WithLayers(WispsNoPct, WorldEventHazardSettings.DefaultBalls, WorldEventHazardSettings.DefaultRain + " pct=0.1"));
+
+            Assert.AreEqual("0.3", WorldEventHazards.BuildStart(plan, "wisps", WorldEventHazardElement.Fire, 50f, new Random(1), null).Args.GetString("pct"));
+            Assert.AreEqual("0.3", WorldEventHazards.BuildStart(plan, "balls", WorldEventHazardElement.Fire, 50f, new Random(1), null).Args.GetString("pct"));
+            Assert.IsFalse(WorldEventHazards.BuildStart(plan, "rain", WorldEventHazardElement.Fire, 50f, new Random(1), null).Args.Has("pct"));
+        }
+
+        [TestMethod]
+        public void BuildStart_GlobalPctWhenTheLayerHasNone_ForEveryKind()
+        {
+            var plan = PlanOf(Source(new HazardDef { Kind = "wisps" }), null, Settings with { Pct = 0.45, Wisps = WispsNoPct });
+
+            foreach (var kind in Kinds)
+            {
+                var start = WorldEventHazards.BuildStart(plan, kind, WorldEventHazardElement.Fire, 50f, new Random(1), null);
+
+                Assert.AreEqual("0.45", start.Args.GetString("pct"), kind);
+                Assert.AreEqual(0.45, HazardArgs.Merge(start.Args, start.SettingsLayer).GetDouble("pct", -1, 0, 1), 1e-9, kind);
+            }
+        }
+
+        [TestMethod]
+        public void Plan_PoolIsBuiltFromTheArgsTheRunGets_SoAnInvalidLayerPctPlansRainOnly()
+        {
+            var settings = Settings with { Pct = 0.30, Balls = WorldEventHazardSettings.DefaultBalls + " pct=abc" };
+            var plan = WorldEventHazards.Plan(Source(new HazardDef { Kind = "balls" }), null, settings, Arena(), new Random(1), out var note);
+
+            Assert.AreEqual(0, plan.BallPatterns.Count, "every start would be refused with that layer, so no pattern may be pooled");
+            Assert.AreEqual("rain", plan.Kind);
+            StringAssert.Contains(note, "rain only");
+
+            var control = WorldEventHazards.Plan(Source(new HazardDef { Kind = "balls" }), null, Settings with { Balls = WorldEventHazardSettings.DefaultBalls + " pct=0.2" }, Arena(), new Random(1), out _);
+
+            Assert.IsTrue(control.BallPatterns.Count > 0, "control: a valid layer pct keeps the pool");
         }
 
         [TestMethod]

@@ -22,6 +22,36 @@ namespace ACE.Server.WorldObjects
     partial class Creature
     {
         /// <summary>
+        /// The killer name written into a corpse's "Killed by X." LongDesc. VTank decides who owns a corpse by
+        /// matching that LongDesc against ^Killed by ([a-zA-Z \-']*)\. and then splitting a pet name on "'s " to
+        /// find the owner. Any other character in the name (a '(' in "Revenant Warden (Slashing)", a digit, the
+        /// leading '+' of an admin name) breaks the match, and VTank then treats the corpse as nobody's and never
+        /// auto-loots it. So every character outside that class is dropped and runs of spaces are collapsed.
+        /// A name that sanitizes to nothing keeps its original text, so the LongDesc is never "Killed by ."
+        /// </summary>
+        public static string ToVtankKillerName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                return name;
+
+            var sb = new System.Text.StringBuilder(name.Length);
+
+            foreach (var c in name)
+            {
+                var keep = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-' || c == '\'';
+
+                if (keep)
+                    sb.Append(c);
+                else if (c == ' ' && sb.Length > 0 && sb[sb.Length - 1] != ' ')
+                    sb.Append(' ');
+            }
+
+            var result = sb.ToString().TrimEnd(' ');
+
+            return result.Length > 0 ? result : name.TrimStart('+');
+        }
+
+        /// <summary>
         /// The authored level to use for loot gating when a spawner RAISED <see cref="WorldObject.Level"/>
         /// (null for every creature that was never raised). Per instance and never persisted, in the same style as
         /// <see cref="DefenseSkillCeilings"/>. Set only by the World Events band uplift
@@ -46,6 +76,31 @@ namespace ACE.Server.WorldObjects
 
                 return DeathTreasureType.HasValue ? DatabaseManager.World.GetCachedDeathTreasure(DeathTreasureType.Value) : null;
             }
+        }
+
+        /// <summary>
+        /// The owner a combat pet's killing blow pays the utility on-kill weapon mods to, or null
+        /// (<see cref="ACE.Server.WeaponMods.WeaponModCombat.PetKillPaysOwner"/> owns the rule). A pet's melee
+        /// (Monster_Melee), missile (ProjectileCollisionHelper, ProjectileSource = the pet) and spell
+        /// (SpellProjectile, ProjectileSource = the pet) kills all record the PET as the attacker, and
+        /// DamageHistoryInfo captures its P_PetOwner as PetOwner at that moment. PetOwner is readonly and set only
+        /// in that constructor, only for a CombatPet attacker, so it alone says "a pet landed this" - never the
+        /// pet's own weak reference, which a pet that fired and then expired may have lost to GC before the
+        /// victim died (the same keying as DamageHistoryInfo.ResolvePetOwnerAsKiller). PetOwner is null for any
+        /// non-pet attacker; it is tested here before TryGetPetOwner, which is itself null-safe now but never returns an owner for it.
+        /// </summary>
+        private Player ResolveWeaponModPetOwner(DamageHistoryInfo lastDamager)
+        {
+            if (lastDamager == null)
+                return null;
+
+            var killerWasCombatPet = lastDamager.PetOwner != null;
+            var owner = killerWasCombatPet ? lastDamager.TryGetPetOwner() : null;
+
+            var pays = ACE.Server.WeaponMods.WeaponModCombat.PetKillPaysOwner(
+                lastDamager.TryGetAttacker() is Player, killerWasCombatPet, owner != null, this is Player, this is Pet);
+
+            return pays ? owner : null;
         }
 
         private bool onDeathEntered = false;
@@ -97,9 +152,14 @@ namespace ACE.Server.WorldObjects
                 // preconditions. THE KILLING BLOW IS THE POINT: killingPlayer comes from
                 // DamageHistory.LastDamager, not TopDamager and not the damage list, so a fellow who did
                 // more damage gets nothing. That exclusion is the mechanic. See Player_KillFillVessel.cs.
-                // A speed-course creature feeds neither this nor the mule-form token below
-                // (FeedsKillProgressHooks, Creature_DeathRewards.cs).
-                var feedsProgress = FeedsKillProgressHooks(P_SpeedCourseCreature);
+                // A speed-course creature and a Balance Trials creature feed neither this nor the mule-form
+                // token below (FeedsKillProgressHooks, Creature_DeathRewards.cs; P_TrialRep, Creature_Trial.cs).
+                var feedsProgress = FeedsKillProgressHooks(P_SpeedCourseCreature || P_TrialRep != null);
+
+                // Nor does an Allegiance Gauntlet creature (P_Gauntlet, Creature_Gauntlet.cs). A separate line so the one
+                // gate read above, which the speed-course and Trials pins hold verbatim, stays as it was.
+                if (P_Gauntlet != null)
+                    feedsProgress = false;
 
                 if (feedsProgress)
                     killingPlayer.ApplyKillFillVesselCreatureDeath(this);
@@ -113,6 +173,23 @@ namespace ACE.Server.WorldObjects
                 if (feedsProgress)
                     killingPlayer.ApplyMuleFormTokenCreatureDeath(this);
             }
+            // A combat pet's killing blow pays its OWNER the three utility on-kill weapon mods (Second Wind, Mana Well,
+            // Cleanse) and nothing else from the block above: no class abilities, no kill-fill vessel, no mule token.
+            // The else makes the two branches exclusive, so a death pays once. The owner may be ticked by another
+            // landblock group, so the effect is queued onto the owner's own action queue (Player_WeaponMods.cs,
+            // ApplyWeaponModPetKill) rather than called across threads from here.
+            else if (ResolveWeaponModPetOwner(lastDamager) is Player petOwner)
+                petOwner.EnqueueAction(new ActionEventDelegate(() => petOwner.ApplyWeaponModPetKill(this)));
+
+            // Summoner casters: the killing pet's OWN half of its owner's focus Second Wind and Cleanse (Shared mods), queued
+            // onto the pet's own action queue, never run here on the victim's thread. A no-op for every other killer.
+            SummonerFocus.EnqueuePetKillUtility(lastDamager?.TryGetAttacker(), this);
+
+            // Jewelry Aspects Resolve: a chance to shake off one monster-cast debuff on a kill. Rolls for the killer
+            // OR the owner of a killing pet (TryGetPetOwnerOrAttacker), which the block above does not cover. Runs
+            // whether or not class abilities are enabled; the Player-side method owns the gate and the victim rules.
+            if (lastDamager?.TryGetPetOwnerOrAttacker() is Player resolvePlayer)
+                resolvePlayer.ApplyJewelryResolveCreatureDeath(this);
 
             //QuestManager.OnDeath(lastDamager?.TryGetAttacker());
 
@@ -242,7 +319,8 @@ namespace ACE.Server.WorldObjects
             if (objectiveDeath)
                 ReportBattlegroundObjectiveDestroyed(lastDamager);
 
-            var suppressCorpse = pooledLoot || IsDigsiteCorpselessDeath(P_DigsiteEncounter, GetProperty(PropertyInt.MlDigsiteEncounterId)) || rewardless || eventPooledLoot || IsPinnacleCorpselessDeath(PinnacleCorpseless) || objectiveDeath;
+            // Allegiance Gauntlet: a Gauntlet creature leaves no corpse (IsGauntletCorpselessDeath, Creature_Gauntlet.cs).
+            var suppressCorpse = pooledLoot || IsDigsiteCorpselessDeath(P_DigsiteEncounter, GetProperty(PropertyInt.MlDigsiteEncounterId)) || rewardless || eventPooledLoot || IsPinnacleCorpselessDeath(PinnacleCorpseless) || IsGauntletCorpselessDeath(P_Gauntlet != null) || objectiveDeath;
 
             // Guarded: a throw here (the rare roll creates a world object) must not abort Die() after dieEntered is
             // set, or the kill is never recorded and the creature is never destroyed. pooledLoot stays true, so the
@@ -264,6 +342,17 @@ namespace ACE.Server.WorldObjects
             // the in-memory back-reference AND the persisted stamp, so a creature from a dead run is inert.
             if (P_DungeonRun != null && GetProperty(PropertyInt.ThreadDungeonRunId) != null)
                 ACE.Server.ThreadDungeons.ThreadDungeonManager.OnRunCreatureDied(this, lastDamager, topDamager);
+
+            // Balance Trials: a trial creature reports its death to the session that owns its room, which advances the
+            // waves. After the Threads hook, so after OnDeath_GrantXP has paid the kill.
+            if (P_TrialRep != null)
+                ACE.Server.BalanceTrials.TrialManager.OnTrialCreatureDied(this);
+
+            // Allegiance Gauntlet: a Gauntlet creature reports its death to the run that spawned it, which clears the wave.
+            // After the Trials hook, so after OnDeath_GrantXP has paid the kill. The hook skips a run that is no longer live
+            // and catches, so Die always completes.
+            if (P_Gauntlet != null)
+                ACE.Server.Avatars.Gauntlet.GauntletSpawner.OnCreatureDied(this);
 
             // ML digsite encounters (WaffleACE): a creature a dug-up encounter spawned reports its death to
             // that encounter, which is what clears a wave and what wins the fight when the death is the
@@ -460,14 +549,21 @@ namespace ACE.Server.WorldObjects
 
                 var totalXP = (XpOverride ?? 0) * damagePercent;
 
-                playerDamager.EarnXP((long)Math.Round(totalXP), XpType.Kill);
+                var xpAward = (long)Math.Round(totalXP);
+                playerDamager.EarnXP(xpAward, XpType.Kill);
 
                 // handle luminance
+                var lumAward = 0L;
                 if (LuminanceAward != null)
                 {
-                    var totalLuminance = (long)Math.Round(LuminanceAward.Value * damagePercent);
-                    playerDamager.EarnLuminance(totalLuminance, XpType.Kill);
+                    lumAward = (long)Math.Round(LuminanceAward.Value * damagePercent);
+                    playerDamager.EarnLuminance(lumAward, XpType.Kill);
                 }
+
+                // Balance Trials recorder: the kill's rounded award, kept on the creature for the kill event that
+                // TrialManager.OnTrialCreatureDied emits. The run's XP total comes from the grant site, not from here.
+                if (P_TrialRep != null)
+                    ACE.Server.BalanceTrials.TrialHooks.OnKillAward(this, playerDamager, xpAward, lumAward);
             }
         }
 
@@ -776,13 +872,7 @@ namespace ACE.Server.WorldObjects
 
                 var loot = GenerateTreasure(killer, null);
 
-                foreach(var item in loot)
-                {
-                    if (!string.IsNullOrEmpty(item.Quest)) // if the item has a Quest string, make the creature a "generator" of the item so that the pickup action applies the quest. 
-                        item.GeneratorId = Guid.Full; 
-                    item.Location = new Position(Location);
-                    LandblockManager.AddObject(item);
-                }
+                DropLootInWorld(loot, Location, Guid);
                 return;
             }
 
@@ -852,7 +942,7 @@ namespace ACE.Server.WorldObjects
                 if (!(Generator != null && Generator.Guid == killer.Guid) && Guid != killer.Guid)
                 {
                     if (!string.IsNullOrWhiteSpace(killer.Name))
-                        killerName = killer.Name.TrimStart('+');  // vtank requires + to be stripped for regex matching.
+                        killerName = ToVtankKillerName(killer.Name);
 
                     corpse.KillerId = killer.Guid.Full;
 
@@ -945,10 +1035,19 @@ namespace ACE.Server.WorldObjects
                 // still read the raw killer - only the gate, TryGenerateRare and TryDropTreasureMap use this.
                 lootKiller = DamageHistoryInfo.ResolvePetOwnerAsKiller(killer);
 
-                if (killer == null || !killer.IsOlthoiPlayer)
-                    GenerateTreasure(killer, corpse);
-                else
-                    GenerateTreasure_Olthoi(killer, corpse);
+                // Anything a full corpse refuses comes back here and is placed in the world beside the corpse
+                // (the same placement the NoCorpse path uses) instead of being left as an object that is in no
+                // container and not in the world. That ground drop deliberately skips the corpse's killer-only
+                // looting window: a full corpse is very rare and the alternative is losing the item.
+                var overflow = (killer == null || !killer.IsOlthoiPlayer)
+                    ? GenerateTreasure(killer, corpse)
+                    : GenerateTreasure_Olthoi(killer, corpse);
+
+                if (overflow.Count > 0)
+                {
+                    log.Warn($"[LOOT][OVERFLOW] corpse of {Name} (wcid {WeenieClassId}, {Guid}) is full: dropping {overflow.Count} refused item(s) on the ground: {string.Join(", ", overflow.Select(i => $"{i.Name} ({i.Guid})"))}");
+                    DropLootInWorld(overflow, corpseLocation, Guid);
+                }
 
                 // ML Treasure Hunt (WaffleACE): a creature killed by a player on Marae Lassel rarely leaves a
                 // treasure map on its corpse (Docs/Marae-Lassel/TREASURE-HUNT-PLAN.md section 6 "Drop", step 7).
@@ -1044,7 +1143,8 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// Transfers generated treasure from creature to corpse
+        /// Transfers generated treasure from creature to corpse. Returns the items that must be placed in the
+        /// world instead: every item when corpse is null, otherwise only the items a full corpse refused.
         /// </summary>
         private List<WorldObject> GenerateTreasure(DamageHistoryInfo killer, Corpse corpse)
         {
@@ -1056,12 +1156,25 @@ namespace ACE.Server.WorldObjects
                 List<WorldObject> items = RollDeathTreasureItems(DeathTreasure);
                 foreach (WorldObject wo in items)
                 {
-                    if (corpse != null)
-                        corpse.TryAddToInventory(wo);
-                    else
-                        droppedItems.Add(wo);
+                    AddToCorpseOrCollect(corpse, wo, droppedItems);
 
                     DoCantripLogging(killer, wo);
+                }
+
+                // Thread Shrine loot blessing, corpse model (pooled loot off): extra DeathTreasure rolls from the killer's
+                // blessing (Docs/Threads/ENCOUNTERS.md "Shrine"). 0 with no draw for every creature no run owns and every
+                // killer without a blessing. Exactly like the roll above: an item a full corpse refuses is collected and
+                // dropped on the ground beside it by CreateCorpse.
+                var extraRolls = ACE.Server.ThreadDungeons.ThreadLootPool.CorpseExtraRolls(P_DungeonRun, GetProperty(PropertyInt.ThreadDungeonRunId), killer);
+
+                for (var extra = 0; extra < extraRolls; extra++)
+                {
+                    foreach (var wo in RollDeathTreasureItems(DeathTreasure))
+                    {
+                        AddToCorpseOrCollect(corpse, wo, droppedItems);
+
+                        DoCantripLogging(killer, wo);
+                    }
                 }
             }
 
@@ -1082,13 +1195,13 @@ namespace ACE.Server.WorldObjects
                 // looted, so it does not keep the boss's size. No-op for every unscaled creature.
                 RestoreRuntimeItemScale(item);
 
-                if (corpse != null)
-                {
-                    corpse.TryAddToInventory(item);
+                // A wielded item may be unique or quest-bound, so a refusal never destroys it: it is dropped.
+                // The helper returns false (and collects the item) for a null corpse too, so a true result means
+                // the item is in the corpse and the broadcast is correct.
+                var took = AddToCorpseOrCollect(corpse, item, droppedItems);
+
+                if (took)
                     EnqueueBroadcast(new GameMessagePublicUpdateInstanceID(item, PropertyInstanceId.Container, corpse.Guid), new GameMessagePickupEvent(item));
-                }
-                else
-                    droppedItems.Add(item);
             }
 
             // contain and non-wielded treasure create
@@ -1105,10 +1218,7 @@ namespace ACE.Server.WorldObjects
 
                     if (wo != null)
                     {
-                        if (corpse != null)
-                            corpse.TryAddToInventory(wo);
-                        else
-                            droppedItems.Add(wo);
+                        AddToCorpseOrCollect(corpse, wo, droppedItems);
                     }
                 }
             }
@@ -1132,10 +1242,7 @@ namespace ACE.Server.WorldObjects
                 // consumes no random draw and no guid, so the outcome is unchanged.
                 foreach (var wo in RollSalvageAffinityItems(P_DungeonSalvageAffinities, DeathTreasure?.Tier ?? 1))
                 {
-                    if (corpse != null)
-                        corpse.TryAddToInventory(wo);
-                    else
-                        droppedItems.Add(wo);
+                    AddToCorpseOrCollect(corpse, wo, droppedItems);
                 }
             }
 
@@ -1143,18 +1250,62 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// Adds an item to the corpse. Returns true when the corpse took it. When there is no corpse, or the corpse
+        /// is full and refuses it, the item is appended to <paramref name="refused"/> so the caller can place it in
+        /// the world, and false is returned. This is the ONLY way GenerateTreasure adds to a corpse, so a refusal
+        /// can never be ignored.
+        /// </summary>
+        internal static bool AddToCorpseOrCollect(Container corpse, WorldObject item, List<WorldObject> refused)
+        {
+            if (corpse != null && corpse.TryAddToInventory(item))
+                return true;
+
+            refused.Add(item);
+            return false;
+        }
+
+        /// <summary>
+        /// Places loot in the world at a position: used when there is no corpse, and for items a full corpse refused.
+        /// An item the landblock will not take is destroyed (logged) rather than left in no container and not in the world.
+        /// </summary>
+        internal static bool DropLootInWorld(IEnumerable<WorldObject> loot, Position at, ObjectGuid generatorGuid)
+        {
+            var allPlaced = true;
+
+            foreach (var item in loot)
+            {
+                if (!string.IsNullOrEmpty(item.Quest)) // if the item has a Quest string, make the creature a "generator" of the item so that the pickup action applies the quest.
+                    item.GeneratorId = generatorGuid.Full;
+                item.Location = new Position(at);
+
+                if (!LandblockManager.AddObject(item))
+                {
+                    log.Warn($"[LOOT][OVERFLOW] landblock refused dropped item {item.Name} ({item.Guid}) at {at.ToLOCString()}; destroying it");
+                    item.Destroy();
+                    allPlaced = false;
+                }
+            }
+
+            return allPlaced;
+        }
+
+        /// <summary>
         /// Generates random amounts of slag on a corpse
         /// when an OlthoiPlayer is the killer
         /// </summary>
-        private void GenerateTreasure_Olthoi(DamageHistoryInfo killer, Corpse corpse)
+        private List<WorldObject> GenerateTreasure_Olthoi(DamageHistoryInfo killer, Corpse corpse)
         {
-            if (DeathTreasure == null) return;
+            var refused = new List<WorldObject>();
+
+            if (DeathTreasure == null) return refused;
 
             var slag = LootGenerationFactory.RollSlag(DeathTreasure);
 
-            if (slag == null) return;
+            if (slag == null) return refused;
 
-            corpse.TryAddToInventory(slag);
+            AddToCorpseOrCollect(corpse, slag, refused);
+
+            return refused;
         }
 
         public void DoCantripLogging(DamageHistoryInfo killer, WorldObject wo)

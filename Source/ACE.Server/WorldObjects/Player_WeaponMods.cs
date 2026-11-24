@@ -108,9 +108,20 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public double GetDefensiveWeaponModValue()
         {
-            var physical = DefensiveWeaponMath.Sanitize(WeaponModCombat.ReadWeaponOnly(GetEquippedWeapon(forceMainHand: true), WeaponModId.DefensiveWeapon));
+            // Harbinger's Guard (Knot trait) is read here so it rides every consumer of this one choke point. It is part
+            // of the CARRIER's level: the carrier's Defensive Weapon plus its Guard, then the same physical-then-wand
+            // precedence, so Guard on a wand never stacks onto a sword's Defensive Weapon.
+            var mainHand = GetEquippedWeapon(forceMainHand: true);
+            var physical = DefensiveWeaponMath.Sanitize(WeaponModCombat.ReadWeaponOnly(mainHand, WeaponModId.DefensiveWeapon))
+                + DefensiveWeaponMath.Sanitize(GetKnotHarbingerGuardLevel(mainHand));
 
-            return physical > 0.0 ? physical : DefensiveWeaponMath.Sanitize(GetCasterOnlyModValue(WeaponModId.DefensiveWeapon));
+            if (physical > 0.0)
+                return physical;
+
+            var wand = GetEquippedWand();
+
+            return DefensiveWeaponMath.Sanitize(WeaponModCombat.ReadWeaponOnly(wand, WeaponModId.DefensiveWeapon))
+                + DefensiveWeaponMath.Sanitize(GetKnotHarbingerGuardLevel(wand));
         }
 
         /// <summary>
@@ -223,38 +234,12 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         private void TryWeaponModSiphon(Creature target, double chance)
         {
-            // magnitude first: nothing below this line runs on a weapon without Siphon, or with the gate off
-            if (chance <= 0.0)
+            // the body (every rule in the remarks above) is Creature.SiphonOneBeneficialEnchantment, shared with a
+            // Summoner focus's pets; the player adds only its two client messages
+            var (spell, addResult) = SiphonOneBeneficialEnchantment(target, chance);
+
+            if (spell == null)
                 return;
-
-            if (target == null || target == this || PvpClassifier.IsPvp(this, target) || target is Pet || target.IsDead)
-                return;
-
-            if (!WeaponModCombat.RollsFree(chance, ThreadSafeRandom.Next(0f, 1f)))
-                return;
-
-            // Top layer per spell category, so a stack of the same buff counts once and the strongest is taken.
-            var stealable = DispellingEdgeAbility.SelectDispellable(target.EnchantmentManager.GetEnchantments_TopLayer(EnchantmentTypeFlags.Beneficial));
-
-            if (stealable.Count == 0)
-                return;
-
-            // Exactly ONE, chosen at random. Deliberately not a loop: one hit steals one enchantment even when
-            // the hit came from a multishot volley or an AOE, and each hit rolls separately.
-            var entry = stealable[ThreadSafeRandom.Next(0, stealable.Count - 1)];
-
-            // see the remarks: never resurrect an item-sourced aura on the player
-            if (entry == null || entry.Duration == -1 || entry.SpellId > short.MaxValue)
-                return;
-
-            var spell = new Spell(entry.SpellId);
-
-            if (spell.NotFound)
-                return;
-
-            target.EnchantmentManager.Dispel(entry);
-
-            var addResult = EnchantmentManager.Add(spell, this, null);
 
             if (addResult?.Enchantment != null)
                 Session?.Network.EnqueueSend(new GameEventMagicUpdateEnchantment(Session, new Enchantment(this, addResult.Enchantment)));
@@ -390,6 +375,26 @@ namespace ACE.Server.WorldObjects
             ApplyWeaponModSecondWind();
             ApplyWeaponModManaWell();
             ApplyWeaponModCleanse();
+        }
+
+        /// <summary>
+        /// The same three effects for a kill landed by this player's COMBAT PET. Queued by Creature.OnDeath onto
+        /// this player's own action queue (Player.EnqueueAction), which Player_Tick drains from the player's
+        /// landblock in Landblock.TickSingleThreadedWork, so the vitals, equipped-item mana and enchantment
+        /// writes below happen on the owner's tick, never on the pet's or the victim's landblock thread. That
+        /// matters because a pet is not tied to its owner's landblock group (CombatPet_Follow.CanFollowOwner).
+        ///
+        /// The owner is read at run time, so a dead owner takes nothing. Every other precondition is
+        /// <see cref="ApplyWeaponModCreatureDeath"/>'s own, unchanged: the weapon_mods_enabled gate and PK
+        /// suppression (inside the accessors), and the PvP, pet and self victim filter, which reads only the
+        /// victim's type and reference and so is safe from here. It evaluates THIS player's wielded weapon.
+        /// </summary>
+        public void ApplyWeaponModPetKill(Creature victim)
+        {
+            if (IsDead)
+                return;
+
+            ApplyWeaponModCreatureDeath(victim);
         }
 
         /// <summary>
@@ -530,7 +535,9 @@ namespace ACE.Server.WorldObjects
         /// weapon mod above (on a killing blow), and Dispelling Dance's self half
         /// (DispellingEdgeAbility.TryDispel, on a successful proc). Extracted from ApplyWeaponModCleanse on
         /// 2026-10-24 so the two cannot drift - the selection rule, the item-sourced exclusion, the PvP lock
-        /// and the all-layers expansion are written down exactly once.
+        /// and the all-layers expansion are written down once for players. A second, lock-free copy for a
+        /// Summoner focus's pets is Creature.CleanseOneHarmfulEnchantmentNoPvpLock (Creature_WeaponModUtility.cs);
+        /// it is separate because the PvP dispel lock below is player-only and pinned to this file.
         ///
         /// THE PvP DISPEL VULN LOCK (D2) STILL HAS EXACTLY ONE CALL SITE PAIR, here: both the pre-pick filter
         /// and the re-expansion filter below are pinned by PvpDispelLockTests against this file.

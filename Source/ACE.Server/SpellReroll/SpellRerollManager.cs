@@ -198,9 +198,11 @@ namespace ACE.Server.SpellReroll
             // (spellId, item.Guid) and are removed on dequip by iterating the item's CURRENT spell book, so
             // swapping the book on a worn item strands the old enchantments applied forever and grants the new
             // ones on top at the next re-equip. This is the buff-duplication guard, not a convenience.
-            if (player.FindObject(target.Guid.Full, Player.SearchLocations.MyInventory) == null)
+            var targetInventoryRefusal = TargetInventoryRefusal(player, target);
+
+            if (targetInventoryRefusal != null)
             {
-                SendCraftMessage(player, $"You must remove the {target.Name} and place it in your inventory first.");
+                SendCraftMessage(player, targetInventoryRefusal);
                 return WeenieError.YouDoNotPassCraftingRequirements;
             }
 
@@ -217,6 +219,39 @@ namespace ACE.Server.SpellReroll
                 return WeenieError.YouDoNotPassCraftingRequirements;
             }
 
+            var targetStateRefusal = TargetStateRefusal(target);
+
+            if (targetStateRefusal != null)
+            {
+                SendCraftMessage(player, targetStateRefusal);
+                return WeenieError.YouDoNotPassCraftingRequirements;
+            }
+
+            return WeenieError.None;
+        }
+
+        // ---------------- target-only verification (shared with the Salvage Roller) ----------------
+        //
+        // The target half of VerifyUseRequirements, split out so the Salvage Roller (Docs/SalvageRoller/DESIGN.md
+        // 5.3) refuses a target with EXACTLY the manual path's checks and EXACTLY its words - including the
+        // inventory-only rule, which is the worn-item enchantment-duplication guard. The bag path still runs the two
+        // halves at their original positions, so which message a player sees when several things are wrong is
+        // unchanged.
+
+        /// <summary>The inventory-only rule for the target, or null when it passes. See the class remarks.</summary>
+        internal static string TargetInventoryRefusal(Player player, WorldObject target)
+        {
+            if (player.FindObject(target.Guid.Full, Player.SearchLocations.MyInventory) == null)
+                return $"You must remove the {target.Name} and place it in your inventory first.";
+
+            return null;
+        }
+
+        /// <summary>
+        /// Whether the target has anything to reroll, as the refusal line the player is sent, or null when it does.
+        /// </summary>
+        internal static string TargetStateRefusal(WorldObject target)
+        {
             // Feasibility is decided by the SAME planner that performs the reroll, so there is exactly one
             // place that knows what is rerollable. Planned here with a fixed picker rather than the RNG: the
             // question is only whether ANY swap is possible, and the first pending spell's candidate list does
@@ -224,18 +259,24 @@ namespace ACE.Server.SpellReroll
             var plan = BuildPlan(target, n => 0, out var refusal);
 
             if (refusal != RerollRefusal.None)
-            {
-                SendCraftMessage(player, GetRefusalMessage(refusal, target));
-                return WeenieError.YouDoNotPassCraftingRequirements;
-            }
+                return GetRefusalMessage(refusal, target);
 
             if (plan.Swaps.Count == 0)
-            {
-                SendCraftMessage(player, GetRefusalMessage(RerollRefusal.NothingToReroll, target));
-                return WeenieError.YouDoNotPassCraftingRequirements;
-            }
+                return GetRefusalMessage(RerollRefusal.NothingToReroll, target);
 
-            return WeenieError.None;
+            return null;
+        }
+
+        /// <summary>
+        /// The whole target-only verify, in the bag path's order: inventory, then rerollability. True when the target
+        /// is eligible; otherwise <paramref name="refusalMessage"/> is the exact line the bag path would have sent.
+        /// Sends nothing itself.
+        /// </summary>
+        internal static bool VerifyTarget(Player player, WorldObject target, out string refusalMessage)
+        {
+            refusalMessage = TargetInventoryRefusal(player, target) ?? TargetStateRefusal(target);
+
+            return refusalMessage == null;
         }
 
         /// <summary>
@@ -362,31 +403,7 @@ namespace ACE.Server.SpellReroll
                 return;
             }
 
-            foreach (var spell in plan.Skipped)
-                log.Warn($"SpellRerollManager.HandleApply({player.Name}, {target.Name}): left spell {spell} in place - no usable level progression or no legal replacement");
-
-            // capture the old cast probabilities before removing anything. Lootgen and RecipeManager.AddSpell
-            // both write the 2.0f default, but a hand-authored weenie is free to carry another value, and a
-            // reroll has no business editing it.
-            var oldSpells = new HashSet<int>();
-
-            foreach (var swap in plan.Swaps)
-                oldSpells.Add(swap.OldSpell);
-
-            var probabilities = target.Biota.GetMatchingSpells(oldSpells, target.BiotaDatabaseLock);
-
-            foreach (var swap in plan.Swaps)
-            {
-                if (!target.Biota.TryRemoveKnownSpell(swap.OldSpell, target.BiotaDatabaseLock))
-                {
-                    log.Error($"SpellRerollManager.HandleApply({player.Name}, {target.Name}): failed to remove spell {swap.OldSpell}");
-                    continue;
-                }
-
-                var probability = probabilities.TryGetValue(swap.OldSpell, out var p) ? p : 2.0f;
-
-                target.Biota.GetOrAddKnownSpell(swap.NewSpell, target.BiotaDatabaseLock, out _, probability);
-            }
+            ApplyPlan(target, plan, $"SpellRerollManager.HandleApply({player.Name}, {target.Name})");
 
             // ItemSpellcraft / ItemDifficulty are intentionally NOT adjusted - every swap preserves its
             // spell's level, so the arcane lore requirement the item was generated with still holds exactly.
@@ -409,7 +426,7 @@ namespace ACE.Server.SpellReroll
             SendCraftMessage(player, $"The salvage reforges the enchantments on your {target.Name}.");
 
             foreach (var swap in plan.Swaps)
-                SendCraftMessage(player, $"- {GetSpellName(swap.OldSpell)} becomes {GetSpellName(swap.NewSpell)}.");
+                SendCraftMessage(player, $"- {DescribeSwap(swap)}");
 
             var chargeMessage = SalvageTool.GetChargeMessage(sourceName, wasSalvageTool, remaining);
 
@@ -417,6 +434,58 @@ namespace ACE.Server.SpellReroll
                 SendCraftMessage(player, chargeMessage);
 
             player.SendUseDoneEvent();
+        }
+
+        /// <summary>
+        /// Applies a reroll plan to the item's spell book, as a pure function of the item: no Player, no network, no
+        /// save and no fuel (Docs/SalvageRoller/DESIGN.md 5.8 and section 9). Every swap keeps the old spell's cast
+        /// probability. Returns the swaps that actually landed; a swap whose old spell could not be removed is
+        /// logged and skipped, exactly as before the extraction.
+        ///
+        /// <paramref name="logContext"/> prefixes the log lines, so the bag path's lines stay word for word what they
+        /// were ("SpellRerollManager.HandleApply(player, item): ...").
+        ///
+        /// The plan must have come from <see cref="BuildPlan"/> with no refusal; this does not re-check it.
+        /// </summary>
+        internal static List<SpellRerollSwap> ApplyPlan(WorldObject target, SpellRerollPlan plan, string logContext)
+        {
+            var applied = new List<SpellRerollSwap>();
+
+            foreach (var spell in plan.Skipped)
+                log.Warn($"{logContext}: left spell {spell} in place - no usable level progression or no legal replacement");
+
+            // capture the old cast probabilities before removing anything. Lootgen and RecipeManager.AddSpell
+            // both write the 2.0f default, but a hand-authored weenie is free to carry another value, and a
+            // reroll has no business editing it.
+            var oldSpells = new HashSet<int>();
+
+            foreach (var swap in plan.Swaps)
+                oldSpells.Add(swap.OldSpell);
+
+            var probabilities = target.Biota.GetMatchingSpells(oldSpells, target.BiotaDatabaseLock);
+
+            foreach (var swap in plan.Swaps)
+            {
+                if (!target.Biota.TryRemoveKnownSpell(swap.OldSpell, target.BiotaDatabaseLock))
+                {
+                    log.Error($"{logContext}: failed to remove spell {swap.OldSpell}");
+                    continue;
+                }
+
+                var probability = probabilities.TryGetValue(swap.OldSpell, out var p) ? p : 2.0f;
+
+                target.Biota.GetOrAddKnownSpell(swap.NewSpell, target.BiotaDatabaseLock, out _, probability);
+
+                applied.Add(swap);
+            }
+
+            return applied;
+        }
+
+        /// <summary>One swap as the craft-channel line describes it: "Flame Bane VII becomes Frost Bane VII.".</summary>
+        internal static string DescribeSwap(SpellRerollSwap swap)
+        {
+            return $"{GetSpellName(swap.OldSpell)} becomes {GetSpellName(swap.NewSpell)}.";
         }
 
         /// <summary>

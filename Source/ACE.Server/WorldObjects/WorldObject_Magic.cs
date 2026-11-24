@@ -95,6 +95,9 @@ namespace ACE.Server.WorldObjects
             if (tryResist && TryResistSpell(target, spell, itemCaster))
                 return;
 
+            // Allegiance Gauntlet: a member's beneficial spell on another member or the fighter counts toward a crate.
+            ACE.Server.Avatars.Gauntlet.GauntletHooks.OnBeneficialAct(this, target, spell.IsBeneficial);
+
             // if not resisted, cast spell
             HandleCastSpell(spell, target, itemCaster, weapon, isWeaponSpell, fromProc);
         }
@@ -200,7 +203,7 @@ namespace ACE.Server.WorldObjects
             // magic defense for this resist roll (and the debug dump of it) only. A no-op unless the caster and target are two players.
             difficulty = PvpRules.ApplyMagicDefenseMod(this, targetCreature, difficulty);
 
-            // Knot trait Overpowering Intent (Matron hive batons): the caster's own War/Void skill counts as (1 + X) times
+            // Knot trait Overpowering Intent (Matron hive batons): the caster's own War/Void/Life skill counts as (1 + X) times
             // its value for THIS resist roll only, for a damaging spell the player casts itself (not an item or cloak
             // caster) at a non-player. Only magicSkill moves: never difficulty, and never the damage skill mod.
             magicSkill = ACE.Server.KnotLoot.KnotTraitCombat.OverpoweringIntentResistSkill(magicSkill, this, caster, targetCreature,
@@ -229,6 +232,10 @@ namespace ACE.Server.WorldObjects
 
             if (resisted)
             {
+                // Balance Trials recorder: a trial creature resisted, or the trial player resisted a trial creature's spell.
+                if (targetCreature.P_TrialRep != null || targetPlayer?.TrialActive == true)
+                    ACE.Server.BalanceTrials.TrialHooks.OnSpellResisted(casterCreature, targetCreature, spell.Id);
+
                 if (player != null)
                 {
                     player.SendChatMessage(targetCreature, $"{targetCreature.Name} resists your spell", ChatMessageType.Magic);
@@ -350,7 +357,10 @@ namespace ACE.Server.WorldObjects
             // stamping after the switch would apply this cast's charge to the NEXT cast instead of this one.
             // Placed after the early LifeMagic/Dispel target-validity return above, so a cast that bails out
             // before this point (no valid target) never stamps or arms anything.
-            if (this is Player spellweavePlayer && !spellweavePlayer.ClassAbilityProcCastActive)
+            //
+            // An Echo Cast wisp cast (Player.EchoWispCast) neither consumes nor arms the weave: one charge buys one
+            // cast, and the wisp must not eat the charge the player meant for their own next cast.
+            if (this is Player spellweavePlayer && !spellweavePlayer.ClassAbilityProcCastActive && spellweavePlayer.ActiveEchoWispCast == null)
                 spellweavePlayer.OnSpellweaveCast();
 
             switch (spell.MetaSpellType)
@@ -433,8 +443,8 @@ namespace ACE.Server.WorldObjects
                     return false;
             }
 
-            // play spell effects
-            DoSpellEffects(spell, this, target);
+            // play spell effects - on the Echo Cast wisp for a wisp cast, so the cast visibly comes from it
+            DoSpellEffects(spell, ProjectileGeometrySource, target);
 
             return true;
         }
@@ -638,15 +648,39 @@ namespace ACE.Server.WorldObjects
                 && Player.QualifiesForFocusSpellDamage(true, targetCreature is Player, fromProc, focusCaster.ClassAbilityProcCastActive))
                 lifeClassAbilityMod *= focusCaster.GetFocusSpellDamageMod();
 
+            // FORK: the same on a caster summon's Harm, from the pet's own buffed Focus (a pet has no class-ability procs)
+            else if (isHarmfulLifeBoost && this is CombatPet { IsCasterPet: true } focusPet
+                && Player.QualifiesForFocusSpellDamage(true, targetCreature is Player, fromProc, false))
+                lifeClassAbilityMod *= focusPet.GetFocusSpellDamageMod();
+
             // tryBoost is NEGATIVE for Harm, so this is a multiply rather than an add - a bonus added to a
             // negative roll would heal the target.
+            // kept as the double GetResistanceMod returns, so every Harm without penetration does the same arithmetic as before
+            var harmResistanceMod = targetCreature.GetResistanceMod(resistanceType, this, null, lifeWeaponResistMod);
+
+            // Jewelry Aspects Penetration (Harm only: Drain is out of scope, ruling 3): a player's Harm against a non-player
+            if (isHarmfulLifeBoost && this is Player harmPenetrationCaster && targetCreature is not Player)
+            {
+                var harmPenetrationP = harmPenetrationCaster.GetPenetrationAgainst(targetCreature);
+                harmResistanceMod = JewelryAspectMath.Penetrate((float)harmResistanceMod, harmPenetrationP, harmPenetrationP > 0 ? harmPenetrationCaster.GetPenetrationAmplify() : 0.0);
+            }
+
             tryBoost = (int)Math.Round(tryBoost
-                * targetCreature.GetResistanceMod(resistanceType, this, null, lifeWeaponResistMod)
+                * harmResistanceMod
                 * lifeElementalMod
                 * lifeCritMultiplier
                 * lifeClassAbilityMod);
 
             int boost = tryBoost;
+
+            // Summoner casters (Docs/SummonerCasters/DESIGN.md): the live focus multiplier, read at the hit
+            if (spell.VitalDamageType == DamageType.Health && tryBoost < 0)
+            {
+                var summonerMod = SummonerFocus.HitMod(this, targetCreature);
+
+                if (summonerMod != 1.0f)
+                    tryBoost = boost = -(int)Math.Round(-tryBoost * summonerMod);
+            }
 
             // PvP rules choke point C3 (Docs/Pvp/DESIGN.md "PvP rules (levers)"): the per-hit damage cap on a
             // Harm's health damage, on the caster's final roll (resist, weapon levers, crit) and before the cloak
@@ -678,6 +712,24 @@ namespace ACE.Server.WorldObjects
                 if (rampedHarm > -tryBoost)
                     tryBoost = boost = -(int)Math.Min(int.MaxValue, Math.Floor(rampedHarm));
             }
+
+            // Pinning Shot damage reduction rider, read site 3 of 4 (PinReductionMath documents all four): a monster carrying
+            // a live pin reduction deals less Harm damage to a player or a combat pet. Health damage only, applied ONCE, on the
+            // final roll and BEFORE the cloak damage proc, the cloakProcPercent capture and the pre-write mitigations
+            // below. tryBoost is NEGATIVE for damage; the int rounding is the site's own Math.Round, as the World
+            // Events multiplier below uses it.
+            if (spell.VitalDamageType == DamageType.Health && tryBoost < 0 && PinReductionMath.AppliesTo(creature, targetCreature))
+            {
+                var pinMod = creature.GetPinOutgoingDamageMod();
+
+                if (pinMod != 1.0f)
+                    tryBoost = boost = -(int)Math.Round(-tryBoost * pinMod);
+            }
+
+            // Hunter's Echo: a Harm on the Echo takes its owner-equivalent resistance and magic damage resist rating
+            // snapshot (CombatPet_HuntersEcho), as a spell projectile does in SpellProjectile.DamageTarget. Health only.
+            if (spell.VitalDamageType == DamageType.Health && tryBoost < 0 && targetCreature is CombatPet harmedEcho && harmedEcho.IsHuntersEcho)
+                tryBoost = boost = -(int)Math.Round(-tryBoost * harmedEcho.HuntersEchoMagicMitigation(DamageType.Health));
 
             // handle cloak damage proc for harm other
             var equippedCloak = targetCreature?.EquippedCloak;
@@ -759,6 +811,9 @@ namespace ACE.Server.WorldObjects
                 {
                     holdHarm = ACE.Server.WorldEvents.WorldEventHooks.HoldWardDamage(targetCreature, ACE.Server.WorldEvents.Defs.WorldEventCombatKinds.Magic, holdHarm);
                     holdHarm = ACE.Server.WorldEvents.WorldEventHooks.ScaleHoldKnightHit(targetCreature, this, holdHarm);
+
+                    // Allegiance Gauntlet: the Avatar fighter's cap on a Harm, which writes health directly.
+                    holdHarm = ACE.Server.Avatars.Gauntlet.GauntletAvatarFighter.CapGauntletFighterHit(targetCreature, holdHarm);
                 }
 
                 if (holdHarm != -tryBoost)
@@ -797,6 +852,11 @@ namespace ACE.Server.WorldObjects
             var holdHealQueued = spell.VitalDamageType == DamageType.Health && tryBoost > 0 && player != null
                 && ACE.Server.WorldEvents.WorldEventHooks.TryQueuePlayerHeal(player, targetCreature, tryBoost, false, null, ChatMessageType.Magic);
 
+            // Allegiance Gauntlet: a player's heal spell on the Avatar fighter takes the kit heal's conversion and bucket, queued
+            // on the fighter's landblock, which writes it and sends the caster its line. One type test otherwise.
+            var gauntletHealQueued = !holdHealQueued && spell.VitalDamageType == DamageType.Health && tryBoost > 0 && player != null
+                && ACE.Server.Avatars.Gauntlet.GauntletHooks.TryQueueFighterSpellHeal(player, targetCreature, tryBoost);
+
             // World Events Hold: only a player's heal reaches a knight, and only through that queue; any other caster's heal on
             // a knight (a monster's heal spell, an item proc) is refused here, before the vital write. One field read otherwise.
             if (spell.VitalDamageType == DamageType.Health && tryBoost > 0 && player == null && ACE.Server.WorldEvents.WorldEventHooks.IsHoldKnight(targetCreature))
@@ -813,7 +873,7 @@ namespace ACE.Server.WorldObjects
                     srcVital = "stamina";
                     break;
                 default:   // Health
-                    if (holdHealQueued)
+                    if (holdHealQueued || gauntletHealQueued)
                     {
                         boost = 0;
                         srcVital = "health";
@@ -838,7 +898,7 @@ namespace ACE.Server.WorldObjects
                     }
                     else
                     {
-                        targetCreature.DamageHistory.Add(this, DamageType.Health, (uint)-boost, thrown: (uint)-tryBoost);
+                        targetCreature.DamageHistory.Add(this, DamageType.Health, (uint)-boost, thrown: (uint)-tryBoost, kind: DamageAttackKind.Magic, isCritical: lifeCritMultiplier > 1.0f, spellId: spell.Id);
 
                         // World Events measured boss damage scaling (TECH-DESIGN 2.16). Life magic resolved
                         // without a projectile - Harm / drain health - reaches neither Player.TakeDamage nor
@@ -873,6 +933,15 @@ namespace ACE.Server.WorldObjects
                     break;
             }
 
+            // THE CLOAK SPELL PROC IS ROLLED JUST AHEAD OF THORNS (Vanguard pass 2026-11-06) and cast in the
+            // deferred chain below: a successful roll opens Cloaked in Power's Critical Thorns window and this
+            // Harm's own reflect must see it open. The gate is the one the cast has always had (a living,
+            // other-than-caster target, Health vital, an applied or mitigated loss), evaluated here instead.
+            var harmCloakProcRolled = targetCreature != this && targetCreature.IsAlive && spell.VitalDamageType == DamageType.Health
+                && (boost < 0 || cloakProcPercent.HasValue)
+                && equippedCloak != null && Cloak.HasProcSpell(equippedCloak)
+                && Cloak.RollSpellProc(targetCreature, equippedCloak, cloakProcPercent ?? (float)-boost / targetCreature.Health.MaxValue);
+
             // Thorns on a direct Harm (user ruling 2026-10-07): after the health write, the same slot the
             // physical hook occupies in Player.TakeDamage, so it fires on a killing Harm and on one absorbed to
             // 0 (gated on the AUTHORED harmful direction, not on `boost`, for exactly that reason). `this` - the
@@ -890,7 +959,7 @@ namespace ACE.Server.WorldObjects
             if (harmfulBoost && (srcVital != "health" || boost >= 0))
                 ACE.Server.WorldEvents.WorldEventHooks.OnCombatContact(targetCreature, this);
 
-            if (player != null && !holdHealQueued)
+            if (player != null && !holdHealQueued && !gauntletHealQueued)
             {
                 string casterMessage;
 
@@ -943,18 +1012,14 @@ namespace ACE.Server.WorldObjects
 
             // handle cloak spell proc. A Harm fully absorbed by a pre-write mitigation leaves boost at 0, so
             // the gate also admits the mitigated case (cloakProcPercent set) rather than requiring boost < 0.
-            if (targetCreature != this && targetCreature.IsAlive && spell.VitalDamageType == DamageType.Health && (boost < 0 || cloakProcPercent.HasValue))
+            // (rolled above, ahead of Thorns - harmCloakProcRolled; only the cast is deferred here)
+            if (harmCloakProcRolled)
             {
-                if (equippedCloak != null && Cloak.HasProcSpell(equippedCloak))
-                {
-                    var pct = cloakProcPercent ?? (float)-boost / targetCreature.Health.MaxValue;
-
-                    // ensure message is sent after enchantment.Message
-                    var actionChain = new ActionChain();
-                    actionChain.AddDelayForOneTick();
-                    actionChain.AddAction(this, () => Cloak.TryProcSpell(targetCreature, this, equippedCloak, pct));
-                    actionChain.EnqueueChain();
-                }
+                // ensure message is sent after enchantment.Message
+                var actionChain = new ActionChain();
+                actionChain.AddDelayForOneTick();
+                actionChain.AddAction(this, () => Cloak.CompleteSpellProc(targetCreature, this, equippedCloak));
+                actionChain.EnqueueChain();
             }
 
             if (targetCreature != this && targetCreature.IsAlive && spell.VitalDamageType == DamageType.Health && boost < 0)
@@ -1027,7 +1092,7 @@ namespace ACE.Server.WorldObjects
             var attackSkill = player.GetCreatureSkill(spell.School);
 
             elementalMod = GetCasterElementalDamageModifier(wand, player, targetCreature, DamageType.Health);
-            weaponResistMod = GetWeaponResistanceModifier(wand, player, attackSkill, DamageType.Health);
+            weaponResistMod = GetWeaponResistanceModifier(wand, player, attackSkill, DamageType.Health, targetCreature);
         }
 
         /// <summary>
@@ -1096,7 +1161,7 @@ namespace ACE.Server.WorldObjects
         /// FORK ADDITION - how far a fellow or summon may stand from a blood mage and still catch the Drain
         /// surplus. Deliberately short: this is a "stand with your healer" range, not a fellowship-wide aura.
         /// </summary>
-        private const float DrainSurplusRange = 10.0f;
+        internal const float DrainSurplusRange = 10.0f;
 
         /// <summary>
         /// FORK ADDITION - the visual played on anyone a Drain Health returns health to: the CASTER, once
@@ -1189,7 +1254,7 @@ namespace ACE.Server.WorldObjects
         /// <see cref="DrainSurplusDistribution.Distribute"/> unchanged. Read "fellow" throughout this
         /// mechanic as "surplus recipient" - a fellowship member or one of the caster's own summons.
         /// </summary>
-        private List<Creature> GetDrainSurplusFellows(Spell spell, bool isDrain, Creature destination, Creature targetCreature, out List<uint> fellowMissing, out ulong fellowMissingTotal, out double shareFraction)
+        private List<Creature> GetDrainSurplusFellows(Spell spell, bool isDrain, Creature destination, Creature targetCreature, out List<uint> fellowMissing, out ulong fellowMissingTotal, out double shareFraction, bool isSecondaryStrike = false)
         {
             fellowMissing = null;
             fellowMissingTotal = 0;
@@ -1211,6 +1276,14 @@ namespace ACE.Server.WorldObjects
             // arena mask Transfusion reads as rank 0 and Drain behaves exactly as retail.
             var transfusionRank = caster == null || caster.ClassAbilitySuppressed ? 0 : caster.GetClassAbilityRank(ClassAbilityId.Transfusion);
 
+            // World Events Hold: the protected envoys in reach (Transfusion feeds them too). Scanned only for a Blood Mage
+            // who has the ability, so every other Drain pays nothing; null after the scan when no envoy qualifies.
+            // The scan follows every scalar gate (caster is the destination, a PvE victim) and runs on the primary strike
+            // only: Crimson Harvest re-enters here per secondary target and must not bid for envoys again.
+            var holdKnights = !isSecondaryStrike && caster != null && destination == caster
+                && targetCreature != null && targetCreature is not Player && transfusionRank >= 1
+                ? ACE.Server.WorldEvents.WorldEventHooks.HoldTransfusionKnights(caster) : null;
+
             // hasFellowship OR hasSummon: a solo Blood Mage with a hurt pet beside them is a real cascade
             // target, so a fellowship is no longer required (user, 2026-08-03). Both are PRESENCE checks -
             // the alive/landblock/range/missing filters run below on fellows and summons alike.
@@ -1220,7 +1293,8 @@ namespace ACE.Server.WorldObjects
                     targetIsEligibleVictim: targetCreature != null && targetCreature is not Player,
                     transfusionRank: transfusionRank,
                     hasFellowship: caster?.Fellowship != null,
-                    hasSummon: caster?.CurrentActivePet != null || caster?.SecondaryActivePet != null))
+                    hasSummon: caster?.CurrentActivePet != null || caster?.SecondaryActivePet != null,
+                    hasHoldKnight: holdKnights != null))
                 return null;
 
             // How much of the surplus is DELIVERED. Rank sets the base fraction (40/70/100%); the Healing
@@ -1290,6 +1364,27 @@ namespace ACE.Server.WorldObjects
             // caster and nowhere else. SecondaryActivePet is null unless the caster holds Summon 2x.
             TryAddRecipient(caster.CurrentActivePet);
             TryAddRecipient(caster.SecondaryActivePet);
+
+            // World Events Hold envoys, after the summons. Their "missing" is the raw player-heal points they ask for
+            // (HoldTransfusionKnightDemand), so the split stays in one unit; the payout queues it as a player heal.
+            if (holdKnights != null)
+            {
+                foreach (var knight in holdKnights)
+                {
+                    var demand = ACE.Server.WorldEvents.WorldEventHooks.HoldTransfusionKnightDemand(knight);
+
+                    if (demand == 0 || (results != null && results.Contains(knight)))
+                        continue;
+
+                    results ??= new List<Creature>();
+                    missingByRecipient ??= new List<uint>();
+
+                    results.Add(knight);
+                    missingByRecipient.Add(demand);
+
+                    missingTotal += demand;
+                }
+            }
 
             fellowMissing = missingByRecipient;
             fellowMissingTotal = missingTotal;
@@ -1518,7 +1613,7 @@ namespace ACE.Server.WorldObjects
             // nothing. It does NOT widen the ceiling: effectiveTransferCap still clamps
             // maxDestVitalChange immediately below, so the most a single cast can ever move is unchanged.
             // The drain simply reaches that cap more often.
-            var drainFellows = GetDrainSurplusFellows(spell, isDrain, destination, targetCreature, out var fellowMissing, out var fellowMissingTotal, out var drainShareFraction);
+            var drainFellows = GetDrainSurplusFellows(spell, isDrain, destination, targetCreature, out var fellowMissing, out var fellowMissingTotal, out var drainShareFraction, isSecondaryStrike);
 
             var maxDestVitalChange = missingDest;
 
@@ -1534,6 +1629,19 @@ namespace ACE.Server.WorldObjects
 
                 srcVitalChange = (uint)Math.Round(srcVitalChange * scalar);
                 destVitalChange = maxDestVitalChange;
+            }
+
+            // Summoner casters (Docs/SummonerCasters/DESIGN.md): the live focus multiplier, read at the hit
+            if (isDrain && spell.Source == PropertyAttribute2nd.Health && srcVitalChange > 0)
+            {
+                var summonerMod = SummonerFocus.HitMod(this, transferSource);
+
+                if (summonerMod != 1.0f)
+                {
+                    srcVitalChange = (uint)Math.Round(srcVitalChange * summonerMod);
+
+                    destVitalChange = PvpRules.RecomputeDrainGain(srcVitalChange, destVitalChange, spell.LossPercent, boostMod: boostMod);
+                }
             }
 
             // PvP rules choke point C4 (Docs/Pvp/DESIGN.md "PvP rules (levers)"): the per-hit damage cap on a Drain
@@ -1560,6 +1668,23 @@ namespace ACE.Server.WorldObjects
                 {
                     srcVitalChange = cappedDrain;
                     destVitalChange = PvpRules.RecomputeDrainGain(srcVitalChange, destVitalChange, spell.LossPercent, boostMod);
+                }
+            }
+
+            // Pinning Shot damage reduction rider, read site 4 of 4 (PinReductionMath documents all four): a monster carrying
+            // a live pin reduction drains a player or a combat pet for less. Drain HEALTH only, applied ONCE, on the final
+            // loss and BEFORE the cloak damage proc and the cloakProcPercent capture below. The caster's gain is
+            // recomputed from the reduced loss through PvpRules.RecomputeDrainGain, which only ever LOWERS it (the C4 cap's
+            // recompute), so a pinned drainer also heals less. The uint rounding is the site's own Math.Round.
+            if (isDrain && spell.Source == PropertyAttribute2nd.Health && srcVitalChange > 0 && PinReductionMath.AppliesTo(caster, transferSource))
+            {
+                var pinMod = caster.GetPinOutgoingDamageMod();
+
+                if (pinMod != 1.0f)
+                {
+                    srcVitalChange = (uint)Math.Round(srcVitalChange * pinMod);
+
+                    destVitalChange = PvpRules.RecomputeDrainGain(srcVitalChange, destVitalChange, spell.LossPercent, boostMod: boostMod);
                 }
             }
 
@@ -1703,7 +1828,7 @@ namespace ACE.Server.WorldObjects
 
                     srcVitalChange = (uint)-transferSource.UpdateVitalDelta(transferSource.Health, -(int)srcVitalChange);
 
-                    transferSource.DamageHistory.Add(this, DamageType.Health, srcVitalChange, thrown: drainThrown);
+                    transferSource.DamageHistory.Add(this, DamageType.Health, srcVitalChange, thrown: drainThrown, kind: DamageAttackKind.Magic, isCritical: drainCritCapMod > 1.0f, spellId: spell.Id);
 
                     // Thorns is answered BELOW the destination write, not here - see the comment there
                     thornsDrainTarget = transferSource as Player;
@@ -1773,6 +1898,15 @@ namespace ACE.Server.WorldObjects
             // is the attacker; a caster-source transfer drains the caster itself and the self filter inside
             // drops it. A Transfer has no proc flag, so every drain that lands is a DirectHit. The attacker
             // filter and close-range gate are inside.
+            //
+            // THE CLOAK SPELL PROC IS ROLLED JUST AHEAD OF THAT REFLECT (Vanguard pass 2026-11-06) and cast in the
+            // deferred chain at the bottom: a successful roll opens Cloaked in Power's Critical Thorns window and
+            // this drain's own reflect must see it open. Same gate the cast has always had, evaluated here: after
+            // both vital writes, so it is the same state the deferred check saw (Thorns cannot change the victim).
+            var drainCloakProcRolled = isDrain && targetCreature.IsAlive && spell.Source == PropertyAttribute2nd.Health
+                && equippedCloak != null && Cloak.HasProcSpell(equippedCloak)
+                && Cloak.RollSpellProc(targetCreature, equippedCloak, cloakProcPercent ?? (float)srcVitalChange / targetCreature.Health.MaxValue);
+
             if (thornsDrainTarget != null)
                 thornsDrainTarget.ApplyThornsOnMagicHit(this, spell.DamageType, IncomingDamageOrigin.DirectHit);
 
@@ -1814,6 +1948,14 @@ namespace ACE.Server.WorldObjects
                         continue;
 
                     var fellow = drainFellows[i];
+
+                    // World Events Hold envoy: the share is raw heal points, queued on the knight's landblock as a Player heal
+                    // from the caster (conversion, caps and the result line happen there). Never written here.
+                    if (ACE.Server.WorldEvents.WorldEventHooks.IsHoldKnight(fellow))
+                    {
+                        ACE.Server.WorldEvents.WorldEventHooks.TryQueuePlayerHeal(this as Player, fellow, fellowShares[i], false, null, ChatMessageType.Magic);
+                        continue;
+                    }
 
                     // PvP rules choke point HL5F: pvp_healing_mod on THIS recipient's share, keyed on this recipient
                     // alone (a summon is never a Player, so its share is untouched). fellowGain below - and so the
@@ -1902,15 +2044,13 @@ namespace ACE.Server.WorldObjects
 
             if (isDrain && targetCreature.IsAlive && spell.Source == PropertyAttribute2nd.Health)
             {
-                // handle cloak spell proc
-                if (equippedCloak != null && Cloak.HasProcSpell(equippedCloak))
+                // handle cloak spell proc (rolled above, ahead of Thorns - drainCloakProcRolled; only the cast is deferred)
+                if (drainCloakProcRolled)
                 {
-                    var pct = cloakProcPercent ?? (float)srcVitalChange / targetCreature.Health.MaxValue;
-
                     // ensure message is sent after enchantment.Message
                     var actionChain = new ActionChain();
                     actionChain.AddDelayForOneTick();
-                    actionChain.AddAction(this, () => Cloak.TryProcSpell(targetCreature, this, equippedCloak, pct));
+                    actionChain.AddAction(this, () => Cloak.CompleteSpellProc(targetCreature, this, equippedCloak));
                     actionChain.EnqueueChain();
                 }
 
@@ -1935,8 +2075,9 @@ namespace ACE.Server.WorldObjects
                 && this is Player drainCaster && targetCreature is not Player)
             {
                 // Sanguine Reserve: one charge per CAST. A Crimson Harvest secondary strike is part of the
-                // same cast, so it is skipped here rather than granting a fifth charge from one drain.
-                if (!isSecondaryStrike)
+                // same cast, so it is skipped here rather than granting a fifth charge from one drain. An Echo
+                // Cast wisp cast grants none at all (wisp casts never build the pool).
+                if (!isSecondaryStrike && drainCaster.ActiveEchoWispCast == null)
                     drainCaster.TryGrantBloodCharge();
 
                 // Weakened Blood: applied by EVERY strike, primary and secondary alike, which is what
@@ -1992,10 +2133,7 @@ namespace ACE.Server.WorldObjects
                 + caster.GetEquippedModValue(EquipmentModId.Bloodletting);
 
             // the EXTRA creatures beyond the primary, by rank (2/3/4 at the defaults); rank 3 == the old flat cap
-            var maxTargets = CrimsonHarvestMath.SecondaryTargetCap(harvestRank,
-                PropertyManager.GetLong("class_ability_crimsonharvest_extra_targets_r1").Item,
-                PropertyManager.GetLong("class_ability_crimsonharvest_extra_targets_r2").Item,
-                PropertyManager.GetLong("class_ability_crimsonharvest_extra_targets_r3").Item);
+            var maxTargets = CrimsonHarvestMath.SecondaryTargetCap(ClassAbilityText.Live, harvestRank);
 
             if (radius <= 0.0 || maxTargets <= 0)
                 return;
@@ -2069,6 +2207,17 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         private void HandleCastSpell_Projectile(Spell spell, WorldObject target, WorldObject itemCaster, WorldObject weapon, bool isWeaponSpell, bool fromProc)
         {
+            // Echo Cast wisp cast: the Life damage basis is the ORIGINAL cast's, snapshotted on the scope, so the
+            // wisp drains no vital, grants no Sanguine Ward, records no self damage history, never re-resolves the
+            // Blood Charge pool (ApplyLifeProjectileBloodCharge) and cannot kill its caster. Everything below is
+            // the player's own hand cast and is untouched by this branch.
+            var echoWispCast = (this as Player)?.ActiveEchoWispCast;
+            if (echoWispCast != null)
+            {
+                CreateSpellProjectiles(spell, target, weapon, isWeaponSpell, fromProc, echoWispCast.LifeProjectileDamage);
+                return;
+            }
+
             uint damage = 0;
             var caster = this as Creature;
             var damageType = DamageType.Undef;
@@ -2144,6 +2293,10 @@ namespace ACE.Server.WorldObjects
             // cast including war and void ones. Also resolves the (never-bursting) Blood Charge ramp for a
             // life health bolt - Bloodstone Bolt, a MetaSpellType Projectile life spell - since 2026-10-01.
             (this as Player)?.ApplyLifeProjectileBloodCharge(spell, target);
+
+            // Echo Cast: the basis this hand cast drained, for a wisp it may spawn (armed only around a committed hand
+            // cast in DoCastSpell_Inner; first write wins). Never reached by a wisp cast, which returned above.
+            (this as Player)?.EchoWispBasis.Note(damage);
 
             CreateSpellProjectiles(spell, target, weapon, isWeaponSpell, fromProc, damage);
 
@@ -2821,14 +2974,47 @@ namespace ACE.Server.WorldObjects
 
             var spellType = SpellProjectile.GetProjectileSpellType(spell.Id);
 
-            var origins = CalculateProjectileOrigins(spell, spellType, target);
+            // the launch geometry is the Echo Cast wisp's during a wisp cast, this object's otherwise
+            var geometrySource = ProjectileGeometrySource;
 
-            var velocity = CalculateProjectileVelocity(spell, target, spellType, origins[0]);
+            var origins = geometrySource.CalculateProjectileOrigins(spell, spellType, target);
+
+            var velocity = geometrySource.CalculateProjectileVelocity(spell, target, spellType, origins[0]);
 
             return LaunchSpellProjectiles(spell, target, spellType, weapon, isWeaponSpell, fromProc, origins, velocity, lifeProjectileDamage, suppressPetAssist);
         }
 
         public const float ProjHeight = 2.0f / 3.0f;
+
+        /// <summary>
+        /// The object a spell cast's projectiles are launched FROM - their origins, heading, velocity and the
+        /// line-of-sight check - and the one its caster effect plays on. This object, except during a player's
+        /// Echo Cast wisp cast (Player.EchoWispCast), when it is the wisp. The caster is unchanged either way:
+        /// LaunchSpellProjectiles still stamps ProjectileSource = this, so damage, credit and procs stay the
+        /// player's.
+        /// </summary>
+        internal WorldObject ProjectileGeometrySource => (this as Player)?.ActiveEchoWispCast?.Origin ?? this;
+
+        /// <summary>
+        /// The Spellsword proc stamps a projectile captures at launch (SpellProjectile.ProcDamageScale and
+        /// RendSourceDamageType): the live proc latch for every ordinary cast, the wisp scope's copy for an Echo Cast
+        /// wisp cast (a proc wisp repeats its proc; any other wisp carries 1.0 and null). Pure so it is unit-testable.
+        /// </summary>
+        public static (float Scale, DamageType? RendSource) ResolveProcStamps(EchoWispCastScope echoWispCast, float liveScale, DamageType? liveRendSource)
+        {
+            return echoWispCast != null ? (echoWispCast.ProcDamageScale, echoWispCast.RendSourceDamageType) : (liveScale, liveRendSource);
+        }
+
+        /// <summary>
+        /// The per-cast stamps a projectile captures at launch: Spellweave's damage mod and the Blood Mage
+        /// life-projectile stamp. The live values for every ordinary cast; neutral (1.0 and
+        /// LifeProjectileCastStamp.None) for an Echo Cast wisp cast, which neither consumes nor receives a
+        /// one-shot, paid-for burst. Pure so the rule is unit-testable.
+        /// </summary>
+        public static (float Spellweave, LifeProjectileCastStamp Stamp) ResolveLaunchStamps(bool echoWispCast, float live, LifeProjectileCastStamp liveStamp)
+        {
+            return echoWispCast ? (1.0f, LifeProjectileCastStamp.None) : (live, liveStamp);
+        }
 
         /// <summary>
         /// Runtime only, never persisted: the height this object's spell projectiles are launched from and its line of
@@ -3081,11 +3267,15 @@ namespace ACE.Server.WorldObjects
 
             var spellProjectiles = new List<SpellProjectile>();
 
-            var casterLoc = PhysicsObj.Position.ACEPosition(PhysicsObj.CurInstance);
+            // Echo Cast wisp cast: the projectiles leave the wisp (geometrySource), the caster stays this player.
+            var echoWispCast = (this as Player)?.ActiveEchoWispCast;
+            var geometrySource = ProjectileGeometrySource;
+
+            var casterLoc = geometrySource.PhysicsObj.Position.ACEPosition(geometrySource.PhysicsObj.CurInstance);
             var targetLoc = target?.PhysicsObj.Position.ACEPosition(target.PhysicsObj.CurInstance);
 
             // Volatile Wall (Archmage T3): ONE landed-hit counter per player wall cast, shared by every projectile
-            // this launch creates (an Echo Cast recast is its own launch, so it gets its own). Created whether or
+            // this launch creates (an Echo Cast wisp cast is its own launch, so it gets its own). Created whether or
             // not the caster owns the ability; Player.ApplyVolatileWall decides the bonus at impact.
             var volatileWallCounter = spellType == ProjectileSpellType.Wall && this is Player ? new VolatileWallAbility.CastCounter() : null;
 
@@ -3106,7 +3296,7 @@ namespace ACE.Server.WorldObjects
                 var rotate = casterLoc.Rotation;
                 if (target != null)
                 {
-                    var qDir = PhysicsObj.Position.GetOffset(target.PhysicsObj.Position);
+                    var qDir = geometrySource.PhysicsObj.Position.GetOffset(target.PhysicsObj.Position);
                     rotate = Quaternion.CreateFromAxisAngle(Vector3.UnitZ, (float)Math.Atan2(-qDir.X, qDir.Y));
                 }
 
@@ -3132,23 +3322,35 @@ namespace ACE.Server.WorldObjects
                 sp.FromProc = fromProc;
                 sp.IsClassAbilityProc = (this as Player)?.ClassAbilityProcCastActive ?? false;
 
+                // Echo Cast wisp cast: stamped here, BEFORE AddObject below, because a spawn that overlaps
+                // something collides inside AddObject itself. IsEchoWispCast carries the wisp rules to impact
+                // time (no Blood Charge grant, Blood Price and Adrenaline neutral, never lands on a player);
+                // InheritsProcCasterSkill is set for a wisp spawned off a Spellsword proc.
+                sp.IsEchoWispCast = echoWispCast != null;
+                sp.InheritsProcCasterSkill = echoWispCast?.InheritsProcCasterSkill ?? false;
+
+                // Spellweave (Spellsword T1) and the Blood Mage stamp (below): neutral for a wisp cast.
+                var launchStamps = ResolveLaunchStamps(sp.IsEchoWispCast, (this as Player)?.GetSpellweaveSpellDamageMod() ?? 1.0f, (this as Player)?.GetLifeProjectileCastStamp() ?? LifeProjectileCastStamp.None);
+
                 // Spellweave (Spellsword T1): capture the launching cast's stamp NOW, while this synchronous
                 // cast still owns it, so a later cast re-stamping the player cannot change this projectile's
                 // bonus in flight. See SpellProjectile.SpellweaveDamageMod.
-                sp.SpellweaveDamageMod = (this as Player)?.GetSpellweaveSpellDamageMod() ?? 1.0f;
+                sp.SpellweaveDamageMod = launchStamps.Spellweave;
                 // Spellsword Nether parity: the proc cast's damage scale, armed by
                 // Player.CastClassAbilityProc(cast, scale) for exactly this synchronous cast and 1.0 otherwise.
                 // See SpellProjectile.ProcDamageScale.
-                sp.ProcDamageScale = (this as Player)?.ClassAbilityProcDamageScale ?? 1.0f;
                 // Volatile Elements: the re-typed weapon hit's ORIGINAL type, armed by
                 // Player.CastClassAbilityProc(cast, scale, rendSourceDamageType) for exactly this synchronous proc
                 // cast and null otherwise. See SpellProjectile.RendSourceDamageType.
-                sp.RendSourceDamageType = (this as Player)?.ClassAbilityProcRendSourceDamageType;
+                // An Echo Cast wisp spawned off a proc carries both on its scope instead (ResolveProcStamps).
+                var procStamps = ResolveProcStamps(echoWispCast, (this as Player)?.ClassAbilityProcDamageScale ?? 1.0f, (this as Player)?.ClassAbilityProcRendSourceDamageType);
+                sp.ProcDamageScale = procStamps.Scale;
+                sp.RendSourceDamageType = procStamps.RendSource;
                 // Blood Mage per-cast terms (Blood Price, Blood Charge ramp or Exsanguinate burst): the same
                 // capture-at-launch, for the same reason. ApplyBloodPriceCost and ApplyLifeProjectileBloodCharge
-                // both resolve before this synchronous cast reaches here. An Echo Cast recast overwrites this
-                // with its parent's snapshot (EchoCastAbility.StampEchoCopy). See SpellProjectile.LifeProjectileStamp.
-                sp.LifeProjectileStamp = (this as Player)?.GetLifeProjectileCastStamp() ?? LifeProjectileCastStamp.None;
+                // both resolve before this synchronous cast reaches here. An Echo Cast wisp cast takes the neutral
+                // stamp (ResolveLaunchStamps). See SpellProjectile.LifeProjectileStamp.
+                sp.LifeProjectileStamp = launchStamps.Stamp;
                 sp.SuppressPetAssist = suppressPetAssist;
                 sp.VolatileWallCounter = volatileWallCounter;
 
@@ -3164,19 +3366,34 @@ namespace ACE.Server.WorldObjects
 
                 sp.LifeProjectileDamage = lifeProjectileDamage;
 
-                if (!LandblockManager.AddObject(sp))
+                // Echo Cast wisp cast: the latch is SUSPENDED across AddObject, because an overlapping spawn (a Strike
+                // spawns on its target) resolves its whole impact in here, and that impact's procs must launch from
+                // the player exactly as at a flown projectile's impact. The locals above already hold the wisp. The
+                // lambda is static and takes sp as its argument, so an ordinary cast's loop body captures nothing.
+                var added = echoWispCast != null
+                    ? ((Player)this).RunWithEchoWispSuspended(sp, static projectile => LandblockManager.AddObject(projectile))
+                    : LandblockManager.AddObject(sp);
+
+                if (!added)
                 {
                     sp.Destroy();
                     continue;
                 }
+
+                // Echo Cast wisp cast: diagnostics for the wisp's per-cast DEBUG line, read by nothing else
+                if (echoWispCast != null)
+                    echoWispCast.ProjectilesLaunched++;
 
                 if (sp.WorldEntryCollision)
                     continue;
 
                 sp.EnqueueBroadcast(new GameMessageScript(sp.Guid, PlayScript.Launch, sp.GetProjectileScriptIntensity(spellType)));
 
-                if (!IsProjectileVisible(sp))
+                if (!geometrySource.IsProjectileVisible(sp))
                 {
+                    if (echoWispCast != null)
+                        echoWispCast.ProjectilesBlocked++;
+
                     sp.OnCollideEnvironment();
                     continue;
                 }
@@ -3417,6 +3634,9 @@ namespace ACE.Server.WorldObjects
 
             var creatureTarget = target as Creature;
 
+            // Summoner casters (Docs/SummonerCasters/DESIGN.md): the live focus multiplier, read at the hit
+            var summonerWielderMod = SummonerFocus.WielderDamageMod(this, creatureTarget);
+
             if (spell.Category == SpellCategory.AetheriaProcHealthOverTimeRaising)
             {
                 // no healing boost rating modifier found in retail pcaps on apply,
@@ -3430,7 +3650,7 @@ namespace ACE.Server.WorldObjects
             if (spell.Category == SpellCategory.AetheriaProcDamageOverTimeRaising)
             {
                 // no mods found in retail pcaps
-                return enchantment_statModVal;
+                return enchantment_statModVal * summonerWielderMod;
             }
 
             var player = this as Player;
@@ -3459,7 +3679,7 @@ namespace ACE.Server.WorldObjects
             if (spell.Category == SpellCategory.DFBleedDamage)
             {
                 // retail pcaps have modifiers in the range of 1.1x - 1.7x
-                return enchantment_statModVal * damageRatingMod;
+                return enchantment_statModVal * damageRatingMod * summonerWielderMod;
             }
 
             if (spell.Category != SpellCategory.NetherDamageOverTimeRaising && spell.Category != SpellCategory.NetherDamageOverTimeRaising2 && spell.Category != SpellCategory.NetherDamageOverTimeRaising3)
@@ -3499,9 +3719,49 @@ namespace ACE.Server.WorldObjects
                     }
                 }
             }
-            enchantment_statModVal *= skillMod * elementalDamageMod * damageRatingMod;
+            enchantment_statModVal *= skillMod * elementalDamageMod * damageRatingMod * summonerWielderMod;
 
             return enchantment_statModVal;
+        }
+
+        /// <summary>
+        /// Where an Item Enchantment cast aimed at ANOTHER creature (not the caster) lands: the redirect half of
+        /// <see cref="TryCastItemEnchantment_WithRedirects"/>, shared with the Echo Cast wisp (EchoWisp), which judges
+        /// "already carries this debuff" on the same object the cast would write to, so the two cannot diverge.
+        ///  - impen / bane / brittlemail / lure: the creature's first enchantable equipped shield, else null;
+        ///  - blood loather, spirit loather, lure blade, turn blade, leaden weapon, hermetic void: the equipped item the
+        ///    spell's NonComponentTargetType names, when enchantable, else null;
+        ///  - every other item spell: the creature itself (it is cast directly on the target).
+        /// Null means the cast fails to affect that creature.
+        /// </summary>
+        public static WorldObject ItemEnchantmentLandingItem(Spell spell, Creature targetCreature) =>
+            ItemEnchantmentLandingItem(spell.IsImpenBaneType, spell.IsOtherNegativeRedirectable || spell.IsItemRedirectableType, spell.NonComponentTargetType, targetCreature);
+
+        /// <summary>The rule behind <see cref="ItemEnchantmentLandingItem(Spell, Creature)"/> over the spell's flags (unit-testable without a dat).</summary>
+        public static WorldObject ItemEnchantmentLandingItem(bool impenBaneType, bool weaponRedirectType, ItemType nonComponentTargetType, Creature targetCreature)
+        {
+            if (targetCreature == null)
+                return null;
+
+            if (impenBaneType)
+                return targetCreature.EquippedObjects.Values.FirstOrDefault(i => i.IsShield && i.IsEnchantable);
+
+            if (weaponRedirectType)
+            {
+                var weapon = nonComponentTargetType switch
+                {
+                    ItemType.Weapon => targetCreature.GetEquippedWeapon(),
+                    ItemType.Caster => targetCreature.GetEquippedWand(),
+                    ItemType.WeaponOrCaster => targetCreature.GetEquippedWeapon() ?? targetCreature.GetEquippedWand(),
+                    ItemType.MeleeWeapon => targetCreature.GetEquippedMeleeWeapon(),
+                    ItemType.MissileWeapon => targetCreature.GetEquippedMissileWeapon(),
+                    _ => null
+                };
+
+                return weapon != null && weapon.IsEnchantable ? weapon : null;
+            }
+
+            return targetCreature;
         }
 
         public void TryCastItemEnchantment_WithRedirects(Spell spell, WorldObject target, WorldObject itemCaster = null)
@@ -3563,7 +3823,7 @@ namespace ACE.Server.WorldObjects
                     else
                     {
                         // targeting another player or monster
-                        var item = targetCreature.EquippedObjects.Values.FirstOrDefault(i => i.IsShield && i.IsEnchantable);
+                        var item = ItemEnchantmentLandingItem(spell, targetCreature);
 
                         if (item != null)
                         {
@@ -3592,17 +3852,9 @@ namespace ACE.Server.WorldObjects
                 else
                 {
                     // targeting a creature, try to redirect to primary weapon
-                    var weapon = spell.NonComponentTargetType switch
-                    {
-                        ItemType.Weapon => targetCreature.GetEquippedWeapon(),
-                        ItemType.Caster => targetCreature.GetEquippedWand(),
-                        ItemType.WeaponOrCaster => targetCreature.GetEquippedWeapon() ?? targetCreature.GetEquippedWand(),
-                        ItemType.MeleeWeapon => targetCreature.GetEquippedMeleeWeapon(),
-                        ItemType.MissileWeapon => targetCreature.GetEquippedMissileWeapon(),
-                        _ => null
-                    };
+                    var weapon = ItemEnchantmentLandingItem(spell, targetCreature);
 
-                    if (weapon != null && weapon.IsEnchantable)
+                    if (weapon != null)
                     {
                         HandleCastSpell(spell, weapon);
                     }

@@ -111,7 +111,7 @@ namespace ACE.Server.HazardMechanics
                     Position = point,
                     Moving = true,
                     Tag = "rain-ball",
-                    HitRadius = RainRules.BallRadius,
+                    HitRadius = (float)s.BallRadius,
                 });
 
             public bool Fall(HazardHandle ball, Vector3 end, double seconds)

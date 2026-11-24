@@ -466,6 +466,7 @@ namespace ACE.Server.Tests
         /// Assert.Inconclusive's message does not reach the default console logger.
         /// </summary>
         [TestMethod]
+        [TestCategory("Probe")]
         public void Probe_ReportDepositCostAgainstVaultSize()
         {
             const int reps = 3;

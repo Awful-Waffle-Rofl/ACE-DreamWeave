@@ -404,13 +404,51 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void Clone_ForTheSarcophagus_DropsTheDonorsAppearanceLists()
+        public void Clone_ForTheSarcophagus_DropsTheDonorsPaletteAndAnimParts()
         {
             var clone = Clone(MakeMule(), MakeSarcophagus());
 
             Assert.IsNull(clone.PropertiesPalette);
-            Assert.IsNull(clone.PropertiesTextureMap);
             Assert.IsNull(clone.PropertiesAnimPart);
+        }
+
+        private static void AssertCoffinRows(IList<PropertiesTextureMap> rows)
+        {
+            Assert.IsNotNull(rows);
+            const uint Stone = 0x05001AFB;
+            var actual = new List<(int, uint, uint)>();
+            foreach (var r in rows)
+                actual.Add((r.PartIndex, r.OldTexture, r.NewTexture));
+            CollectionAssert.AreEqual(
+                new List<(int, uint, uint)> { (0, 0x05000E21u, Stone), (0, 0x05000E19u, Stone), (1, 0x05000E21u, Stone) },
+                actual);
+        }
+
+        [TestMethod]
+        public void Clone_ForTheSarcophagus_CarriesExactlyTheStandInsThreeTextureRows_NotTheDonors()
+        {
+            var donor = MakeSarcophagus();
+            var clone = Clone(MakeMule(), donor);
+
+            AssertCoffinRows(clone.PropertiesTextureMap);
+            Assert.AreEqual(MuleFormStandIn.DarkSarcophagusStoneTexture, 0x05001AFBu);
+            Assert.AreNotSame(donor.PropertiesTextureMap, clone.PropertiesTextureMap);
+        }
+
+        [TestMethod]
+        public void Clone_ForTheSarcophagus_NeverSharesTheTextureListBetweenClones()
+        {
+            var first = Clone(MakeMule(), MakeSarcophagus());
+            var second = Clone(MakeMule(), MakeSarcophagus());
+
+            Assert.AreNotSame(first.PropertiesTextureMap, second.PropertiesTextureMap);
+
+            first.PropertiesTextureMap[0].NewTexture = 1;
+            first.PropertiesTextureMap.Clear();
+            first.PropertiesTextureMap.Add(new PropertiesTextureMap { PartIndex = 9, OldTexture = 1, NewTexture = 2 });
+
+            AssertCoffinRows(second.PropertiesTextureMap);
+            AssertCoffinRows(Clone(MakeMule(), MakeSarcophagus()).PropertiesTextureMap);
         }
 
         [TestMethod]

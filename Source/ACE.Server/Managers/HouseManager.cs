@@ -509,6 +509,9 @@ namespace ACE.Server.Managers
 
             // handle eviction
             house.HouseOwner = null;
+
+            // Allegiance Avatar: a Seat in this mansion stops qualifying (never throws; the unseat runs on the world thread)
+            ACE.Server.Avatars.AvatarNpcs.OnHouseLost(house.Guid.Full);
             house.MonarchId = null;
             house.HouseOwnerName = null;
 

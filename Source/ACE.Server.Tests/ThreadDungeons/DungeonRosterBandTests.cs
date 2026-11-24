@@ -22,13 +22,14 @@ namespace ACE.Server.Tests.ThreadDungeons
     public class DungeonRosterBandTests
     {
         /// <summary>
-        /// The fourteen Raw Fragment rungs, wcids 1003615-1003624 and 1003626-1003629
-        /// (Content/sql/weenies/). The top four arrived with the 2026-09-09 ceiling raise to 375.
+        /// The seventeen Raw Fragment rungs, wcids 1003615-1003624 and 1003626-1003632
+        /// (Content/sql/weenies/). 300..375 arrived with the 2026-09-09 ceiling raise to 375 and 400/450/500
+        /// with the 2026-11-16 raise to 500.
         /// </summary>
         private static readonly int[] FragmentRungs =
         {
             185, 195, 205, 215, 225, 235, 245, 255, 265, 275,
-            300, 325, 350, 375,
+            300, 325, 350, 375, 400, 450, 500,
         };
 
         // ---- band arithmetic ---------------------------------------------------------------------------
@@ -47,10 +48,12 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreEqual(275, band.Low);
             Assert.AreEqual(317, band.High, "275 * 1.15 = 316.25, ceiling 317, and NO clamp to 275");
 
-            // The discriminating half: World Events still clamps, and must keep clamping. If this ever starts
-            // reporting 317 then the audience ceiling has been changed out from under World Events, which is
-            // exactly the side effect this split was made to avoid.
-            var worldEvents = WorldEventRosterSelector.TrashBand(275, DungeonRosterSelector.BandLow, DungeonRosterSelector.BandHigh);
+            // The discriminating half: World Events still clamps, and must keep clamping. At a level whose
+            // 1.15x edge passes the ceiling (375 * 1.15 = 431.25, ceiling 432) the dungeon band reports 432; if
+            // World Events ever starts reporting that too then the audience ceiling has been changed out from
+            // under World Events, which is exactly the side effect this split was made to avoid.
+            Assert.AreEqual(432, DungeonRosterSelector.TrashBand(375).High);
+            var worldEvents = WorldEventRosterSelector.TrashBand(375, DungeonRosterSelector.BandLow, DungeonRosterSelector.BandHigh);
             Assert.AreEqual(WorldEventRosterSelector.MaxConsideredLevel, worldEvents.High,
                 "WorldEventRosterSelector must still clamp; only the dungeon band was unclamped");
         }
@@ -385,9 +388,10 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.IsTrue(eligible >= 5, $"level-275 eligible families fell to {eligible}, expected at least 5");
             Assert.IsTrue(trashInBand >= 15, $"level-275 trash members fell to {trashInBand}, expected at least 15");
 
-            // Every one of them sits ABOVE the World Events audience ceiling, which is the point: under the
-            // clamped band this set is empty.
-            Assert.IsTrue(band.Low >= WorldEventRosterSelector.MaxConsideredLevel);
+            // Every one of them sits ABOVE the retail 275 audience ceiling (the World Events ceiling is now 400,
+            // so the retail value is pinned here as a literal), which is the point: under a band clamped at 275
+            // this set is empty.
+            Assert.IsTrue(band.Low >= 275);
         }
 
         // ---- adaptive band widening ----------------------------------------------------------------------

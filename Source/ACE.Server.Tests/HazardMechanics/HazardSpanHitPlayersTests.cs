@@ -114,6 +114,94 @@ namespace ACE.Server.Tests.HazardMechanics
             Assert.AreEqual(2, f.Hit.Count);
         }
 
+        /// <summary>
+        /// A wisp volley: two pillar hosts that both cover one player in the same tick, struck under one hit group, hit
+        /// that player ONCE (and keep hitting a player only one of them covers). Without a group each host has its own
+        /// ledger entry, so the same two strikes hit twice: that is the control. A fresh group is a fresh volley.
+        /// </summary>
+        [TestMethod]
+        public void HitPlayers_TwoPillarsInOneVolley_HitAPlayerInReachOfBoth_Once()
+        {
+            int Strikes(bool grouped, out List<uint> hit)
+            {
+                var f = new Fixture(Arena());
+
+                f.Players.Put(f.AnchorLb, 1, Anchor, 190f, 96f, 5f);   // between the two pillars: in reach of both
+                f.Players.Put(f.AnchorLb, 2, Anchor, 185f, 96f, 5f);   // under the west pillar only
+
+                var west = new HazardHandle(10, f.Source.Object, new HazardSpawnSpec { Wcid = 1, Tag = "pillar" }, Vector3.Zero);
+                var east = new HazardHandle(11, f.Source.Object, new HazardSpawnSpec { Wcid = 1, Tag = "pillar" }, Vector3.Zero);
+                int? group = grouped ? f.Ctx.NewHitGroup() : (int?)null;
+
+                var total = f.Ctx.HitPlayers(west, new Vector3(187.5f, 96f, 5f), 2.5f, hitGroup: group)
+                          + f.Ctx.HitPlayers(east, new Vector3(192.5f, 96f, 5f), 2.5f, hitGroup: group);
+
+                hit = f.Hit;
+                return total;
+            }
+
+            Assert.AreEqual(3, Strikes(false, out var ungrouped), "control: per-host ledgers hit the player between them twice");
+            CollectionAssert.AreEquivalent(new uint[] { 1, 2, 1 }, ungrouped);
+
+            Assert.AreEqual(2, Strikes(true, out var grouped), "one volley: each player at most once");
+            CollectionAssert.AreEquivalent(new uint[] { 1, 2 }, grouped);
+        }
+
+        /// <summary>
+        /// The production edge of the volley rule: the wisps mechanic's real port (WispSquadMechanic.ContextPort) over a real
+        /// HazardContext. Two pillar hosts struck with the same non-zero volley hit a player in reach of both ONCE; volley 0
+        /// falls back to each host's own ledger key, so the same two strikes hit twice.
+        /// </summary>
+        [TestMethod]
+        public void ContextPort_Strike_ForwardsTheVolleyAsTheHitGroup()
+        {
+            int Strikes(Func<WispSquadMechanic.ContextPort, int> volleyOf, out List<uint> hit)
+            {
+                var f = new Fixture(Arena());
+
+                f.Players.Put(f.AnchorLb, 1, Anchor, 190f, 96f, 5f);   // between the two pillars: in reach of both
+
+                var port = new WispSquadMechanic.ContextPort(f.Ctx, WispSettings.From(HazardArgs.Empty));
+                var west = new HazardHandle(10, f.Source.Object, new HazardSpawnSpec { Wcid = 1, Tag = "pillar" }, Vector3.Zero);
+                var east = new HazardHandle(11, f.Source.Object, new HazardSpawnSpec { Wcid = 1, Tag = "pillar" }, Vector3.Zero);
+                var volley = volleyOf(port);
+
+                var total = port.Strike(west, new Vector3(187.5f, 96f, 5f), 2.5f, double.PositiveInfinity, volley)
+                          + port.Strike(east, new Vector3(192.5f, 96f, 5f), 2.5f, double.PositiveInfinity, volley);
+
+                hit = f.Hit;
+                return total;
+            }
+
+            Assert.AreEqual(1, Strikes(p => p.NewHitGroup(), out var grouped), "one volley: the player in reach of both pillars is hit once");
+            CollectionAssert.AreEqual(new uint[] { 1 }, grouped);
+
+            Assert.AreEqual(2, Strikes(_ => 0, out var ungrouped), "volley 0: each host keeps its own ledger key, so two hits");
+            CollectionAssert.AreEqual(new uint[] { 1, 1 }, ungrouped);
+        }
+
+        [TestMethod]
+        public void HitPlayers_AHitGroupLedger_IsSeparateFromTheSourcesOwn()
+        {
+            var f = new Fixture(Arena());
+
+            f.Players.Put(f.AnchorLb, 1, Anchor, 190f, 96f, 5f);
+
+            // two groups are two keys
+            var first = f.Ctx.NewHitGroup();
+            var second = f.Ctx.NewHitGroup();
+
+            Assert.AreNotEqual(first, second);
+
+            // the source's own (ungrouped) hit does not use up a volley's hit, nor the other way round
+            var ownId = new HazardHandle(first + 100, f.Source.Object, new HazardSpawnSpec { Wcid = 1 }, Vector3.Zero);
+
+            Assert.AreEqual(1, f.Ctx.HitPlayers(ownId, new Vector3(190f, 96f, 5f), 2f, hitGroup: first));
+            Assert.AreEqual(1, f.Ctx.HitPlayers(ownId, new Vector3(190f, 96f, 5f), 2f), "its own key is not the group's");
+            Assert.AreEqual(1, f.Ctx.HitPlayers(ownId, new Vector3(190f, 96f, 5f), 2f, hitGroup: second), "a fresh volley hits again");
+            Assert.AreEqual(0, f.Ctx.HitPlayers(ownId, new Vector3(190f, 96f, 5f), 2f, hitGroup: first), "the first volley is spent");
+        }
+
         [TestMethod]
         public void HitPlayers_ANeighbourOnAnotherTickThread_IsNeverRead()
         {

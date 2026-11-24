@@ -69,8 +69,18 @@ namespace ACE.Server.WorldEvents.Hold
         /// <summary>undefended_seconds for <see cref="Participants"/>, by ProtectDef.EffectiveUndefendedSeconds's rule.</summary>
         public double UndefendedSeconds { get; init; }
 
-        /// <summary>min_death_seconds (fallback 0 = no cap).</summary>
+        /// <summary>
+        /// min_death_seconds (fallback 0 = no cap), already multiplied by <see cref="KnightDurability"/> when resolved
+        /// from settings.
+        /// </summary>
         public double MinDeathSeconds { get; init; }
+
+        /// <summary>
+        /// The group-scaled durability multiplier for <see cref="Participants"/> (knight_durability_per_participant and
+        /// knight_durability_cap; ProtectDef.Durability). Already folded into <see cref="UndefendedSeconds"/>,
+        /// <see cref="MinDeathSeconds"/> and <see cref="FinaleMinKillSeconds"/> by From, and nowhere else. 1 = none.
+        /// </summary>
+        public double KnightDurability { get; init; } = 1.0;
 
         /// <summary>min_survivors (fallback ProtectDef.DefaultMinSurvivors).</summary>
         public int MinSurvivors { get; init; }
@@ -336,6 +346,12 @@ namespace ACE.Server.WorldEvents.Hold
                 UndefendedSecondsFloor = undefendedFloor
             }.EffectiveUndefendedSeconds(participants);
 
+            // Durability scales the three knight lifetimes once, here, from the live participant count. The same D divides the
+            // passive heal shares below (shrine, rescue, rescue cap, clear regen, between waves, corrupted kill), so a big group's
+            // sturdier knights are not also healed D times more strongly. Player-driven healing (player_heal_cap, player_heal_mult,
+            // heal_budget_per_wave, Transfusion) is deliberately NOT divided.
+            var durability = ProtectDef.Durability(N(K.KnightDurabilityPerParticipant, 0), N(K.KnightDurabilityCap, 1), participants);
+
             WorldEventCombatKinds wardReduces = wardDef.ReducesKinds, wardBreakOn = wardDef.BreakOnKinds;
 
             var tuning = new WorldEventHoldTuning
@@ -347,8 +363,9 @@ namespace ACE.Server.WorldEvents.Hold
                 UndefendedSecondsBase = undefendedBase,
                 UndefendedSecondsPerParticipant = undefendedPer,
                 UndefendedSecondsFloor = undefendedFloor,
-                UndefendedSeconds = undefended,
-                MinDeathSeconds = N(K.MinDeathSeconds, 0),
+                UndefendedSeconds = undefended * durability,
+                MinDeathSeconds = N(K.MinDeathSeconds, 0) * durability,
+                KnightDurability = durability,
                 MinSurvivors = (int)(settings.Whole(K.MinSurvivors) ?? ProtectDef.DefaultMinSurvivors),
                 HoldSeconds = N(K.HoldSeconds, 0),
 
@@ -362,18 +379,18 @@ namespace ACE.Server.WorldEvents.Hold
                 HealReductionAfterHit = N(K.HealReductionAfterHit, 0),
                 HealReductionSeconds = N(K.HealReductionSeconds, 5),
                 HealBudgetPerWave = N(K.HealBudgetPerWave, 0),
-                RescueHeal = N(K.RescueHeal, 0),
-                RescueCapPerWave = N(K.RescueCapPerWave, 0.10),
-                CorruptedKillHeal = N(K.CorruptedKillHeal, 0),
-                HealBetweenWaves = N(K.HealBetweenWaves, 0),
-                RegenPerSecond = N(K.RegenPerSecond, 0),
+                RescueHeal = N(K.RescueHeal, 0) / durability,
+                RescueCapPerWave = N(K.RescueCapPerWave, 0.10) / durability,
+                CorruptedKillHeal = N(K.CorruptedKillHeal, 0) / durability,
+                HealBetweenWaves = N(K.HealBetweenWaves, 0) / durability,
+                RegenPerSecond = N(K.RegenPerSecond, 0) / durability,
                 RegenClearRadius = N(K.RegenClearRadius, 10),
                 RegenIntervalSeconds = N(K.RegenIntervalSeconds, 1),
                 PlayerHealEnabled = settings.Flag(K.PlayerHeal),
                 PlayerHealCap = N(K.PlayerHealCap, ProtectDef.DefaultMaxHealPerTenSeconds),
                 PlayerHealMult = N(K.PlayerHealMult, 1.0),
                 ShrineEnabled = settings.OnOff(K.Shrine) ?? false,
-                ShrineHeal = N(K.ShrineHeal, 0.15),
+                ShrineHeal = N(K.ShrineHeal, 0.15) / durability,
                 ShrineCooldownSeconds = N(K.ShrineCooldownSeconds, 45),
                 ShrineHealsAll = settings.Flag(K.ShrineHealsAll),
                 ShrinePlayerCooldownSeconds = N(K.ShrinePlayerCooldownSeconds, 0),
@@ -405,7 +422,7 @@ namespace ACE.Server.WorldEvents.Hold
                 WardBreakEffect = wardDef.BreakEffect,
                 WardRestoreEffect = wardDef.RestoreEffect,
 
-                FinaleMinKillSeconds = N(K.FinaleMinKillSeconds, ProtectDef.DefaultBossMinKillSeconds),
+                FinaleMinKillSeconds = N(K.FinaleMinKillSeconds, ProtectDef.DefaultBossMinKillSeconds) * durability,
                 FinalePlayerDamageMult = N(K.FinalePlayerDamageMult, 1.0),
                 FinaleEnrageSeconds = N(K.FinaleEnrageSeconds, 0),
                 FinaleEnrageMult = N(K.FinaleEnrageMult, 1.5),

@@ -13,6 +13,7 @@ using ACE.Entity.Models;
 using ACE.Server.EquipmentMods;
 using ACE.Server.Managers;
 using ACE.Server.Managers.Market;
+using ACE.Server.Tests.KnotLoot;
 using ACE.Server.WeaponMods;
 using ACE.Server.WorldObjects;
 
@@ -86,6 +87,21 @@ namespace ACE.Server.Tests
                 var definition = WeaponModRegistry.Get(id);
                 WeaponModTinkerSet.ApplySpecial(weapon, definition, WeaponModValue.MaxMagnitude(definition));
             }
+        }
+
+        /// <summary>
+        /// The appraisal panel appends a requirement suffix to each mod line ("(Works without the ability)" / "(Requires X trained)").
+        /// A market row carries no such field, so the projection is compared with the panel line minus that suffix.
+        /// </summary>
+        private static string WithoutRequirement(string line)
+        {
+            if (line.StartsWith("- Mod Capacity:", StringComparison.Ordinal))
+                return line;
+
+            var at = line.LastIndexOf(" (", StringComparison.Ordinal);
+            Assert.IsGreaterThanOrEqualTo(0, at, $"a mod panel line carries no requirement suffix: {line}");
+
+            return line.Substring(0, at);
         }
 
         /// <summary>One projected row rebuilt into the exact appraisal bullet line it came from.</summary>
@@ -168,7 +184,10 @@ namespace ACE.Server.Tests
                 "Venom", "Acid Proc", "Caustic", "Riposte", "Attack Speed",
                 "Thorns", "Bulwark",
                 "Frenzied Pace", "Lingering Fury", "Savage Blows", "Break Armor", "Executioner", "Bloodlust",
-                "Overchannel", "Echo Cast", "Elemental Rend", "Resonance",
+                "Overchannel", "Echo Cast", "Elemental Rend",
+                // 2026-11-03: the returned Elemental Rend. Its token derives from the enum member ElementalRendVuln
+                // (ElementalRend, id 23, is the Elemental Proficiency mod and its token is pinned above).
+                "Elemental Rend Vuln", "Resonance",
                 "Void Damage", "Withering", "Empowered Summons", "Soul Tether", "Nether Bloom",
                 "Mana Barrier",
                 "Blood Charge", "Transfusion", "Hemorrhage", "Deepen", "Bloodletting", "Sanguinate", "Blood Price", "Clotting",
@@ -331,9 +350,55 @@ namespace ACE.Server.Tests
 
             var panel = EquipmentModDisplay.GetAppraisalLines(plate);
 
-            CollectionAssert.AreEqual(panel.Where(l => !l.StartsWith("- Mod Capacity:", StringComparison.Ordinal)).ToList(),
+            CollectionAssert.AreEqual(panel.Where(l => !l.StartsWith("- Mod Capacity:", StringComparison.Ordinal)).Select(WithoutRequirement).ToList(),
                 snapshot.Mods.Select(AsAppraisalLine).ToList(), "a projected armor row disagrees with the appraisal panel");
             Assert.IsTrue(panel.Contains("- Mod Capacity: 3"), "control: the panel prints the same capacity");
+        }
+
+        [TestMethod]
+        public void ArmorRows_CarryTheAbilityRequirement_StandaloneAndMachineryExactStrings()
+        {
+            var plate = Breastplate();
+            plate.SetProperty(EquipmentModRegistry.Get(EquipmentModId.Deadeye).Property, 0.83);
+            plate.SetProperty(EquipmentModRegistry.Get(EquipmentModId.ManaBarrier).Property, 0.5);
+            plate.SetProperty(PropertyInt.GearModCapacity, 3);
+
+            var snapshot = MarketSnapshot.FromItem(plate);
+
+            Assert.AreEqual("Works without the ability", snapshot.Mods.Single(m => m.Token == "Deadeye").Requirement);
+            Assert.AreEqual("Requires Mana Barrier trained", snapshot.Mods.Single(m => m.Token == "Mana Barrier").Requirement);
+
+            var json = MarketSnapshot.Serialize(snapshot);
+
+            Assert.IsTrue(json.Contains("\"requirement\":\"Works without the ability\""), json);
+            Assert.IsTrue(json.Contains("\"requirement\":\"Requires Mana Barrier trained\""), json);
+        }
+
+        [TestMethod]
+        public void NonEquipmentModRows_OmitRequirementFromTheJson()
+        {
+            var sword = Sword();
+            WeaponModTinkerSet.ApplySpecial(sword, WeaponModRegistry.Get(WeaponModId.Devastation), 4.0);
+
+            var weaponSnapshot = MarketSnapshot.FromItem(sword);
+
+            Assert.IsTrue(weaponSnapshot.Mods != null && weaponSnapshot.Mods.Count > 0, "control: the sword projects a weapon row");
+            Assert.IsTrue(weaponSnapshot.Mods.All(m => m.Requirement == null));
+            Assert.IsFalse(MarketSnapshot.Serialize(weaponSnapshot).Contains("\"requirement\""));
+
+            var cloak = UpgradedCloakTestItems.Item(cloak: true);
+            cloak.SetProperty(PropertyFloat.CloakProcAmplifier, 1.0);
+            var cloakRows = MarketItemMods.CloakRows(cloak);
+
+            Assert.IsTrue(cloakRows.Count > 0, "control: the cloak projects a Proc Amplifier row");
+            Assert.IsFalse(JsonSerializer.Serialize(cloakRows, MarketSnapshot.JsonOptions).Contains("\"requirement\""));
+
+            var ring = JewelryAspectApplicatorTests.Jewelry("Aspected Ring", EquipMask.FingerWearLeft | EquipMask.FingerWearRight, 1, 0, 0);
+            var jewelrySnapshot = new ListingSnapshot();
+            MarketItemMods.Apply(ring, jewelrySnapshot);
+
+            Assert.IsTrue(jewelrySnapshot.Mods != null && jewelrySnapshot.Mods.Count > 0, "control: the ring projects a jewelry row");
+            Assert.IsFalse(MarketSnapshot.Serialize(jewelrySnapshot).Contains("\"requirement\""));
         }
 
         [TestMethod]
@@ -481,7 +546,7 @@ namespace ACE.Server.Tests
                 var snapshot = MarketSnapshot.FromItem(plate);
 
                 Assert.IsNull(snapshot.Mods[0].IntensityPct, "a muted scale leaves no honest figure");
-                CollectionAssert.AreEqual(EquipmentModDisplay.GetAppraisalLines(plate), snapshot.Mods.Select(AsAppraisalLine).ToList());
+                CollectionAssert.AreEqual(EquipmentModDisplay.GetAppraisalLines(plate).Select(WithoutRequirement).ToList(), snapshot.Mods.Select(AsAppraisalLine).ToList());
             }
             finally
             {

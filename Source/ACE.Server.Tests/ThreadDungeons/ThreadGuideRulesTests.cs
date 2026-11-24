@@ -77,6 +77,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         {
             AssertGranted(75, ThreadGuideRules.DecideGrant(true, 120, 50, false, false));
             AssertGranted(375, ThreadGuideRules.DecideGrant(true, 275, 350, false, false));
+            AssertGranted(400, ThreadGuideRules.DecideGrant(true, 275, 375, false, false));
         }
 
         /// <summary>
@@ -104,7 +105,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         [TestMethod]
         public void A_completed_ladder_refuses()
         {
-            AssertRefused(GuideRefusal.LadderComplete, ThreadGuideRules.DecideGrant(true, 300, 375, false, false));
+            AssertRefused(GuideRefusal.LadderComplete, ThreadGuideRules.DecideGrant(true, 300, 500, false, false));
         }
 
         [TestMethod]
@@ -123,9 +124,9 @@ namespace ACE.Server.Tests.ThreadDungeons
         [TestMethod]
         public void Refusals_are_checked_in_order()
         {
-            AssertRefused(GuideRefusal.Disabled, ThreadGuideRules.DecideGrant(false, 10, 375, true, true));
-            AssertRefused(GuideRefusal.BelowMinimumLevel, ThreadGuideRules.DecideGrant(true, 10, 375, true, true));
-            AssertRefused(GuideRefusal.LadderComplete, ThreadGuideRules.DecideGrant(true, 300, 375, true, true));
+            AssertRefused(GuideRefusal.Disabled, ThreadGuideRules.DecideGrant(false, 10, 500, true, true));
+            AssertRefused(GuideRefusal.BelowMinimumLevel, ThreadGuideRules.DecideGrant(true, 10, 500, true, true));
+            AssertRefused(GuideRefusal.LadderComplete, ThreadGuideRules.DecideGrant(true, 300, 500, true, true));
             AssertRefused(GuideRefusal.HoldsGuideItem, ThreadGuideRules.DecideGrant(true, 300, 100, true, true));
         }
     }

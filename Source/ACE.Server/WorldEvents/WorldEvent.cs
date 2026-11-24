@@ -142,6 +142,9 @@ namespace ACE.Server.WorldEvents
 
         public WorldEventRequest Request { get; }
 
+        /// <summary>The Avatar whose private event this is, copied from the request; null for an ordinary run.</summary>
+        public uint? AvatarId { get; }
+
         /// <summary>
         /// The goal being pursued. Attached by <see cref="SetObjective"/> immediately after construction in
         /// production (the WP-06 factory needs the event to build one), and may be null only in tests.
@@ -384,6 +387,11 @@ namespace ACE.Server.WorldEvents
         /// <summary>Kind (wisps | balls | rain) of the live run, null between runs. Written on the world thread, read by the status line.</summary>
         private volatile string hazardRunKind;
 
+        /// <summary>Pattern of the live run (null for none) and the world-clock second it started, for the end-of-run summary line. World thread.</summary>
+        private string hazardRunPattern;
+
+        private double hazardRunStartedAt;
+
         /// <summary>The count last handed to the live run. Written on the world thread, read by the status line.</summary>
         private volatile int hazardLiveCount;
 
@@ -590,6 +598,9 @@ namespace ACE.Server.WorldEvents
             RunId = runId;
             Composition = composition;
             Request = request;
+            AvatarId = request?.AvatarId;
+            AnnounceServerWide = request?.AnnounceServerWide ?? true;
+            avatarFavorPrice = request?.AvatarFavorPrice ?? 0;
             Objective = objective;
 
             this.audienceSampler = audienceSampler;
@@ -1077,6 +1088,71 @@ namespace ACE.Server.WorldEvents
         public uint BossRebaseHealth { get; private set; }
 
         /// <summary>
+        /// True once this run sized its named boss from the champion HP budget (WorldEventBossBudget): a
+        /// kill_boss run, the budget flag on, and a boss carrying a budget. Latched for the same reason
+        /// <see cref="BossThroughputActive"/> is - a refused placement re-issues and must re-size the same way.
+        /// While it is set, every audience re-sample recomputes the boss's health from the CURRENT power and
+        /// the ratchet only ever raises it (a late arrival adds health; a departure changes nothing).
+        /// </summary>
+        public bool BossBudgetActive { get; private set; }
+
+        // The budget dials as they stood when the boss was sized; BossRebaseHealth is the latched floor.
+        private double budgetPerPower;
+        private double budgetExponent;
+        private uint budgetCap;
+
+        // The power the budget actually sized from (the telemetry's powerAtSpawn in budget mode).
+        private double budgetSizedPower;
+
+        /// <summary>Audience head-count at the instant the boss was sized (the latest sizing attempt). Telemetry only.</summary>
+        public int BossAudienceAtSpawn { get; private set; }
+
+        /// <summary>Audience power at the instant the boss was sized. Telemetry only.</summary>
+        public double BossPowerAtSpawn { get; private set; }
+
+        /// <summary>The largest audience head-count any sample of this run saw. Telemetry only.</summary>
+        public int PeakAudience { get; private set; }
+
+        /// <summary>The largest audience power any sample of this run saw. Telemetry only.</summary>
+        public double PeakPower { get; private set; }
+
+        /// <summary>
+        /// Test seam for world_events_boss_budget_enabled. A read that throws (no shard config in a unit test)
+        /// reads as OFF, the legacy path - the only safe direction for a failure here.
+        /// </summary>
+        internal static Func<bool> BossBudgetEnabledSource = ReadBossBudgetEnabled;
+
+        private static bool ReadBossBudgetEnabled()
+        {
+            try
+            {
+                return PropertyManager.GetBool("world_events_boss_budget_enabled").Item;
+            }
+            catch (Exception ex)
+            {
+                log.Error("[WORLDEVENT] could not read world_events_boss_budget_enabled; treating it as off", ex);
+
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// The champion HP budget applies to this boss: the goal is kill_boss, the flag is on, and the boss
+        /// carries a budget (perPower and floor both non-zero after the live overrides).
+        /// </summary>
+        private bool BossBudgetEligible(BossDef boss)
+        {
+            if (boss == null || Composition?.Goal == null || Composition.Goal.TypeKind != GoalType.KillBoss)
+                return false;
+
+            // The boss's own dials first: a boss with no budget never touches the property flag.
+            if (!(boss.EffectiveBudgetHealthPerPower > 0) || boss.EffectiveBudgetFloorHealth == 0)
+                return false;
+
+            return BossBudgetEnabledSource();
+        }
+
+        /// <summary>
         /// The boss's DamageRating as this run currently believes it to be (TECH-DESIGN 2.16): the AUTHORED
         /// value while nothing has been advised, then whatever the last successfully queued write set. Only
         /// ever moved after <see cref="WorldEventSpawner.ApplyBossDamageRating"/> reports the write was
@@ -1100,6 +1176,33 @@ namespace ACE.Server.WorldEvents
         /// <summary>True once the controller has been seeded from the boss's authored rating and the one
         /// spawn-time line has been logged. Latched for the life of the run.</summary>
         private bool bossDamageSeeded;
+
+        /// <summary>
+        /// The run maximum length in seconds: an explicit request maximum when one was given (it always wins),
+        /// otherwise the larger of the 600 s default and the goal maxDurationSeconds. Min duration is unchanged.
+        /// </summary>
+        public int EffectiveMaxDurationSeconds =>
+            ResolveMaxDuration(Request?.MaxDurationSeconds, Composition?.Goal?.MaxDurationSeconds ?? 0);
+
+        /// <summary>
+        /// The per-goal duration rule (D6 - pure): an EXPLICIT request maximum always wins, shorter or longer than
+        /// the goal value (0 or less is "no limit" to the timers and is passed through). With none given, the run gets
+        /// the larger of <see cref="DefaultMaxDurationSeconds"/> and the goal maxDurationSeconds, so a goal value
+        /// can only lengthen the default, never shorten it.
+        /// </summary>
+        public static int ResolveMaxDuration(int? explicitMaxSeconds, int goalMaxSeconds)
+        {
+            if (explicitMaxSeconds.HasValue)
+                return explicitMaxSeconds.Value;
+
+            return Math.Max(DefaultMaxDurationSeconds, goalMaxSeconds);
+        }
+
+        /// <summary>
+        /// The boss-sizing mode label for logs and status (D6 - pure): budget, else throughput, else power.
+        /// </summary>
+        public static string BossModeLabel(bool budgetActive, bool throughputActive) =>
+            budgetActive ? "budget" : throughputActive ? "throughput" : "power";
 
         /// <summary>Seconds of Active run time at <paramref name="now"/>. 0 before the run goes Active.</summary>
         public double ActiveSeconds(double now)
@@ -1147,6 +1250,12 @@ namespace ACE.Server.WorldEvents
 
             Audience = estimate;
 
+            if (estimate.Count > PeakAudience)
+                PeakAudience = estimate.Count;
+
+            if (estimate.PowerSum > PeakPower)
+                PeakPower = estimate.PowerSum;
+
             var boss = Composition?.Boss;
 
             if (boss == null || boss.Kind != BossKind.Named)
@@ -1186,6 +1295,20 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         private double BossCandidateMult(BossDef boss, AudienceEstimate estimate)
         {
+            // The champion HP budget first (kill_boss only): the boss's health is a function of the power now
+            // present, so a late arrival recomputes it and the ratchet (RatchetMult) keeps it raise-only.
+            if (BossBudgetActive)
+            {
+                // Latched at spawn: the floor is the rebase the boss was actually built on, and perPower,
+                // exponent and cap are the values it was sized with, so a dial changed mid-fight can neither
+                // double the multiplier (new floor under an old rebase) nor freeze the ratchet.
+                return WorldEventBossBudget.ResolveMult(budgetPerPower, budgetExponent, estimate.PowerSum,
+                    BossRebaseHealth, budgetCap);
+            }
+
+            if (BossBudgetEligible(boss))
+                return boss.ResolveBudgetMult(estimate.PowerSum);
+
             return BossThroughputActive
                 ? ThroughputCandidateMult(boss, BossThroughputHps, estimate.Count, BossThroughputCountAtSpawn)
                 : boss.ResolveHealthMult(estimate.PowerSum);
@@ -1233,7 +1356,7 @@ namespace ACE.Server.WorldEvents
 
             try
             {
-                WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.TeaserLine(Composition?.Source, AnchorName, lead, null), relayToDiscord: true);
+                Announce(WorldEventAnnouncer.TeaserLine(Composition?.Source, AnchorName, lead, null), relayToDiscord: true);
 
                 relayedToDiscord = true;
             }
@@ -1287,14 +1410,14 @@ namespace ACE.Server.WorldEvents
 
             log.Info($"[WORLDEVENT] run={RunId} announce lead={AnnounceLeadSeconds}s flavour={flavour ?? "(none)"}");
 
-            WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.StartLine(Composition?.Source, Composition?.FamilyDisplayName, AnchorName));
+            Announce(WorldEventAnnouncer.StartLine(Composition?.Source, Composition?.FamilyDisplayName, AnchorName));
 
             // Asheron's Protection (WaffleACE): a second global line, immediately after the ordinary start
             // announcement, only while world events and death protection are both on. Latched so Finish
             // knows whether it is allowed to speak the matching end line.
             if (DeathProtectionEnabled())
             {
-                WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.DeathProtectionStartLine);
+                Announce(WorldEventAnnouncer.DeathProtectionStartLine);
                 deathProtectionStartAnnounced = true;
             }
 
@@ -1830,7 +1953,7 @@ namespace ACE.Server.WorldEvents
                             // After the decor (the element may follow its style). Never throws.
                             StartHazard(now);
 
-                            WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.ActiveLine(
+                            Announce(WorldEventAnnouncer.ActiveLine(
                                 Composition?.Source, Composition?.FamilyDisplayName, Composition?.Goal, AnchorName,
                                 Composition?.GoalDisplayName), relayToDiscord: true);
 
@@ -2155,6 +2278,9 @@ namespace ACE.Server.WorldEvents
 
             lastWaveIndexSpawned = WaveIndex;
 
+            // the private Avatar event's fighter fights at the top of this wave's band (nothing for an ordinary run)
+            WorldEventHooks.NotifyAvatarEventWave(this, WaveIndex, band.High);
+
             if (objectiveWave?.Place != null)
                 objectiveWave.Place(new WorldEventObjectiveWavePick(pick, WaveIndex, band, healthMult, now, trigger));
             else
@@ -2163,7 +2289,7 @@ namespace ACE.Server.WorldEvents
             // Per-wave chatter is local, not server-wide (PLAN 1.10): everyone actually near the fight sees
             // it, without spamming players nowhere near this run. An objective wave that says its own lines skips it.
             if (objectiveWave?.SkipThemeWaveLine != true)
-                WorldEventAnnouncer.Local(this, WorldEventAnnouncer.WaveLine(theme));
+                AnnounceLocal(WorldEventAnnouncer.WaveLine(theme));
         }
 
         /// <summary>
@@ -2342,7 +2468,7 @@ namespace ACE.Server.WorldEvents
                 var line = WorldEventAnnouncer.BossArrivedLine(bossName, AnchorName);
 
                 log.Info($"[WORLDEVENT] run={RunId} announce boss_arrived");
-                WorldEventAnnouncer.Broadcast(line);
+                AnnounceInRunWide(line);
             }
             catch (Exception ex)
             {
@@ -2611,7 +2737,45 @@ namespace ACE.Server.WorldEvents
             // two attempts of the same spawn would leave the multiplier and the rebase describing different
             // bosses. Once a run has sized this boss from measurement, every retry re-sizes it the same way
             // (against the fresher sample - nothing is standing yet, so there is nothing to protect).
-            if (BossThroughputActive || (enabled && boss.EffectiveThroughputFloorHealth > 0 && hasSample))
+            // The champion HP budget (kill_boss only) comes BEFORE the throughput path: the boss is sized from
+            // the power of the players standing here now, so take a fresh audience sample first (the last wave's
+            // sample may be minutes old). BossBudgetActive latches for the same reason BossThroughputActive does.
+            if (BossBudgetActive || BossBudgetEligible(boss))
+            {
+                SetAudience(SampleAudience());
+
+                // Never below the biggest crowd this run has seen: an empty or throwing sample, or a momentary
+                // dip, must not drop a populated run's boss to the floor. PeakPower already includes the fresh
+                // sample just taken.
+                var power = Math.Max(Audience.PowerSum, PeakPower);
+                var perPower = boss.EffectiveBudgetHealthPerPower;
+                var exponent = boss.EffectiveBudgetExponent;
+                var budgetFloor = boss.EffectiveBudgetFloorHealth;
+                var cap = boss.EffectiveBudgetCapHealth;
+
+                BossBudgetActive = true;
+                BossThroughputActive = false;
+
+                budgetPerPower = perPower;
+                budgetExponent = exponent;
+                budgetCap = cap;
+                budgetSizedPower = power;
+
+                BossRebaseHealth = budgetFloor;
+                BossHealthMult = WorldEventBossBudget.ResolveMult(perPower, exponent, power, budgetFloor, cap);
+
+                var hp = WorldEventBossBudget.ResolveHealth(perPower, exponent, power, budgetFloor, cap);
+
+                var line = $"[WORLDEVENT] run={RunId} boss sizing mode=budget perPower={perPower:F0} exponent={exponent:F2} " +
+                           $"power={power:F2} audience={Audience.Count} hp={hp} floor={budgetFloor} cap={cap} " +
+                           $"mult=x{BossHealthMult:F2}";
+
+                if (loud)
+                    log.Info(line);
+                else
+                    log.Debug(line);
+            }
+            else if (BossThroughputActive || (enabled && boss.EffectiveThroughputFloorHealth > 0 && hasSample))
             {
                 BossThroughputHps = hps;
                 BossThroughputCountAtSpawn = Math.Max(1, Audience.Count);
@@ -2646,6 +2810,10 @@ namespace ACE.Server.WorldEvents
                 else
                     log.Debug(line);
             }
+
+            // Telemetry for the finish line: the crowd the boss was actually sized against, every mode.
+            BossAudienceAtSpawn = Audience.Count;
+            BossPowerAtSpawn = BossBudgetActive ? budgetSizedPower : Audience.PowerSum;
 
             return BossHealthMult;
         }
@@ -2964,7 +3132,7 @@ namespace ACE.Server.WorldEvents
                     var line = WorldEventAnnouncer.BossHealthMilestoneLine(boss.DisplayName, pct);
 
                     log.Info($"[WORLDEVENT] run={RunId} announce boss_health {pct}");
-                    WorldEventAnnouncer.Broadcast(line);
+                    AnnounceInRunWide(line);
                 }
             }
             catch (Exception ex)
@@ -3054,7 +3222,7 @@ namespace ACE.Server.WorldEvents
 
                 lastProgressAt = now;
 
-                var maxDuration = Request?.MaxDurationSeconds ?? DefaultMaxDurationSeconds;
+                var maxDuration = EffectiveMaxDurationSeconds;
                 var secondsRemaining = maxDuration > 0
                     ? (int)Math.Max(0, maxDuration - ActiveSeconds(now))
                     : -1;
@@ -3296,7 +3464,7 @@ namespace ACE.Server.WorldEvents
                 if (hazardPlan == null)
                     log.Info($"[WORLDEVENT] run={RunId} hazard: none ({note})");
                 else
-                    log.Info($"[WORLDEVENT] run={RunId} hazard: kind={hazardPlan.Kind} alternates={hazardPlan.BallsAlternateWithRain} count={hazardPlan.CountLow}..{hazardPlan.CountHigh} balls=[{string.Join(",", hazardPlan.BallPatterns)}] rainHeight={hazardPlan.RainDropHeight:F1}{(note != null ? " (" + note + ")" : "")}");
+                    log.Info($"[WORLDEVENT] run={RunId} hazard: kind={hazardPlan.Kind} alternates={hazardPlan.BallsAlternateWithRain} count={hazardPlan.CountLow}..{hazardPlan.CountHigh} balls=[{string.Join(",", hazardPlan.BallPatterns)}] choices=[{string.Join(",", hazardPlan.KindChoices)}] rainHeight={hazardPlan.RainDropHeight:F1}{(note != null ? " (" + note + ")" : "")}");
             }
             catch (Exception ex)
             {
@@ -3345,6 +3513,8 @@ namespace ACE.Server.WorldEvents
 
                 hazardRun = run;
                 hazardRunKind = kind;
+                hazardRunPattern = start.Pattern;
+                hazardRunStartedAt = now;
                 SetHazardCount(now);
 
                 log.Info($"[WORLDEVENT] run={RunId} hazard started kind={kind} element={hazardElement} pattern={start.Pattern ?? "-"} count={HazardCountNow(now)}");
@@ -3363,6 +3533,29 @@ namespace ACE.Server.WorldEvents
 
             hazardLiveCount = count;
             hazardRun.SetLiveCount(count);
+        }
+
+        /// <summary>
+        /// One Info line for a hazard run that just ended (any outcome): its kind, pattern, length, the players near the anchor
+        /// at the end, and the host's hit tally (hits, distinct players hit, damage as a percent of each victim's max health).
+        /// Never throws.
+        /// </summary>
+        private void LogHazardSummary(IWorldEventHazardRun run, string kind, double now)
+        {
+            try
+            {
+                var tally = hazardHost.TakeTally(run.Key);
+                var players = CountPlayersPresent();
+
+                if (players == int.MaxValue)
+                    players = -1; // the presence scan failed and held the run open: unknown, not a count
+
+                log.Info(WorldEventHazardHost.FormatSummary(RunId, kind, hazardRunPattern, now - hazardRunStartedAt, players, tally));
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} hazard summary threw", ex);
+            }
         }
 
         private IWorldEventHazardRun StartLiveHazard(WorldEventHazardStart start)
@@ -3407,6 +3600,8 @@ namespace ACE.Server.WorldEvents
                 {
                     if (hazardRun == null || !ReferenceEquals(hazardRun.Key, key))
                         continue; // an end we already settled, or a run we stopped ourselves.
+
+                    LogHazardSummary(hazardRun, hazardRunKind, now);
 
                     hazardRun = null;
                     hazardRunKind = null;
@@ -3454,6 +3649,7 @@ namespace ACE.Server.WorldEvents
             hazardDone = true;
 
             var run = hazardRun;
+            var stoppedKind = hazardRunKind;
 
             hazardRun = null;
             hazardRunKind = null;
@@ -3468,6 +3664,10 @@ namespace ACE.Server.WorldEvents
             catch (Exception ex)
             {
                 log.Error($"[WORLDEVENT] run={RunId} hazard stop threw", ex);
+            }
+            finally
+            {
+                LogHazardSummary(run, stoppedKind, Now());
             }
         }
 
@@ -3636,7 +3836,7 @@ namespace ACE.Server.WorldEvents
                 Now = now,
                 ActiveAt = ActiveAt,
                 LastCreditAt = LastCreditAt,
-                MaxDurationSeconds = Request?.MaxDurationSeconds ?? DefaultMaxDurationSeconds,
+                MaxDurationSeconds = EffectiveMaxDurationSeconds,
 
                 // Both zeroed while the run is held open (TECH-DESIGN 2.15), which is how
                 // WorldEventTimers.Evaluate is told to skip a rule. An objective that has already been MET
@@ -3690,7 +3890,7 @@ namespace ACE.Server.WorldEvents
                 case TimerVerdict.Warn60:
                     warned60 = true;
                     log.Info($"[WORLDEVENT] run={RunId} warning 60 seconds remaining");
-                    WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.WarnLine(60));
+                    Announce(WorldEventAnnouncer.WarnLine(60));
                     break;
 
                 case TimerVerdict.Warn30:
@@ -3699,7 +3899,7 @@ namespace ACE.Server.WorldEvents
                     warned30 = true;
                     warned60 = true;
                     log.Info($"[WORLDEVENT] run={RunId} warning 30 seconds remaining");
-                    WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.WarnLine(30));
+                    Announce(WorldEventAnnouncer.WarnLine(30));
                     break;
             }
 
@@ -3907,7 +4107,7 @@ namespace ACE.Server.WorldEvents
                     ? boss.DisplayName
                     : "the champion";
 
-                WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.OutcomeLine(
+                Announce(WorldEventAnnouncer.OutcomeLine(
                     outcome, Composition?.Goal, AnchorName, mvp, Participation.TopKiller(), Participation.Count, bossName,
                     Composition?.GoalDisplayName,
                     ObjectiveOutcomeTemplate(Composition?.SuccessTemplate, success: true),
@@ -3919,7 +4119,7 @@ namespace ACE.Server.WorldEvents
                 // outcome announcement, ONLY if the start line actually went out for this run - never on the
                 // property being toggled off mid-run with no corresponding start.
                 if (deathProtectionStartAnnounced)
-                    WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.DeathProtectionEndLine);
+                    Announce(WorldEventAnnouncer.DeathProtectionEndLine);
 
                 // BOSS-STANDARD.md section 2: a named boss that WON gets the last word, as a second
                 // global line right after the outcome. Nothing is said on a Success (the boss lost) and
@@ -3930,7 +4130,7 @@ namespace ACE.Server.WorldEvents
                     var failLine = WorldEventAnnouncer.BossFailLine(Composition?.Boss, null);
 
                     if (!string.IsNullOrEmpty(failLine))
-                        WorldEventAnnouncer.Broadcast(failLine);
+                        Announce(failLine);
                 }
             }
             catch (Exception ex)
@@ -3985,7 +4185,7 @@ namespace ACE.Server.WorldEvents
         ///
         /// Format:
         ///   [WORLDEVENT] run=&lt;id&gt; throughput hpCleared=&lt;n&gt; activeSeconds=&lt;n&gt; hps=&lt;n&gt;
-        ///   bossMode=&lt;power|throughput&gt; bossMult=&lt;n&gt; bossMax=&lt;n&gt; bossTtkSeconds=&lt;n&gt; bossHps=&lt;n&gt;
+        ///   bossMode=&lt;power|throughput|budget&gt; bossMult=&lt;n&gt; bossMax=&lt;n&gt; bossTtkSeconds=&lt;n&gt; bossHps=&lt;n&gt;
         ///
         /// hps is what the WAVE phase measured; bossHps is what the group actually achieved against the boss
         /// (bossMax / bossTtkSeconds). Comparing the two is the whole point of the line - it is the evidence
@@ -4005,13 +4205,70 @@ namespace ACE.Server.WorldEvents
                 var bossHps = ttk > 0 ? bossMax / ttk : 0;
 
                 log.Info($"[WORLDEVENT] run={RunId} throughput hpCleared={cleared:F0} activeSeconds={elapsed:F0} " +
-                         $"hps={hps:F1} bossMode={(BossThroughputActive ? "throughput" : "power")} " +
-                         $"bossMult={BossHealthMult:F2} bossMax={bossMax} bossTtkSeconds={ttk:F0} bossHps={bossHps:F1}");
+                         $"hps={hps:F1} bossMode={BossModeLabel(BossBudgetActive, BossThroughputActive)} " +
+                         $"bossMult={BossHealthMult:F2} bossMax={bossMax} bossTtkSeconds={ttk:F0} bossHps={bossHps:F1} " +
+                         BossFinishFields(bossMax));
             }
             catch (Exception ex)
             {
                 log.Error($"[WORLDEVENT] run={RunId} throughput line threw", ex);
             }
+        }
+
+        /// <summary>
+        /// The champion-budget fields appended to the finish throughput line: the crowd the boss was sized
+        /// for and the biggest crowd seen, how much of the boss was left, and the per-power damage the fight
+        /// implies, normalised to a 175 s kill - the number healthPerPower is tuned from. Never throws.
+        ///
+        /// bossHealthLeftPct is 0 when the boss died, its live percentage when it stands, and -1 when no boss
+        /// stood (not measured). impliedPerPower is 0 unless a boss fought for a measurable time against a
+        /// non-zero power.
+        /// </summary>
+        private string BossFinishFields(uint bossMax)
+        {
+            var leftPct = -1.0;
+            double standingMax = bossMax;
+
+            try
+            {
+                if (Spawner.BossTtkSeconds > 0)
+                {
+                    leftPct = 0;
+                }
+                else if (Spawner.BossMaxHealth > 0 && Spawner.TryGetBossHealth(out var cur, out var max) && max > 0)
+                {
+                    leftPct = 100.0 * cur / max;
+                    standingMax = max;
+                }
+
+                var implied = ImpliedPerPower(standingMax, leftPct, Spawner.BossFightSeconds, BossPowerAtSpawn);
+
+                return $"audienceAtSpawn={BossAudienceAtSpawn} powerAtSpawn={BossPowerAtSpawn:F2} " +
+                       $"peakAudience={PeakAudience} peakPower={PeakPower:F2} bossHealthLeftPct={leftPct:F1} " +
+                       $"impliedPerPower={implied:F0}";
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} boss finish fields threw", ex);
+
+                return "audienceAtSpawn=0 powerAtSpawn=0 peakAudience=0 peakPower=0 bossHealthLeftPct=-1 impliedPerPower=0";
+            }
+        }
+
+        /// <summary>
+        /// bossMax x (1 - left) / fightSeconds x 175 / powerAtSpawn (D6 - pure): the health per unit of power
+        /// that would have made THIS fight last 175 s at the damage rate the group actually showed. 0 for any
+        /// input that cannot be measured (no boss, no fight time, no power, an unmeasured left share).
+        /// </summary>
+        public static double ImpliedPerPower(double bossMax, double healthLeftPct, double fightSeconds, double powerAtSpawn)
+        {
+            if (!(bossMax > 0) || !(fightSeconds > 0) || !(powerAtSpawn > 0) || !double.IsFinite(healthLeftPct)
+                || healthLeftPct < 0 || healthLeftPct > 100)
+                return 0;
+
+            var dealt = bossMax * (1.0 - (healthLeftPct / 100.0));
+
+            return dealt / fightSeconds * 175.0 / powerAtSpawn;
         }
 
         /// <summary>
@@ -4105,7 +4362,10 @@ namespace ACE.Server.WorldEvents
             {
                 // Unreachable in practice; forced so a stuck run can never block the next TryStart.
                 log.Error($"[WORLDEVENT] run={RunId} could not transition {State} -> Done; forcing Done");
+                var forcedFrom = State;
                 State = WorldEventState.Done;
+                SettleAvatarFavor(WorldEventState.Done);
+                WorldEventHooks.NotifyAvatarEventState(this, forcedFrom, WorldEventState.Done);
             }
 
             log.Info($"[WORLDEVENT] run={RunId} finish outcome={Outcome} participants={Participation.Count} duration={duration:F0}");
@@ -4324,6 +4584,11 @@ namespace ACE.Server.WorldEvents
             State = to;
 
             log.Info($"[WORLDEVENT] run={RunId} state {from} -> {to} reason={reason}");
+
+            SettleAvatarFavor(to);
+
+            // the private Avatar event's fighter (nothing for an ordinary run)
+            WorldEventHooks.NotifyAvatarEventState(this, from, to);
 
             return true;
         }

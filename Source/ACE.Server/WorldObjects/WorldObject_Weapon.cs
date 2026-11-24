@@ -13,7 +13,7 @@ namespace ACE.Server.WorldObjects
 {
     /// <summary>
     /// DIVERGES FROM UPSTREAM 08471633e (2026-08-06) further than its pre-existing multi-shot prototype
-    /// divergence - the weapon mods v3 Tier B expansion added three more hooks here (Attunement, Focus x2).
+    /// divergence - the weapon mods v3 Tier B expansion added three more hooks here (Attunement, Precision x2).
     /// See PR #493 for the flagged maintenance cost at the next upstream merge.
     /// </summary>
     partial class WorldObject
@@ -139,12 +139,14 @@ namespace ACE.Server.WorldObjects
         private const float defaultModifier = 1.0f;
 
         /// <summary>
-        /// Returns the Melee Defense skill modifier for the current weapon
+        /// Returns the Melee Defense skill modifier for the current weapon.
+        /// <paramref name="stance"/> null reads the wielder's live CombatMode (every combat caller); a value
+        /// answers as if the wielder were in that stance, without touching the wielder (Character Details).
         /// </summary>
-        public static float GetWeaponMeleeDefenseModifier(Creature wielder)
+        public static float GetWeaponMeleeDefenseModifier(Creature wielder, CombatMode? stance = null)
         {
             // creatures only receive defense bonus in combat mode
-            if (wielder == null || wielder.CombatMode == CombatMode.NonCombat)
+            if (wielder == null || (stance ?? wielder.CombatMode) == CombatMode.NonCombat)
                 return defaultModifier;
 
             var mainhand = GetWeapon(wielder, true);
@@ -187,13 +189,13 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// Returns the Missile Defense skill modifier for the current weapon
+        /// Returns the Missile Defense skill modifier for the current weapon (<paramref name="stance"/>: as the melee one)
         /// </summary>
-        public static float GetWeaponMissileDefenseModifier(Creature wielder)
+        public static float GetWeaponMissileDefenseModifier(Creature wielder, CombatMode? stance = null)
         {
             WorldObject weapon = GetWeapon(wielder as Player);
 
-            if (weapon == null || wielder.CombatMode == CombatMode.NonCombat)
+            if (weapon == null || (stance ?? wielder.CombatMode) == CombatMode.NonCombat)
                 return defaultModifier;
 
             //// no enchantments?
@@ -212,13 +214,13 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// Returns the Magic Defense skill modifier for the current weapon
+        /// Returns the Magic Defense skill modifier for the current weapon (<paramref name="stance"/>: as the melee one)
         /// </summary>
-        public static float GetWeaponMagicDefenseModifier(Creature wielder)
+        public static float GetWeaponMagicDefenseModifier(Creature wielder, CombatMode? stance = null)
         {
             WorldObject weapon = GetWeapon(wielder as Player);
 
-            if (weapon == null || wielder.CombatMode == CombatMode.NonCombat)
+            if (weapon == null || (stance ?? wielder.CombatMode) == CombatMode.NonCombat)
                 return defaultModifier;
 
             //// no enchantments?
@@ -237,12 +239,12 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// Returns the attack skill modifier for the current weapon
+        /// Returns the attack skill modifier for the current weapon (<paramref name="stance"/>: as the melee defense one)
         /// </summary>
-        public static float GetWeaponOffenseModifier(Creature wielder)
+        public static float GetWeaponOffenseModifier(Creature wielder, CombatMode? stance = null)
         {
             // creatures only receive offense bonus in combat mode
-            if (wielder == null || wielder.CombatMode == CombatMode.NonCombat)
+            if (wielder == null || (stance ?? wielder.CombatMode) == CombatMode.NonCombat)
                 return defaultModifier;
 
             var mainhand = GetWeapon(wielder, true);
@@ -349,11 +351,39 @@ namespace ACE.Server.WorldObjects
         private const float defaultPhysicalCritFrequency = 0.1f;    // 10% base chance
 
         /// <summary>
-        /// Returns the critical chance for the attack weapon
+        /// Returns the critical chance for the attack weapon: the attacker-side chance
+        /// (<see cref="GetWeaponCriticalChancePreResist"/>) times the target's crit-resist mitigation
+        /// (<see cref="ApplyCritResist"/>). The two halves are split so a reader with no target creature (Character
+        /// Details, the combat simulator) composes the same arithmetic against a known rating.
         /// </summary>
         public static float GetWeaponCriticalChance(WorldObject weapon, Creature wielder, CreatureSkill skill, Creature target)
         {
+            var critRate = GetWeaponCriticalChancePreResist(weapon, wielder, skill, target);
+
+            return ApplyCritResist(critRate, target.GetCritResistRating());
+        }
+
+        /// <summary>
+        /// The crit-resist mitigation both crit chances end with: <paramref name="critRate"/> times
+        /// GetNegativeRatingMod(<paramref name="critResistRating"/>).
+        /// </summary>
+        public static float ApplyCritResist(float critRate, int critResistRating)
+        {
+            // mitigation
+            var critResistRatingMod = Creature.GetNegativeRatingMod(critResistRating);
+            critRate *= critResistRatingMod;
+
+            return critRate;
+        }
+
+        /// <summary>
+        /// The attacker-side physical crit chance, before the target's crit-resist rating. <paramref name="target"/> is
+        /// read only by the PvP Critical Strike lever, which treats a null target as not PvP.
+        /// </summary>
+        public static float GetWeaponCriticalChancePreResist(WorldObject weapon, Creature wielder, CreatureSkill skill, Creature target)
+        {
             var critRate = (float)(weapon?.CriticalFrequency ?? defaultPhysicalCritFrequency);
+            var unimbuedCritRate = critRate;
 
             if (weapon != null && weapon.HasImbuedEffect(ImbuedEffectType.CriticalStrike))
             {
@@ -366,25 +396,25 @@ namespace ACE.Server.WorldObjects
                 critRate = Math.Max(critRate, criticalStrikeBonus);
             }
 
+            critRate = WithPetFocusCriticalStrike(critRate, unimbuedCritRate, wielder, skill, target);
+
             if (wielder != null)
                 critRate += wielder.GetCritRating() * 0.01f;
 
-            // Weapon mods v3 Tier B (2026-08-06): Focus adds to crit CHANCE after the Math.Max against the
+            // Weapon mods v3 Tier B (2026-08-06): Precision adds to crit CHANCE after the Math.Max against the
             // Critical Strike imbue above, alongside the rating term - never writes CriticalFrequency itself,
-            // so the crit-routes-through-ratings invariant (see WeaponModRegistry.cs) is untouched.
+            // so the crit-routes-through-ratings invariant (see WeaponModRegistry.cs) is untouched. The line after it
+            // adds a pet's share from its owner's Summoner focus (0 for everyone else); the wielder's read is 0 there.
             critRate += (float)WeaponModCombat.ReadWeaponOnlyWieldedBy(weapon, WeaponModId.Focus, wielder);
+            critRate += (float)SummonerFocus.PetFocusModValue(wielder, target, WeaponModId.Focus);
 
-            // Killer Instinct (Rogue T3, class ability overhaul 2026-09-12): a flat +2%/held-Opening crit
+            // Killer Instinct (Rogue T2 since 2026-11-06, class ability overhaul 2026-09-12): a flat +2%/held-Opening crit
             // chance, rank-invariant and carrying no affinity. This is PHYSICAL ONLY (this method, not
             // GetWeaponMagicCritFrequency below), matching the ability's own crit-damage half, which only
             // ever fires from the melee/missile IOutgoingDamageAbility hook. Bespoke read rather than a
             // hook dispatch, because the crit roll happens here, before IOutgoingDamageAbility ever runs.
             if (wielder is Player killerInstinctPlayer)
                 critRate += (float)killerInstinctPlayer.GetKillerInstinctCritChanceBonus();
-
-            // mitigation
-            var critResistRatingMod = Creature.GetNegativeRatingMod(target.GetCritResistRating());
-            critRate *= critResistRatingMod;
 
             return critRate;
         }
@@ -399,16 +429,34 @@ namespace ACE.Server.WorldObjects
         private const float defaultMagicCritFrequency = 0.05f;
 
         /// <summary>
-        /// Returns the critical chance for the caster weapon
+        /// Returns the critical chance for the caster weapon: with no caster, the flat default and nothing else (no
+        /// rating, no target); otherwise the attacker-side chance (<see cref="GetWeaponMagicCritFrequencyPreResist"/>)
+        /// times the target's crit-resist mitigation (<see cref="ApplyCritResist"/>).
         /// </summary>
         public static float GetWeaponMagicCritFrequency(WorldObject weapon, Creature wielder, CreatureSkill skill, Creature target)
+        {
+            // a pet casts with no launcher, so its owner's Summoner focus Critical Strike and Precision ride this return too
+            if (weapon == null)
+                return WithPetFocusCriticalStrike(defaultMagicCritFrequency, defaultMagicCritFrequency, wielder, skill, target) + (float)SummonerFocus.PetFocusModValue(wielder, target, WeaponModId.Focus);
+
+            var critRate = GetWeaponMagicCritFrequencyPreResist(weapon, wielder, skill, target);
+
+            return ApplyCritResist(critRate, target.GetCritResistRating());
+        }
+
+        /// <summary>
+        /// The attacker-side magic crit chance, before the target's crit-resist rating; the flat default with no caster.
+        /// <paramref name="target"/> is read only by the PvP Critical Strike lever, which treats a null target as not PvP.
+        /// </summary>
+        public static float GetWeaponMagicCritFrequencyPreResist(WorldObject weapon, Creature wielder, CreatureSkill skill, Creature target)
         {
             // TODO : merge with above function
 
             if (weapon == null)
-                return defaultMagicCritFrequency;
+                return WithPetFocusCriticalStrike(defaultMagicCritFrequency, defaultMagicCritFrequency, wielder, skill, target) + (float)SummonerFocus.PetFocusModValue(wielder, target, WeaponModId.Focus);
 
             var critRate = (float)(weapon.GetProperty(PropertyFloat.CriticalFrequency) ?? defaultMagicCritFrequency);
+            var unimbuedCritRate = critRate;
 
             if (weapon.HasImbuedEffect(ImbuedEffectType.CriticalStrike))
             {
@@ -423,15 +471,14 @@ namespace ACE.Server.WorldObjects
                 critRate = Math.Max(critRate, criticalStrikeMod);
             }
 
+            critRate = WithPetFocusCriticalStrike(critRate, unimbuedCritRate, wielder, skill, target);
+
             critRate += wielder.GetCritRating() * 0.01f;
 
-            // Weapon mods v3 Tier B (2026-08-06): Focus's magic half - see GetWeaponCriticalChance above for
-            // why this is wired at both crit-chance functions rather than just the physical one.
+            // Weapon mods v3 Tier B (2026-08-06): Precision's magic half - see GetWeaponCriticalChance above for
+            // why this is wired at both crit-chance functions rather than just the physical one, and for the pet line.
             critRate += (float)WeaponModCombat.ReadWeaponOnlyWieldedBy(weapon, WeaponModId.Focus, wielder);
-
-            // mitigation
-            var critResistRatingMod = Creature.GetNegativeRatingMod(target.GetCritResistRating());
-            critRate *= critResistRatingMod;
+            critRate += (float)SummonerFocus.PetFocusModValue(wielder, target, WeaponModId.Focus);
 
             return critRate;
         }
@@ -455,13 +502,71 @@ namespace ACE.Server.WorldObjects
 
                 critDamageMod = Math.Max(critDamageMod, cripplingBlowMod);
             }
+
+            critDamageMod = WithPetFocusCripplingBlow(critDamageMod, wielder, skill, target);
+
             return critDamageMod;
+        }
+
+        /// <summary>
+        /// Summoner casters: a combat pet's crit chance with the Critical Strike imbue on its owner's focus
+        /// (SummonerFocus.PetFocusHasImbue), sized by the skill this hit already uses (owner ruling Q1), its bonus above
+        /// <paramref name="unimbued"/> at summoner_pet_imbue_transfer_percent, then the max against
+        /// <paramref name="critRate"/>, so the pet's own Critical Strike weapon is never weakened. Unchanged for anyone
+        /// else, and for a null skill (GetCriticalStrikeMod dereferences it).
+        /// </summary>
+        private static float WithPetFocusCriticalStrike(float critRate, float unimbued, Creature wielder, CreatureSkill skill, Creature target)
+        {
+            if (skill == null || !SummonerFocus.PetFocusHasImbue(wielder, target, ImbuedEffectType.CriticalStrike))
+                return critRate;
+
+            return Math.Max(critRate, SummonerFocusMath.ScaleImbueChance(GetCriticalStrikeMod(skill), unimbued, SummonerFocus.PetImbueTransferPercent()));
+        }
+
+        /// <summary>
+        /// Summoner casters: a combat pet's crit damage multiplier with the Crippling Blow imbue on its owner's focus,
+        /// sized by the skill this hit already uses, its bonus above 1 at summoner_pet_imbue_transfer_percent, then the
+        /// max against <paramref name="critDamageMod"/> (the pet's own weapon term), so a pet already carrying Crippling
+        /// Blow gains nothing and loses nothing. Unchanged for anyone else, and for a null skill.
+        /// </summary>
+        private static float WithPetFocusCripplingBlow(float critDamageMod, Creature wielder, CreatureSkill skill, Creature target)
+        {
+            if (skill == null || !SummonerFocus.PetFocusHasImbue(wielder, target, ImbuedEffectType.CripplingBlow))
+                return critDamageMod;
+
+            return Math.Max(critDamageMod, SummonerFocusMath.ScaleImbueMultiplier(GetCripplingBlowMod(skill), SummonerFocus.PetImbueTransferPercent()));
         }
 
         /// <summary>
         /// PvP damaged is halved, automatically displayed in the client
         /// </summary>
         public const float ElementalDamageBonusPvPReduction = 0.5f;
+
+        /// <summary>
+        /// The caster elemental damage mod before any gate: the stored ElementalDamageMod, plus the wielder's and the
+        /// weapon's enchantments, plus Attunement. No damage-type gate and no PvP halving, so SummonerFocus can read
+        /// a focus's power without the wielder-side guards. Extracted unchanged from GetCasterElementalDamageModifier.
+        /// </summary>
+        internal static float SumCasterElementalDamageMod(WorldObject weapon, Creature wielder)
+        {
+            var elementalDamageMod = weapon.ElementalDamageMod ?? 1.0f;
+
+            // additive to base multiplier
+            // null-safe so the Summoner focus appraisal can read an unwielded focus through this same sum
+            var wielderEnchantments = wielder?.EnchantmentManager.GetElementalDamageMod() ?? 0.0f;
+            var weaponEnchantments = weapon.EnchantmentManager.GetElementalDamageMod();
+
+            // Weapon mods v3 Tier B (2026-08-06): Attunement adds into the enchantment sum, read directly off
+            // the weapon (this function already requires it to be a Caster).
+            // Attunement is read through ReadWeaponOnlyWieldedBy ON PURPOSE and stays with the wielder-side read:
+            // the Summoner focus strip in WeaponModCombat.ReadWeaponOnly (SummonerFocus.IsPetTransferredMod) leaves
+            // Attunement out, because Attunement already feeds the pet formula through this very sum.
+            var weaponModEnchantment = WeaponModCombat.ReadWeaponOnlyWieldedBy(weapon, WeaponModId.Attunement, wielder);
+
+            var enchantments = wielderEnchantments + weaponEnchantments + weaponModEnchantment;
+
+            return (float)(elementalDamageMod + enchantments);
+        }
 
         /// <summary>
         /// Returns a multiplicative elemental damage modifier for the magic caster weapon type
@@ -471,19 +576,12 @@ namespace ACE.Server.WorldObjects
             if (wielder == null || !(weapon is Caster) || weapon.W_DamageType != damageType)
                 return 1.0f;
 
-            var elementalDamageMod = weapon.ElementalDamageMod ?? 1.0f;
+            // Summoner casters: a summoner focus never boosts its wielder's own spell damage; its rolled power is
+            // read live by SummonerFocus and goes to the wielder's combat pets instead.
+            if (SummonerFocus.IsSummonerFocus(weapon))
+                return 1.0f;
 
-            // additive to base multiplier
-            var wielderEnchantments = wielder.EnchantmentManager.GetElementalDamageMod();
-            var weaponEnchantments = weapon.EnchantmentManager.GetElementalDamageMod();
-
-            // Weapon mods v3 Tier B (2026-08-06): Attunement adds into the enchantment sum, read directly off
-            // the weapon (this function already requires it to be a Caster).
-            var weaponModEnchantment = WeaponModCombat.ReadWeaponOnlyWieldedBy(weapon, WeaponModId.Attunement, wielder);
-
-            var enchantments = wielderEnchantments + weaponEnchantments + weaponModEnchantment;
-
-            var modifier = (float)(elementalDamageMod + enchantments);
+            var modifier = SumCasterElementalDamageMod(weapon, wielder);
 
             if (modifier > 1.0f && target is Player)
                 modifier = 1.0f + (modifier - 1.0f) * ElementalDamageBonusPvPReduction;
@@ -549,12 +647,13 @@ namespace ACE.Server.WorldObjects
         /// <summary>
         /// Returns the resistance modifier or rending modifier
         /// </summary>
-        public static float GetWeaponResistanceModifier(WorldObject weapon, Creature wielder, CreatureSkill skill, DamageType damageType)
+        public static float GetWeaponResistanceModifier(WorldObject weapon, Creature wielder, CreatureSkill skill, DamageType damageType, Creature target)
         {
             float resistMod = defaultModifier;
 
+            // a pet's spell has no launcher, so the owner's focus rend is read before the no-weapon return
             if (wielder == null || weapon == null)
-                return defaultModifier;
+                return WithPetFocusRending(defaultModifier, wielder, skill, damageType, target);
 
             // handle quest weapon fixed resistance cleaving
             if (weapon.ResistanceModifierType != null && weapon.ResistanceModifierType == damageType)
@@ -573,7 +672,28 @@ namespace ACE.Server.WorldObjects
                 resistMod = Math.Max(resistMod, rendingMod);
             }
 
-            return resistMod;
+            return WithPetFocusRending(resistMod, wielder, skill, damageType, target);
+        }
+
+        /// <summary>
+        /// Summoner casters: a combat pet's hit with its owner's focus rend OF THIS HIT'S ELEMENT (owner ruling Q5; the
+        /// retail element match, GetRendDamageType), sized by the skill this hit already uses, its bonus above 1 at
+        /// summoner_pet_imbue_transfer_percent, then the max against <paramref name="resistMod"/> (the pet's own weapon
+        /// term). The owner's Vulnerability is compared later (the larger wins), so a focus rend adds nothing under a
+        /// stronger Vulnerability. Unchanged for anyone else, for a null skill, and when no rend matches, so a quest
+        /// weapon's below-1 term is never raised to 1.
+        /// </summary>
+        private static float WithPetFocusRending(float resistMod, Creature wielder, CreatureSkill skill, DamageType damageType, Creature target)
+        {
+            if (skill == null)
+                return resistMod;
+
+            var rendDamageType = GetRendDamageType(damageType);
+
+            if (rendDamageType == ImbuedEffectType.Undef || !SummonerFocus.PetFocusHasImbue(wielder, target, rendDamageType))
+                return resistMod;
+
+            return Math.Max(resistMod, SummonerFocusMath.ScaleImbueMultiplier(GetRendingMod(skill), SummonerFocus.PetImbueTransferPercent()));
         }
 
         public ImbuedEffectType GetImbuedEffects()
@@ -874,6 +994,26 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// The armor-rending term of a physical hit (the share of armor kept; 1 = none ignored), shared by DamageEvent and
+        /// the combat simulator so the two cannot drift: the weapon's Armor Rending imbue sized by the hit's skill, then,
+        /// for a combat pet, its owner's focus Armor Rending (SummonerFocus.PetFocusHasImbue) sized by the same skill, its
+        /// bonus at summoner_pet_imbue_transfer_percent, the stronger (smaller) of the two. Armor Rending has no magic
+        /// formula, so a caster pet's skill reads 1. Unchanged for anyone else.
+        /// </summary>
+        public static float GetArmorRendingModFor(WorldObject weapon, Creature attacker, CreatureSkill skill, Creature defender)
+        {
+            var armorRendingMod = 1.0f;
+
+            if (weapon != null && weapon.HasImbuedEffect(ImbuedEffectType.ArmorRending))
+                armorRendingMod = GetArmorRendingMod(skill);
+
+            if (skill != null && SummonerFocus.PetFocusHasImbue(attacker, defender, ImbuedEffectType.ArmorRending))
+                armorRendingMod = Math.Min(armorRendingMod, SummonerFocusMath.ScaleArmorRending(GetArmorRendingMod(skill), SummonerFocus.PetImbueTransferPercent()));
+
+            return armorRendingMod;
+        }
+
+        /// <summary>
         /// Armor Cleaving
         /// </summary>
         public double? IgnoreArmor
@@ -916,6 +1056,12 @@ namespace ACE.Server.WorldObjects
             // this attacker's weapon mods are suppressed (PK facet) only that recorded amount comes back off the
             // WEAPON term; the attacker's own IgnoreShield above is not a weapon mod and is left alone.
             var weaponMod = WeaponModSuppression.WeaponIgnoreShield(weapon, WeaponModSuppression.SuppressedFor(this));
+            // Paragon weapon mods: Paragon Shield Bypass gems add on the WEAPON term at read time (no native is
+            // written); 0 when the gate is off or this attacker is suppressed.
+            weaponMod += WeaponModParagon.IgnoreShieldAddFor(weapon, this);
+            // A weapon ignores at most the whole shield: cap its term at 1.0 so the mod below never goes negative
+            // (this also caps a loot IgnoreShield plus a Tourmaline Shield Bypass add that summed past 1.0).
+            weaponMod = WeaponModParagon.ClampWeaponIgnoreShield(weaponMod);
 
             return 1.0f - (float)Math.Max(creatureMod, weaponMod);
         }

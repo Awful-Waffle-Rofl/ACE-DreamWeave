@@ -19,6 +19,115 @@ namespace ACE.Server.WorldObjects
 {
     partial class Creature
     {
+        /// <summary>
+        /// Hunter's Echo (Archer T3): while non-null, this creature's weapon getters (GetEquippedWeapon, GetEquippedMeleeWeapon,
+        /// GetDualWieldWeapon, GetEquippedMissileWeapon, GetEquippedMissileLauncher, GetEquippedAmmo) answer from this set
+        /// instead of EquippedObjects. Set ONLY by Player.WithHuntersEchoWeapons, around one Echo volley's class-ability
+        /// rolls and one Echo arrow's DamageTarget, and restored in a finally, so every live weapon read on those paths sees
+        /// the weapon the Echo was summoned with. Null at every other time; runtime only.
+        ///
+        /// THREAD-LOCAL: the scope is held per thread and names the one creature it applies to, so it is seen only by code
+        /// running on the thread that set it. An Echo volley runs on the Echo's landblock thread, which need not be the
+        /// owner's; a plain field on the owner would let the owner's own attack on its own thread read the Echo's weapon.
+        /// </summary>
+        internal ACE.Server.ClassAbilities.HuntersEchoWeapons HuntersEchoWeaponScope =>
+            huntersEchoScopeCreature != null && ReferenceEquals(huntersEchoScopeCreature, this) ? huntersEchoScopeWeapons : null;
+
+        [ThreadStatic] private static Creature huntersEchoScopeCreature;
+        [ThreadStatic] private static ACE.Server.ClassAbilities.HuntersEchoWeapons huntersEchoScopeWeapons;
+
+        /// <summary>
+        /// Makes <paramref name="weapons"/> this thread's Hunter's Echo weapon scope for this creature and returns the
+        /// scope it replaced, which the caller hands back to <see cref="RestoreHuntersEchoWeaponScope"/> in a finally.
+        /// </summary>
+        internal (Creature Creature, ACE.Server.ClassAbilities.HuntersEchoWeapons Weapons) EnterHuntersEchoWeaponScope(ACE.Server.ClassAbilities.HuntersEchoWeapons weapons)
+        {
+            var previous = (huntersEchoScopeCreature, huntersEchoScopeWeapons);
+
+            huntersEchoScopeCreature = this;
+            huntersEchoScopeWeapons = weapons;
+
+            return previous;
+        }
+
+        /// <summary>Puts back the thread's Hunter's Echo weapon scope that <see cref="EnterHuntersEchoWeaponScope"/> replaced.</summary>
+        internal static void RestoreHuntersEchoWeaponScope((Creature Creature, ACE.Server.ClassAbilities.HuntersEchoWeapons Weapons) previous)
+        {
+            huntersEchoScopeCreature = previous.Creature;
+            huntersEchoScopeWeapons = previous.Weapons;
+        }
+
+        /// <summary>
+        /// Who a monster's retaliation against <paramref name="attacker"/> (Reflect on hit or on avoid, Riposte) lands
+        /// on. Outside an Echo hit: <paramref name="attacker"/>, unchanged. Inside one (the attacker's thread holds a
+        /// Hunter's Echo weapon scope): the Echo that FIRED the shot (HuntersEchoWeapons.Shooter, owner ruling
+        /// 2026-11-11: "Reflect should hit the echo if it fired the shot, not the main player"), or null - the
+        /// retaliation is dropped - when that Echo is gone, dead, not this attacker's, or not in
+        /// <paramref name="retaliator"/>'s landblock group (it is written from this thread). Never returns the owner
+        /// from inside an Echo hit, and never a player there: the Echo is a CombatPet.
+        /// </summary>
+        internal static Creature ResolveHuntersEchoRetaliationTarget(Creature attacker, Creature retaliator)
+        {
+            var scope = attacker?.HuntersEchoWeaponScope;
+
+            if (scope == null)
+                return attacker;
+
+            if (!(scope.Shooter is CombatPet echo) || !echo.IsHuntersEcho || echo.IsDestroyed || echo.IsDead || !ReferenceEquals(echo.P_PetOwner, attacker))
+                return null;
+
+            if (!SharesLandblockGroup(echo, retaliator))
+                return null;
+
+            return echo;
+        }
+
+        /// <summary>Whether both creatures are in the world and in one landblock group (so one thread may write both).</summary>
+        internal static bool SharesLandblockGroup(Creature a, Creature b) =>
+            a?.CurrentLandblock != null && b?.CurrentLandblock != null
+            && a.CurrentLandblock.CurrentLandblockGroup == b.CurrentLandblock.CurrentLandblockGroup;
+
+        /// <summary>
+        /// The missile weapon this creature REALLY wields, whatever Hunter's Echo weapon scope this thread holds. No
+        /// delegate or closure on the unscoped path, so it is safe on the trigger gate.
+        /// </summary>
+        internal WorldObject GetEquippedMissileWeaponIgnoringHuntersEchoScope()
+        {
+            if (HuntersEchoWeaponScope == null)
+                return GetEquippedMissileWeapon();
+
+            var previous = EnterHuntersEchoWeaponScope(null);
+
+            try
+            {
+                return GetEquippedMissileWeapon();
+            }
+            finally
+            {
+                RestoreHuntersEchoWeaponScope(previous);
+            }
+        }
+
+        /// <summary>
+        /// Runs <paramref name="action"/> with this creature's Hunter's Echo weapon scope SUSPENDED (entered with null,
+        /// restored in a finally), so every weapon getter reads the real equipment. For the owner's DEFENSIVE side inside
+        /// an Echo hit (a Reflect monster's damage back onto the owner, Player.TakeDamage) and for the trigger gate,
+        /// which must judge what the owner really holds.
+        /// </summary>
+        internal T WithoutHuntersEchoWeaponScope<T>(Func<T> action)
+        {
+            var previous = EnterHuntersEchoWeaponScope(null);
+
+            try
+            {
+                return action();
+            }
+            finally
+            {
+                RestoreHuntersEchoWeaponScope(previous);
+            }
+        }
+
         public bool EquippedObjectsLoaded { get; private set; }
 
         /// <summary>
@@ -116,6 +225,9 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public WorldObject GetEquippedWeapon(bool forceMainHand = false)
         {
+            if (HuntersEchoWeaponScope != null)
+                return HuntersEchoWeaponScope.Weapon;
+
             var meleeWeapon = GetEquippedMeleeWeapon(forceMainHand);
             return meleeWeapon ?? GetEquippedMissileWeapon();
         }
@@ -126,6 +238,9 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public WorldObject GetEquippedMeleeWeapon(bool forceMainHand = false)
         {
+            if (HuntersEchoWeaponScope != null)
+                return null;
+
             if (!IsDualWieldAttack || DualWieldAlternate || forceMainHand)
                 return EquippedObjects.Values.FirstOrDefault(e => e.ParentLocation == ACE.Entity.Enum.ParentLocation.RightHand && (e.CurrentWieldedLocation == EquipMask.MeleeWeapon || e.CurrentWieldedLocation == EquipMask.TwoHanded));
 
@@ -137,6 +252,9 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public WorldObject GetDualWieldWeapon()
         {
+            if (HuntersEchoWeaponScope != null)
+                return null;
+
             return EquippedObjects.Values.FirstOrDefault(e => !e.IsShield && e.CurrentWieldedLocation == EquipMask.Shield);
         }
 
@@ -154,6 +272,9 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public WorldObject GetEquippedMissileWeapon()
         {
+            if (HuntersEchoWeaponScope != null)
+                return HuntersEchoWeaponScope.Weapon;
+
             return EquippedObjects.Values.FirstOrDefault(e => e.CurrentWieldedLocation == EquipMask.MissileWeapon);
         }
 
@@ -162,6 +283,9 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public WorldObject GetEquippedMissileLauncher()
         {
+            if (HuntersEchoWeaponScope != null)
+                return HuntersEchoWeaponScope.Launcher;
+
             return EquippedObjects.Values.FirstOrDefault(e => e.CurrentWieldedLocation == EquipMask.MissileWeapon && e is MissileLauncher);
         }
 
@@ -195,6 +319,9 @@ namespace ACE.Server.WorldObjects
         /// <returns></returns>
         public WorldObject GetEquippedAmmo()
         {
+            if (HuntersEchoWeaponScope != null)
+                return HuntersEchoWeaponScope.AmmoSlot;
+
             return EquippedObjects.Values.FirstOrDefault(e => e.CurrentWieldedLocation == EquipMask.MissileAmmo);
         }
 
@@ -217,7 +344,7 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         private Dictionary<PropertyInt, int> equippedItemsRatingCache;
 
-        private void AddItemToEquippedItemsRatingCache(WorldObject wo)
+        internal void AddItemToEquippedItemsRatingCache(WorldObject wo)
         {
             if ((wo.GearDamage ?? 0) == 0 && (wo.GearDamageResist ?? 0) == 0 && (wo.GearCrit ?? 0) == 0 && (wo.GearCritResist ?? 0) == 0 && (wo.GearCritDamage ?? 0) == 0 && (wo.GearCritDamageResist ?? 0) == 0 && (wo.GearHealingBoost ?? 0) == 0 && (wo.GearMaxHealth ?? 0) == 0 && (wo.GearPKDamageRating ?? 0) == 0 && (wo.GearPKDamageResistRating ?? 0) == 0)
                 return;
@@ -251,7 +378,7 @@ namespace ACE.Server.WorldObjects
             equippedItemsRatingCache[PropertyInt.GearPKDamageResistRating] += (wo.GearPKDamageResistRating ?? 0);
         }
 
-        private void RemoveItemFromEquippedItemsRatingCache(WorldObject wo)
+        internal void RemoveItemFromEquippedItemsRatingCache(WorldObject wo)
         {
             if (equippedItemsRatingCache == null)
                 return;

@@ -16,6 +16,25 @@ namespace ACE.Server.Tests.KnotLoot
         private static KnotTraitSettings DefaultsOf(KnotTraitDefinition d) => d.Defaults;
 
         [TestMethod]
+        public void FormatLine_HarbingerGuardMutation_AppendsTheGuardNote_OnlyOnMutatedDrops()
+        {
+            var drops = new List<KnotLootDrop>
+            {
+                new(1008270, 1, KnotTraitId.OverpoweringIntent, 1.0, KnotLootMutation.HarbingerGuard),
+                new(1008276, 1, null, 0.0, KnotLootMutation.HarbingerGuard),
+                new(1008273, 1, null, 0.0),
+                new(20630, 30, null, 0.0),
+            };
+
+            var line = KnotLootSummary.FormatLine("harbinger", 400, 1, drops, W, DefaultsOf);
+
+            StringAssert.Contains(line, "1008270 Overpowering Intent [100%]: +10% War, Void and Life Magic skill against monster resistance + Harbinger's Guard");
+            StringAssert.Contains(line, "1008276 x1 + Harbinger's Guard");
+            StringAssert.Contains(line, "1008273 x1; 20630 x30");
+            Assert.AreEqual(2, System.Text.RegularExpressions.Regex.Matches(line, "Harbinger's Guard").Count, "the unmutated scythe and the currency carry no note");
+        }
+
+        [TestMethod]
         public void Parse_Valid()
         {
             var r = KnotLootCommandRequest.Parse(new[] { "grael", "300", "5" });

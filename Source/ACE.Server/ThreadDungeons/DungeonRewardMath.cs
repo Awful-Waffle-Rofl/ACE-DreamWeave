@@ -167,7 +167,7 @@ namespace ACE.Server.ThreadDungeons
         /// <summary>
         /// XP one kill awards, off a base value the CALLER resolved.
         ///
-        /// <paramref name="rewardScale"/> is the owner's headline rate (dynamic_dungeons_xp_scale, 2.0 by
+        /// <paramref name="rewardScale"/> is the owner's headline rate (dynamic_dungeons_xp_scale, 2.7 by
         /// default) and it is its OWN term here, deliberately not folded into
         /// <paramref name="xpMultiplier"/>. <see cref="Product"/> ends in Math.Min(product, cap): a scalar
         /// folded in as a synthetic factor would be clipped by dynamic_dungeons_xp_mult_cap, and a plain gem

@@ -22,11 +22,15 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,   // T3 -> T1 2026-10-24 (Berserker pass); token icons and trainer tier block moved with it
             Name = "bloodlust",
             DisplayName = "Bloodlust",
-            Description = "Your melee hits heal you for 3% of the damage dealt per rank. Higher Salvaging increases the lifesteal.",
+            // Live text: lifesteal = rank * class_ability_bloodlust_percent_per_rank (ModifyOutgoingDamage and GetReadout below).
+            DescriptionTemplate = "Your melee hits heal you for part of the damage you deal.",
+            RankTailTemplate = "{per:class_ability_bloodlust_percent_per_rank|pct}% of damage healed",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
             AffinitySkill = Skill.Salvaging,
+            // its own pair of rates, pinned equal: ModifyOutgoingDamage reads these two keys, not the shared pair
+            AffinityRate = AffinityRateSpec.Own("class_ability_affinity_bloodlust_rate_per_trained", "class_ability_affinity_bloodlust_rate_per_spec"),
         };
 
         public void ModifyOutgoingDamage(Player attacker, int rank, Creature target, DamageEvent damageEvent)

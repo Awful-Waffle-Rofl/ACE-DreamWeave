@@ -185,10 +185,11 @@ namespace ACE.Server.Tests
             var body = MethodBody(ServerSource("WorldObjects", "WorldObject_Magic.cs"), "private void TryCrimsonHarvest(");
 
             StringAssert.Contains(body, "TryGetClassAbility(ClassAbilityId.CrimsonHarvest, out var harvestRank)");
-            StringAssert.Contains(body, "CrimsonHarvestMath.SecondaryTargetCap(harvestRank,");
-            StringAssert.Contains(body, "class_ability_crimsonharvest_extra_targets_r1");
-            StringAssert.Contains(body, "class_ability_crimsonharvest_extra_targets_r2");
-            StringAssert.Contains(body, "class_ability_crimsonharvest_extra_targets_r3");
+            StringAssert.Contains(body, "CrimsonHarvestMath.SecondaryTargetCap(ClassAbilityText.Live, harvestRank)");
+            // the three extra_targets_rN keys are read inside CrimsonHarvestMath.SecondaryTargetCap(ITunableValues, int), pinned below
+            StringAssert.Contains(ServerSource("ClassAbilities", "CrimsonHarvestMath.cs"), "class_ability_crimsonharvest_extra_targets_r1");
+            StringAssert.Contains(ServerSource("ClassAbilities", "CrimsonHarvestMath.cs"), "class_ability_crimsonharvest_extra_targets_r2");
+            StringAssert.Contains(ServerSource("ClassAbilities", "CrimsonHarvestMath.cs"), "class_ability_crimsonharvest_extra_targets_r3");
             Assert.IsFalse(body.Contains("crimsonharvest_max_targets"), "the flat cap is no longer read");
         }
 
@@ -298,7 +299,7 @@ namespace ACE.Server.Tests
 
             StringAssert.Contains(body,
                 "RatingAbility.HealBoostDamageRatingConversion(hbrcPlayer.GetClassAbilityRating(ClassAbilityId.HealBoostRating))");
-            // Damage Rating's crit damage conversion (Berserker pass 2026-10-24) joins the sum after this term
+            // Damage Rating's crit damage conversion (Berserker pass 2026-10-24) joins the sum after this term, and Crit Resist Rating's damage conversion (Vanguard pass 2026-11-06) after that
             StringAssert.Contains(body, "+ classAbilityBonus + healBoostConversion + critDamageConversion;");
         }
     }

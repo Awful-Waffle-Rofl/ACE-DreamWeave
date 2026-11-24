@@ -23,7 +23,16 @@ namespace ACE.Server.Tests
         public FakeHoldRunView(uint runId) => RunId = runId;
 
         public uint RunId { get; }
-        public bool IsActive { get; set; } = true;
+        private bool isActive = true;
+
+        /// <summary>How many times the run's active flag was read (a probe: a read means someone asked about the run's state).</summary>
+        public int IsActiveReads;
+
+        public bool IsActive
+        {
+            get { IsActiveReads++; return isActive; }
+            set => isActive = value;
+        }
         public int WaveNumber { get; set; } = 1;
         public WorldEventHoldTuning Tuning { get; set; } = WorldEventHoldTuning.Defaults;
         public int ParticipantCount { get; set; } = 1;

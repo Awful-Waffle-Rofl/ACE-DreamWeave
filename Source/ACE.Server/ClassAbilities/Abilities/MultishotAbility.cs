@@ -24,15 +24,27 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "multishot",
             DisplayName = "Multishot",
-            Description = "Your missile attacks strike additional nearby targets - one extra arrow per rank. " +
-                          "Stacks with multi-shot weapons: their extra arrows are added together. Each extra " +
-                          "arrow deals 60% of a normal arrow's damage; high Assess Creature and gear raise " +
-                          "that toward a 100% ceiling. If there are fewer targets than extra arrows, each leftover " +
+            // Live text (clamp limit: the multiplier is raised toward the cap, so the quoted cap is the ceiling): the extra-arrow multiplier and its ceiling are class_ability_multishot_damage_mult / _cap
+            // (AddExtraShots below). The per-rank tails ("1 extra arrow", "2 extra arrows", ...) quote the rank number via {rank}.
+            DescriptionTemplate = "Your missile attacks fire extra arrows at nearby targets. An extra arrow deals " +
+                          "{v:class_ability_multishot_damage_mult|pct}% of a normal arrow's damage, up to " +
+                          "{v:class_ability_multishot_damage_mult_cap|pct}%. If there are fewer targets than arrows, each spare " +
                           "arrow hits your own target for a third of that damage.",
+            RankTailTemplate = new[]
+            {
+                "{rank} extra arrow",
+                "{rank} extra arrows",
+                "{rank} extra arrows",
+            },
+            AllowedLiterals = new[] { ("a third of that damage", "word-number for the leftover-arrow damage fraction; not a digit and not a placeholder, documentation only and it goes stale on a retune") },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },   // flat 1/rank (class ability overhaul repricing, 2026-09-12)
             Implemented = true,
             AffinitySkill = Skill.AssessCreature,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "total", Bounds = CeilingBounds.Total, Source = CeilingSource.Tunable, Key = "class_ability_multishot_damage_mult_cap", Label = "max extra arrow damage", Format = "pct" },
+            },
         };
 
         /// <summary>
@@ -122,6 +134,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "extra arrow",
                 Per = null,
                 CapNote = clamped < uncapped - 0.0000001 ? "multishot cap" : null,
+                Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "total", uncapped * 100.0, rank, ClassAbilityText.Live) },
             };
         }
     }

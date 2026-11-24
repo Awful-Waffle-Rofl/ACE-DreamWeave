@@ -14,10 +14,10 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 namespace ACE.Server.Tests.ThreadDungeons
 {
     /// <summary>
-    /// Owner ruling 2026-10-30: a Thread run creature's pre-enchantment War, Life, Void and Creature Enchantment skill is held
-    /// at dynamic_dungeons_magic_attack_skill_cap (default 508) so a top player (about 530 magic defense) resists about 66%
+    /// Owner ruling 2026-11-10 (508/66% before): a Thread run creature's pre-enchantment War, Life, Void and Creature Enchantment skill is held
+    /// at dynamic_dungeons_magic_attack_skill_cap (default 490) so a top player (about 530 magic defense) resists about 77%
     /// of monster spells. Pins the clamp arithmetic, the per-creature ceiling on the four schools only, the dial's sanitizer
-    /// and ReadLimits wiring, the plan field, the PrepareForPlacement hook position, and the resist arithmetic the 508 comes from.
+    /// and ReadLimits wiring, the plan field, the PrepareForPlacement hook position, and the resist arithmetic the 490 comes from.
     /// </summary>
     [TestClass]
     public class MagicAttackCapTests
@@ -92,21 +92,21 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         [TestMethod]
-        public void The_default_is_508_and_the_resist_at_530_magic_defense_is_about_66_percent()
+        public void The_default_is_490_and_the_resist_at_530_magic_defense_is_about_77_percent()
         {
-            Assert.AreEqual(508.0, DungeonPopulationLimits.DefaultMagicAttackSkillCap);
+            Assert.AreEqual(490.0, DungeonPopulationLimits.DefaultMagicAttackSkillCap);
 
             // resist = 1 - GetSkillChance(A, D); WorldObject.MagicDefenseCheck reports exactly that as resistChance.
             // The roll is random, so read the reported chance and ignore the outcome.
-            WorldObject.MagicDefenseCheck(508, 530, out var capped);
-            Assert.AreEqual(0.66, capped, 0.005, "A = 508 against D = 530 resists about 66%");
+            WorldObject.MagicDefenseCheck(490, 530, out var capped);
+            Assert.AreEqual(0.77, capped, 0.005, "A = 490 against D = 530 resists about 77%");
 
             // Discriminating: an uncapped 857 (the stat curve at level 500) barely resists.
             WorldObject.MagicDefenseCheck(857, 530, out var uncapped);
             Assert.IsTrue(uncapped < 0.001, $"uncapped resist {uncapped}");
 
             // And the analytic solution the default comes from.
-            Assert.AreEqual(507.9, 530 + Math.Log(0.34 / 0.66) / 0.03, 0.05);
+            Assert.AreEqual(489.7, 530 + Math.Log(0.23 / 0.77) / 0.03, 0.05);
         }
 
         // ---- 2. the per-creature ceiling ------------------------------------------------------------------
@@ -215,9 +215,9 @@ namespace ACE.Server.Tests.ThreadDungeons
         [TestMethod]
         public void The_sanitizer_reads_garbage_as_the_default_and_negative_as_off()
         {
-            Assert.AreEqual(508.0, DungeonCombatNormalizer.SanitizeMagicAttackSkillCap(double.NaN));
-            Assert.AreEqual(508.0, DungeonCombatNormalizer.SanitizeMagicAttackSkillCap(double.PositiveInfinity));
-            Assert.AreEqual(508.0, DungeonCombatNormalizer.SanitizeMagicAttackSkillCap(double.NegativeInfinity));
+            Assert.AreEqual(490.0, DungeonCombatNormalizer.SanitizeMagicAttackSkillCap(double.NaN));
+            Assert.AreEqual(490.0, DungeonCombatNormalizer.SanitizeMagicAttackSkillCap(double.PositiveInfinity));
+            Assert.AreEqual(490.0, DungeonCombatNormalizer.SanitizeMagicAttackSkillCap(double.NegativeInfinity));
             Assert.AreEqual(0.0, DungeonCombatNormalizer.SanitizeMagicAttackSkillCap(-5));
             Assert.AreEqual(0.0, DungeonCombatNormalizer.SanitizeMagicAttackSkillCap(0));
             Assert.AreEqual(600.0, DungeonCombatNormalizer.SanitizeMagicAttackSkillCap(600), "positive control: a legal value passes through");
@@ -235,10 +235,10 @@ namespace ACE.Server.Tests.ThreadDungeons
             try
             {
                 Assert.IsTrue(PropertyManager.ModifyDouble(CapKey, DungeonPopulationLimits.DefaultMagicAttackSkillCap), "key not registered");
-                Assert.AreEqual(508.0, ThreadDungeonSpawner.ReadLimits(GroupScaling.Solo).MagicAttackSkillCap, 1e-12, "shipped default");
+                Assert.AreEqual(490.0, ThreadDungeonSpawner.ReadLimits(GroupScaling.Solo).MagicAttackSkillCap, 1e-12, "shipped default");
 
                 Assert.IsTrue(PropertyManager.ModifyDouble(CapKey, double.NaN));
-                Assert.AreEqual(508.0, ThreadDungeonSpawner.ReadLimits(GroupScaling.Solo).MagicAttackSkillCap, 1e-12, "NaN reads as the default");
+                Assert.AreEqual(490.0, ThreadDungeonSpawner.ReadLimits(GroupScaling.Solo).MagicAttackSkillCap, 1e-12, "NaN reads as the default");
 
                 Assert.IsTrue(PropertyManager.ModifyDouble(CapKey, -3.0));
                 Assert.AreEqual(0.0, ThreadDungeonSpawner.ReadLimits(GroupScaling.Solo).MagicAttackSkillCap, 1e-12, "negative reads as off");
@@ -400,16 +400,28 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         [TestMethod]
-        public void Pinnacles_and_World_Events_never_set_the_ceiling()
+        public void Pinnacles_and_map_events_never_set_the_ceiling()
         {
             var root = "Source/ACE.Server/";
 
-            foreach (var file in new[] { "Pinnacles/PinnacleScaling.cs", "WorldEvents/WorldEventSpawner.cs", "MlDigsite/MlMapEventScaling.cs" })
+            foreach (var file in new[] { "Pinnacles/PinnacleScaling.cs", "MlDigsite/MlMapEventScaling.cs" })
             {
                 var text = PooledLootSourceText.Read(root + file);
                 Assert.IsTrue(text.IndexOf("MagicAttackSkillCeiling", StringComparison.Ordinal) < 0, file);
                 Assert.IsTrue(text.IndexOf("ApplyMagicAttackCeiling", StringComparison.Ordinal) < 0, file);
             }
+        }
+
+        [TestMethod]
+        public void World_Events_set_the_ceiling_only_from_their_own_dial()
+        {
+            // World Events set the ceiling since world_events_magic_attack_skill_cap (Option A); they must never call
+            // the Threads helper, which reads a Threads plan, and must route through the shared sanitized-cap rule.
+            var text = PooledLootSourceText.Read("Source/ACE.Server/WorldEvents/WorldEventSpawner.cs");
+
+            Assert.IsTrue(text.IndexOf("ThreadDungeonSpawner.ApplyMagicAttackCeiling", StringComparison.Ordinal) < 0);
+            Assert.IsTrue(text.IndexOf("DungeonCombatNormalizer.MagicAttackCeilingFor(upliftDials.MagicAttackSkillCap)", StringComparison.Ordinal) >= 0);
+            Assert.IsTrue(text.IndexOf("creature.MagicAttackSkillCeiling = ceiling;", StringComparison.Ordinal) >= 0);
         }
     }
 }

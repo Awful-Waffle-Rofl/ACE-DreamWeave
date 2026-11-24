@@ -892,6 +892,7 @@ namespace ACE.Server.WorldObjects
                 CheckSurvivalChallengeInstanceExit();
                 CheckWaveChallengeInstanceExit();
                 CheckSpeedChallengeInstanceExit();
+                CheckTrialInstanceExit();
 
                 // the queued portal teleport (if this was one) has now been decided - refused - so the
                 // player may use a portal again at once rather than waiting out the pending-marker bound
@@ -1403,6 +1404,9 @@ namespace ACE.Server.WorldObjects
             // speed challenge (WaffleACE): same reconciliation for the timed run - ANY teleport out of the
             // season instance other than death or a completion (recall, portal, the exit portal) forfeits it
             CheckSpeedChallengeInstanceExit();
+
+            // Balance Trials: any teleport out of the bound trial room (recall, portal, admin teleport) ends the trial
+            CheckTrialInstanceExit();
 
             // Threads (WaffleACE): we are past the pink-bubble retry above, so the player is really
             // in this instance now. Latch that on the run, if this instance is one.

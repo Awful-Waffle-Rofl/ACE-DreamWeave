@@ -215,7 +215,7 @@ namespace ACE.Server.Tests
             var p = new ProtectDef
             {
                 Count = new ScaledCount { Base = 11 },
-                UndefendedSeconds = 101.5, UndefendedSecondsPerParticipant = 102.5, UndefendedSecondsFloor = 103.5, MinDeathSeconds = 104.5, MinSurvivors = 12,
+                UndefendedSeconds = 101.5, UndefendedSecondsPerParticipant = 102.5, UndefendedSecondsFloor = 103.5, MinDeathSeconds = 104.5, DurabilityPerParticipant = 0.511, DurabilityCap = 5.52, MinSurvivors = 12,
                 DefendPose = new DefendPoseDef { SwingSeconds = 1.11, SwingMaxSeconds = 1.12 }, HealthMilestones = false,
                 Shrine = new ShrineDef { UseRadius = 1.13 }, ShrineHeal = 0.201, ShrineCooldownSeconds = 105.5,
                 CorruptedKillHeal = 0.202, RescueHeal = 0.203, RescueCapPerWave = 0.204, ClearRegenPerSecond = 0.0205, ClearRadius = 20.6,
@@ -239,7 +239,7 @@ namespace ACE.Server.Tests
             var expected = new Dictionary<string, string>
             {
                 [K.KnightCount] = "11", [K.UndefendedSeconds] = "101.5", [K.UndefendedSecondsPerParticipant] = "102.5", [K.UndefendedSecondsFloor] = "103.5",
-                [K.MinDeathSeconds] = "104.5", [K.MinSurvivors] = "12", [K.DefendPose] = "on", [K.DefendSwingSeconds] = "1.11", [K.DefendSwingMaxSeconds] = "1.12",
+                [K.MinDeathSeconds] = "104.5", [K.KnightDurabilityPerParticipant] = "0.511", [K.KnightDurabilityCap] = "5.52", [K.MinSurvivors] = "12", [K.DefendPose] = "on", [K.DefendSwingSeconds] = "1.11", [K.DefendSwingMaxSeconds] = "1.12",
                 [K.HealthMilestones] = "off", [K.Shrine] = "on", [K.ShrineHeal] = "0.201", [K.ShrineCooldownSeconds] = "105.5", [K.ShrineUseRadius] = "1.13",
                 [K.CorruptedKillHeal] = "0.202", [K.RescueHeal] = "0.203", [K.RescueCapPerWave] = "0.204", [K.RegenPerSecond] = "0.0205", [K.RegenClearRadius] = "20.6",
                 [K.PlayerHealCap] = "0.207", [K.HealReductionAfterHit] = "0.208", [K.HealReductionSeconds] = "20.9", [K.HealBetweenWaves] = "0.211", [K.HealBudgetPerWave] = "0.212",

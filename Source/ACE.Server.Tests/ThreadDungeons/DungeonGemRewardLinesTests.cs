@@ -106,7 +106,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         /// <summary>
         /// The rule that keeps an ordinary gem from growing three lines that say nothing, at scale 1.0: a
         /// total of 1.0 is not printed. This is the case that covers the ten shipped rung fragments (P2-R20)
-        /// UNDER A SCALE OF ONE; at the shipped 2.0 default the same specs DO print Experience/Luminance
+        /// UNDER A SCALE OF ONE; at the shipped 2.7 default the same specs DO print Experience/Luminance
         /// (see the scale section below and DungeonGemLongDescTests.Fragment_shows_Pressed_nothing_and_matches_the_shipped_rung_row,
         /// which composes through the real default and asserts the ten rungs' regenerated text).
         /// </summary>
@@ -390,7 +390,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         // ---- the reward scale (owner follow-up, 2026-09-06) ----------------------------------------------
 
         /// <summary>
-        /// A plain gem (no XP modifiers) at the shipped 2.0 default scale shows the bare scale alone, no
+        /// A plain gem (no XP modifiers) at the shipped 2.7 default scale shows the bare scale alone, no
         /// parenthetical: there is nothing this gem itself contributed worth calling out, so
         /// "(x1.00 from this gem)" would be noise rather than information.
         /// </summary>

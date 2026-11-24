@@ -68,8 +68,8 @@ namespace ACE.Server.Tests
         {
             var enumValues = Enum.GetValues(typeof(EquipmentModId)).Cast<EquipmentModId>().ToList();
 
-            Assert.AreEqual(49, enumValues.Count, "the enum carries 49 members (47 registered mods plus 2 retired, reserved-forever ids: HeavyDraw, ShieldCheck)");
-            Assert.AreEqual(47, EquipmentModRegistry.AllMods.Count, "every non-retired EquipmentModId needs exactly one registry row");
+            Assert.AreEqual(50, enumValues.Count, "the enum carries 50 members (48 registered mods plus 2 retired, reserved-forever ids: HeavyDraw, ShieldCheck)");
+            Assert.AreEqual(48, EquipmentModRegistry.AllMods.Count, "every non-retired EquipmentModId needs exactly one registry row");
 
             foreach (var id in enumValues)
             {
@@ -486,8 +486,10 @@ namespace ACE.Server.Tests
                 EquipmentModId.LingeringFury,
                 EquipmentModId.EchoCast,
                 EquipmentModId.ElementalRend,
+                EquipmentModId.ElementalRendVuln,
                 EquipmentModId.Resonance,
                 EquipmentModId.NetherBloom,
+                EquipmentModId.ManaBarrier,
                 // 2026-08-17 Berserker/Rogue balance pass: id 18 was standalone Blood Fury (a rank-0 melee
                 // ramp) and became machinery Break Armor (a proc-chance amplifier) when Blood Fury retired.
                 EquipmentModId.BreakArmor,
@@ -694,14 +696,15 @@ namespace ACE.Server.Tests
         /// Asserted as an invariant on the live catalog, not a hand-derived count copied from the design doc:
         /// the reconciliation is exactly 19 rows, and the catalog was 30 (shipped) + 19 = 49 rows before the
         /// 2026-10-02 retirement of HeavyDraw and ShieldCheck dropped the REGISTERED row count to 47 (the
-        /// enum still carries 49 members - two are reserved and unregistered, see RetiredIds above).
+        /// enum then carried 49 members - two are reserved and unregistered, see RetiredIds above). The returned
+        /// Elemental Rend (EquipmentModId.ElementalRendVuln, 2026-11-03) makes it 48 registered rows of 50 members.
         /// </summary>
         [TestMethod]
-        public void Reconciliation_CatalogIs47RegisteredRowsOf49EnumMembers()
+        public void Reconciliation_CatalogIs48RegisteredRowsOf50EnumMembers()
         {
             Assert.AreEqual(19, reconciliationRowIds.Length, "the reconciliation itself is 19 mods");
-            Assert.AreEqual(47, EquipmentModRegistry.AllMods.Count, "30 shipped + 19 reconciled - 2 retired (HeavyDraw, ShieldCheck) = 47");
-            Assert.AreEqual(49, Enum.GetValues(typeof(EquipmentModId)).Length, "EquipmentModId must carry one member per registry row plus the 2 retired, reserved ids");
+            Assert.AreEqual(48, EquipmentModRegistry.AllMods.Count, "30 shipped + 19 reconciled + 1 returned Elemental Rend (2026-11-03) - 2 retired (HeavyDraw, ShieldCheck) = 48");
+            Assert.AreEqual(50, Enum.GetValues(typeof(EquipmentModId)).Length, "EquipmentModId must carry one member per registry row plus the 2 retired, reserved ids");
 
             // 8168 (ShieldWall) is the last row, shipped once its prerequisite landed: BlockChance now
             // clamps its Armor Tinkering rider with class_ability_affinity_chance_cap, so the pooled
@@ -726,18 +729,18 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// StackCap now covers 14 rows total: the 5 pre-existing proc-chance caps (DoubleVolley, AcidProc,
+        /// StackCap now covers 15 rows total (the returned Elemental Rend, EquipmentModId.ElementalRendVuln, was added 2026-11-03): the 5 pre-existing proc-chance caps (DoubleVolley, AcidProc,
         /// EchoCast, ElementalRend, NetherBloom), the 8 rows from the 2026-08-04 reconciliation (Spellblade,
         /// Runeblade, Sundermark, Surge, Spellstorm, Cascade, DispellingEdge, ShieldWall), and Break Armor,
         /// added 2026-08-17 when mod 18 was repurposed from Blood Fury into a proc-chance mod. Every declared
         /// cap is 3.0 (three perfect rolls); no other row declares one.
         /// </summary>
         [TestMethod]
-        public void Reconciliation_StackCapCoversExactlyFourteenRowsAtThreePointZero()
+        public void Reconciliation_StackCapCoversExactlyFifteenRowsAtThreePointZero()
         {
             var capped = EquipmentModRegistry.AllMods.Where(m => m.StackCap > 0.0).ToList();
 
-            Assert.AreEqual(14, capped.Count, "5 pre-existing + 8 reconciliation + Break Armor = 14 proc-chance caps");
+            Assert.AreEqual(15, capped.Count, "5 pre-existing + 8 reconciliation + Break Armor + the returned Elemental Rend (2026-11-03) = 15 capped rows");
 
             foreach (var mod in capped)
                 Assert.AreEqual(3.0, mod.StackCap, 1e-12, $"{mod.Id}: every declared StackCap is three perfect rolls");
@@ -748,6 +751,7 @@ namespace ACE.Server.Tests
                 EquipmentModId.AcidProc,
                 EquipmentModId.EchoCast,
                 EquipmentModId.ElementalRend,
+                EquipmentModId.ElementalRendVuln,
                 EquipmentModId.NetherBloom,
                 EquipmentModId.Spellblade,
                 EquipmentModId.Runeblade,

@@ -99,7 +99,7 @@ namespace ACE.Server.Tests.HazardMechanics
         public void ForWave_CopiesEveryOtherProperty()
         {
             // every property gets a non-default value, so a property ForWave forgets to copy shows up as a difference
-            var rich = P("ball_radius=1.2 escape_speed=4 player_radius=0.7 edge_inset=3 gap=7 count=5 window=10 marker=false dir=n dirs=ne cx=5 cy=-12 spread=45 target=nearest speed=4 speed_end=8 lead=3 lead_end=5 wave_gap=2 wave_gap_end=1 stream=30 waves=6 ray_markers=1 wave_every=4 wave_every_end=2 gaps=3 max_in_flight=2 max_in_flight_end=4 max_balls=24 marker_script=0x33001030 fair_lead=0 no_overlap=1 origin_clear=2 distinct_dirs=1 hit_lag=0.3 occupancy=1.5", BallPatterns.Random);
+            var rich = P("ball_radius=1.2 escape_speed=4 player_radius=0.7 edge_inset=3 gap=7 count=5 window=10 marker=false dir=n dirs=ne cx=5 cy=-12 spread=45 target=nearest speed=4 speed_end=8 lead=3 lead_end=5 wave_gap=2 wave_gap_end=1 stream=30 waves=6 ray_markers=1 wave_every=4 wave_every_end=2 gaps=3 max_in_flight=2 max_in_flight_end=4 max_balls=24 marker_script=0x33001030 fair_lead=0 no_overlap=1 origin_clear=2 distinct_dirs=1 hit_lag=0.3 occupancy=1.5 axis=ew", BallPatterns.Random);
             var fresh = new BallParams();
             var ramped = new[] { nameof(BallParams.Speed), nameof(BallParams.Lead), nameof(BallParams.WaveGap), nameof(BallParams.WaveEvery), nameof(BallParams.MaxInFlight) };
             var copy = BallRules.ForWave(rich, 1);

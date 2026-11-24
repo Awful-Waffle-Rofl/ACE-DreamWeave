@@ -39,20 +39,32 @@ namespace ACE.Server.ClassAbilities.Abilities
         {
             Id = ClassAbilityId.AcidProc,
             AbilityClass = ClassAbilityClass.Rogue,
-            Tier = 2,
+            Tier = 3,
             Name = "acidproc",
             DisplayName = "Acid Proc",
-            Description = "Your poisoned hits have a flat 30% chance to leave a caustic wound: a 3-tick acid " +
-                          "damage-over-time equal to your Poison Weapon damage (needs Poison Weapon). Another " +
-                          "proc on an open wound refreshes it to 3 full ticks rather than dealing an extra tick. " +
-                          "Ranks raise all your poison damage by +25/50/75% (Poison Weapon hits and the acid " +
-                          "ticks alike); higher Alchemy raises it further. Each wound takes the scaling of the " +
-                          "hit that last opened or refreshed it: damage ratings, the target's resistance, " +
-                          "critical bonuses, and the reduced damage of Multishot extra arrows and Riposte counters.",
+            // Live text: the proc chance is the flat class_ability_acidproc_chance_base (AcidProcAbility.Chance); the
+            // poison bonus ladder is damageBase + (rank - 1) * damageStep (the damageRankBonus expression below and
+            // PoisonWeaponAbility.FlatBonus); the tick count is class_ability_acidproc_dot_ticks, read where the DoT
+            // is armed (Player_ClassAbilityBuffs). The token tail is a per-rank array: its "+25%" increment is the rank 1
+            // base at rank 1 but the step above it, and a "total" is the ladder's value at that rank.
+            DescriptionTemplate = "Your poisoned hits have a {v:class_ability_acidproc_chance_base|pct}% chance to open a caustic " +
+                          "wound: acid damage over {v:class_ability_acidproc_dot_ticks|int} ticks, equal to your Poison Weapon " +
+                          "damage. Needs Poison Weapon. A new proc on an open wound resets it to " +
+                          "{v:class_ability_acidproc_dot_ticks|int} ticks instead of adding one. Ranks also raise all your poison " +
+                          "damage, from Poison Weapon hits and acid ticks alike. A wound scales like the hit that last opened or " +
+                          "reset it: damage ratings, the target's resistance, critical bonuses, and the lower damage of Multishot " +
+                          "extra arrows and Riposte counters.",
+            RankTailTemplate = "+{ladder:class_ability_acidproc_damage_base,class_ability_acidproc_damage_step|pct}% poison damage",
+            TunableSourceFiles = new[] { "WorldObjects/Player_ClassAbilityBuffs.cs" },
             MaxRank = 3,
             CostPerRank = new[] { 2, 2, 2 },   // premium reprice 2026-09-13: 1/rank -> 2/rank
             Implemented = true,
             AffinitySkill = Skill.Alchemy, // rider computed in PoisonWeaponAbility.FlatBonus, not in this file
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "gear", Bounds = CeilingBounds.Gear, Source = CeilingSource.GearStackCap, GearMod = EquipmentModId.AcidProc, Label = "max from gear", Format = "pct" },
+                new ClassAbilityCeiling { Id = "affinity", Bounds = CeilingBounds.Affinity, Source = CeilingSource.Tunable, Key = "class_ability_acidproc_damage_affinity_cap", Label = "max poison damage from affinity", Format = "pct" },
+            },
         };
 
         /// <summary>
@@ -236,6 +248,11 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Per = null,
                 CapNote = null,
                 Secondary = new List<ClassAbilityReadout> { poisonDamageSecondary },
+                Ceilings = new[]
+                {
+                    ClassAbilityCeilings.Read(Definition, "gear", gear, rank, ClassAbilityText.Live),
+                    ClassAbilityCeilings.Read(Definition, "affinity", rawDamageAdded * 100.0, rank, ClassAbilityText.Live),
+                },
             };
         }
     }

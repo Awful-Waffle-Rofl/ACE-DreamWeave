@@ -7,7 +7,7 @@ namespace ACE.Server.ThreadDungeons
     /// The Thread-Guide tag a guide fragment carries in its DungeonGemSpec, as the optional
     /// guide=&lt;rung&gt;:&lt;serial&gt;:&lt;ownerGuid&gt; field. Pure value type, no engine references.
     ///
-    ///   Rung      - the ladder level this item was issued for; one of ThreadGuideLadder's rungs (50..375 in 25s).
+    ///   Rung      - the ladder level this item was issued for; one of ThreadGuideLadder's rungs (50..500 in 25s).
     ///   Serial    - the issue counter for this player, >= 1. An item whose serial is not the player's current
     ///               one is a superseded copy (ThreadGuideRules.IsCurrent).
     ///   OwnerGuid - the player the item was issued to. Non-zero, written as a plain decimal uint exactly like

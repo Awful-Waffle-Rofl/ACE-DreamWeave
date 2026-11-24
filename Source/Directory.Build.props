@@ -1,0 +1,24 @@
+<Project>
+  <PropertyGroup>
+    <!-- ONE version for MSTest.TestAdapter and MSTest.TestFramework in every test project. A mismatched pair
+         discovers ZERO tests and `dotnet test` still exits 0 (2026-11-17: Dependabot bumped TestFramework alone,
+         master CI went green running nothing; fixed by #2150). Bump it here, never per csproj. Unconditioned
+         so Dependabot can resolve it when it reads this file on its own; nothing else reads it. -->
+    <MSTestVersion>4.5.3</MSTestVersion>
+  </PropertyGroup>
+  <!-- Test projects only (name ends in .Tests); every other project is untouched. -->
+  <PropertyGroup Condition="$(MSBuildProjectName.EndsWith('.Tests'))">
+    <!-- Platform defaults to x64 so the TEST ASSEMBLY of a bare `dotnet test <proj>` lands in the same bin/x64 output
+         dir as the x64 solution build. Only that assembly moves: this is a plain property, so it does not flow to
+         ProjectReferences, and ACE.Server and the libraries below it still build with the caller's platform (a bare
+         run can therefore still rebuild them AnyCPU; an attempt to force x64 onto the ACE.Server reference built
+         the libraries twice, so it was dropped). An explicit Platform property on the command line (CI passes x64)
+         still wins, since this only applies when Platform is empty. -->
+    <Platform Condition="'$(Platform)' == ''">x64</Platform>
+    <!-- Default test filter: keeps the Probe (measurement probes, always Inconclusive) and Slow (a test over 2 s locally,
+         exempt from the 4 s CI per-test ceiling; it runs in CI but is skipped in plain local runs) test categories out of a plain local run. This is the same MSBuild property the test command's
+         filter option sets, so any filter given on the command line replaces it; CI passes its own filter on the
+         steps that must still run Slow. -->
+    <VSTestTestCaseFilter Condition="'$(VSTestTestCaseFilter)' == ''">TestCategory!=Probe&amp;TestCategory!=Slow</VSTestTestCaseFilter>
+  </PropertyGroup>
+</Project>

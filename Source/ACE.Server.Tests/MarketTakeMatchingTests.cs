@@ -205,6 +205,8 @@ namespace ACE.Server.Tests
 
             public void DestroyItem(WorldObject item) => Destroyed++;
 
+            public uint NewDisplayAliasGuid() => FakeVaultWorld.NextGuid();
+
             public VaultContainerLoad LoadContainer(uint containerGuid, out Container container)
             {
                 container = null;

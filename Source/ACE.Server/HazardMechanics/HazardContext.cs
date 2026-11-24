@@ -926,6 +926,12 @@ namespace ACE.Server.HazardMechanics
         // ---- damage -----------------------------------------------------------------------------------------------
 
         /// <summary>
+        /// A hit-ledger key for <see cref="HitPlayers"/>'s hitGroup, shared by several sources. Drawn from the handle id
+        /// counter, so it can never be the id of a hazard (whose own ledger entries it would otherwise share).
+        /// </summary>
+        public int NewHitGroup() => ++nextHandleId;
+
+        /// <summary>
         /// Damages every player in reach (shared invariant 3): ceil(pct x MaxHealth) through Player.TakeDamage, no
         /// resistance, players only, when the 2D distance from <paramref name="centre"/> is within
         /// <paramref name="radius"/> + player_radius AND the player's z is inside the region band above
@@ -935,9 +941,12 @@ namespace ACE.Server.HazardMechanics
         /// COMPUTED position for <paramref name="centre"/> (handle.PositionAt(ctx.Now)). Returns how many were hit.
         /// A spanning region tests the players of every usable covered landblock, in the anchor frame; a region with
         /// HitsRequireInside also needs the player inside its 2D shape.
+        /// <paramref name="hitGroup"/> (from <see cref="NewHitGroup"/>) makes several sources share ONE ledger entry per
+        /// player: a player is hit at most once per window by all of them together (a wisp volley: the pillars that fire
+        /// in the same tick). Null keeps the ledger per source.
         /// </summary>
         public int HitPlayers(HazardHandle source, Vector3 centre, float radius, double windowSeconds = double.PositiveInfinity,
-            double? pct = null, DamageType damageType = DamageType.Fire, string text = null)
+            double? pct = null, DamageType damageType = DamageType.Fire, string text = null, int? hitGroup = null)
         {
             var span = Span;
 
@@ -988,10 +997,10 @@ namespace ACE.Server.HazardMechanics
                         continue;
 
                     // an arena region: "hit by the hazard" == "inside the arena" (the band is already checked)
-                    if (Region.HitsRequireInside && !Region.Contains(p.X, p.Y))
+                    if (Region.HitsRequireInside && !Region.ContainsPlayerXY(p.X, p.Y))
                         continue;
 
-                    var key = (source.Id, seen.Guid);
+                    var key = (hitGroup ?? source.Id, seen.Guid);
                     double? last = lastHits.TryGetValue(key, out var t) ? t : (double?)null;
 
                     if (!HazardHitRules.WindowOpen(last, Now, windowSeconds))

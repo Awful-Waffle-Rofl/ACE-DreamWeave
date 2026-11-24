@@ -37,7 +37,7 @@ namespace ACE.Server.WorldObjects
 
             var sum = EquippedObjects.Values.Sum(i => EquipmentModRoller.Clamp01(i.GetProperty(definition.Property) ?? 0.0));
 
-            return definition.StackCap > 0.0 ? Math.Min(sum, definition.StackCap) : sum;
+            return EquipmentModValue.CapPotencySum(definition, sum);
         }
 
         /// <summary>

@@ -220,7 +220,7 @@ namespace ACE.Server.WorldEvents
             {
                 foreach (var table in speciesTables)
                 {
-                    if (table?.Members == null)
+                    if (table?.Members == null || !table.Drawable)
                         continue;
 
                     foreach (var member in table.Members)
@@ -376,7 +376,8 @@ namespace ACE.Server.WorldEvents
 
             foreach (var table in speciesTables)
             {
-                if (table?.Members == null)
+                // A table with "enabled": false is not a drawable family (SpeciesTableDef.Drawable).
+                if (table?.Members == null || !table.Drawable)
                     continue;
 
                 foreach (var member in table.Members)

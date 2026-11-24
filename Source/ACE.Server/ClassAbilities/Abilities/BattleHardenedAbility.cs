@@ -7,9 +7,9 @@ using ACE.Server.WorldObjects;
 namespace ACE.Server.ClassAbilities.Abilities
 {
     /// <summary>
-    /// A single-tier, expensive passive: reduces all incoming damage (every type - melee, missile,
+    /// A single-tier passive (three ranks since 2026-11-06): reduces all incoming damage (every type - melee, missile,
     /// magic projectiles, and damage-over-time) by a flat fraction scaled off the player's Strength -
-    /// 0.05% per point by default. The reduction is silent: it is applied at the one damage-resist
+    /// 0.025% / 0.05% / 0.075% per point at ranks 1-3 by default (three ranks since 2026-11-06). The reduction is silent: it is applied at the one damage-resist
     /// modifier choke point (Creature.GetDamageResistRatingMod) that every incoming-damage path
     /// multiplies through, so there is no chat message and it never appears as a Damage Resist Rating
     /// on the character panel (it multiplies the mod, not the integer rating).
@@ -28,13 +28,37 @@ namespace ACE.Server.ClassAbilities.Abilities
             Name = "battlehardened",
             DisplayName = "Battle Hardened",
             Category = "Combat",
-            Description = "Passively reduces all incoming damage of every type from monsters by 0.05% per point " +
-                          "of your Strength (a hidden reduction, capped; does not apply in PvP). Scales with " +
-                          "Strength buffs and Enhanced Strength.",
-            MaxRank = 1,
-            CostPerRank = new[] { 3 },   // Vanguard T3 GC: 3 flat (was a pre-redesign standalone 30, which exceeded the point cap)
+            // Live text: the reduction per point at rank n is n x class_ability_battlehardened_reduction_per_strength_per_rank
+            // (ReductionPerStrength; GetReadout below). The tail's {per:...|pct3} renders "0.025", "0.05", "0.075" by rank.
+            DescriptionTemplate = "Reduces all damage you take from creatures, by a set amount for each point of your Strength. It is " +
+                          "a hidden, capped reduction. Strength buffs and Enhanced Strength raise it.",
+            RankTailTemplate = "{per:class_ability_battlehardened_reduction_per_strength_per_rank|pct3}% less damage per Strength " +
+                          "point",
+            MaxRank = 3,
+            // Vanguard pass 2026-11-06 (owner ruling): was a single rank costing 3 (Vanguard T3 GC; before that a
+            // pre-redesign standalone 30, which exceeded the point cap). Now 1/rank; rank 2 equals the old single
+            // rank's 0.05% per point and rank 3 is half again as strong.
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "total", Bounds = CeilingBounds.Total, Source = CeilingSource.Tunable, Key = "class_ability_battlehardened_max_reduction", Label = "max damage reduction", Format = "pct", ZeroIsLimit = true },
+            },
         };
+
+        /// <summary>
+        /// The Strength-scaled reduction per point at a rank: rank x <paramref name="perStrengthPerRank"/>
+        /// (class_ability_battlehardened_reduction_per_strength_per_rank, 0.00025 = 0.025% at the defaults, so
+        /// 0.025% / 0.05% / 0.075% at ranks 1-3). 0 at rank 0 (a Bulwark-only wearer) and for any non-positive
+        /// rate. Ranks above the ladder clamp to the top rung.
+        /// </summary>
+        public static double ReductionPerStrength(int rank, double perStrengthPerRank)
+        {
+            if (rank <= 0 || perStrengthPerRank <= 0.0)
+                return 0.0;
+
+            return Math.Clamp(rank, 1, EnhancedStatAbility.MaxTier) * perStrengthPerRank;
+        }
 
         /// <summary>
         /// The multiplicative damage-resist factor this skill contributes (1.0 = no reduction). Applied
@@ -61,7 +85,7 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
-            var reductionPerStrength = PropertyManager.GetDouble("class_ability_battlehardened_reduction_per_strength").Item;
+            var reductionPerStrength = ReductionPerStrength(rank, PropertyManager.GetDouble("class_ability_battlehardened_reduction_per_strength_per_rank").Item);
             var maxReduction = PropertyManager.GetDouble("class_ability_battlehardened_max_reduction").Item;
             var gear = player.GetEquippedModValue(EquipmentModId.Bulwark);
 
@@ -81,6 +105,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "dmg reduce",
                 Per = null,
                 CapNote = capBit ? "max reduction" : null,
+                Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "total", rawReduction * 100.0, rank, ClassAbilityText.Live) },
             };
         }
     }

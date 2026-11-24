@@ -111,11 +111,18 @@ namespace ACE.Server.Command.Handlers
             "status, phase and reset act on the Pinnacle fight in the copy you stand in. status describes it, phase <n> jumps to that phase\n" +
             "(begins the fight free if it has not begun), reset ends the attempt as lost. enter opens a fresh admin copy of that\n" +
             "kind at that level (or returns you to your held one); it ignores the row's enabled flag, charges no Knot and\n" +
-            "records no clear. It is refused while you stand in an instance. Trailing key=value pairs tune that one copy (matron only):\n" +
+            "records no clear. It is refused while you stand in an instance. Trailing key=value pairs tune that one copy (matron and harbinger). Matron keys:\n" +
             "flow_rate finale_rate drain_rate lava_clear_rate flow_escalate_seconds flow_rate_cap damage damage_per_m damage_max\n" +
             "submerged_damage submerged_per_m submerged_max (the tier once acid is head_height, 0.5-10 m, deep; submerged_damage 0 turns it off)\n" +
             "finale_damage_scale max_z fill_floor_z hazard_pct_min hazard_pct_max wall_fx (0 panels, 1 fog, 2 both) fog_acid (0-2) fog_lava (0-3)\n" +
             "flow_delay (seconds from a vent opening to its acid rising, 0-30) beacon_depth (m of acid at which the unused drain shows its beam, 0.25-20) beacon_fx (0-2) return_max_depth (most m of acid a death and return restarts at, 0-20).\n" +
+            "Harbinger keys: acid_rate acid_rate_cap acid_escalate_seconds acid_max_z acid_damage_scale wisp_pct hail_pct hail_max_falling hail_run_slow\n" +
+            "hail_attack_factor hail_slow_seconds fire_pct final_scale summon_seconds summon_cap final_summon_cap cast_seconds melee_reach\n" +
+            "hazard_pct_min hazard_pct_max wall_fx fog_acid health_multiplier (the four crystals, 0.1-10) head_health_multiplier (the head, 0.1-50)\ncrystal_cast_seconds attune_seconds (0 grants none)\n" +
+            "pressure_seconds (the alcove's doorway pressure) alcove_grace_seconds (0-60) pool_size (2.25-3) pool_cap drip_seconds drip_pressure_seconds drip_pct pool_step (0.05-0.5) pool_max_depth (0.2-0.65) pool_damage pool_damage_per_m\n" +
+            "film_damage (the acid alcove's floor film, 0-1000, default 0)\n" +
+            "twin_revive_seconds (4-120, halved under the pressure) conductor_wisp_pct conductor_wisps conductor_pressure_wisps (1-3) whiteout_pct whiteout_max_falling whiteout_pressure_max_falling whiteout_speed whiteout_pressure_speed\n" +
+            "whiteout_burst_radius (1.1-3) ember_pct_min ember_pct_max ember_count ember_pressure_count (1-3) ember_every_seconds ember_pressure_every_seconds ember_speed ember_pressure_speed ember_ball_radius (0.3-0.5).\n" +
             "An unknown key refuses the entry.")]
         public static void HandlePinnacle(Session session, params string[] parameters)
         {

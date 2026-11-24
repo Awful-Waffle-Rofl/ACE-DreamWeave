@@ -80,6 +80,9 @@ namespace ACE.Server.MonsterEffects
         Spawn     = 0x08,
         Heartbeat = 0x10,
         HpBelow   = 0x20,
+
+        /// <summary>This monster completed a spell cast (IMonsterCastHook). Read by ramp on=cast.</summary>
+        Cast      = 0x40,
     }
 
     /// <summary>
@@ -223,11 +226,20 @@ namespace ACE.Server.MonsterEffects
     }
 
     /// <summary>
-    /// Fires when this monster finishes casting a spell - the hook a recast effect rides.
+    /// Fires when this monster finishes casting a spell - the hook a recast effect rides, and the one a
+    /// ramp on=cast accrues from.
     /// </summary>
     public interface IMonsterCastHook : IMonsterEffect
     {
         void OnCastComplete(Creature caster, Spell spell, MonsterEffectSpec spec, ref MonsterEffectState state);
+
+        /// <summary>
+        /// TRUE for a handler that answers a completed cast by STARTING another cast (recast). Such a handler
+        /// re-casts at AttackTarget, so the caster-pet cast path (Creature.TryStartExplicitCast), whose target
+        /// may be the owner or a sibling, dispatches with chaining off and skips it. Defaulted, so only the
+        /// chaining handler has to say anything.
+        /// </summary>
+        bool StartsCasts => false;
     }
 
     /// <summary>

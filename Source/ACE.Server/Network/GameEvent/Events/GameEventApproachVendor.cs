@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 
 using ACE.Database;
 using ACE.Entity.Models;
@@ -37,9 +38,11 @@ namespace ACE.Server.Network.GameEvent.Events
                 // which are held only as a property, never as an inventory item). Without the banked amount
                 // the client shows "You have 0" and refuses to initiate the purchase, even though the server
                 // would accept it (Vendor.BuyItems_ValidateTransaction already counts the banked balance).
-                var altCurrencyInInventory = (uint)session.Player.GetNumInventoryItemsOfWCID(vendor.AlternateCurrency.Value);
-                var altCurrencyBanked = (uint)session.Player.GetBankedAlternateCurrency(vendor.AlternateCurrency.Value);
-                Writer.Write(altCurrencyInInventory + altCurrencyBanked + altCurrencySpent);
+                // Read through the per-viewer seam (Vendor.AlternateCurrencyBalanceFor), whose default is exactly that
+                // inventory + banked sum. The uint cast truncates the same way the two per-term casts did before (an
+                // unchecked cast keeps the low 32 bits, and the low 32 bits of a sum are the sum of the low 32 bits).
+                var altCurrencyBalance = (uint)vendor.AlternateCurrencyBalanceFor(session.Player, vendor.AlternateCurrency.Value);
+                Writer.Write(altCurrencyBalance + altCurrencySpent);
 
                 // the plural name of alt currency
                 Writer.WriteString16L(pluralName);
@@ -55,22 +58,37 @@ namespace ACE.Server.Network.GameEvent.Events
             // dictionary neither of these two contains, and a hardcoded sum here previously wrote 0
             // for a mule holding only stored (non-ledger) items while forEachItem still serialized
             // them - the panel rendered empty for the most common vault state (Mule Vendor fix round 1, I1).
-            var numItems = vendor.ItemsForSaleCount;
+            // Both through the viewer seam, for the same viewer: the Salvage Roller station serves each player only
+            // their own rows, and every other vendor's default is the viewer-less pair.
+            var viewer = session.Player;
+
+            var numItems = vendor.GetItemsForSaleCount(viewer);
 
             Writer.Write(numItems);
 
-            vendor.forEachItem((obj) =>
+            WriteItemRows(Writer, vendor, viewer);
+
+            Writer.Align();
+        }
+
+        /// <summary>
+        /// The item rows of the approach message, one per object <see cref="Vendor.ForEachItemFor"/> emits
+        /// for <paramref name="viewer"/>. Static and Session-free so a test can serialize a vendor's rows
+        /// directly. Each row is written under <see cref="Vendor.GetWireGuid"/>, which is the object's own
+        /// guid for every vendor but a mule (PersonalVendor lists stored items under display aliases).
+        /// </summary>
+        internal static void WriteItemRows(BinaryWriter writer, Vendor vendor, Player viewer)
+        {
+            vendor.ForEachItemFor(viewer, (obj) =>
             {
                 int stackSize = obj.VendorShopCreateListStackSize ?? obj.StackSize ?? 1; // -1 = unlimited supply
 
                 // packed value: (stackSize & 0xFFFFFF) | (pwdType << 24)
                 // pwdType: flag indicating whether the new or old PublicWeenieDesc is used; -1 = PublicWeenieDesc, 1 = OldPublicWeenieDesc; -1 always used.
-                Writer.Write(stackSize & 0xFFFFFF | -1 << 24);
+                writer.Write(stackSize & 0xFFFFFF | -1 << 24);
 
-                obj.SerializeGameDataOnly(Writer);
+                obj.SerializeGameDataOnly(writer, wireGuid: vendor.GetWireGuid(obj));
             });
-
-            Writer.Align();
         }
     }
 }

@@ -92,9 +92,9 @@ namespace ACE.Server.ThreadDungeons
         /// variety. 1.15x keeps that same gem's ceiling at 213, a spread a player can read off the gem and
         /// still recognise as "roughly this level".
         ///
-        /// Still not clamped to WorldEventRosterSelector.MaxConsideredLevel (275) - that reasoning is
-        /// unchanged and lives on <see cref="TrashBand"/>: 275 is a bound on a player audience level, not on a
-        /// monster level, and monsters above 275 are shipped and roster-reachable.
+        /// Still not clamped to WorldEventRosterSelector.MaxConsideredLevel (400; it was 275) - that reasoning is
+        /// unchanged and lives on <see cref="TrashBand"/>: that constant is a bound on a player audience level, not
+        /// on a monster level, and monsters above it are roster-reachable.
         /// </summary>
         public const double BandHigh = 1.15;
 
@@ -177,7 +177,7 @@ namespace ACE.Server.ThreadDungeons
         /// CONTAINS the real-valued interval rather than clipping a member sitting just inside it.
         ///
         /// The one and only difference from WorldEventRosterSelector.TrashBand/EliteBand is that the high
-        /// edge is NOT clamped to WorldEventRosterSelector.MaxConsideredLevel (275), and that is the whole
+        /// edge is NOT clamped to WorldEventRosterSelector.MaxConsideredLevel (400; it was 275), and that is the whole
         /// reason this arithmetic is duplicated here instead of being borrowed. See <see cref="TrashBand"/>.
         ///
         /// No multiplier validation here: the caller (TrashBand/EliteBand) already resolved low/high through
@@ -249,6 +249,10 @@ namespace ACE.Server.ThreadDungeons
 
         public static bool IsEligible(SpeciesTableDef table, int level, Func<uint, int> levelOf, DungeonRosterBand? band = null)
         {
+            // A table the owner removed from the draw ("enabled": false) is never eligible, at any band or widening.
+            if (table == null || !table.Drawable)
+                return false;
+
             var b = TrashBand(level, band);
             return InBand(table.Members, IsTrash, b, levelOf).Count > 0;
         }
@@ -307,7 +311,7 @@ namespace ACE.Server.ThreadDungeons
         {
             var b = TrashBand(level, band);
 
-            // Optional cap used only by World Events (its 275 audience ceiling); Threads passes none.
+            // Optional cap used only by World Events (its audience ceiling, MaxConsideredLevel; Pinnacles pass 275); Threads passes none.
             if (b.High > maxHighEdge)
                 b = new LevelBand(b.Low, Math.Max(b.Low, maxHighEdge));
 
@@ -503,6 +507,11 @@ namespace ACE.Server.ThreadDungeons
             return widest;
         }
 
+        /// <param name="burnRng">
+        /// The run's MAIN stream when <paramref name="rng"/> is the family's own salted stream (<see cref="FamilyRngFor"/>):
+        /// the same single <c>Next(total)</c> the old code took from the main stream is taken and discarded here, only on the
+        /// path that drew, so every later draw of the run is byte-identical to before the family stream was split off.
+        /// </param>
         /// <param name="themedOnly">
         /// Open World Threads (F11), true for an OUTDOOR site only: when at least one eligible table is preferred (its id in
         /// <paramref name="dungeonFamilies"/>, or its CreatureType in <paramref name="dungeonCreatureTypes"/>), the draw is
@@ -510,20 +519,39 @@ namespace ACE.Server.ThreadDungeons
         /// With no preferred table eligible, the ordinary weighted draw runs unchanged. False (every dungeon) leaves the
         /// draw byte-for-byte as it was: the same candidates, the same weights, the same single rng.Next.
         /// </param>
+        /// <param name="extraEligible">
+        /// Stretched families (FamilyStretch) that join the draw although they are not natively in the band. They are unioned
+        /// with the native eligible set (deduplicated by Id, re-sorted ordinal) and weighted by the same preference rules; a
+        /// forced <paramref name="requestedFamily"/> found here is returned without the band test. Null or empty is
+        /// byte-identical to the old behaviour: same result, same draws on <paramref name="rng"/> and <paramref name="burnRng"/>.
+        /// </param>
         public static SpeciesTableDef PickFamily(IReadOnlyDictionary<string, SpeciesTableDef> tables, string requestedFamily,
             IReadOnlyList<string> dungeonFamilies, IReadOnlyList<string> dungeonCreatureTypes, int level, Func<uint, int> levelOf, Random rng,
-            DungeonRosterBand? band = null, bool themedOnly = false)
+            DungeonRosterBand? band = null, bool themedOnly = false, Random burnRng = null,
+            IReadOnlyCollection<SpeciesTableDef> extraEligible = null)
         {
             if (!string.IsNullOrEmpty(requestedFamily) && requestedFamily != DungeonGemSpec.Any)
             {
+                var forcedExtra = extraEligible?.FirstOrDefault(t => t.Id == requestedFamily);
+                if (forcedExtra != null)
+                    return forcedExtra;
                 if (!tables.TryGetValue(requestedFamily, out var forced))
                     throw new ArgumentException($"unknown family '{requestedFamily}'", nameof(requestedFamily));
+                if (forced != null && !forced.Drawable)
+                    throw new ArgumentException($"family '{requestedFamily}' is disabled (enabled false in its species table)", nameof(requestedFamily));
                 if (!IsEligible(forced, level, levelOf, band))
                     throw new ArgumentException($"family '{requestedFamily}' has no trash member in the level-{level} band", nameof(requestedFamily));
                 return forced;
             }
 
             var eligible = EligibleFamiliesOrdered(tables, level, levelOf, band);
+            if (extraEligible != null && extraEligible.Count > 0)
+            {
+                foreach (var x in extraEligible)
+                    if (eligible.All(t => t.Id != x.Id))
+                        eligible.Add(x);
+                eligible = eligible.OrderBy(t => t.Id, StringComparer.Ordinal).ToList();
+            }
             if (eligible.Count == 0)
                 return null;
 
@@ -540,12 +568,34 @@ namespace ACE.Server.ThreadDungeons
 
             var total = eligible.Sum(WeightOf);
             var roll = rng.Next(total);
+            burnRng?.Next(total);
             foreach (var t in eligible)
             {
                 roll -= WeightOf(t);
                 if (roll < 0) return t;
             }
             return eligible[eligible.Count - 1];
+        }
+
+        /// <summary>
+        /// The family draw's own Random for a gem seed. Before this, the family draw was the FIRST use of <c>new Random(seed)</c>,
+        /// the very stream the "any" dungeon pick (OutdoorSiteTunables.Pick, <c>candidates[rng.Next(count)]</c>) also takes its
+        /// first value from. Dungeon k of N therefore only ever saw family rolls in [k/N, (k+1)/N), pinning each map to one or
+        /// two families per level. The fixed integer mix below (uint multiply/xor-shift avalanche, NEVER string.GetHashCode or
+        /// HashCode.Combine, which are randomized per process) decorrelates the two. Deterministic per seed.
+        /// </summary>
+        public static Random FamilyRngFor(int seed)
+        {
+            unchecked
+            {
+                var x = (uint)seed * 0x9E3779B1u ^ 0x85EBCA6Bu;
+                x ^= x >> 16;
+                x *= 0x7FEB352Du;
+                x ^= x >> 15;
+                x *= 0x846CA68Bu;
+                x ^= x >> 16;
+                return new Random((int)x);
+            }
         }
 
         /// <summary>The tables <see cref="PickFamily"/> draws from (every one with an in-band trash member), in Id-ordinal order.</summary>
@@ -569,7 +619,7 @@ namespace ACE.Server.ThreadDungeons
         /// (the caller passes Id-ordinal order, <see cref="EligibleFamiliesOrdered"/>). A non-positive or non-finite weight
         /// never wins; floating-point residue lands on the last family with a positive weight. Null for no candidate.
         /// </summary>
-        public static SpeciesTableDef PickFamilyWeighted(IReadOnlyList<SpeciesTableDef> families, IReadOnlyList<double> weights, Random rng)
+        public static SpeciesTableDef PickFamilyWeighted(IReadOnlyList<SpeciesTableDef> families, IReadOnlyList<double> weights, Random rng, Random burnRng = null)
         {
             if (families == null || weights == null || families.Count == 0 || families.Count != weights.Count)
                 return null;
@@ -591,6 +641,7 @@ namespace ACE.Server.ThreadDungeons
                 return null;
 
             var roll = rng.NextDouble() * total;
+            burnRng?.NextDouble();
 
             for (var i = 0; i < families.Count; i++)
             {

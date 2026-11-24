@@ -16,10 +16,11 @@ namespace ACE.Server.Managers.Market
     /// (made internal for exactly this) is the one place that turns a spell id into a display name,
     /// and this class calls it rather than reimplementing it.
     ///
-    /// The equipment-set and gear-rating matching rules are IDENTICAL to the ones the separate web
-    /// market app implements against the same snapshot fields, deliberately: see the 4-arg and 5-arg
-    /// SearchText overloads' remarks. The one intentional difference is the web-only custom mod names
-    /// (see the 5-arg overload).
+    /// The equipment-set, mod-name and gear-rating matching rules are IDENTICAL to the ones the separate
+    /// web market app implements against the same snapshot fields, deliberately: see the 4-arg, 5-arg
+    /// and 6-arg SearchText overloads' remarks. The one difference is reach: the live-item overload
+    /// includes weapon-mod and equipment-mod names, while the Weenie overload (a collapsed ledger row
+    /// with no live item) carries none, so it never has any to include.
     ///
     /// A pattern cannot contain a literal double quote: CommandManager.ParseCommand strips every `"`
     /// from a command line that has one (pre-existing, not specific to this class) before /mule search's
@@ -100,11 +101,21 @@ namespace ACE.Server.Managers.Market
         /// "critical damage.*\+2" finds a rated piece. Null/empty entries are skipped, and an item with
         /// no ratings produces exactly the 4-arg string.
         ///
-        /// Rating segments come LAST. The web market app puts its WEB-ONLY custom mod names between the
-        /// set parts and the ratings; ACE has no mod segment (in-game search of mods is out of scope), so
-        /// for an item with no mods the two strings are identical.
+        /// Rating segments come LAST, after the mod names (see the 6-arg overload). This overload passes
+        /// no mod names, so for an item with no mods it is identical to the 6-arg text.
         /// </summary>
         public static string SearchText(string name, IEnumerable<string> spellNames, string setLabel, string setToken, IEnumerable<string> ratingLines)
+            => SearchText(name, spellNames, setLabel, setToken, null, ratingLines);
+
+        /// <summary>
+        /// The 4-arg text, then every non-empty mod name, then the rating segments of the 5-arg overload.
+        /// Mod names sit between the set parts and the ratings, the same position the web market app's
+        /// TextPatternSearch.SearchText gives them, so "defensive" or "deadeye" matches an item carrying
+        /// that mod on both surfaces. The names are the mod definitions' DisplayName (see
+        /// <see cref="MarketItemMods.SearchNames"/>). Null/empty entries are skipped, and an item with
+        /// no mods produces exactly the 5-arg string.
+        /// </summary>
+        public static string SearchText(string name, IEnumerable<string> spellNames, string setLabel, string setToken, IEnumerable<string> modNames, IEnumerable<string> ratingLines)
         {
             var parts = new List<string> { name ?? string.Empty };
 
@@ -123,6 +134,15 @@ namespace ACE.Server.Managers.Market
             if (!string.IsNullOrEmpty(setToken) && !string.Equals(setToken, setLabel, StringComparison.Ordinal))
                 parts.Add(setToken);
 
+            if (modNames != null)
+            {
+                foreach (var modName in modNames)
+                {
+                    if (!string.IsNullOrEmpty(modName))
+                        parts.Add(modName);
+                }
+            }
+
             if (ratingLines != null)
             {
                 foreach (var ratingLine in ratingLines)
@@ -140,7 +160,15 @@ namespace ACE.Server.Managers.Market
         /// <see cref="MarketSnapshot"/> uses (MarketSnapshot.FromItem). Never throws on a null/empty
         /// spellbook.
         /// </summary>
-        public static string SearchText(WorldObject item)
+        public static string SearchText(WorldObject item) => SearchText(item, includeJewelryMods: false);
+
+        /// <summary>
+        /// <see cref="SearchText(WorldObject)"/> with the Jewelry Aspect mod names ("Defense (Fortitude)" ...) optionally in the
+        /// mod-name slot. The vault search (/mule search) passes true; the Salvage Roller row filter uses the one-argument form,
+        /// because its rows are matched by the lead type carried in the row NAME and a name-less mod row would match every
+        /// piece holding any aspect of that type.
+        /// </summary>
+        public static string SearchText(WorldObject item, bool includeJewelryMods)
         {
             if (item == null)
                 return string.Empty;
@@ -163,7 +191,7 @@ namespace ACE.Server.Managers.Market
             var setLabel = MarketEquipmentSet.Label(equipmentSetId);
             var setToken = MarketEquipmentSet.Classify(equipmentSetId);
 
-            return SearchText(item.Name, spellNames, setLabel, setToken, MarketAppraisal.RatingLines(item));
+            return SearchText(item.Name, spellNames, setLabel, setToken, MarketItemMods.SearchNames(item, includeJewelryMods), MarketAppraisal.RatingLines(item));
         }
 
         /// <summary>

@@ -167,12 +167,13 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// Returns the creature's effective magic defense skill
-        /// with item.WeaponMagicDefense and imbues factored in
+        /// with item.WeaponMagicDefense and imbues factored in.
+        /// <paramref name="stance"/>: as Creature.GetEffectiveDefenseSkill's (null = the live CombatMode).
         /// </summary>
-        public uint GetEffectiveMagicDefense()
+        public uint GetEffectiveMagicDefense(CombatMode? stance = null)
         {
             var current = GetCreatureSkill(Skill.MagicDefense).Current;
-            var weaponDefenseMod = GetWeaponMagicDefenseModifier(this);
+            var weaponDefenseMod = GetWeaponMagicDefenseModifier(this, stance);
             var defenseImbues = (uint)GetDefenseImbues(ImbuedEffectType.MagicDefense);
 
             var effectiveMagicDefense = (uint)Math.Round((current * weaponDefenseMod) + defenseImbues);

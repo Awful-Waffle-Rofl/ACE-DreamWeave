@@ -141,6 +141,8 @@ namespace ACE.Server.Tests
         // ---------------------------------------------------------------- the oracle
 
         [TestMethod]
+        // Measured 4.74 s on CI, over the 4.0 s per-test ceiling.
+        [TestCategory("Slow")]
         public void IncrementalGrouping_MatchesAFullRebuild_AtEveryStep()
         {
             // Fixed seeds, so a failure is reproducible. Several of them, because one seed exercises one

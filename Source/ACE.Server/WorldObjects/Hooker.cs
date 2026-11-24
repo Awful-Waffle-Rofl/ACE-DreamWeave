@@ -34,6 +34,11 @@ namespace ACE.Server.WorldObjects
         public override void ActOnUse(WorldObject activator)
         {
             // handled in base.OnActivate -> EmoteManager.OnUse()
+
+            // Tinkerer's Inspiration (hookable variant, wcid 1002770): no-ops unless PropertyBool.TinkerersInspiration
+            // (9037) is set on this item, so every other Hooker is unaffected.
+            if (activator is Player player)
+                ACE.Server.Entity.TinkerersInspiration.TryHandleUse(this, player);
         }
 
         public override ActivationResult CheckUseRequirements(WorldObject activator)

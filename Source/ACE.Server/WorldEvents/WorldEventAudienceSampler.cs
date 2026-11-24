@@ -5,6 +5,7 @@ using System.Reflection;
 using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Server.Managers;
+using ACE.Server.WorldObjects;
 
 using log4net;
 
@@ -111,6 +112,36 @@ namespace ACE.Server.WorldEvents
         /// must hold the run open, never end it.
         /// </summary>
         public static int CountAliveNear(Position anchor, float radius) => CountAliveNear(anchor, radius, false);
+
+        /// <summary>
+        /// Every online player in <paramref name="anchor"/>'s instance within <paramref name="radius"/> of it, living or dead,
+        /// staff included (the Avatar fighter's participants: it follows whoever fights beside it). Empty on a failure.
+        /// </summary>
+        public static List<Player> PlayersNear(Position anchor, float radius)
+        {
+            var near = new List<Player>();
+
+            if (anchor == null || radius <= 0)
+                return near;
+
+            try
+            {
+                foreach (var player in PlayerManager.GetAllOnline())
+                {
+                    var loc = player?.Location;
+
+                    if (loc != null && loc.Instance == anchor.Instance && loc.DistanceTo(anchor) <= radius)
+                        near.Add(player);
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error("[WORLDEVENT] near-anchor player scan failed", ex);
+                near.Clear();
+            }
+
+            return near;
+        }
 
         /// <summary><see cref="CountAliveNear(Position, float)"/>, with staff counted too when <paramref name="countStaff"/> is true.</summary>
         public static int CountAliveNear(Position anchor, float radius, bool countStaff)

@@ -18,6 +18,10 @@ namespace ACE.Server.ClassAbilities
     ///    summed with the ward (DefensiveWeaponMath.AfterShieldCap).
     /// Either way the frontal cone and the phantom-weapon exemption GetShieldMod already applies to a shield
     /// apply to the ward unchanged.
+    ///
+    /// THORNS (owner ruling 2026-11-05): the same two levels also feed Thorns' reflect armor level, but through
+    /// a separate decision, <see cref="ThornsLevelFor"/>, with NO frontal cone and no physical-only gate. A ward
+    /// still does not ENABLE Thorns (a shield is required); it only makes the reflect stronger.
     /// </summary>
     public static class WardShieldMath
     {
@@ -48,6 +52,26 @@ namespace ACE.Server.ClassAbilities
                 return 0.0;
 
             if (!attackerIsEnemyCreature || !frontal || !enabled)
+                return 0.0;
+
+            return Level(runicUp ? runicLevel : 0.0, sanguineUp ? sanguineLevel : 0.0);
+        }
+
+        /// <summary>
+        /// THE WARD'S THORNS BONUS (owner ruling 2026-11-05), pure like <see cref="LevelFor"/> so every branch is
+        /// unit-testable (Player.GetWardThornsLevel only gathers the inputs). The ward's shield level is ADDED to
+        /// the armor level Thorns reflects from. Same gates as <see cref="LevelFor"/> EXCEPT the frontal cone: there
+        /// is deliberately no facing input, so a hit from behind, a spell and a Reflect bounce all get the bonus.
+        /// 0 unless at least one ward is up, the attacker is an enemy creature (so PvP and self give 0) and class
+        /// abilities are enabled; otherwise the larger of the up wards' levels (<see cref="Level"/>), never the sum.
+        /// </summary>
+        public static double ThornsLevelFor(bool runicUp, bool sanguineUp, bool attackerIsEnemyCreature, bool enabled,
+            double runicLevel, double sanguineLevel)
+        {
+            if (!runicUp && !sanguineUp)
+                return 0.0;
+
+            if (!attackerIsEnemyCreature || !enabled)
                 return 0.0;
 
             return Level(runicUp ? runicLevel : 0.0, sanguineUp ? sanguineLevel : 0.0);

@@ -157,7 +157,7 @@ namespace ACE.Server.WorldObjects
             if (prev != null && prev.IsDead)
                 prev = null;
 
-            // The engagement lock's range test is IsMeleeRange - GetDistanceToTarget() <= MaxMeleeRange, the
+            // The engagement lock's range test is IsMeleeRange - GetDistanceToTarget() <= MeleeRange, the
             // same test MeleeReady gates every monster melee swing on - measured against prev while it is still
             // AttackTarget. Distance only, regardless of CurrentAttack, per the owner ruling.
             // Only for a still-valid candidate: a target with no physics object, or one the tether filter or

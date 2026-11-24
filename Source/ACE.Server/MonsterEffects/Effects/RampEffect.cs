@@ -9,7 +9,7 @@ namespace ACE.Server.MonsterEffects.Effects
 {
     /// <summary>
     /// Phase 6: a general stacking buff. One record accrues state.Stacks on whichever triggers on= names
-    /// (hit, spellhit, avoid), lapsing the whole pool once window= elapses with no qualifying trigger, and
+    /// (hit, spellhit, avoid, cast), lapsing the whole pool once window= elapses with no qualifying trigger, and
     /// publishes a multiplier on whichever axis= it was authored for via IMonsterRampSource - the seam
     /// MonsterEffectSet.GetRampMultiplier exists for, so a consumer reads "how ramped is this monster" by
     /// axis without knowing which effect (if any) is doing the ramping. FrenzyAbility.AttackSpeedMultiplier
@@ -39,9 +39,19 @@ namespace ACE.Server.MonsterEffects.Effects
     /// on=avoid accrual needs an avoidance GRANTER on the same monster: this effect's own GetAvoidChance is a
     /// pure 0.0 (a ramp reacts to an avoid, it never grants one), so OnAvoided runs only when the monster
     /// also carries something that can actually make the pooled roll succeed, such as AvoidEffect.
+    ///
+    /// on=cast accrues one stack per COMPLETED cast of any school, harmful or beneficial
+    /// (IMonsterCastHook, Creature.OnMonsterEffectCastComplete): the monster Mana Rush. Paired with
+    /// axis=castspeed it shortens the cast cadence through ScaleMonsterEffectCastTime; for a combat pet the
+    /// magic-delay gate is scaled too (CombatPet.CasterMagicDelay). A ramp is not a chaining cast hook, so
+    /// it never starts a cast and the recast guard is unaffected by it.
     /// </summary>
-    public sealed class RampEffect : IMonsterEffect, IMonsterOutgoingHit, IMonsterSpellHit, IMonsterAvoidance, IMonsterHeartbeat, IMonsterRampSource
+    public sealed class RampEffect : IMonsterEffect, IMonsterOutgoingHit, IMonsterSpellHit, IMonsterAvoidance, IMonsterHeartbeat, IMonsterRampSource, IMonsterCastHook
     {
+        /// <summary>The triggers a ramp accrues from. on= tokens outside this set are a Validate error.</summary>
+        private const MonsterEffectTrigger SupportedTriggers =
+            MonsterEffectTrigger.Hit | MonsterEffectTrigger.SpellHit | MonsterEffectTrigger.Avoid | MonsterEffectTrigger.Cast;
+
         public string Kind => "ramp";
 
         /// <summary>
@@ -57,6 +67,27 @@ namespace ACE.Server.MonsterEffects.Effects
             {
                 error = "ramp requires a valid axis= (attackspeed|castspeed|magicdamage|procchance|avoid)";
                 return false;
+            }
+
+            // on= is optional (defaults to hit), but every token it names must be a trigger a ramp answers:
+            // GetFlags silently drops an unknown token, so "on=cats" would otherwise fall back to hit
+            var onRaw = spec.GetString("on");
+            if (onRaw != null)
+            {
+                foreach (var token in onRaw.Split(','))
+                {
+                    var name = token.Trim();
+
+                    if (name.Length == 0)
+                        continue;
+
+                    if (!Enum.TryParse<MonsterEffectTrigger>(name, true, out var trigger) || !Enum.IsDefined(typeof(MonsterEffectTrigger), trigger)
+                        || trigger == MonsterEffectTrigger.None || (trigger & ~SupportedTriggers) != 0)
+                    {
+                        error = "ramp on= must name triggers from hit|spellhit|avoid|cast (comma-separated)";
+                        return false;
+                    }
+                }
             }
 
             if (spec.GetDouble("per", 0.0) <= 0.0)
@@ -114,6 +145,19 @@ namespace ACE.Server.MonsterEffects.Effects
         {
             var trigger = spec.GetFlags("on", MonsterEffectTrigger.Hit);
             if (!trigger.HasFlag(MonsterEffectTrigger.Avoid))
+                return;
+
+            Accrue(spec, ref state);
+        }
+
+        /// <summary>
+        /// on=cast: one stack per completed cast, whatever the spell. The stack lands AFTER the cast it
+        /// counts, so that cast's own cadence was set from the stacks held before it.
+        /// </summary>
+        public void OnCastComplete(Creature caster, Spell spell, MonsterEffectSpec spec, ref MonsterEffectState state)
+        {
+            var trigger = spec.GetFlags("on", MonsterEffectTrigger.Hit);
+            if (!trigger.HasFlag(MonsterEffectTrigger.Cast))
                 return;
 
             Accrue(spec, ref state);

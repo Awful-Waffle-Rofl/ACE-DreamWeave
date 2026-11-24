@@ -323,7 +323,9 @@ namespace ACE.Server.Command.Handlers
                     ? "RESTORED"
                     : row.PurgedAt != null
                         ? "PURGED"
-                        : $"{Math.Max(0, retentionDays - (int)age.TotalDays)}d left";
+                        // An open ITEM row can be evicted sooner by a full barrel, so its window is an upper
+                        // bound. Ledger and class rows hold nothing in the barrel and are never evicted.
+                        : $"{(row.ItemGuid != null ? "up to " : "")}{Math.Max(0, retentionDays - (int)age.TotalDays)}d left";
 
                 // A class barreling carries a null guid exactly as a ledger one does, so it is tested
                 // FIRST: labelling it "ledger" would tell an admin the restore credits the stack ledger,

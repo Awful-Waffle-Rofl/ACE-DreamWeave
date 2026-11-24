@@ -499,6 +499,7 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
+        [TestCategory("Slow")]
         public void Random_ManySourceGoalCombos_StillComposesForEverySeed()
         {
             // 260 (source, goal) combinations, of which exactly one composes, against 3 candidate family
@@ -611,6 +612,365 @@ namespace ACE.Server.Tests
             Assert.IsFalse(ok);
             Assert.IsNull(composition);
             StringAssert.StartsWith(error, "unknown source 'not_a_source'");
+        }
+
+        // ---- weighted roll (TECH-DESIGN 5.3): bucket -> source -> goal ----
+
+        private static WorldEventAxisStore RealAxesStore()
+        {
+            var dir = new System.IO.DirectoryInfo(AppContext.BaseDirectory);
+
+            while (dir != null && !System.IO.File.Exists(System.IO.Path.Combine(dir.FullName, "Content", "events", "axes", "goals.json")))
+                dir = dir.Parent;
+
+            Assert.IsNotNull(dir, $"Could not find Content/events/axes/goals.json by walking up from {AppContext.BaseDirectory}");
+
+            return WorldEventAxisStore.Load(System.IO.Path.Combine(dir.FullName, "Content", "events", "axes"));
+        }
+
+        private static string BucketOf(string sourceId) => sourceId.StartsWith("element_portal_", StringComparison.Ordinal) ? "portal" : sourceId;
+
+        private const int WeightedRolls = 8000;
+
+        /// <summary>Fixed seed for the one rng a frequency test shares across all its rolls (consecutive seeds would stratify the first draw).</summary>
+        private const int FrequencySeed = 20261116;
+
+        /// <summary>Rolls <paramref name="rolls"/> seeded random compositions against the shipped axes with Hold seeded as given.</summary>
+        private static List<(string sourceId, string goalId)> RollReal(bool holdEnabled, int rolls, IReadOnlyList<string> allowed = null)
+        {
+            var store = RealAxesStore();
+            var family = store.Families.Keys.OrderBy(k => k, StringComparer.Ordinal).First();
+            var catalog = WorldEventHoldComposerGateTests.CatalogFor(family);
+            var saved = WorldEventComposer.HoldEnabledReader;
+            var results = new List<(string, string)>();
+            var rng = new Random(FrequencySeed);
+
+            try
+            {
+                WorldEventComposer.HoldEnabledReader = _ => holdEnabled;
+
+                for (var i = 0; i < rolls; i++)
+                {
+                    var request = RandomRequest();
+                    request.AllowedSourceIds = allowed;
+
+                    Assert.IsTrue(WorldEventComposer.TryCompose(store, catalog, request, out var composition, out var error, rng),
+                        $"roll {i}: {error}");
+
+                    results.Add((composition.Source.Id, composition.Goal.Id));
+                }
+            }
+            finally
+            {
+                WorldEventComposer.HoldEnabledReader = saved;
+            }
+
+            return results;
+        }
+
+        private static double Share(List<(string sourceId, string goalId)> rolls, Func<(string sourceId, string goalId), bool> pick) =>
+            rolls.Count(pick) / (double)rolls.Count;
+
+        [TestMethod]
+        public void Weighted_HoldOn_FourBucketsRollAQuarterEach()
+        {
+            var rolls = RollReal(holdEnabled: true, WeightedRolls);
+            var shares = new[] { "portal", "sky_rift", "weave_spiral", "ambush" }
+                .ToDictionary(b => b, b => Share(rolls, r => BucketOf(r.sourceId) == b));
+
+            Console.WriteLine("HoldOn bucket shares: " + string.Join(", ", shares.Select(kv => $"{kv.Key}={kv.Value:P1}")));
+
+            foreach (var kv in shares)
+                Assert.AreEqual(0.25, kv.Value, 0.02, $"bucket {kv.Key}");
+
+            Assert.AreEqual(0, rolls.Count(r => r.sourceId == "rift"), "rift has weight 0");
+        }
+
+        [TestMethod]
+        public void Weighted_HoldOff_ThreeBucketsRollAThirdEach()
+        {
+            var rolls = RollReal(holdEnabled: false, WeightedRolls);
+            var shares = new[] { "portal", "sky_rift", "weave_spiral" }
+                .ToDictionary(b => b, b => Share(rolls, r => BucketOf(r.sourceId) == b));
+
+            Console.WriteLine("HoldOff bucket shares: " + string.Join(", ", shares.Select(kv => $"{kv.Key}={kv.Value:P1}")));
+
+            foreach (var kv in shares)
+                Assert.AreEqual(1.0 / 3.0, kv.Value, 0.02, $"bucket {kv.Key}");
+
+            Assert.AreEqual(0, rolls.Count(r => r.sourceId == "ambush" || r.sourceId == "rift"));
+        }
+
+        [TestMethod]
+        public void Weighted_PortalElementIsUniformWithinTheBucket()
+        {
+            var rolls = RollReal(holdEnabled: false, WeightedRolls).Where(r => BucketOf(r.sourceId) == "portal").ToList();
+
+            foreach (var element in new[] { "fire", "acid", "frost", "lightning", "earth" })
+                Assert.AreEqual(0.2, rolls.Count(r => r.sourceId == "element_portal_" + element) / (double)rolls.Count, 0.04, element);
+        }
+
+        [TestMethod]
+        public void Weighted_KillCountNeverRolled_ButComposesWhenPinned()
+        {
+            foreach (var hold in new[] { true, false })
+            {
+                var rolls = RollReal(hold, 1500);
+
+                Assert.AreEqual(0, rolls.Count(r => r.goalId == "kill_count"), $"hold={hold}");
+                Assert.IsTrue(rolls.Any(r => r.goalId == "kill_boss"), "control: kill_boss (weight 1) does roll");
+            }
+
+            var store = RealAxesStore();
+            var catalog = WorldEventHoldComposerGateTests.CatalogFor(store.Families.Keys.OrderBy(k => k, StringComparer.Ordinal).First());
+
+            Assert.IsTrue(WorldEventComposer.TryCompose(store, catalog, RandomRequest(sourceId: "sky_rift", goalId: "kill_count"),
+                out var composition, out var error, new Random(1)), error);
+            Assert.AreEqual("kill_count", composition.Goal.Id);
+        }
+
+        [TestMethod]
+        public void Weighted_RiftNeverRolled_ButComposesWhenPinned()
+        {
+            var rolls = RollReal(holdEnabled: true, 1500);
+
+            Assert.AreEqual(0, rolls.Count(r => r.sourceId == "rift"));
+            Assert.IsTrue(rolls.Any(r => r.sourceId == "sky_rift"), "control: a weight-1 source does roll");
+
+            var store = RealAxesStore();
+            var catalog = WorldEventHoldComposerGateTests.CatalogFor(store.Families.Keys.OrderBy(k => k, StringComparer.Ordinal).First());
+
+            Assert.IsTrue(WorldEventComposer.TryCompose(store, catalog, RandomRequest(sourceId: "rift"),
+                out var composition, out var error, new Random(1)), error);
+            Assert.AreEqual("rift", composition.Source.Id);
+        }
+
+        [TestMethod]
+        public void Weighted_PortalBucketStaysOneShare_WhenTheFilterRemovesSomePortals()
+        {
+            var allowed = new List<string> { "element_portal_fire", "element_portal_acid", "sky_rift", "weave_spiral", "ambush" };
+            var rolls = RollReal(holdEnabled: true, WeightedRolls, allowed);
+            var portal = Share(rolls, r => BucketOf(r.sourceId) == "portal");
+
+            Console.WriteLine($"filtered portal share: {portal:P1}");
+
+            Assert.AreEqual(0.25, portal, 0.02);
+            Assert.AreEqual(0, rolls.Count(r => r.sourceId == "element_portal_frost" || r.sourceId == "element_portal_earth"));
+            Assert.AreEqual(0.125, Share(rolls, r => r.sourceId == "element_portal_fire"), 0.02, "the surviving portals split the bucket");
+        }
+
+        [TestMethod]
+        public void Weighted_FilterRemovingABucket_RenormalizesTheRest()
+        {
+            var allowed = new List<string> { "element_portal_fire", "sky_rift" };
+            var rolls = RollReal(holdEnabled: true, WeightedRolls, allowed);
+
+            Assert.AreEqual(0.5, Share(rolls, r => r.sourceId == "sky_rift"), 0.03);
+            Assert.AreEqual(0.5, Share(rolls, r => r.sourceId == "element_portal_fire"), 0.03);
+        }
+
+        [TestMethod]
+        public void Weighted_AmbushOnlyEverYieldsDefendEnvoys()
+        {
+            var ambush = RollReal(holdEnabled: true, WeightedRolls).Where(r => r.sourceId == "ambush").ToList();
+
+            Assert.IsTrue(ambush.Count > 500, $"control: ambush must actually roll ({ambush.Count})");
+            Assert.IsTrue(ambush.All(r => r.goalId == "defend_envoys"), string.Join(",", ambush.Select(r => r.goalId).Distinct()));
+        }
+
+        // ---- the ordering primitive, on a synthetic store ----
+
+        private static WorldEventAxisStore WeightedFixture(string sourceExtraA = "", string sourceExtraB = "", string goalExtra = "")
+        {
+            string Src(string id, string extra) => @"{ ""id"": """ + id + @""", ""displayName"": """ + id + @""", ""geometry"": ""disc"",
+                ""geometryRadius"": 10.0, ""geometryPoints"": 4, ""waveIntervalSeconds"": 40.0, ""maxAlive"": 20,
+                ""waveCount"": { ""base"": 3, ""perParticipant"": 1.5, ""cap"": 16 }, ""rewardRadius"": 60.0," + extra + @"
+                ""compatibleGoals"": [ ""kill_count"", ""kill_boss"" ], ""startFlavour"": ""x"", ""waveFlavour"": ""y"" }";
+
+            var sources = @"{ ""randomGroups"": { ""pair"": 2.0 }, ""sources"": [ " + Src("a", sourceExtraA) + ", " + Src("b", sourceExtraB) + " ] }";
+
+            var goals = @"{ ""goals"": [
+                { ""id"": ""kill_count"", ""displayName"": ""Kill Count"", " + goalExtra + @" ""type"": ""KillCount"",
+                  ""count"": { ""base"": 20, ""perParticipant"": 6, ""cap"": 150 }, ""holdSeconds"": 0,
+                  ""mvpRule"": ""mostKills"", ""progressTemplate"": ""x"" },
+                { ""id"": ""kill_boss"", ""displayName"": ""Slay the Champion"", ""type"": ""KillBoss"",
+                  ""holdSeconds"": 0, ""mvpRule"": ""killingBlowAndTopDamage"", ""progressTemplate"": ""x"" } ] }";
+
+            return WorldEventAxisStore.Parse(sources, RandomFamilies, goals, RandomRewards, null, RandomBosses);
+        }
+
+        private static List<(string sourceId, string goalId)> AllPairs(WorldEventAxisStore store) =>
+            store.Sources.Keys.OrderBy(k => k, StringComparer.Ordinal)
+                .SelectMany(s => store.Goals.Keys.OrderBy(k => k, StringComparer.Ordinal).Select(g => (s, g))).ToList();
+
+        [TestMethod]
+        public void WeightedPairOrder_IsAPermutationOfTheEligiblePairs_AndSeedReproducible()
+        {
+            var store = WeightedFixture();
+            var pairs = AllPairs(store);
+
+            var one = WorldEventComposer.WeightedPairOrder(store, pairs, false, false, new Random(9));
+            var two = WorldEventComposer.WeightedPairOrder(store, pairs, false, false, new Random(9));
+
+            CollectionAssert.AreEqual(one, two);
+            CollectionAssert.AreEquivalent(pairs, one);
+        }
+
+        [TestMethod]
+        public void WeightedPairOrder_WeightZero_IsDropped_UnlessThatAxisIsPinned()
+        {
+            var store = WeightedFixture(sourceExtraA: @" ""randomWeight"": 0,", goalExtra: @"""randomWeight"": 0,");
+            var pairs = AllPairs(store);
+
+            var rolled = WorldEventComposer.WeightedPairOrder(store, pairs, false, false, new Random(1));
+            CollectionAssert.AreEqual(new[] { ("b", "kill_boss") }, rolled);
+
+            // Pinned source ignores source weights; pinned goal ignores goal weights.
+            var pinnedSource = WorldEventComposer.WeightedPairOrder(store, pairs.Where(p => p.sourceId == "a").ToList(), true, false, new Random(1));
+            CollectionAssert.AreEqual(new[] { ("a", "kill_boss") }, pinnedSource);
+
+            var pinnedGoal = WorldEventComposer.WeightedPairOrder(store, pairs.Where(p => p.goalId == "kill_count").ToList(), false, true, new Random(1));
+            CollectionAssert.AreEqual(new[] { ("b", "kill_count") }, pinnedGoal);
+        }
+
+        [TestMethod]
+        public void WeightedPairOrder_GroupedSourcesSplitTheirBucketByTheirOwnWeights()
+        {
+            // a (weight 3) and b (weight 1) share group "pair": the bucket is always drawn, then a takes 3/4 of first picks.
+            var store = WeightedFixture(sourceExtraA: @" ""randomGroup"": ""pair"", ""randomWeight"": 3.0,", sourceExtraB: @" ""randomGroup"": ""pair"",");
+            var pairs = AllPairs(store);
+            const int n = 6000;
+            var rng = new Random(FrequencySeed);
+
+            var a = Enumerable.Range(0, n).Count(_ => WorldEventComposer.WeightedPairOrder(store, pairs, false, false, rng)[0].sourceId == "a");
+
+            Assert.AreEqual(0.75, a / (double)n, 0.03);
+        }
+
+        [TestMethod]
+        public void Random_PinnedAmbush_HoldOff_RefusalNamesTheGoalAxis()
+        {
+            var store = RealAxesStore();
+            var catalog = WorldEventHoldComposerGateTests.CatalogFor(store.Families.Keys.OrderBy(k => k, StringComparer.Ordinal).First());
+            var saved = WorldEventComposer.HoldEnabledReader;
+
+            try
+            {
+                WorldEventComposer.HoldEnabledReader = _ => false;
+
+                Assert.IsFalse(WorldEventComposer.TryCompose(store, catalog, RandomRequest(sourceId: "ambush"), out var composition, out var error, new Random(1)));
+                Assert.IsNull(composition);
+                Assert.AreEqual("random composition: every candidate goal for source 'ambush' has random weight 0 " +
+                                "(pin --goal to start one explicitly; defend_envoys also needs world_events_hold_enabled)", error);
+
+                // Pinning the named axis is the way out: kill_count (weight 0) composes when pinned.
+                Assert.IsTrue(WorldEventComposer.TryCompose(store, catalog, RandomRequest(sourceId: "ambush", goalId: "kill_count"),
+                    out var pinned, out error, new Random(1)), error);
+                Assert.AreEqual("kill_count", pinned.Goal.Id);
+            }
+            finally
+            {
+                WorldEventComposer.HoldEnabledReader = saved;
+            }
+        }
+
+        [TestMethod]
+        public void Random_PinnedWeightZeroGoal_RefusalNamesTheSourceAxis()
+        {
+            var store = WeightedFixture(sourceExtraA: @" ""randomWeight"": 0,", sourceExtraB: @" ""randomWeight"": 0,");
+
+            Assert.IsFalse(WorldEventComposer.TryCompose(store, RandomCatalog(), RandomRequest(goalId: "kill_boss"), out _, out var error, new Random(1)));
+            Assert.AreEqual("random composition: every candidate source for goal 'kill_boss' has random weight 0 (pin --source to start one explicitly)", error);
+        }
+
+        // ---- scripted rng: exact bucket boundaries ----
+
+        /// <summary>Overrides NextDouble ONLY and returns queued values (then 0.0). Never touches Sample or base.</summary>
+        private sealed class ScriptedRandom : Random
+        {
+            private readonly Queue<double> values;
+
+            public ScriptedRandom(params double[] values) { this.values = new Queue<double>(values); }
+
+            public override double NextDouble() => values.Count > 0 ? values.Dequeue() : 0.0;
+        }
+
+        /// <summary>One ungrouped source per weight (ids s0, s1, ...), each with the single goal kill_boss.</summary>
+        private static WorldEventAxisStore ScriptedStore(params double[] weights)
+        {
+            string Src(int i, double w) => @"{ ""id"": ""s" + i + @""", ""displayName"": ""s" + i + @""", ""geometry"": ""disc"",
+                ""geometryRadius"": 10.0, ""geometryPoints"": 4, ""waveIntervalSeconds"": 40.0, ""maxAlive"": 20,
+                ""waveCount"": { ""base"": 3, ""perParticipant"": 1.5, ""cap"": 16 }, ""rewardRadius"": 60.0,
+                ""randomWeight"": " + w.ToString(System.Globalization.CultureInfo.InvariantCulture) + @",
+                ""compatibleGoals"": [ ""kill_boss"" ], ""startFlavour"": ""x"", ""waveFlavour"": ""y"" }";
+
+            var sources = @"{ ""sources"": [ " + string.Join(", ", weights.Select((w, i) => Src(i, w))) + " ] }";
+            var goals = @"{ ""goals"": [ { ""id"": ""kill_boss"", ""displayName"": ""Slay the Champion"", ""type"": ""KillBoss"",
+                ""holdSeconds"": 0, ""mvpRule"": ""killingBlowAndTopDamage"", ""progressTemplate"": ""x"" } ] }";
+
+            return WorldEventAxisStore.Parse(sources, RandomFamilies, goals, RandomRewards, null, RandomBosses);
+        }
+
+        /// <summary>One pick consumes three draws: bucket, source, goal.</summary>
+        private static double[] Picks(params double[] bucketRolls) => bucketRolls.SelectMany(r => new[] { r, 0.0, 0.0 }).ToArray();
+
+        [TestMethod]
+        public void WeightedPairOrder_ScriptedRng_FourEqualBuckets_SwitchExactlyAtTheQuarters()
+        {
+            var store = ScriptedStore(1, 1, 1, 1);
+            var pairs = AllPairs(store);
+
+            string First(double roll) => WorldEventComposer.WeightedPairOrder(store, pairs, false, false, new ScriptedRandom(Picks(roll)))[0].sourceId;
+
+            Assert.AreEqual("s0", First(0.0));
+            Assert.AreEqual("s0", First(0.2499999));
+            Assert.AreEqual("s1", First(0.25));
+            Assert.AreEqual("s1", First(0.4999999));
+            Assert.AreEqual("s2", First(0.5));
+            Assert.AreEqual("s3", First(0.75));
+            Assert.AreEqual("s3", First(0.9999999));
+        }
+
+        [TestMethod]
+        public void WeightedPairOrder_ScriptedRng_WeightTwoVsOne_SwitchesAtTwoThirds()
+        {
+            var store = ScriptedStore(2, 1);
+            var pairs = AllPairs(store);
+
+            string First(double roll) => WorldEventComposer.WeightedPairOrder(store, pairs, false, false, new ScriptedRandom(Picks(roll)))[0].sourceId;
+
+            Assert.AreEqual("s0", First(0.0));
+            Assert.AreEqual("s0", First(0.6666));
+            Assert.AreEqual("s1", First(0.6667));
+            Assert.AreEqual("s1", First(0.9999999));
+        }
+
+        [TestMethod]
+        public void WeightedPairOrder_ScriptedRng_SecondPickRenormalizesOverTheRemainingPool()
+        {
+            // Weights 1,1,2. First roll 0.0 takes s0. The pool is then s1 (1) + s2 (2) = 3, so roll 0.3 lands at 0.9 = s1.
+            // Over the ORIGINAL total of 4 the same roll would land at 1.2 = s2, so this fails if the share is not renormalized.
+            var store = ScriptedStore(1, 1, 2);
+            var order = WorldEventComposer.WeightedPairOrder(store, AllPairs(store), false, false, new ScriptedRandom(Picks(0.0, 0.3)));
+
+            CollectionAssert.AreEqual(new[] { ("s0", "kill_boss"), ("s1", "kill_boss"), ("s2", "kill_boss") }, order);
+
+            var other = WorldEventComposer.WeightedPairOrder(store, AllPairs(store), false, false, new ScriptedRandom(Picks(0.0, 0.34)));
+            CollectionAssert.AreEqual(new[] { ("s0", "kill_boss"), ("s2", "kill_boss"), ("s1", "kill_boss") }, other, "0.34 x 3 = 1.02 is past s1's share of 1");
+        }
+
+        [TestMethod]
+        public void Random_AllCandidatesWeightZero_IsRefusedWithAClearMessage()
+        {
+            var store = WeightedFixture(sourceExtraA: @" ""randomWeight"": 0,", sourceExtraB: @" ""randomWeight"": 0,");
+
+            Assert.IsFalse(WorldEventComposer.TryCompose(store, RandomCatalog(), RandomRequest(), out var composition, out var error, new Random(1)));
+            Assert.IsNull(composition);
+            StringAssert.Contains(error, "every candidate source/goal has random weight 0");
+            StringAssert.Contains(error, "pin --source or --goal");
+
+            // A pinned source still composes: the pin ignores that axis's weight.
+            Assert.IsTrue(WorldEventComposer.TryCompose(store, RandomCatalog(), RandomRequest(sourceId: "a"), out _, out error, new Random(1)), error);
         }
     }
 }

@@ -7,7 +7,7 @@ namespace ACE.Server.RefireStations
     /// <summary>
     /// The Salvage Forge: a Marketplace NPC (wcid 1002652, PropertyBool.SalvageForgeStation), the SIXTH
     /// RefireStation (WaffleACE, DreamWeave, 2026-08-23). A player GIVES the forge one full salvage bag of a
-    /// supported material - Tiger Eye, Obsidian, Tourmaline, Amethyst or Serpentine - and it asks a yes/no
+    /// supported material - Tiger Eye, Obsidian, Tourmaline, Amethyst, Serpentine or Green Jade - and it asks a yes/no
     /// confirmation to pay 5 Trade Notes to consume that bag plus enough OTHER full bags of the same material
     /// (priced by the player's own tinkering skill, same as ever) and forge the material's 10-charge Hammer
     /// straight into the player's pack.
@@ -82,7 +82,7 @@ namespace ACE.Server.RefireStations
             if (item.ItemType != ItemType.TinkeringMaterial || item.MaterialType == null
                 || !SalvageForge.MaterialTable.TryGetValue(item.MaterialType.Value, out var info))
             {
-                refusal = "The Salvage Forge only takes a full bag of tiger eye, obsidian, tourmaline, amethyst or serpentine salvage.";
+                refusal = "The Salvage Forge only takes a full bag of tiger eye, obsidian, tourmaline, amethyst, serpentine or green jade salvage.";
                 return WeenieError.YouDoNotPassCraftingRequirements;
             }
 

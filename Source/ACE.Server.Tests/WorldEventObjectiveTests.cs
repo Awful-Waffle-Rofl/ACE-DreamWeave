@@ -492,6 +492,95 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
+        public void Factory_DestroySource_PhasesFollowTheEnabledSetting()
+        {
+            var saved = DestroySourcePhaseSettings.Reader;
+
+            try
+            {
+                DestroySourcePhaseSettings.Reader = () => new DestroySourcePhaseSettings { Enabled = true };
+                var on = (DestroySourceObjective)WorldEventObjectiveFactory.Create(BuildEvent(DestroySourceGoal(), BossDef.None), out _);
+                Assert.IsNotNull(on.Phases, "phases ship ON");
+
+                DestroySourcePhaseSettings.Reader = () => new DestroySourcePhaseSettings { Enabled = false };
+                var off = (DestroySourceObjective)WorldEventObjectiveFactory.Create(BuildEvent(DestroySourceGoal(), BossDef.None), out _);
+                Assert.IsNull(off.Phases, "off is the legacy objective: no machine at all");
+            }
+            finally
+            {
+                DestroySourcePhaseSettings.Reader = saved;
+            }
+        }
+
+        [TestMethod]
+        public void DestroySource_PhasesOn_RemainingKillsStaysNull_AndCompletionIsStillEverySourceDead()
+        {
+            var saved = DestroySourcePhaseSettings.Reader;
+
+            try
+            {
+                DestroySourcePhaseSettings.Reader = () => new DestroySourcePhaseSettings { Enabled = true };
+                var sources = new List<uint> { 10, 11 };
+                var objective = (DestroySourceObjective)WorldEventObjectiveFactory.Create(BuildEvent(DestroySourceGoal(), BossDef.None), out _);
+                var direct = new DestroySourceObjective(DestroySourceGoal(), () => sources);
+                direct.AttachPhases(new DestroySourcePhases(DestroySourcePhaseSettings.Defaults, new NullPort(), () => 4), () => 0);
+
+                Assert.IsNull(objective.RemainingKills, "WP-20: no opinion, never 0");
+                Assert.IsNull(direct.RemainingKills);
+
+                direct.OnPhaseDeathCore(55, wasEventCreature: true);
+                direct.OnDeathCore(10, "A", "A");
+                Assert.IsFalse(direct.IsComplete);
+
+                direct.OnDeathCore(11, "B", "B");
+                Assert.IsTrue(direct.IsComplete, "phases never change what completes the objective");
+            }
+            finally
+            {
+                DestroySourcePhaseSettings.Reader = saved;
+            }
+        }
+
+        [TestMethod]
+        public void DestroySource_PhaseDeathCore_CountsKillsNotSources_AndTheBossEarnsAPhase()
+        {
+            var sources = new List<uint> { 10 };
+            var port = new NullPort();
+            var machine = new DestroySourcePhases(DestroySourcePhaseSettings.Defaults, port, () => 4);
+            var objective = new DestroySourceObjective(DestroySourceGoal(), () => sources);
+            objective.AttachPhases(machine, () => 77);
+
+            objective.OnPhaseDeathCore(10, wasEventCreature: true);
+            objective.OnPhaseDeathCore(55, wasEventCreature: false);
+            Assert.AreEqual(0, machine.KillsInPhase, "a source and an unstamped creature are not kills");
+
+            objective.OnPhaseDeathCore(56, wasEventCreature: true);
+            Assert.AreEqual(1, machine.KillsInPhase);
+
+            objective.OnPhaseDeathCore(77, wasEventCreature: true);
+            Assert.AreEqual(1, machine.PendingPhases, "the boss is one full phase, not a kill");
+            Assert.AreEqual(1, machine.KillsInPhase);
+        }
+
+        private sealed class NullPort : IDestroySourcePhasePort
+        {
+            public void SetGuard(uint guid, bool immune, uint floorHp)
+            {
+            }
+
+            public bool TryGetHealth(uint guid, out uint current, out uint max)
+            {
+                current = 0;
+                max = 0;
+                return false;
+            }
+
+            public void Announce(string line)
+            {
+            }
+        }
+
+        [TestMethod]
         public void Factory_UnknownGoalType_ReturnsAnError()
         {
             var goal = new GoalDef { Id = "mystery", DisplayName = "Mystery", Type = "Mystery", TypeKind = (GoalType)99 };

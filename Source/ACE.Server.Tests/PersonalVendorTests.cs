@@ -273,6 +273,16 @@ namespace ACE.Server.Tests
             };
         }
 
+        /// <summary>
+        /// The guid a stored item's panel row is listed (and bought, and appraised) under: the store's
+        /// display alias, never the item's own guid. ObjectGuid.Invalid when the window does not list the
+        /// item directly (filtered out, proxied, or not in the vault), which resolves to nothing.
+        /// </summary>
+        private static ObjectGuid RowGuid(PersonalVendor vendor, WorldObject stored)
+        {
+            return vendor.DisplayGuidOf(stored) ?? ObjectGuid.Invalid;
+        }
+
         private static PersonalVendor MakeVendor()
         {
             EnsureVendorConstructible();
@@ -818,7 +828,7 @@ namespace ACE.Server.Tests
 
             vendor.RebuildView();
 
-            Assert.IsTrue(vendor.TryGetItemForSale(item.Guid, out var found), "the stored item must be reachable through the vendor view");
+            Assert.IsTrue(vendor.TryGetItemForSale(RowGuid(vendor, item), out var found), "the stored item must be reachable through the vendor view");
             Assert.AreSame(item, found);
 
             Assert.IsFalse(vendor.DefaultItemsForSale.ContainsKey(item.Guid));
@@ -835,7 +845,7 @@ namespace ACE.Server.Tests
             var (_, item) = SeedStoredItem(backend, world);
 
             vendor.RebuildView();
-            Assert.IsTrue(vendor.TryGetItemForSale(item.Guid, out _), "sanity: the item must be in view before Destroy() is exercised");
+            Assert.IsTrue(vendor.TryGetItemForSale(RowGuid(vendor, item), out _), "sanity: the item must be in view before Destroy() is exercised");
 
             vendor.Destroy();
 
@@ -868,7 +878,7 @@ namespace ACE.Server.Tests
             var (_, item) = SeedStoredItem(backend, world);
             vendor.RebuildView();
 
-            Assert.IsTrue(vendor.TryGetItemForSale(item.Guid, out _), "sanity: the item must already be a store biota");
+            Assert.IsTrue(vendor.TryGetItemForSale(RowGuid(vendor, item), out _), "sanity: the item must already be a store biota");
 
             vendor.AddDefaultItem(item);
 
@@ -977,7 +987,7 @@ namespace ACE.Server.Tests
             var (_, item) = SeedStoredItem(backend, world);
             vendor.RebuildView();
 
-            var basket = new List<ItemProfile> { new ItemProfile(1, item.Guid.Full) };
+            var basket = new List<ItemProfile> { new ItemProfile(1, RowGuid(vendor, item).Full) };
 
             return (vendor, store, backend, world, item, basket);
         }
@@ -1000,7 +1010,7 @@ namespace ACE.Server.Tests
             var ok = vendor.TryWithdrawTransaction(basket, DepositOnlyGrantee, null);
 
             Assert.IsFalse(ok, "gate 2 requires DepositWithdraw specifically - Deposit-only access must never authorize a withdrawal");
-            Assert.IsTrue(vendor.TryGetItemForSale(item.Guid, out _), "the item must not have moved");
+            Assert.IsTrue(vendor.TryGetItemForSale(RowGuid(vendor, item), out _), "the item must not have moved");
             CollectionAssert.Contains(store.GetEntries(0, -1).Select(e => (object)e.Guid).ToList(), item.Guid);
         }
 
@@ -1012,7 +1022,7 @@ namespace ACE.Server.Tests
             var ok = vendor.TryWithdrawTransaction(basket, Stranger, null);
 
             Assert.IsFalse(ok);
-            Assert.IsTrue(vendor.TryGetItemForSale(item.Guid, out _), "the item must not have moved");
+            Assert.IsTrue(vendor.TryGetItemForSale(RowGuid(vendor, item), out _), "the item must not have moved");
         }
 
         [TestMethod]
@@ -1031,7 +1041,7 @@ namespace ACE.Server.Tests
             var ok = vendor.TryWithdrawTransaction(basket, Stranger, null);
 
             Assert.IsFalse(ok, "authorization must be checked inside the transaction itself, never assumed from a prior panel-open");
-            Assert.IsTrue(vendor.TryGetItemForSale(item.Guid, out _), "the item must not have moved");
+            Assert.IsTrue(vendor.TryGetItemForSale(RowGuid(vendor, item), out _), "the item must not have moved");
         }
 
         /// <summary>
@@ -1071,12 +1081,12 @@ namespace ACE.Server.Tests
             item.SetStackSize(100);
             vendor.RebuildView();
 
-            var basket = new List<ItemProfile> { new ItemProfile(1, item.Guid.Full) };  // asking for 1 of 100
+            var basket = new List<ItemProfile> { new ItemProfile(1, RowGuid(vendor, item).Full) };  // asking for 1 of 100
 
             var ok = vendor.TryWithdrawTransaction(basket, Owner, null);
 
             Assert.IsFalse(ok, "a stored item must be refused rather than withdrawn as a partial amount");
-            Assert.IsTrue(vendor.TryGetItemForSale(item.Guid, out var found), "the item must still be in the vault, untouched");
+            Assert.IsTrue(vendor.TryGetItemForSale(RowGuid(vendor, item), out var found), "the item must still be in the vault, untouched");
             Assert.AreEqual(100, found.StackSize);
         }
 
@@ -1245,14 +1255,14 @@ namespace ACE.Server.Tests
 
             vendor.RebuildView();
 
-            Assert.IsTrue(vendor.TryGetItemForSale(storedItem.Guid, out _), "sanity: stored item must be in view");
+            Assert.IsTrue(vendor.TryGetItemForSale(RowGuid(vendor, storedItem), out _), "sanity: stored item must be in view");
             Assert.IsTrue(vendor.DefaultItemsForSale.Values.Any(d => d.WeenieClassId == 7778), "sanity: ledger row must be materialized in view");
 
             var ledgerDisplayGuid = vendor.DefaultItemsForSale.Values.First(d => d.WeenieClassId == 7778).Guid;
 
             var basket = new List<ItemProfile>
             {
-                new ItemProfile(1, storedItem.Guid.Full),
+                new ItemProfile(1, RowGuid(vendor, storedItem).Full),
                 new ItemProfile(50, ledgerDisplayGuid.Full),  // asking for 50 of a row that holds 5 - fails
             };
 
@@ -2964,8 +2974,16 @@ namespace ACE.Server.Tests
 
             var content = File.ReadAllText(path);
 
-            Assert.IsTrue(content.Contains("vendor.ItemsForSaleCount"), $"{relativePath} must compute numItems from vendor.ItemsForSaleCount - the line that fixed I1 (a stored-only mule rendering an empty panel).");
+            // The count now goes through the viewer seam (Salvage Roller shared station), whose default is exactly
+            // ItemsForSaleCount for every vendor that does not override it - PersonalVendor included. Both halves pinned.
+            Assert.IsTrue(content.Contains("vendor.GetItemsForSaleCount(viewer)"), $"{relativePath} must compute numItems from vendor.GetItemsForSaleCount(viewer) - the viewer seam over the line that fixed I1 (a stored-only mule rendering an empty panel).");
+            Assert.IsTrue(content.Contains("vendor.ForEachItemFor(viewer,"), $"{relativePath} must serialize through vendor.ForEachItemFor(viewer, ...) so the count and the rows come from the same viewer.");
             Assert.IsFalse(content.Contains("UniqueItemsForSale.Count +"), $"{relativePath} must not re-derive numItems from the two base dictionaries directly - that expression never saw PersonalVendor's storeItems and is the I1 bug site.");
+
+            var vendorPath = FindInSourceTree("Source/ACE.Server/WorldObjects/Vendor.cs");
+            Assert.IsNotNull(vendorPath, "Could not find Source/ACE.Server/WorldObjects/Vendor.cs");
+            Assert.IsTrue(File.ReadAllText(vendorPath).Contains("public virtual int GetItemsForSaleCount(Player viewer) => ItemsForSaleCount;"),
+                "the viewer seam's default must stay exactly ItemsForSaleCount, or the I1 fix no longer reaches PersonalVendor");
         }
 
         /// <summary>
@@ -3479,7 +3497,7 @@ namespace ACE.Server.Tests
 
             Assert.AreEqual(0, vendor.DefaultItemsForSale.Count, "a drawable stored item needs no display object at all");
             Assert.AreEqual(1, vendor.ItemsForSaleCount);
-            Assert.IsTrue(vendor.TryGetItemForSale(item.Guid, out var found));
+            Assert.IsTrue(vendor.TryGetItemForSale(RowGuid(vendor, item), out var found));
             Assert.AreSame(item, found, "a drawable stored item must still resolve to its own biota");
         }
 
@@ -5076,8 +5094,8 @@ namespace ACE.Server.Tests
             vendor.SetSearchFilter(new Regex("8100"));
             vendor.RebuildView();
 
-            Assert.IsTrue(vendor.TryGetItemForSale(matching.Guid, out _), "the matching item must be shown");
-            Assert.IsFalse(vendor.TryGetItemForSale(nonMatching.Guid, out _), "the non-matching item must be filtered out");
+            Assert.IsTrue(vendor.TryGetItemForSale(RowGuid(vendor, matching), out _), "the matching item must be shown");
+            Assert.IsFalse(vendor.TryGetItemForSale(RowGuid(vendor, nonMatching), out _), "the non-matching item must be filtered out");
 
             Assert.AreEqual(1, vendor.LastRebuildShown);
             Assert.AreEqual(2, vendor.LastRebuildTotal);
@@ -5113,8 +5131,8 @@ namespace ACE.Server.Tests
             vendor.SetSearchFilter(null);
             vendor.RebuildView();
 
-            Assert.IsTrue(vendor.TryGetItemForSale(first.Guid, out _));
-            Assert.IsTrue(vendor.TryGetItemForSale(second.Guid, out _));
+            Assert.IsTrue(vendor.TryGetItemForSale(RowGuid(vendor, first), out _));
+            Assert.IsTrue(vendor.TryGetItemForSale(RowGuid(vendor, second), out _));
             Assert.AreEqual(2, vendor.LastRebuildShown);
             Assert.AreEqual(2, vendor.LastRebuildTotal);
         }
@@ -5256,7 +5274,7 @@ namespace ACE.Server.Tests
 
             Assert.AreEqual(1, vendor.LastRebuildTotal, "the store finishing its load (with no version bump) must still be picked up on the next approach, not cached against the first cold build's empty result");
             Assert.AreEqual(1, vendor.LastRebuildShown, "the seeded item must now be shown - it matches the filter and the store is loaded");
-            Assert.IsTrue(vendor.TryGetItemForSale(item.Guid, out _));
+            Assert.IsTrue(vendor.TryGetItemForSale(RowGuid(vendor, item), out _));
         }
 
         #endregion
@@ -5530,6 +5548,415 @@ namespace ACE.Server.Tests
             Assert.IsFalse(PersonalVendor.IsPartialSalvageCandidate(FakeVaultWorld.MakeSalvageBag(CombineIronWcid, 100, 60, 10, 100)), "a full bag is not partial");
             Assert.IsFalse(PersonalVendor.IsPartialSalvageCandidate(FakeVaultWorld.MakeStack(8000, 1, 100)), "not TinkeringMaterial");
             Assert.IsFalse(PersonalVendor.IsPartialSalvageCandidate(null));
+        }
+
+        #endregion
+
+        #region Display aliases (fix/mule-alias-guids)
+
+        // A stored item withdrawn from the mule panel could not be added to VTank until relog: the panel
+        // listed it under its REAL guid inside a vendor blob, and a client plugin's first record of that
+        // guid was then never replaced by the CreateObject at withdraw. Every stored-item row is now
+        // listed, bought and appraised under a display alias the STORE keeps (so it survives a
+        // re-summon), and mule display guids are never recycled.
+
+        /// <summary>A vault holding two directly-listed stored items (Misc, so neither needs a proxy).</summary>
+        private static (PersonalVendor vendor, AccountVaultStore store, FakeVaultBackend backend, FakeVaultWorld world, WorldObject first, WorldObject second) MakeTwoStoredItemScenario(Action<FakeVaultBackend> beforeLoad = null)
+        {
+            var vendor = MakeVendor();
+            var store = MakeStore(out var backend, out var world);
+            vendor.Store = store;
+
+            var (container, first) = SeedStoredItem(backend, world, wcid: 8100);
+
+            var second = FakeVaultWorld.MakeStack(8101, 1, 100);
+            Assert.IsTrue(container.TryAddToInventory(second), "could not seed the second vault item");
+
+            // The store loads on the first rebuild and does not re-read the backend after that.
+            beforeLoad?.Invoke(backend);
+
+            vendor.RebuildView();
+
+            return (vendor, store, backend, world, first, second);
+        }
+
+        /// <summary>
+        /// The approach message's item rows exactly as production writes them (the extracted
+        /// GameEventApproachVendor.WriteItemRows), decoded back into the guid each row was written under.
+        /// Each row is a packed stack-size uint followed by the object's PublicWeenieDesc, whose first
+        /// field is the guid; a row's length is measured by serializing that object alone under its own
+        /// guid (a swapped guid is the same width), and the lengths must account for every byte written.
+        /// </summary>
+        private static List<uint> WrittenRowGuids(Vendor vendor)
+        {
+            // Names go out as Windows-1252 (Extensions.WriteString16L), which .NET only knows once the
+            // code-pages provider is registered; idempotent, and otherwise order-dependent on whichever
+            // earlier test happened to register it.
+            System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+
+            var rows = new List<WorldObject>();
+            vendor.ForEachItemFor(null, rows.Add);
+
+            byte[] bytes;
+
+            using (var stream = new MemoryStream())
+            using (var writer = new BinaryWriter(stream))
+            {
+                ACE.Server.Network.GameEvent.Events.GameEventApproachVendor.WriteItemRows(writer, vendor, null);
+                writer.Flush();
+                bytes = stream.ToArray();
+            }
+
+            var guids = new List<uint>();
+            var offset = 0;
+
+            foreach (var row in rows)
+            {
+                guids.Add(BitConverter.ToUInt32(bytes, offset + 4));
+
+                using (var one = new MemoryStream())
+                using (var oneWriter = new BinaryWriter(one))
+                {
+                    row.SerializeGameDataOnly(oneWriter);
+                    oneWriter.Flush();
+                    offset += 4 + (int)one.Length;
+                }
+            }
+
+            Assert.AreEqual(bytes.Length, offset, "the decoded row lengths must account for every byte WriteItemRows wrote, or the guids read above are not row guids");
+
+            return guids;
+        }
+
+        [TestMethod]
+        public void DisplayAlias_NoStoreItemsKeyIsAStoredGuid_AndTheAliasResolvesTheItem()
+        {
+            var (vendor, _, _, _, first, second) = MakeTwoStoredItemScenario();
+
+            var realGuids = new HashSet<ObjectGuid> { first.Guid, second.Guid };
+
+            Assert.AreEqual(2, vendor.StoreItemKeys.Count, "sanity: both stored items must be listed directly");
+
+            foreach (var key in vendor.StoreItemKeys)
+                Assert.IsFalse(realGuids.Contains(key), $"storeItems key 0x{key.Full:X8} is a stored biota's real guid - the client would see it");
+
+            foreach (var stored in new[] { first, second })
+            {
+                var alias = vendor.DisplayGuidOf(stored);
+
+                Assert.IsTrue(alias.HasValue, "every directly-listed stored item has an alias");
+                Assert.AreNotEqual(stored.Guid, alias.Value);
+                Assert.IsTrue(vendor.TryGetItemForSale(alias.Value, out var found), "the alias must resolve");
+                Assert.AreSame(stored, found, "and resolve to that very stored item");
+                Assert.IsFalse(vendor.TryGetItemForSale(stored.Guid, out _), "the real guid must resolve to nothing - the client was never told it");
+            }
+        }
+
+        /// <summary>
+        /// A null player hands every withdrawn item straight back to the vault (TryWithdrawTransaction's
+        /// delivery else-branch), and handing back saves the item through the world seam - so the fake
+        /// world's Saved list names exactly which stored item the alias withdrew.
+        /// </summary>
+        [TestMethod]
+        public void DisplayAlias_AWithdrawRequestCarryingTheAlias_WithdrawsThatItem()
+        {
+            var (vendor, _, _, world, first, second) = MakeTwoStoredItemScenario();
+
+            var alias = vendor.DisplayGuidOf(first).Value;
+
+            world.Saved.Clear();
+
+            Assert.IsTrue(vendor.TryWithdrawTransaction(new List<ItemProfile> { new ItemProfile(1, alias.Full) }, Owner, null),
+                "a withdraw naming the alias must be accepted");
+
+            CollectionAssert.Contains(world.Saved, first, "the aliased item must be the one that left the vault (and, with no player, came back)");
+            CollectionAssert.DoesNotContain(world.Saved, second, "and nothing else may have moved");
+
+            Assert.IsFalse(vendor.TryWithdrawTransaction(new List<ItemProfile> { new ItemProfile(1, first.Guid.Full) }, Owner, null),
+                "the real guid is not a row the client was ever shown, so it must be refused");
+        }
+
+        [TestMethod]
+        public void DisplayAlias_IsStableAcrossRebuilds_AWithdraw_AndAResummon()
+        {
+            var (vendor, store, _, _, first, second) = MakeTwoStoredItemScenario();
+
+            var firstAlias = vendor.DisplayGuidOf(first).Value;
+            var secondAlias = vendor.DisplayGuidOf(second).Value;
+
+            // No-change rebuild. SetSearchFilter(null) defeats the cheap exit, so this one really rebuilds.
+            vendor.SetSearchFilter(null);
+            vendor.RebuildView();
+
+            Assert.AreEqual(firstAlias, vendor.DisplayGuidOf(first));
+            Assert.AreEqual(secondAlias, vendor.DisplayGuidOf(second));
+
+            // One row withdrawn for good (through the store, so it really leaves): the other keeps its alias.
+            WithdrawOnQueue(store, VaultEntry.ForItem(first), 1);
+            vendor.RebuildView();
+
+            Assert.IsNull(vendor.DisplayGuidOf(first), "the withdrawn item is no longer listed");
+            Assert.AreEqual(secondAlias, vendor.DisplayGuidOf(second), "the untouched row keeps its alias across a one-row-withdraw rebuild");
+            Assert.AreEqual(1, store.DisplayAliasCount, "the withdrawn item's alias is dropped, so the store's map stays bounded by the vault");
+
+            // Re-summon: a brand new window bound to the same store.
+            var resummoned = MakeVendor();
+            resummoned.Store = store;
+            resummoned.RebuildView();
+
+            Assert.AreEqual(secondAlias, resummoned.DisplayGuidOf(second), "the alias belongs to the store, so a re-summoned mule lists the item under the same guid");
+        }
+
+        /// <summary>
+        /// The whole bug, end to end on the wire: no row the approach message writes for a mule carries a
+        /// stored biota's real guid, including after a withdrawal. Mutation-proved by deleting
+        /// PersonalVendor.GetWireGuid (rows then go out under the real guids and this fails).
+        /// </summary>
+        [TestMethod]
+        public void DisplayAlias_TheApproachRowsNeverCarryAStoredGuid_BeforeOrAfterAWithdraw()
+        {
+            EnsureGuidManagerConstructible();
+            SeedWorldStackableWeenie(7811, 100);
+
+            var (vendor, store, _, _, first, second) = MakeTwoStoredItemScenario(backend => SeedLedger(backend, 7811, 4));
+
+            var realGuids = new HashSet<uint> { first.Guid.Full, second.Guid.Full };
+
+            var before = WrittenRowGuids(vendor);
+
+            Assert.AreEqual(3, before.Count, "sanity: two stored rows and one ledger row");
+            Assert.IsFalse(before.Any(realGuids.Contains), "a mule row was written under a stored item's real guid");
+            CollectionAssert.Contains(before, vendor.DisplayGuidOf(first).Value.Full, "the stored row goes out under its alias");
+
+            var ledgerDisplay = vendor.DefaultItemsForSale.Values.Single(d => d.WeenieClassId == 7811);
+            CollectionAssert.Contains(before, ledgerDisplay.Guid.Full, "a ledger display is a disposable object and goes out under its own guid, as before");
+
+            // The delivered item's real guid must not appear in the panel after the withdraw either.
+            var delivered = WithdrawOnQueue(store, VaultEntry.ForItem(first), 1).Single();
+            vendor.RebuildView();
+
+            var after = WrittenRowGuids(vendor);
+
+            Assert.AreEqual(2, after.Count, "sanity: the withdrawn row is gone");
+            CollectionAssert.DoesNotContain(after, delivered.Guid.Full, "the delivered item's guid must never have been a panel row");
+            Assert.IsFalse(after.Any(realGuids.Contains));
+        }
+
+        /// <summary>
+        /// The seam must be invisible to every other vendor: an ordinary vendor's rows are byte-for-byte
+        /// what the pre-alias loop wrote (a golden replica of that loop, inlined here from origin/master's
+        /// GameEventApproachVendor).
+        /// </summary>
+        [TestMethod]
+        public void WriteItemRows_ForAnOrdinaryVendor_IsByteIdenticalToThePreAliasLoop()
+        {
+            EnsureVendorConstructible();
+            System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+
+            var vendor = new Vendor(MakeVendorWeenie(false), new ObjectGuid(NextGuid()));
+            vendor.AddDefaultItem(FakeVaultWorld.MakeStack(8102, 5, 100));
+            vendor.AddDefaultItem(FakeVaultWorld.MakeStack(8103, 1, 100));
+
+            byte[] Write(Action<BinaryWriter> body)
+            {
+                using (var stream = new MemoryStream())
+                using (var writer = new BinaryWriter(stream))
+                {
+                    body(writer);
+                    writer.Flush();
+                    return stream.ToArray();
+                }
+            }
+
+            var golden = Write(writer => vendor.ForEachItemFor(null, obj =>
+            {
+                int stackSize = obj.VendorShopCreateListStackSize ?? obj.StackSize ?? 1;
+                writer.Write(stackSize & 0xFFFFFF | -1 << 24);
+                obj.SerializeGameDataOnly(writer);
+            }));
+
+            var actual = Write(writer => ACE.Server.Network.GameEvent.Events.GameEventApproachVendor.WriteItemRows(writer, vendor, null));
+
+            Assert.IsTrue(golden.Length > 0, "sanity: the vendor wrote rows");
+            CollectionAssert.AreEqual(golden, actual);
+        }
+
+        /// <summary>
+        /// The appraisal is answered under the guid the client asked about: for a mule row that is the
+        /// alias, never the stored item's real guid; for anything else the two are the same guid.
+        /// Mutation-proved by making Player.AppraisalAnswerGuid return obj.Guid.Full.
+        /// </summary>
+        [TestMethod]
+        public void DisplayAlias_AnAppraisalIsAnsweredUnderTheRequestedGuid()
+        {
+            var (vendor, _, _, _, first, _) = MakeTwoStoredItemScenario();
+
+            var alias = vendor.DisplayGuidOf(first).Value;
+
+            // What HandleActionIdentifyObject's FindObject resolves through the vendor arm.
+            Assert.IsTrue(vendor.TryGetItemForSale(alias, out var resolved));
+
+            Assert.AreEqual(alias.Full, Player.AppraisalAnswerGuid(alias.Full, resolved), "a mule row's appraisal must be filed under the alias the client asked about");
+            Assert.AreNotEqual(first.Guid.Full, Player.AppraisalAnswerGuid(alias.Full, resolved), "and must not leak the stored item's real guid");
+
+            var plain = FakeVaultWorld.MakeStack(8104, 1, 100);
+            Assert.AreEqual(plain.Guid.Full, Player.AppraisalAnswerGuid(plain.Guid.Full, plain), "any other object answers under its own guid, as before");
+        }
+
+        /// <summary>
+        /// Code review F3: the window's RebuildView is not the only way an item leaves a vault - the
+        /// market, a suit transfer and a pack delivery withdraw through the store with no window
+        /// rebuilding afterwards. The alias must go at the store's own removal point, or a later item
+        /// reusing that recycled guid would inherit it. Withdrawn here through the store directly, with
+        /// NO rebuild after it.
+        /// </summary>
+        [TestMethod]
+        public void DisplayAlias_IsDroppedWhenTheItemLeavesThroughANonWindowPath()
+        {
+            var (_, store, _, _, first, second) = MakeTwoStoredItemScenario();
+
+            Assert.IsTrue(store.HasDisplayAlias(first.Guid), "sanity: the rebuild aliased the item");
+
+            WithdrawOnQueue(store, VaultEntry.ForItem(first), 1);
+
+            Assert.IsFalse(store.HasDisplayAlias(first.Guid), "the alias must be dropped where the item left the vault, not at some later rebuild");
+            Assert.IsTrue(store.HasDisplayAlias(second.Guid), "and only that item's");
+        }
+
+        /// <summary>
+        /// Code review F1, the wire half: what the appraisal response actually writes first is the answer
+        /// guid. Mutation-proved by making WriteBody write obj.Guid.Full.
+        /// </summary>
+        [TestMethod]
+        public void IdentifyObjectResponse_IsFiledUnderTheAnswerGuid()
+        {
+            var (vendor, _, _, _, first, _) = MakeTwoStoredItemScenario();
+
+            var alias = vendor.DisplayGuidOf(first).Value;
+
+            uint FirstUintWritten(uint? answerGuid)
+            {
+                using (var stream = new MemoryStream())
+                using (var writer = new BinaryWriter(stream))
+                {
+                    ACE.Server.Network.GameEvent.Events.GameEventIdentifyObjectResponse.WriteBody(writer, first, new ACE.Server.Network.Structure.AppraiseInfo(), answerGuid);
+                    writer.Flush();
+                    return BitConverter.ToUInt32(stream.ToArray(), 0);
+                }
+            }
+
+            Assert.AreEqual(alias.Full, FirstUintWritten(alias.Full), "an alias row's appraisal goes out under the alias");
+            Assert.AreEqual(first.Guid.Full, FirstUintWritten(null), "with no answer guid it is the object's own, as before");
+        }
+
+        /// <summary>The body of the method whose declaration starts with <paramref name="signature"/>, comments stripped.</summary>
+        private static string SourceMethodBody(string relativePath, string signature)
+        {
+            var path = FindInSourceTree(relativePath);
+            Assert.IsNotNull(path, $"Could not find {relativePath} by walking up from {AppContext.BaseDirectory}.");
+
+            var source = AccountVaultPurgeTests.StripComments(File.ReadAllText(path));
+
+            var at = source.IndexOf(signature, StringComparison.Ordinal);
+            Assert.IsTrue(at >= 0, $"{signature} not found in {relativePath}");
+
+            var open = source.IndexOf('{', at);
+            var depth = 0;
+
+            for (var i = open; i < source.Length; i++)
+            {
+                if (source[i] == '{') depth++;
+                else if (source[i] == '}' && --depth == 0)
+                    return source.Substring(open, i - open + 1);
+            }
+
+            Assert.Fail($"unbalanced braces after {signature}");
+            return null;
+        }
+
+        private static int Occurrences(string haystack, string needle) => Regex.Matches(haystack, Regex.Escape(needle)).Count;
+
+        /// <summary>
+        /// Code review F1, the wiring half. THIS IS A SOURCE SCAN AND IT PROVES PLACEMENT, NOT BEHAVIOUR:
+        /// no test here can construct a live Player, so the appraisal call sites are pinned by their exact
+        /// statements. Every response HandleActionIdentifyObject and Examine send carries the answer guid,
+        /// CurrentAppraisalTarget records it, and the constructor hands it to WriteBody. Mutation-proved by
+        /// reverting each site to the object's own guid, one at a time.
+        /// </summary>
+        [TestMethod]
+        public void AppraisalCallSites_AnswerAndTrackUnderTheRequestedGuid()
+        {
+            const string playerPath = "Source/ACE.Server/WorldObjects/Player.cs";
+
+            var identify = SourceMethodBody(playerPath, "public void HandleActionIdentifyObject(uint objectGuid)");
+
+            Assert.AreEqual(1, Occurrences(identify, "var answerGuid = AppraisalAnswerGuid(objectGuid, wo);"), "the answer guid is derived from the requested guid");
+            Assert.AreEqual(1, Occurrences(identify, "new GameEventIdentifyObjectResponse(Session, wo, true, answerGuid)"), "continued-success response");
+            Assert.AreEqual(1, Occurrences(identify, "new GameEventIdentifyObjectResponse(Session, wo, false, answerGuid)"), "rate-limited response");
+            Assert.AreEqual(2, Occurrences(identify, "new GameEventIdentifyObjectResponse(Session, wo,"), "no other response to a found object may be sent from here");
+            Assert.AreEqual(1, Occurrences(identify, "Examine(wo, answerGuid);"), "the fresh appraisal is examined under the answer guid");
+
+            var examine = SourceMethodBody(playerPath, "public void Examine(WorldObject obj, uint answerGuid)");
+
+            Assert.AreEqual(1, Occurrences(examine, "CurrentAppraisalTarget = answerGuid;"), "the appraisal target records the answer guid");
+            Assert.AreEqual(1, Occurrences(examine, "new GameEventIdentifyObjectResponse(Session, obj, success, answerGuid)"), "the examine response carries it");
+            Assert.AreEqual(0, Occurrences(examine, "obj.Guid.Full"), "nothing in Examine may fall back to the object's own guid");
+
+            var response = SourceMethodBody("Source/ACE.Server/Network/GameEvent/Events/GameEventIdentifyObjectResponse.cs",
+                "public GameEventIdentifyObjectResponse(Session session, WorldObject obj, bool success, uint? answerGuid = null)");
+
+            Assert.AreEqual(1, Occurrences(response, "WriteBody(Writer, obj, appraiseInfo, answerGuid);"), "the constructor writes the answer guid through WriteBody");
+        }
+
+        /// <summary>
+        /// A mule display object destroyed by RebuildView retires its dynamic guid instead of queuing it
+        /// for reissue. The test allocator normally hands out guids below ObjectGuid.DynamicMin (so
+        /// Destroy would never recycle them and the check would pass vacuously), so it is pointed into the
+        /// dynamic range for this test, with a positive control proving an ordinary dynamic-guid object
+        /// IS queued. Restored in finally.
+        /// </summary>
+        [TestMethod]
+        public void MuleDisplayGuids_AreNeverRecycled()
+        {
+            EnsureGuidManagerConstructible();
+            SeedWorldStackableWeenie(7812, 100);
+
+            var allocField = typeof(GuidManager).GetField("dynamicAlloc", BindingFlags.NonPublic | BindingFlags.Static);
+            var allocator = allocField.GetValue(null);
+            var currentField = allocator.GetType().GetField("current", BindingFlags.NonPublic | BindingFlags.Instance);
+            var savedCurrent = currentField.GetValue(allocator);
+
+            try
+            {
+                currentField.SetValue(allocator, 0xF7000000u);
+
+                // Positive control: an ordinary object with a dynamic guid IS queued on destroy.
+                var ordinary = WorldObjectFactory.CreateNewWorldObject(7812);
+                Assert.IsTrue(ordinary.Guid.IsDynamic(), "sanity: the control must have a dynamic guid");
+                ordinary.Destroy();
+                Assert.IsTrue(GuidManager.IsDynamicGuidQueuedForRecycle(ordinary.Guid), "control: an ordinary destroyed dynamic guid is queued for recycle");
+
+                var vendor = MakeVendor();
+                var store = MakeStore(out var backend, out _);
+                vendor.Store = store;
+
+                SeedLedger(backend, 7812, 3);
+                vendor.RebuildView();
+
+                var oldDisplay = vendor.DefaultItemsForSale.Values.Single(d => d.WeenieClassId == 7812);
+                Assert.IsTrue(oldDisplay.Guid.IsDynamic(), "sanity: the display must have a dynamic guid");
+
+                // A changed count replaces the row, so the old display object is destroyed by the rebuild.
+                WithdrawOnQueue(store, VaultEntry.ForLedger(7812, 1), 1);
+                vendor.RebuildView();
+
+                Assert.IsTrue(oldDisplay.IsDestroyed, "sanity: the rebuild must have destroyed the replaced display");
+                Assert.IsFalse(GuidManager.IsDynamicGuidQueuedForRecycle(oldDisplay.Guid), "a mule display guid reached a client in a vendor blob and must never be reissued");
+            }
+            finally
+            {
+                currentField.SetValue(allocator, savedCurrent);
+            }
         }
 
         #endregion

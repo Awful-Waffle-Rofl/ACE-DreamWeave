@@ -144,7 +144,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void PinningShot_Description_StatesTheVolleyRuleAndTheNewImmunity()
         {
-            var d = new PinningShotAbility().Definition.Description;
+            var d = ClassAbilityText.Describe(new PinningShotAbility().Definition, ClassAbilityText.Defaults);
 
             StringAssert.Contains(d, "rolls once");
             StringAssert.Contains(d, "8 seconds");
@@ -160,7 +160,9 @@ namespace ACE.Server.Tests
 
             Assert.AreEqual(0.02, perRank, 1e-9);
             Assert.AreEqual(0.10, HuntersMarkAbility.MarkPercent(5, perRank, 1.0), 1e-9);
-            StringAssert.Contains(new HuntersMarkAbility().Definition.Description, "2/4/6/8/10%");
+            var hunters = new HuntersMarkAbility().Definition;
+            Assert.AreEqual("+2% damage taken", ClassAbilityText.RankTail(hunters, 1, ClassAbilityText.Defaults));
+            Assert.AreEqual("+10% damage taken", ClassAbilityText.RankTail(hunters, 5, ClassAbilityText.Defaults));
         }
 
         // ---- Double Volley --------------------------------------------------------------------------------
@@ -177,7 +179,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0.0, readout.Affinity, 1e-6, "neutral multiplier 1.0 adds nothing");
             Assert.AreEqual(0.0, readout.Gear, 1e-6);
             Assert.AreEqual(20.0, readout.Effective, 1e-6);
-            StringAssert.Contains(ability.Definition.Description, "10/20/30%");
+            Assert.AreEqual("20% chance", ClassAbilityText.RankTail(ability.Definition, 2, ClassAbilityText.Defaults));
         }
 
         [TestMethod]
@@ -194,7 +196,7 @@ namespace ACE.Server.Tests
         public void LongDraw_DeclaresMissileWeaponsAffinity()
         {
             Assert.AreEqual(Skill.MissileWeapons, new LongDrawAbility().Definition.AffinitySkill);
-            StringAssert.Contains(new LongDrawAbility().Definition.Description, "Missile Weapons");
+            Assert.AreEqual("Affinity: Missile Weapons", ClassAbilityText.AffinityLine(new LongDrawAbility().Definition));
         }
 
         [TestMethod]

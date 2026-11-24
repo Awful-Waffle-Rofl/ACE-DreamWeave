@@ -12,8 +12,8 @@ namespace ACE.Server.ThreadDungeons
     ///
     /// Format v2 (TECH-DESIGN 4.1 plus phase 2 attunement):
     ///   v2|dg=&lt;id|any&gt;|lvl=&lt;1..500&gt;|tier=&lt;1..8&gt;|fam=&lt;species id|any&gt;|seed=&lt;int&gt;|mods=&lt;id:mag,...&gt;|press=&lt;n&gt;|lock=&lt;id,...&gt;|load=&lt;wcid:doses,...&gt;[|guide=&lt;rung:serial:owner&gt;][|run=&lt;uint&gt;|owner=&lt;uint&gt;]
-    /// lvl= is bounded by the RUN ceiling (<see cref="MaxRunLevel"/>, 500), not the gem ceiling
-    /// (<see cref="MaxGemLevel"/>, 375): only the press can lift a spec above 375 (split 2026-10-08).
+    /// lvl= is bounded by the RUN ceiling (<see cref="MaxRunLevel"/>, 500), which equals the gem ceiling
+    /// (<see cref="MaxGemLevel"/>, 500) since the 2026-11-16 raise; the two were split from 2026-10-08 until then.
     /// run/owner are present only once the first use has bound the gem to a live run (Q10). guide= is
     /// present only on a Thread-Guide item (see the guide= note below).
     ///
@@ -55,31 +55,38 @@ namespace ACE.Server.ThreadDungeons
         public const string Any = "any";
         /// <summary>
         /// The GEM level ceiling: the highest level anything can ROLL or ISSUE. Raised 275 -> 375 by owner
-        /// ruling on 2026-09-09, together with the four new Raw Fragment rungs at 300/325/350/375. Read by the
-        /// gem roller, by the survey level ring, and as the DEFAULT of the survey reward's reference level - the
-        /// reference level is a separate tunable (dynamic_dungeons_survey_reference_level) precisely so the
-        /// payout curve can be pinned below the ceiling if a raise ever needs to land without repricing the
-        /// survey. DungeonGemFactory's rung table and ThreadGuideLadder top out at the same 375 on their own.
+        /// ruling on 2026-09-09 (rungs 300/325/350/375), then 375 -> 500 by owner ruling on 2026-11-16 (Raw
+        /// Fragment rungs 400/450/500, Thread-Guide rungs 400..500 in steps of 25). Read by the gem roller and
+        /// by the survey level ring. It is NOT the survey reward's reference level: that is
+        /// <see cref="SurveyReferenceLevelDefault"/>, which stayed at 375 when this ceiling rose (the payout
+        /// ratio clamps to 1.0, so rings above 375 simply pay the full rate). DungeonGemFactory's rung table
+        /// and ThreadGuideLadder top out at the same 500 on their own.
         ///
-        /// SPLIT FROM THE RUN CEILING on 2026-10-08 (owner ruling, final): the gem ceiling stays 375 - no new
-        /// Raw Fragment rungs, no roller, Thread-Guide or survey change - while the level a RUN plays at may go
-        /// higher (<see cref="MaxRunLevel"/>). The rename from MaxLevel was deliberate: it turned every reader
-        /// of the old single constant into a compile error, so each one had to choose a side.
+        /// History: the 2026-10-08 ruling split this ceiling (then 375) from the run ceiling (500); the
+        /// 2026-11-16 raise closed that gap, so the two now coincide. The two constants stay separate on
+        /// purpose: the rename from MaxLevel turned every reader of the old single constant into a compile
+        /// error, so each one had to choose a side, and a future split stays cheap.
         /// </summary>
-        public const int MaxGemLevel = 375;
+        public const int MaxGemLevel = 500;
+
+        /// <summary>
+        /// The default of the survey reward's reference level (dynamic_dungeons_survey_reference_level, and
+        /// the denominator of the luminance ratio avgGemLevel / reference). A LITERAL, not MaxGemLevel: owner
+        /// ruling 2026-11-16 kept it at 375 when the gem ceiling rose to 500, so the survey payout was not
+        /// repriced. The ratio clamps to 1.0 (SurveyRewardMath), so rings above 375 pay the full rate.
+        /// </summary>
+        public const int SurveyReferenceLevelDefault = 375;
 
         /// <summary>
         /// The RUN level ceiling: the highest spec.Level the codec accepts and the Fragment Press can produce
-        /// (owner ruling 2026-10-08). A 375 fragment plus a Mana Scarab (+35, Content/dungeons/dynamic/
-        /// attunement.json, limit 1 per fragment) presses to a 410 run, and the press refuses a fragment that
-        /// has already been pressed (FragmentPressStation.Press, the Seed != 0 check), so 410 is the highest
-        /// level a player can reach with the shipped components. 500 is the headroom above that: the codec,
-        /// the press clamps, every dungeon's index.json maxLevel and the health curve's top level all sit at
-        /// it, so an admin-issued or a future-component gem up to 500 opens a correctly-priced run rather than
-        /// an unreadable item.
+        /// (owner ruling 2026-10-08). A 500 fragment plus a Mana Scarab (+35, Content/dungeons/dynamic/
+        /// attunement.json, limit 1 per fragment) clamps back to 500 (the entries still count), and the press
+        /// refuses a fragment that has already been pressed (FragmentPressStation.Press, the Seed != 0 check).
+        /// The codec, the press clamps, every dungeon's index.json maxLevel and the health curve's top level
+        /// all sit at 500, so an admin-issued or a future-component gem up to 500 opens a correctly-priced run.
         ///
-        /// NOT a gem ceiling. Nothing ROLLS above <see cref="MaxGemLevel"/>; this is only how high an
-        /// already-rolled gem may be pushed and still play.
+        /// Equal to <see cref="MaxGemLevel"/> since 2026-11-16; kept as its own constant so the two can split
+        /// again without a rename.
         /// </summary>
         public const int MaxRunLevel = 500;
         public const int MaxTier = 8;

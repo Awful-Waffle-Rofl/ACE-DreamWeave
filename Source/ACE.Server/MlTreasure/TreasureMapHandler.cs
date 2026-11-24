@@ -353,13 +353,29 @@ namespace ACE.Server.MlTreasure
             var forcedType = MlDigsite.MlDigsiteRules.DecodeForcedType(wo.GetProperty(PropertyInt.TreasureMapForcedDigsiteType) ?? 0);
             var forcedMechanicSetId = (long)(wo.GetProperty(PropertyInt.TreasureMapForcedMechanicSet) ?? 0);
 
+            // Zone isolation (owner-approved design): the encounter's zone is the map's own stamped zone
+            // (PropertyInt 9076) when it has one, else the zone of the site it was just dug at (a legacy map
+            // dropped before this property existed) - read here, before the commit below consumes the map.
+            var mapZone = wo.GetProperty(PropertyInt.TreasureMapZone);
+            var zone = mapZone != null
+                ? (MlTreasureZone)mapZone.Value
+                : MlTreasureSiteStore.Instance.ZoneAt(new Vector2(
+                    (float)(wo.GetProperty(PropertyFloat.TreasureMapEastWest) ?? 0.0),
+                    (float)(wo.GetProperty(PropertyFloat.TreasureMapNorthSouth) ?? 0.0)));
+
             // A roll of 0 pays NOTHING and says nothing: no currency object is created (SetStackSize(0) would
             // hand the pack a zero-size stack), no "You unearth 0 treasure coins!" line, and no "pack is too
             // full" refusal for a payout that does not exist. The map is still consumed and the digsite
-            // encounter still opens below, exactly as on a paying dig.
+            // encounter still opens, exactly as on a paying dig.
+            //
+            // The currency object is built HERE, before TryStart, so the factory call stays outside
+            // MlDigsiteManager's admission lock; only the pack checks and the moves run inside the commit.
+            WorldObject currency = null;
+            var currencyDelivered = false;
+
             if (PaysCurrency(count))
             {
-                var currency = WorldObjectFactory.CreateNewWorldObject(TreasureCurrencyWcid);
+                currency = WorldObjectFactory.CreateNewWorldObject(TreasureCurrencyWcid);
 
                 if (currency == null)
                 {
@@ -368,66 +384,137 @@ namespace ACE.Server.MlTreasure
                 }
 
                 currency.SetStackSize(count);
+            }
 
-                if (!player.TryCreateInInventoryWithNetworking(currency))
+            // The map consumption and the payout, as one commit step. It is NOT run here: it is handed to
+            // MlDigsiteManager.TryStart, which runs it inside the admission lock once admission is decided and
+            // before anything registers. False means the dig was declined (nothing paid, map kept) and no
+            // encounter may open.
+            //
+            // The map is consumed BEFORE the currency is paid (code review 2026-11-16): a consume that fails
+            // declines the whole dig, so no encounter registers and nothing is paid for a map that is still
+            // in the pack. The pack-room check runs first of all, so a full pack still keeps the map exactly
+            // as it did when the payout came first.
+            bool PayAndConsume()
+            {
+                if (currency != null && !player.CanAddToInventory(currency))
                 {
-                    currency.Destroy();
-
                     player.Session.Network.EnqueueSend(new GameMessageSystemChat(
                         "Your pack is too full to hold the treasure. Make room and dig again.", ChatMessageType.Broadcast));
 
-                    return;
+                    return false;
                 }
 
-                player.Session.Network.EnqueueSend(new GameMessageSystemChat(
-                    $"You unearth {count} treasure coins!", ChatMessageType.Broadcast));
+                // Tally of the Unburied (MlRelariaChargeTrophy): every successfully consumed map adds a
+                // charge, digger only. Wrapped so a charge-side failure never costs the player their
+                // already-consumed map. `consumed` is tracked so a throw BEFORE the consume succeeded
+                // declines the dig instead of falling through to a payout for a map still in the pack.
+                var consumed = false;
+
+                try
+                {
+                    consumed = player.TryConsumeFromInventoryWithNetworking(wo, 1);
+
+                    if (consumed)
+                        MlRelariaChargeTrophy.TryAddMapCharge(player);
+                    else
+                    {
+                        log.Warn($"[ML_TREASURE] {player.Name} finished digging map 0x{wo.Guid.Full:X8} but it could not be consumed; nothing paid, no encounter opened");
+
+                        player.Session.Network.EnqueueSend(new GameMessageSystemChat(
+                            MapGoneLine, ChatMessageType.Broadcast));
+
+                        return false;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[ML_TREASURE] {player.Name}'s map 0x{wo.Guid.Full:X8} consume or Tally of the Unburied charge threw (consumed={consumed})", ex);
+
+                    if (!consumed)
+                        return false;
+                }
+
+                if (currency != null)
+                {
+                    // The room was checked above and the consumed map has just freed a slot, so this is not
+                    // expected to fail. If it does, the map is already gone: the encounter (the map's real
+                    // value since the round 17 0 / 0 payout) still opens rather than losing both.
+                    if (player.TryCreateInInventoryWithNetworking(currency))
+                    {
+                        currencyDelivered = true;
+
+                        player.Session.Network.EnqueueSend(new GameMessageSystemChat(
+                            $"You unearth {count} treasure coins!", ChatMessageType.Broadcast));
+                    }
+                    else
+                    {
+                        log.Error($"[ML_TREASURE] {player.Name}'s {count} treasure coins could not be added after map 0x{wo.Guid.Full:X8} was consumed");
+
+                        player.Session.Network.EnqueueSend(new GameMessageSystemChat(
+                            PayoutLostLine, ChatMessageType.Broadcast));
+                    }
+                }
+
+                return true;
             }
 
-            // Tally of the Unburied (MlRelariaChargeTrophy): every successfully consumed map adds a
-            // charge, digger only. Wrapped so a charge-side failure never costs the player their
-            // already-paid-out, already-consumed map.
-            try
-            {
-                if (player.TryConsumeFromInventoryWithNetworking(wo, 1))
-                    MlRelariaChargeTrophy.TryAddMapCharge(player);
-            }
-            catch (Exception ex)
-            {
-                log.Error($"[ML_TREASURE] {player.Name}'s Tally of the Unburied charge failed after consuming map 0x{wo.Guid.Full:X8}", ex);
-            }
-
-            // ML digsite encounter. STRICTLY ADDITIVE and strictly LAST: the doubloon payout above still
-            // happens in full and the map has already been consumed, so a refused encounter - the digger
-            // already has one running, another is too close, the server-wide cap is full, or the whole
-            // feature is switched off - costs the player neither their map nor their coins. There is nothing
-            // to roll back, which is exactly why this sits at the end of the method rather than gating it.
+            // ML digsite encounter, with the payout-and-consume commit run inside its admission.
+            //
+            // Discord bug report "Wave map seems to have gotten eaten" (2026-11-16): this used to pay and
+            // consume FIRST and only then ask TryStart, so a map dug within ml_digsite_separation_metres of
+            // another player's live encounter was eaten, opened nothing, and said nothing. That one refusal
+            // now keeps the map (MlDigsiteRules.KeepsMapOnRefusal) and tells the digger why; dig progress
+            // stays at the last step, so one more dig step retries once that encounter has ended. Every other
+            // refusal - the digger already has one running, the server-wide cap is full, the feature is
+            // switched off - still pays and consumes exactly as before.
             //
             // The Relaria boss-variant arm above never reaches here and is deliberately untouched: it
             // returns on its own path, and its rarity is tuned by ml_treasure_relaria_chance alone.
             //
-            // The refusal reason is reported to the digger ONLY for a /testtreasuremap map
-            // (isAdminTest): an ordinary dig stays silent on a refusal, exactly as before, because every
-            // refusal here is already free (the payout and the map consumption above are unaffected) and a
-            // routine "the cap is full" line on every normal dig would be noise. A tester who forced a
-            // specific type needs to know when admission itself - not the type roll - is what refused it.
-            //
-            // Zone isolation (owner-approved design): the encounter's zone is the map's own stamped zone
-            // (PropertyInt 9076) when it has one, else the zone of the site it was just dug at (a legacy map
-            // dropped before this property existed) - read here, BEFORE the map's coordinates could matter
-            // to anything else, since TryConsumeFromInventoryWithNetworking above has already consumed it.
-            var mapZone = wo.GetProperty(PropertyInt.TreasureMapZone);
+            // Any other refusal reason is reported to the digger ONLY for a /testtreasuremap map
+            // (isAdminTest), as before: a routine "the cap is full" line on every normal dig would be noise.
+            MlDigsite.MlDigsiteStartOutcome outcome;
+            string startRefusal;
 
-            if (!MlDigsite.MlDigsiteManager.TryStart(player, forcedType, forcedMechanicSetId, out var startRefusal,
-                    mapZone != null
-                        ? (MlTreasureZone)mapZone.Value
-                        : MlTreasureSiteStore.Instance.ZoneAt(new Vector2(
-                            (float)(wo.GetProperty(PropertyFloat.TreasureMapEastWest) ?? 0.0),
-                            (float)(wo.GetProperty(PropertyFloat.TreasureMapNorthSouth) ?? 0.0))))
-                && isAdminTest && startRefusal != null)
+            try
+            {
+                outcome = MlDigsite.MlDigsiteManager.TryStart(player, forcedType, forcedMechanicSetId, zone, PayAndConsume, out startRefusal);
+            }
+            finally
+            {
+                // A pre-built payout the commit never delivered (a kept map, a declined dig, or a throw out of
+                // the commit or TryStart) is thrown away. In a finally so an exception cannot leak it.
+                if (currency != null && !currencyDelivered)
+                    currency.Destroy();
+            }
+
+            if (outcome == MlDigsite.MlDigsiteStartOutcome.RefusedMapKept)
+            {
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat(
+                    SeparationRefusalLine(MlDigsite.MlDigsiteTunables.SeparationMetres), ChatMessageType.Broadcast));
+
+                return;
+            }
+
+            if (outcome == MlDigsite.MlDigsiteStartOutcome.Refused && isAdminTest && startRefusal != null)
             {
                 player.Session.Network.EnqueueSend(new GameMessageSystemChat(
                     $"Test digsite encounter refused: {startRefusal}", ChatMessageType.Broadcast));
             }
         }
+
+        /// <summary>The digger's line when the map could not be consumed at the end of the dig; nothing is paid.</summary>
+        internal const string MapGoneLine = "The map is no longer in your pack, so the dig comes to nothing.";
+
+        /// <summary>The digger's line when the map was consumed but the coins could not be added; the encounter still opens.</summary>
+        internal const string PayoutLostLine = "Your pack could not take the coins. The dig goes on, but the payout is lost.";
+
+        /// <summary>
+        /// The digger's line when their map is refused for being dug too close to another live digsite
+        /// encounter. The map is kept, so the line says so and says what to do.
+        /// </summary>
+        internal static string SeparationRefusalLine(double separationMetres)
+            => $"Another dig is already under way within {separationMetres:0} metres of here, and the ground will not give up two at once. Your map is unharmed. Wait for that one to end, then dig here again.";
     }
 }

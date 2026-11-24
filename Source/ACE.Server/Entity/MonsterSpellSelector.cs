@@ -48,13 +48,59 @@ namespace ACE.Server.Entity
         public uint PowerLevel { get; }
         public double StartTime { get; }
 
-        public CarriedEnchantment(EnchantmentTypeFlags statModType, uint statModKey, float statModValue, uint powerLevel = 0, double startTime = 0.0)
+        /// <summary>
+        /// Whether the entry's spell is beneficial (EnchantmentManager.SelectDispel's IsBeneficial / IsHarmful split),
+        /// or null when the snapshot was not asked to resolve it. Only a dispel judgement reads this; an unresolved
+        /// entry never matches one.
+        /// </summary>
+        public bool? IsBeneficial { get; }
+
+        /// <summary>The entry's spell school (SelectDispel's dispel-school filter). Meaningful only when IsBeneficial is set.</summary>
+        public MagicSchool School { get; }
+
+        /// <summary>
+        /// FALSE for an entry a dispel from a creature can never remove: a permanent (Duration -1) item or vitae
+        /// entry, or a CreatureDispelExempt progression buff (SelectDispel's filters). TRUE by default.
+        /// </summary>
+        public bool Dispellable { get; }
+
+        public CarriedEnchantment(EnchantmentTypeFlags statModType, uint statModKey, float statModValue, uint powerLevel = 0, double startTime = 0.0,
+            bool? isBeneficial = null, MagicSchool school = MagicSchool.None, bool dispellable = true)
         {
             StatModType = statModType;
             StatModKey = statModKey;
             StatModValue = statModValue;
             PowerLevel = powerLevel;
             StartTime = startTime;
+            IsBeneficial = isBeneficial;
+            School = school;
+            Dispellable = dispellable;
+        }
+
+        /// <summary>
+        /// Whether a dispel of <paramref name="dispelSchool"/> (None = every school) aimed at the beneficial
+        /// (<paramref name="beneficial"/> true) or harmful half could remove this entry: the same school and
+        /// alignment tests as EnchantmentManager.SelectDispel, preceded by its power window (SelectDispel keeps only
+        /// entries whose PowerLevel lies between minPower and maxPower before it looks at school or alignment).
+        /// </summary>
+        public bool IsDispellableBy(bool beneficial, MagicSchool dispelSchool, int minPower = int.MinValue, int maxPower = int.MaxValue) =>
+            IsBeneficial.HasValue && IsBeneficial.Value == beneficial && Dispellable
+            && PowerLevel >= minPower && PowerLevel <= maxPower
+            && (dispelSchool == MagicSchool.None || School == dispelSchool);
+    }
+
+    /// <summary>What a dispel judgement needs to know about one registry entry's spell.</summary>
+    public readonly struct EnchantmentDispelFacts
+    {
+        public bool IsBeneficial { get; }
+        public MagicSchool School { get; }
+        public bool Dispellable { get; }
+
+        public EnchantmentDispelFacts(bool isBeneficial, MagicSchool school, bool dispellable)
+        {
+            IsBeneficial = isBeneficial;
+            School = school;
+            Dispellable = dispellable;
         }
     }
 
@@ -164,7 +210,16 @@ namespace ACE.Server.Entity
         /// StartTime is the newer entry). Cooldown entries are skipped; they share one synthetic category and
         /// carry no stat. Pure, so it is tested without a live Creature.
         /// </summary>
-        public static IReadOnlyDictionary<SpellCategory, CarriedEnchantment> BuildTopLayers(IEnumerable<PropertiesEnchantmentRegistry> entries)
+        public static IReadOnlyDictionary<SpellCategory, CarriedEnchantment> BuildTopLayers(IEnumerable<PropertiesEnchantmentRegistry> entries) =>
+            BuildTopLayers(entries, null);
+
+        /// <summary>
+        /// As above, and when <paramref name="dispelFacts"/> is given each layer also carries its spell's alignment,
+        /// school and dispellability (a caster pet's dispel judgement). The resolver is the only part that touches a
+        /// dat, so this stays pure; it returns null for a spell it cannot resolve (that layer then never matches a dispel).
+        /// </summary>
+        public static IReadOnlyDictionary<SpellCategory, CarriedEnchantment> BuildTopLayers(IEnumerable<PropertiesEnchantmentRegistry> entries,
+            Func<PropertiesEnchantmentRegistry, EnchantmentDispelFacts?> dispelFacts)
         {
             if (entries == null)
                 return null;
@@ -185,7 +240,12 @@ namespace ACE.Server.Entity
                     continue;
                 }
 
-                result[e.SpellCategory] = new CarriedEnchantment(e.StatModType, e.StatModKey, e.StatModValue, e.PowerLevel, e.StartTime);
+                var facts = dispelFacts?.Invoke(e);
+
+                result[e.SpellCategory] = facts.HasValue
+                    ? new CarriedEnchantment(e.StatModType, e.StatModKey, e.StatModValue, e.PowerLevel, e.StartTime,
+                        facts.Value.IsBeneficial, facts.Value.School, facts.Value.Dispellable)
+                    : new CarriedEnchantment(e.StatModType, e.StatModKey, e.StatModValue, e.PowerLevel, e.StartTime);
             }
 
             return result;

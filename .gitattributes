@@ -38,3 +38,6 @@ tools/loot-catalog/dreamweave-items.tsv text eol=lf
 
 # Generated and drift-compared by loot-catalog; byte-stable across platforms
 tools/loot-catalog/loot-palettes.json text eol=lf
+
+# Vendored Dereth.Network mod: LF on every platform so Windows working trees match upstream bytes
+third_party/dereth/** text eol=lf

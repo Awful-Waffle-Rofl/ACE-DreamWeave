@@ -510,18 +510,23 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         /// <summary>
-        /// A zero median is reported, not silent (code review F2). TryPopulate needs a live run, landblock and world cache,
-        /// so the log line cannot be driven from a unit test; the source is pinned instead: after the plan is built, a zero
-        /// shared median warns, only while the switch is on and a delegate was passed.
+        /// A zero median is reported, not silent (code review F2). The plan build lives in BuildLivePlan (TryPopulate needs a
+        /// live run, landblock and world cache, so the log line cannot be driven from a unit test); the source is pinned
+        /// instead: after the plan is built, a zero shared median warns, only while the switch is on and a delegate was passed.
+        /// The warning names the run through BuildLivePlan's logLabel, and TryPopulate reaches it through that call.
         /// </summary>
         [TestMethod]
-        public void TryPopulate_reports_a_zero_median_after_building_the_plan()
+        public void BuildLivePlan_reports_a_zero_median_after_building_the_plan()
         {
-            var body = PooledLootSourceText.MethodBody(PooledLootSourceText.Read(Spawner), "public static void TryPopulate(ThreadDungeonRun run, Landblock landblock)");
+            var spawner = PooledLootSourceText.Read(Spawner);
+            var body = PooledLootSourceText.MethodBody(spawner, "internal static DungeonSpawnPlan BuildLivePlan(");
 
-            var build = body.IndexOf("plan = DungeonPopulationBuilder.Build(", StringComparison.Ordinal);
+            var build = body.IndexOf("var plan = DungeonPopulationBuilder.Build(", StringComparison.Ordinal);
             var gate = body.IndexOf("if (limits.DamageCeiling && perHitOf != null && !(plan.PerHitMedian > 0))", StringComparison.Ordinal);
-            var warn = body.IndexOf("log.Warn($\"[DYNDUNGEON] {run} damage ceiling: the per-hit median", StringComparison.Ordinal);
+            var warn = body.IndexOf("log.Warn($\"[DYNDUNGEON] {logLabel?.Invoke()} damage ceiling: the per-hit median", StringComparison.Ordinal);
+
+            StringAssert.Contains(PooledLootSourceText.MethodBody(spawner, "public static void TryPopulate(ThreadDungeonRun run, Landblock landblock)"),
+                "plan = BuildLivePlan(", "TryPopulate must build its plan through BuildLivePlan, which owns the zero-median warning");
 
             Assert.IsTrue(build >= 0 && gate > build, "the check runs after the plan is built, gated on the switch and the delegate");
             Assert.IsTrue(warn > gate, "a zero median warns");

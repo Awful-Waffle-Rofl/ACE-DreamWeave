@@ -109,13 +109,38 @@ namespace ACE.Server.Physics.Common
         public const int HalfSquareLength = 12;
         public const int SquareLength = 24;
 
-        public static List<float> LandHeightTable;
+        private static volatile List<float> landHeightTable;
 
-        static LandDefs()
+        /// <summary>
+        /// Resolves the table from the portal dat. Internal so ACE.Server.Tests can stand in for the dat.
+        /// </summary>
+        internal static Func<List<float>> HeightTableSource = () => DatManager.PortalDat?.RegionDesc.LandDefs.LandHeightTable;
+
+        /// <summary>
+        /// Resolved on first access once the dats are loaded, and never cached while still null. A static
+        /// constructor resolved it only if the dats were already loaded when LandDefs was first touched,
+        /// so any earlier touch left it null for the whole process. The race is benign: every thread
+        /// resolves the same list instance.
+        /// </summary>
+        public static List<float> LandHeightTable
         {
-            if (DatManager.PortalDat != null)
-                LandHeightTable = DatManager.PortalDat.RegionDesc.LandDefs.LandHeightTable;
+            get
+            {
+                var table = landHeightTable;
+                if (table == null)
+                {
+                    table = HeightTableSource();
+                    if (table != null)
+                        landHeightTable = table;
+                }
+                return table;
+            }
         }
+
+        /// <summary>
+        /// Drops the cached table so the next access re-resolves it. For ACE.Server.Tests only.
+        /// </summary>
+        internal static void ResetHeightTableForTests() => landHeightTable = null;
 
         public static bool AdjustToOutside(Position pos)
         {

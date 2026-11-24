@@ -14,10 +14,14 @@ namespace ACE.Server.Entity
         RefusedSelfDrain,
         RefusedCannotCast,
         RefusedFull,
+        RefusedUnusable,
     }
 
-    /// <summary>What a spell is, reduced to the three facts that can get a scroll refused.</summary>
-    public readonly record struct SpellBindFacts(bool IsItemTargeted, bool IsPortal, bool IsSelfDrain);
+    /// <summary>
+    /// What a spell is, reduced to the facts that can get a scroll refused. IsUnusable is the caster brain's verdict
+    /// (PetCasterBrain.ClassifySpell == Unusable): a spell the bound pet could never cast.
+    /// </summary>
+    public readonly record struct SpellBindFacts(bool IsItemTargeted, bool IsPortal, bool IsSelfDrain, bool IsUnusable = false);
 
     /// <summary>The outcome of one bind attempt on a blank caster summon. Pure data.</summary>
     public readonly record struct BindOutcome(uint? Spell1, uint? Spell2, bool ConsumeScroll, bool Completed);
@@ -58,8 +62,8 @@ namespace ACE.Server.Entity
         }
 
         /// <summary>
-        /// Refusal order: item-targeting, portal/recall, self-drain, then the skill test. The first reason that
-        /// applies is the one named to the player.
+        /// Refusal order: item-targeting, portal/recall, self-drain, then the skill test, then a spell the caster
+        /// brain can never cast. The first reason that applies is the one named to the player.
         /// </summary>
         public static BindVerdict Classify(SpellBindFacts facts, SkillAdvancementClass schoolClass)
         {
@@ -75,12 +79,16 @@ namespace ACE.Server.Entity
             if (schoolClass < SkillAdvancementClass.Trained)
                 return BindVerdict.RefusedCannotCast;
 
+            if (facts.IsUnusable)
+                return BindVerdict.RefusedUnusable;
+
             return BindVerdict.Allowed;
         }
 
         private static SpellBindFacts FactsOf(Spell spell)
         {
-            return FactsFrom(spell.School, spell.HasItemCategory, spell.MetaSpellType, spell.TransferFlags, spell.IsBeneficial);
+            return FactsFrom(spell.School, spell.HasItemCategory, spell.MetaSpellType, spell.TransferFlags, spell.IsBeneficial,
+                spell.IsSelfTargeted, spell.Boost, spell.VitalDamageType, spell.Align);
         }
 
         private static SkillAdvancementClass SchoolClassOf(Spell spell, Player binder)
@@ -101,7 +109,8 @@ namespace ACE.Server.Entity
         /// Self-drain: a Transfer whose destination is the caster, or a beneficial Transfer whose source and
         /// destination are both the target (see the comment at the rule).
         /// </summary>
-        public static SpellBindFacts FactsFrom(MagicSchool school, bool hasItemCategory, SpellType metaType, TransferFlags transfer, bool isBeneficial)
+        public static SpellBindFacts FactsFrom(MagicSchool school, bool hasItemCategory, SpellType metaType, TransferFlags transfer, bool isBeneficial,
+            bool selfTargeted = false, int boost = 0, DamageType vitalDamageType = DamageType.Undef, DispelType align = DispelType.All)
         {
             var itemTargeted = school == MagicSchool.ItemEnchantment && !hasItemCategory;
 
@@ -113,12 +122,14 @@ namespace ACE.Server.Entity
 
             // Owner ruling: refuse a Transfer that lands on the caster itself (the "X to Y Self" family), and a
             // beneficial Transfer whose source AND destination are both the target (it would convert the owner's own
-            // vitals). "X to Y Other" and Infuse-style spells, where the pet pays and the owner receives, are allowed.
+            // vitals). "X to Y Other" harmful drains are allowed. Infuse-style spells (the pet pays, the owner receives) pass this rule but are refused as Unusable below, because the caster brain never casts a beneficial Transfer.
             var selfDrain = metaType == SpellType.Transfer
                 && (transfer.HasFlag(TransferFlags.CasterDestination)
                     || (isBeneficial && transfer.HasFlag(TransferFlags.TargetSource) && transfer.HasFlag(TransferFlags.TargetDestination)));
 
-            return new SpellBindFacts(itemTargeted, portal, selfDrain);
+            var unusable = PetCasterBrain.ClassifySpell(metaType, isBeneficial, selfTargeted, boost, vitalDamageType, align, out _) == CasterSpellKind.Unusable;
+
+            return new SpellBindFacts(itemTargeted, portal, selfDrain, unusable);
         }
 
         /// <summary>The slot the next scroll fills: 1, 2, or 0 when both are taken.</summary>
@@ -170,6 +181,8 @@ namespace ACE.Server.Entity
                     return $"{spellName} costs the caster's own vitals, so a summon cannot bind it.";
                 case BindVerdict.RefusedCannotCast:
                     return $"You are not trained in the school of {spellName}, so you cannot bind it.";
+                case BindVerdict.RefusedUnusable:
+                    return $"{spellName} is not a spell a summon can use, so it cannot bind it.";
                 case BindVerdict.RefusedFull:
                     return "This summon already has two bound spells.";
                 default:

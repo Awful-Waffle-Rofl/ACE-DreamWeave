@@ -710,6 +710,126 @@ namespace ACE.Server.Tests
             Assert.AreEqual(200.0, ThornsPair(CombatMode.NonCombat, Wand()).player.GetDefensiveWeaponModValue(), 1e-9, "the simulator read is stance-free");
         }
 
+        // ---------------- the ward's Thorns bonus (owner ruling 2026-11-05), through a real Player ----------------
+
+        private static void RaiseSanguineWard(Player player) =>
+            SetField(typeof(Player), player, "sanguineWard", new SanguineWardMath.WardState { Amount = 500, ExpireTime = ACE.Common.Time.GetUnixTime() + 600.0 });
+
+        /// <summary>Seeds the ward tunables, runs the body, restores them (and class_abilities_enabled) in a finally.</summary>
+        private static void WithWardTunables(long runicLevel, long sanguineLevel, bool abilitiesEnabled, Action body)
+        {
+            var priorAbilities = PropertyManager.GetBool("class_abilities_enabled").Item;
+            var priorRunic = PropertyManager.GetLong("class_ability_runicward_shield_level").Item;
+            var priorSanguine = PropertyManager.GetLong("class_ability_sanguine_ward_shield_level").Item;
+
+            try
+            {
+                PropertyManager.ModifyBool("class_abilities_enabled", abilitiesEnabled);
+                PropertyManager.ModifyLong("class_ability_runicward_shield_level", runicLevel);
+                PropertyManager.ModifyLong("class_ability_sanguine_ward_shield_level", sanguineLevel);
+
+                body();
+            }
+            finally
+            {
+                PropertyManager.ModifyBool("class_abilities_enabled", priorAbilities);
+                PropertyManager.ModifyLong("class_ability_runicward_shield_level", priorRunic);
+                PropertyManager.ModifyLong("class_ability_sanguine_ward_shield_level", priorSanguine);
+            }
+        }
+
+        [TestMethod]
+        public void GetWardThornsLevel_IsTheTunableForALiveMonster_AndZeroForEveryOtherAttacker()
+        {
+            WithWardTunables(100, 300, true, () =>
+            {
+                var (player, monster) = ThornsPair(null, Shield(400, thorns: true));
+                Assert.AreEqual(0.0, player.GetWardThornsLevel(monster), 1e-9, "control: no ward up");
+
+                RaiseRunicWard(player);
+                Assert.AreEqual(100.0, player.GetWardThornsLevel(monster), 1e-9, "a live monster attacker gets the runic tunable");
+
+                var (otherPlayer, _) = ThornsPair(null, Shield(400, thorns: true));
+                Assert.AreEqual(0.0, player.GetWardThornsLevel(otherPlayer), 1e-9, "a Player attacker (PvP) gives 0");
+                Assert.AreEqual(0.0, player.GetWardThornsLevel(player), 1e-9, "self gives 0");
+                Assert.AreEqual(0.0, player.GetWardThornsLevel(null), 1e-9, "no attacker gives 0");
+
+                var (_, deadMonster) = ThornsPair(null, Shield(400, thorns: true));
+                deadMonster.Health.Current = 0;
+                Assert.IsTrue(deadMonster.IsDead, "harness: the attacker is dead");
+                Assert.AreEqual(0.0, player.GetWardThornsLevel(deadMonster), 1e-9, "a dead creature gives 0");
+            });
+
+            WithWardTunables(100, 300, false, () =>
+            {
+                var (player, monster) = ThornsPair(null, Shield(400, thorns: true));
+                RaiseRunicWard(player);
+                Assert.AreEqual(0.0, player.GetWardThornsLevel(monster), 1e-9, "class abilities disabled gives 0");
+            });
+        }
+
+        [TestMethod]
+        public void Thorns_WithAShieldAndARunicWard_ReflectsFromShieldPlusWardLevel()
+        {
+            const int shieldArmor = 400;
+            const long wardLevel = 200;
+
+            WithWardTunables(wardLevel, 0, true, () =>
+            {
+                var (warded, wardedAttacker) = ThornsPair(null, Shield(shieldArmor, thorns: true));
+                var (control, controlAttacker) = ThornsPair(null, Shield(shieldArmor, thorns: true));
+                RaiseRunicWard(warded);
+
+                warded.ApplyThornsReflect(wardedAttacker, DamageType.Slash, 1.0);
+                control.ApplyThornsReflect(controlAttacker, DamageType.Slash, 1.0);
+
+                var plain = Expected(control, shieldArmor);
+                var with = Expected(warded, shieldArmor + wardLevel);
+                Assert.IsTrue(plain > 0 && with > plain && with < 100, $"harness: distinct, in-health expected reflects ({plain}, {with})");
+
+                Assert.AreEqual(100u - plain, controlAttacker.Health.Current, "control: no ward, the shield alone");
+                Assert.AreEqual(100u - with, wardedAttacker.Health.Current, "a standing runic ward adds its level to the reflected armor level");
+            });
+        }
+
+        [TestMethod]
+        public void Thorns_WithoutAShield_AStandingWardDoesNotEnableIt()
+        {
+            WithWardTunables(200, 200, true, () =>
+            {
+                var (shieldless, attacker) = ThornsPair(null, ThornsArmor());
+                RaiseRunicWard(shieldless);
+
+                Assert.IsTrue(shieldless.GetEquippedModValue(EquipmentModId.Thorns) > 0.0, "harness: Thorns is owned through the armor's equipment mod");
+                Assert.AreEqual(200.0, shieldless.GetWardThornsLevel(attacker), 1e-9, "harness: the ward bonus itself is live");
+
+                shieldless.ApplyThornsReflect(attacker, DamageType.Slash, 1.0);
+
+                Assert.AreEqual(100u, attacker.Health.Current, "no shield: a ward must not enable Thorns");
+            });
+        }
+
+        [TestMethod]
+        public void Thorns_RunicAndSanguineBothUp_ReflectFromTheLargerWardLevel_NotTheSum()
+        {
+            const int shieldArmor = 400;
+
+            WithWardTunables(100, 300, true, () =>
+            {
+                var (both, bothAttacker) = ThornsPair(null, Shield(shieldArmor, thorns: true));
+                RaiseRunicWard(both);
+                RaiseSanguineWard(both);
+
+                Assert.AreEqual(300.0, both.GetWardThornsLevel(bothAttacker), 1e-9, "the larger of 100 and 300, not 400");
+
+                both.ApplyThornsReflect(bothAttacker, DamageType.Slash, 1.0);
+
+                var max = Expected(both, shieldArmor + 300);
+                var sum = Expected(both, shieldArmor + 400);
+                Assert.IsTrue(max != sum && sum < 100, $"harness: max and sum reflects must differ and stay inside the 100 health ({max}, {sum})");
+                Assert.AreEqual(100u - max, bothAttacker.Health.Current, "max, not the sum");
+            });
+        }
         // ---------------- wiring that a harness cannot reach ----------------
 
         /// <summary>
@@ -724,7 +844,7 @@ namespace ACE.Server.Tests
 
             var thorns = PooledLootSourceText.MethodBody(combat, "public void ApplyThornsReflect(");
             var shieldCheck = thorns.IndexOf("if (shield == null)", StringComparison.Ordinal);
-            var defensive = thorns.IndexOf("DefensiveWeaponMath.ThornsArmorLevel(shieldArmorLevel, GetDefensiveWeaponShieldLevel())", StringComparison.Ordinal);
+            var defensive = thorns.IndexOf("DefensiveWeaponMath.ThornsArmorLevel(shieldArmorLevel, GetDefensiveWeaponShieldLevel(), GetWardThornsLevel(attacker))", StringComparison.Ordinal);
             Assert.IsTrue(shieldCheck >= 0 && defensive > shieldCheck, "Thorns must add the Defensive Weapon level only after refusing a shieldless defender");
 
             var block = PooledLootSourceText.MethodBody(combat, "public ClassAbilityAvoidanceOutcome RollClassAbilityAvoidance(");

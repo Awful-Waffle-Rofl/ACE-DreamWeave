@@ -87,15 +87,27 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "pinning_shot",
             DisplayName = "Pinning Shot",
-            Description = "Each missile volley and each damaging spell projectile has a 10/20/30% chance " +
-                          "(by rank) to pin its target in place for 5 seconds. A volley rolls once: if it wins, " +
-                          "every arrow that lands pins its target; if it fails, none do. A pinned creature " +
-                          "still attacks and casts. Each target is immune to being pinned again for 8 seconds " +
-                          "after a pin ends. Higher Assess Creature multiplies the chance.",
+            // Live text: the chance ladder is chanceBase + (rank - 1) * chanceStep (Chance / ChanceFor / GetReadout);
+            // the pin and re-pin immunity lengths are class_ability_pinningshot_duration_seconds / _immunity_seconds.
+            DescriptionTemplate = "Your missile volleys and damaging spell projectiles can pin a target in place for " +
+                          "{v:class_ability_pinningshot_duration_seconds|num} seconds. A volley rolls once: on a win every arrow " +
+                          "that lands pins its target, on a loss none do. A pinned creature can still attack and cast, but its melee, " +
+                          "missile and spell hits on players and combat pets deal {v:class_ability_pinningshot_damage_reduction|pct}% " +
+                          "less damage while it is pinned and while it is slowed afterwards; damage over time is not reduced. Higher Assess Creature adds to that " +
+                          "reduction, by at most {v:class_ability_pinningshot_damage_reduction_affinity_cap|pct} percentage points. " +
+                          "A target cannot be pinned again for {v:class_ability_pinningshot_immunity_seconds|num} seconds after a pin ends.",
+            RankTailTemplate = "{ladder:class_ability_pinningshot_chance_base,class_ability_pinningshot_chance_step|pct}% chance to " +
+                          "pin",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },   // reprice reversal 2026-09-29: back to 1/rank (was 2/rank premium reprice 2026-09-13)
             Implemented = true,
             AffinitySkill = Skill.AssessCreature,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "affinity", Bounds = CeilingBounds.Affinity, Source = CeilingSource.Tunable, Key = "class_ability_affinity_chance_cap", Label = "max chance from affinity", Format = "pct" },
+                new ClassAbilityCeiling { Id = "affinity_reduction", Bounds = CeilingBounds.Affinity, Source = CeilingSource.Tunable, Key = "class_ability_pinningshot_damage_reduction_affinity_cap", Label = "max reduction from affinity", Format = "pct" },
+                new ClassAbilityCeiling { Id = "pinmax", Bounds = CeilingBounds.Total, Source = CeilingSource.Constant, ConstantValue = _ => PinReductionMath.MaxReduction, ConstantRef = "PinReductionMath.MaxReduction", Label = "max pin damage reduction", Format = "pct" },
+            },
         };
 
         /// <summary>
@@ -146,6 +158,29 @@ namespace ACE.Server.ClassAbilities.Abilities
                 added = Math.Min(added, affinityCap);
 
             return Math.Max(0.0, rankBonus + added);
+        }
+
+        /// <summary>
+        /// Where the damage-reduction window ends, given what ACTUALLY happened to the creature: the end of the
+        /// pin's slow window (Creature.PinSlowWindowEnd, the sum the slow itself is written with) when the pin's
+        /// slow was applied, the pin's own end when it was not. Pure over the creature's pin state, so a REAL slow
+        /// refusal (a stronger slow already running) can be tested against it.
+        /// </summary>
+        internal static double PinReductionEnd(Creature target, bool slowApplied, double slowSeconds) =>
+            slowApplied ? target.PinSlowWindowEnd(slowSeconds) : target.ClassAbilityPinnedUntil;
+
+        /// <summary>
+        /// The fraction of outgoing damage a creature pinned by <paramref name="archer"/> loses: the flat base
+        /// (class_ability_pinningshot_damage_reduction, the same at every rank) multiplied by Assess Creature, the
+        /// amount the multiply adds capped by class_ability_pinningshot_damage_reduction_affinity_cap. The ONE
+        /// place the magnitude is assembled from tunables.
+        /// </summary>
+        public static double PinDamageReductionFor(Player archer)
+        {
+            return PinReductionMath.Magnitude(
+                PropertyManager.GetDouble("class_ability_pinningshot_damage_reduction").Item,
+                archer.GetClassAbilityAffinityMultiplier(Skill.AssessCreature),
+                PropertyManager.GetDouble("class_ability_pinningshot_damage_reduction_affinity_cap").Item);
         }
 
         /// <summary>
@@ -246,7 +281,19 @@ namespace ACE.Server.ClassAbilities.Abilities
             var slowSeconds = PropertyManager.GetDouble("class_ability_pinningshot_slow_seconds").Item;
             var slowFactor = (float)PropertyManager.GetDouble("class_ability_pinningshot_slow_factor").Item;
 
-            if (target.TryApplyClassAbilityMoveSlow(slowSeconds, slowFactor))
+            var slowApplied = target.TryApplyClassAbilityMoveSlow(slowSeconds, slowFactor);
+
+            // The defensive rider: the pinned creature deals less damage to players and combat pets while it is
+            // pinned AND through the slow that follows. THE ONLY WRITER; one site covers the weapon and the spell
+            // pin. The window follows what ACTUALLY happened to the creature: with the slow applied it ends where
+            // the slow window ends (target.PinSlowWindowEnd, the sum the slow itself is written with, from the same
+            // slowSeconds read above); with the slow refused or disabled (zero seconds, a factor outside the open
+            // interval, or a stronger running slow that kept its own window) it ends with the pin.
+            var reductionEnd = PinReductionEnd(target, slowApplied, slowSeconds);
+
+            target.TryApplyPinDamageReduction(PinDamageReductionFor(attacker), reductionEnd);
+
+            if (slowApplied)
             {
                 // EnchantDownGrey (0x8C) rather than the EnchantDownBlue the design note suggested: Blue is
                 // already the fade visual for two other class abilities (Resonance and Spellsurge, in
@@ -293,6 +340,14 @@ namespace ACE.Server.ClassAbilities.Abilities
 
             var chance = Chance(rank, chanceBase, chanceStep, multiplier, affinityCap);
 
+            // The damage-reduction rider's own RAW (pre-clamp) numbers, assembled the way PinDamageReductionFor does.
+            var reductionBase = PropertyManager.GetDouble("class_ability_pinningshot_damage_reduction").Item;
+            var reductionAdded = Math.Max(0.0, reductionBase * Math.Max(1.0, multiplier) - reductionBase);
+            var reductionAffinityCap = PropertyManager.GetDouble("class_ability_pinningshot_damage_reduction_affinity_cap").Item;
+
+            // PinReductionMath.MaxReduction sees the base plus the affinity amount AFTER the affinity cap, so that is what it is read against.
+            var reductionAfterAffinityCap = reductionAffinityCap > 0.0 ? Math.Min(reductionAdded, reductionAffinityCap) : reductionAdded;
+
             return new ClassAbilityReadout
             {
                 HasValue = true,
@@ -304,6 +359,12 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "pin proc",
                 Per = null,
                 CapNote = affinityCapBites ? "affinity cap" : null,
+                Ceilings = new[]
+                {
+                    ClassAbilityCeilings.Read(Definition, "affinity", rawAdded * 100.0, rank, ClassAbilityText.Live),
+                    ClassAbilityCeilings.Read(Definition, "affinity_reduction", reductionAdded * 100.0, rank, ClassAbilityText.Live),
+                    ClassAbilityCeilings.Read(Definition, "pinmax", (reductionBase + reductionAfterAffinityCap) * 100.0, rank, ClassAbilityText.Live),
+                },
             };
         }
     }

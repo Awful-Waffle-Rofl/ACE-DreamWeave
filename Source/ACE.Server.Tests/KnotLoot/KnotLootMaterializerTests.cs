@@ -102,6 +102,40 @@ namespace ACE.Server.Tests.KnotLoot
         }
 
         [TestMethod]
+        public void Materialize_HarbingerGuardMutation_StampsGuardFromItsOwnStream_AndLeavesTheFirstTraitAlone()
+        {
+            // a wand: the roller's trait u (0.25) is Overpowering Intent, the mutation's own draw (0.8) is Harbinger's Guard
+            var draws = 0;
+            var wand = new KnotLootDrop(1008270, 1, KnotTraitId.OverpoweringIntent, 0.25, KnotLootMutation.HarbingerGuard);
+            var heavy = new KnotLootDrop(1008276, 1, null, 0.0, KnotLootMutation.HarbingerGuard);
+
+            var items = KnotLootMaterializer.Create(new List<KnotLootDrop> { wand, heavy }, "harbinger", 320, Create, () => draws++ == 0 ? 0.8 : 0.35);
+
+            Assert.AreEqual(2, draws, "one stream draw per mutated drop, and nothing else draws");
+
+            Assert.AreEqual(0.25, items[0].GetProperty(PropertyFloat.KnotTraitOverpoweringIntent).Value, 1e-9, "the roller's u still lands on the first trait");
+            Assert.AreEqual(0.8, items[0].GetProperty(PropertyFloat.KnotTraitHarbingerGuard).Value, 1e-9, "the mutation's draw lands on Guard");
+            Assert.AreEqual(320, items[0].GetProperty(PropertyInt.KnotLootLevel));
+            Assert.AreEqual("harbinger", items[0].GetProperty(PropertyString.KnotLootTable));
+
+            // a heavy has no roller trait at all, yet the mutation alone stamps level, table and Guard
+            Assert.IsNull(items[1].GetProperty(PropertyFloat.KnotTraitOverpoweringIntent));
+            Assert.AreEqual(0.35, items[1].GetProperty(PropertyFloat.KnotTraitHarbingerGuard).Value, 1e-9);
+            Assert.AreEqual(320, items[1].GetProperty(PropertyInt.KnotLootLevel));
+            Assert.AreEqual("harbinger", items[1].GetProperty(PropertyString.KnotLootTable));
+        }
+
+        [TestMethod]
+        public void Materialize_CelerityTrait_StampsOnlyCelerity()
+        {
+            var items = KnotLootMaterializer.Create(new List<KnotLootDrop> { new(1008268, 1, KnotTraitId.HarbingerCelerity, 0.5) }, "harbinger", 300, Create);
+
+            Assert.AreEqual(0.5, items[0].GetProperty(PropertyFloat.KnotTraitHarbingerCelerity).Value, 1e-9);
+            Assert.IsNull(items[0].GetProperty(PropertyFloat.KnotTraitHarbingerGuard));
+            Assert.IsNull(items[0].GetProperty(PropertyFloat.KnotTraitOverpoweringIntent));
+        }
+
+        [TestMethod]
         public void Materialize_NullCreate_IsEmpty_AndWarnsWithTableAndWcid()
         {
             var appender = new MemoryAppender();

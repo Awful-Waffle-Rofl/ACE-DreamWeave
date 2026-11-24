@@ -51,6 +51,11 @@ namespace ACE.Server.Tests
             // code-path change - see Creature.TryApplyClassAbilityMoveSlow.
             Assert.AreEqual(10.0, D("class_ability_pinningshot_slow_seconds"), 1e-9);
             Assert.AreEqual(0.2, D("class_ability_pinningshot_slow_factor"), 1e-9);
+
+            // the defensive rider: a pinned creature deals 30% less damage to players and combat pets through the pin and
+            // the slow, Assess Creature adding at most 20 more percentage points
+            Assert.AreEqual(0.30, D("class_ability_pinningshot_damage_reduction"), 1e-9);
+            Assert.AreEqual(0.20, D("class_ability_pinningshot_damage_reduction_affinity_cap"), 1e-9);
         }
 
         [TestMethod]
@@ -110,11 +115,11 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void BerserkerPass_NewTunablesMatchSignedOffDefaults()
         {
-            // Berserk Rage: 5 s immunity, 90/60/30 s cooldown by rank, x1.5 outgoing while raging
+            // Berserk Rage: 5 s immunity, 135/90/45 s cooldown by rank, x1.5 outgoing while raging
             Assert.AreEqual(5.0, D("class_ability_berserkrage_duration_seconds"), 1e-9);
-            Assert.AreEqual(90.0, D("class_ability_berserkrage_cooldown_seconds_r1"), 1e-9);
-            Assert.AreEqual(60.0, D("class_ability_berserkrage_cooldown_seconds_r2"), 1e-9);
-            Assert.AreEqual(30.0, D("class_ability_berserkrage_cooldown_seconds_r3"), 1e-9);
+            Assert.AreEqual(135.0, D("class_ability_berserkrage_cooldown_seconds_r1"), 1e-9);
+            Assert.AreEqual(90.0, D("class_ability_berserkrage_cooldown_seconds_r2"), 1e-9);
+            Assert.AreEqual(45.0, D("class_ability_berserkrage_cooldown_seconds_r3"), 1e-9);
             Assert.AreEqual(1.5, D("class_ability_berserkrage_damage_multiplier"), 1e-9);
 
             // Heavy Blows: power part +25% per rank; Intimidate: 15 defense per rank
@@ -171,7 +176,9 @@ namespace ACE.Server.Tests
         {
             Assert.AreEqual(360.0, D("class_ability_souljump_cooldown_seconds_base"), 1e-9);
             Assert.AreEqual(-120.0, D("class_ability_souljump_cooldown_seconds_step"), 1e-9);
-            Assert.AreEqual(0.10, D("class_ability_souljump_restore_fraction"), 1e-9);
+            Assert.AreEqual(0.20, D("class_ability_souljump_restore_fraction"), 1e-9);
+            Assert.AreEqual(0.20, D("class_ability_souljump_restore_fraction_step"), 1e-9);
+            Assert.AreEqual(5.0, D("class_ability_souljump_immunity_seconds"), 1e-9);
 
             // Soul Jump's affinity direction (against Jump) is UNSETTLED - see SoulJumpAbility's doc
             // comment. Do not add an assertion for a rate pair here: none is registered for Soul Jump

@@ -15,8 +15,8 @@ namespace ACE.Server.Managers.Market
     ///
     /// THE TWO KINDS HAVE DIFFERENT MATERIAL LISTS. Bags are built from Player.MaterialSalvage - one bag
     /// wcid per material - minus the five category headers that map to wcid 0, leaving 72. Hammers exist
-    /// in only the five materials SalvageForge.MaterialTable names, and that dictionary is read directly
-    /// rather than copied, so adding a sixth Hammer there needs no change in this file.
+    /// in only the materials SalvageForge.MaterialTable names (six today), and that dictionary is read directly
+    /// rather than copied, so adding a seventh Hammer there needs no change in this file.
     ///
     /// Never reads PropertyManager (unit tests have no shard).
     /// </summary>
@@ -49,7 +49,7 @@ namespace ACE.Server.Managers.Market
 
         /// <summary>
         /// The Hammer wcid per material, projected straight off <see cref="SalvageForge.MaterialTable"/>.
-        /// A literal copy of the five would be a second place to update and a second place to be wrong;
+        /// A literal copy of the MaterialTable rows would be a second place to update and a second place to be wrong;
         /// this way a new Hammer in the forge is orderable the moment it exists there.
         /// </summary>
         private static readonly Dictionary<int, uint> hammerWcidByMaterial = SalvageForge.MaterialTable
@@ -102,7 +102,7 @@ namespace ACE.Server.Managers.Market
                              .ToList();
 
         /// <summary>
-        /// Every material a Hammer exists in, sorted by name - the five of
+        /// Every material a Hammer exists in, sorted by name - the six of
         /// <see cref="SalvageForge.MaterialTable"/>, each carrying its HAMMER wcid, name and icons.
         ///
         /// NO PRODUCTION CALLER, and that is intentional rather than an oversight waiting to be

@@ -50,12 +50,23 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "netherbloom",
             DisplayName = "Nether Bloom",
-            Description = "When you land the killing blow on a creature carrying one of your void " +
-                          "damage-over-time spells, that spell spreads to the 1/2/3 nearest other enemies " +
-                          "by rank, keeping its remaining duration. A spread spell cannot spread again.",
+            DescriptionTemplate = "When you kill a creature carrying one of your void damage-over-time spells, the spell spreads to " +
+                          "the nearest other enemies with the time it had left. A spread spell cannot spread again.",
+            // Live text: targets = floor(rank * class_ability_netherbloom_jumps_per_rank) (JumpCount, read in OnCreatureKilled). The
+            // "floor" formatter matches JumpCount's floor, so a fractional tunable renders the same count the mechanic grants. The token tail changes shape per rank (singular / plural), so it is a per-rank array. The wording is fixed per rank: a retune of jumps_per_rank that moves rank 1 off one enemy would read "2 nearby enemy".
+            RankTailTemplate = new[]
+            {
+                "spreads to {per:class_ability_netherbloom_jumps_per_rank|floor} nearby enemy",
+                "spreads to {per:class_ability_netherbloom_jumps_per_rank|floor} nearby enemies",
+                "spreads to {per:class_ability_netherbloom_jumps_per_rank|floor} nearby enemies",
+            },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "gear", Bounds = CeilingBounds.Gear, Source = CeilingSource.GearStackCap, GearMod = EquipmentModId.NetherBloom, Label = "max from gear", Format = "pct" },
+            },
         };
 
         public void OnCreatureKilled(Player killer, int rank, Creature victim)
@@ -271,12 +282,15 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
-            var gearSecondary = GearJumpChanceSecondary(player?.GetEquippedModValue(EquipmentModId.NetherBloom) ?? 0.0);
+            var gearMod = player?.GetEquippedModValue(EquipmentModId.NetherBloom) ?? 0.0;
+            var gearSecondary = GearJumpChanceSecondary(gearMod);
 
             return new ClassAbilityReadout
             {
                 HasValue = false,
                 Secondary = gearSecondary.HasValue ? new List<ClassAbilityReadout> { gearSecondary.Value } : null,
+                // The extra-jump probability the mod gives, already bounded by its StackCap in the accessor (R9).
+                Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "gear", Math.Max(0.0, gearMod) * 100.0, rank, ClassAbilityText.Live) },
             };
         }
 

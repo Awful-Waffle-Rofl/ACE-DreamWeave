@@ -819,9 +819,9 @@ namespace ACE.Server.Tests
                 System.IO.File.ReadAllText(System.IO.Path.Combine(dir, "rewards.json")),
                 System.IO.File.ReadAllText(System.IO.Path.Combine(dir, "anchors.json")));
 
-            // 4 base themes plus the five element_portal themes. The count is asserted so that a theme
-            // added later cannot quietly ship without the difficulty block the loop below checks for.
-            Assert.AreEqual(9, store.Sources.Count);
+            // 4 base themes, envoy_muster (the web panel's Hold source) and the five element_portal themes. The count is
+            // asserted so that a theme added later cannot quietly ship without the difficulty block the loop below checks for.
+            Assert.AreEqual(10, store.Sources.Count);
 
             foreach (var theme in store.Sources.Values)
             {

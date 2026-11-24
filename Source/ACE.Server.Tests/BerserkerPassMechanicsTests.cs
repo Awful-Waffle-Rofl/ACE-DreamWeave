@@ -183,9 +183,9 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void BerserkRage_CooldownKeysAreTunables_AndTheDefinitionMatchesTheRuling()
         {
-            Assert.AreEqual(90.0, PropertyManager.GetDouble(BerserkRageAbility.CooldownKey(1)).Item, 1e-9);
-            Assert.AreEqual(60.0, PropertyManager.GetDouble(BerserkRageAbility.CooldownKey(2)).Item, 1e-9);
-            Assert.AreEqual(30.0, PropertyManager.GetDouble(BerserkRageAbility.CooldownKey(3)).Item, 1e-9);
+            Assert.AreEqual(135.0, PropertyManager.GetDouble(BerserkRageAbility.CooldownKey(1)).Item, 1e-9);
+            Assert.AreEqual(90.0, PropertyManager.GetDouble(BerserkRageAbility.CooldownKey(2)).Item, 1e-9);
+            Assert.AreEqual(45.0, PropertyManager.GetDouble(BerserkRageAbility.CooldownKey(3)).Item, 1e-9);
             Assert.AreEqual(BerserkRageAbility.CooldownKey(3), BerserkRageAbility.CooldownKey(9), "rank clamps to 3");
 
             var def = ClassAbilityRegistry.Get(ClassAbilityId.BerserkRage);

@@ -155,11 +155,21 @@ namespace ACE.Server.HazardMechanics
         /// </summary>
         public bool HitsRequireInside { get; }
 
+        /// <summary>
+        /// Metres the region's shape is GROWN by for the player test only (<see cref="ContainsPlayerXY"/>,
+        /// <see cref="ContainsPlayer"/>, PlayersInRegion and the HitsRequireInside hit gate). Placement (<see cref="Contains"/>,
+        /// <see cref="IsPlaceable"/>, <see cref="DistanceToEdge"/>) is untouched, so hazards stay where they fit while a
+        /// player standing on floor between the placement edge and the wall still counts as inside (no safe ring).
+        /// 0 (every region but the Harbinger alcoves): the player shape is the placement shape.
+        /// </summary>
+        public float PlayerMargin { get; }
+
         private HazardRegion(string name, ushort landblock, uint instance, bool outdoor, HazardShape shape,
             float minX, float maxX, float minY, float maxY, float cx, float cy, float radius,
             HazardGroundMode groundMode, float groundPlaneZ, float? hazardPlaneZ, float hazardOffset, float? ceilingZ,
             float bandBelow, float bandAbove, IReadOnlyList<HazardExclusion> exclusions,
-            bool spansLandblocks = false, float? absoluteBandMinZ = null, float? absoluteBandMaxZ = null, bool hitsRequireInside = false)
+            bool spansLandblocks = false, float? absoluteBandMinZ = null, float? absoluteBandMaxZ = null, bool hitsRequireInside = false,
+            float playerMargin = 0f)
         {
             Name = string.IsNullOrWhiteSpace(name) ? "region" : name;
             Landblock = landblock;
@@ -185,6 +195,7 @@ namespace ACE.Server.HazardMechanics
             AbsoluteBandMinZ = absoluteBandMinZ;
             AbsoluteBandMaxZ = absoluteBandMaxZ;
             HitsRequireInside = hitsRequireInside;
+            PlayerMargin = playerMargin;
         }
 
         // ---- construction ----------------------------------------------------------------------------------------
@@ -204,16 +215,18 @@ namespace ACE.Server.HazardMechanics
                 groundMode, groundPlaneZ, hazardPlaneZ, hazardOffset, ceilingZ, bandBelow, bandAbove, exclusions);
         }
 
+        /// <param name="playerMargin">See <see cref="PlayerMargin"/>; default 0.</param>
         public static HazardRegion Circle(string name, ushort landblock, uint instance, bool outdoor,
             float centerX, float centerY, float radius,
             HazardGroundMode groundMode, float groundPlaneZ, float? hazardPlaneZ, float hazardOffset, float? ceilingZ,
-            float bandBelow, float bandAbove, IReadOnlyList<HazardExclusion> exclusions = null)
+            float bandBelow, float bandAbove, IReadOnlyList<HazardExclusion> exclusions = null, float playerMargin = 0f)
         {
             var r = Math.Max(0f, radius);
 
             return new HazardRegion(name, landblock, instance, outdoor, HazardShape.Circle,
                 centerX - r, centerX + r, centerY - r, centerY + r, centerX, centerY, r,
-                groundMode, groundPlaneZ, hazardPlaneZ, hazardOffset, ceilingZ, bandBelow, bandAbove, exclusions);
+                groundMode, groundPlaneZ, hazardPlaneZ, hazardOffset, ceilingZ, bandBelow, bandAbove, exclusions,
+                playerMargin: playerMargin);
         }
 
         /// <summary>
@@ -274,7 +287,7 @@ namespace ACE.Server.HazardMechanics
         public HazardRegion WithInstance(uint instance)
             => new HazardRegion(Name, Landblock, instance, Outdoor, Shape, MinX, MaxX, MinY, MaxY, CenterX, CenterY, Radius,
                 GroundMode, GroundPlaneZ, HazardPlaneZ, HazardOffset, CeilingZ, BandBelow, BandAbove, Exclusions,
-                SpansLandblocks, AbsoluteBandMinZ, AbsoluteBandMaxZ, HitsRequireInside);
+                SpansLandblocks, AbsoluteBandMinZ, AbsoluteBandMaxZ, HitsRequireInside, PlayerMargin);
 
         // ---- validation ------------------------------------------------------------------------------------------
 
@@ -285,7 +298,7 @@ namespace ACE.Server.HazardMechanics
         /// </summary>
         public string Validate()
         {
-            if (!AllFinite(MinX, MaxX, MinY, MaxY, CenterX, CenterY, Radius, GroundPlaneZ, HazardOffset, BandBelow, BandAbove)
+            if (!AllFinite(MinX, MaxX, MinY, MaxY, CenterX, CenterY, Radius, GroundPlaneZ, HazardOffset, BandBelow, BandAbove, PlayerMargin)
                 || (HazardPlaneZ.HasValue && !float.IsFinite(HazardPlaneZ.Value))
                 || (CeilingZ.HasValue && !float.IsFinite(CeilingZ.Value))
                 || (AbsoluteBandMinZ.HasValue && !float.IsFinite(AbsoluteBandMinZ.Value))
@@ -326,6 +339,9 @@ namespace ACE.Server.HazardMechanics
             if (CeilingZ.HasValue && GroundMode == HazardGroundMode.Plane && CeilingZ.Value <= GroundPlaneZ)
                 return "ceiling must be above the ground plane";
 
+            if (PlayerMargin < 0f)
+                return "player margin must not be negative";
+
             return null;
         }
 
@@ -356,6 +372,26 @@ namespace ACE.Server.HazardMechanics
             }
 
             return x >= MinX && x <= MaxX && y >= MinY && y <= MaxY;
+        }
+
+        /// <summary>
+        /// 2D containment for a PLAYER: the shape grown by <see cref="PlayerMargin"/> (a circle of Radius + margin, a rect
+        /// grown on every side). Equals <see cref="Contains"/> when the margin is 0.
+        /// </summary>
+        public bool ContainsPlayerXY(float x, float y)
+        {
+            if (!(PlayerMargin > 0f))
+                return Contains(x, y);
+
+            if (Shape == HazardShape.Circle)
+            {
+                var dx = x - CenterX;
+                var dy = y - CenterY;
+                var r = Radius + PlayerMargin;
+                return dx * dx + dy * dy <= r * r;
+            }
+
+            return x >= MinX - PlayerMargin && x <= MaxX + PlayerMargin && y >= MinY - PlayerMargin && y <= MaxY + PlayerMargin;
         }
 
         public bool InExclusion(float x, float y)
@@ -432,10 +468,11 @@ namespace ACE.Server.HazardMechanics
 
         /// <summary>
         /// Is a player at <paramref name="p"/> in the region: inside the 2D shape AND z within
-        /// [GroundZ - BandBelow, GroundZ + BandAbove]. Exclusions do NOT exempt a player (no safe spots).
+        /// [GroundZ - BandBelow, GroundZ + BandAbove]. Exclusions do NOT exempt a player (no safe spots). The 2D half is
+        /// <see cref="ContainsPlayerXY"/> (the shape grown by <see cref="PlayerMargin"/>).
         /// </summary>
         public bool ContainsPlayer(Vector3 p, Func<float, float, float> terrainZ = null)
-            => Contains(p.X, p.Y) && InBand(p, terrainZ);
+            => ContainsPlayerXY(p.X, p.Y) && InBand(p, terrainZ);
 
         /// <summary>Only the z half of <see cref="ContainsPlayer"/>.</summary>
         public bool InBand(Vector3 p, Func<float, float, float> terrainZ = null)
@@ -520,7 +557,9 @@ namespace ACE.Server.HazardMechanics
 
             var ceiling = CeilingZ.HasValue ? string.Format(CultureInfo.InvariantCulture, " ceiling {0:0.##}", CeilingZ.Value) : "";
 
-            return $"{Name} lb=0x{Landblock:X4} inst=0x{Instance:X8} {shape} ground {ground} hazard {hazard}{ceiling} excl={Exclusions.Count}";
+            var margin = PlayerMargin > 0f ? string.Format(CultureInfo.InvariantCulture, " player+{0:0.##}", PlayerMargin) : "";
+
+            return $"{Name} lb=0x{Landblock:X4} inst=0x{Instance:X8} {shape}{margin} ground {ground} hazard {hazard}{ceiling} excl={Exclusions.Count}";
         }
     }
 

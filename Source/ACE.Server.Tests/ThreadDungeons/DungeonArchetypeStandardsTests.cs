@@ -195,10 +195,10 @@ namespace ACE.Server.Tests.ThreadDungeons
             var (s, _, _, _) = MeasureFixture();
             var caster = s.Get(CreatureArchetype.Caster);
 
-            Assert.AreSame(caster, DungeonArchetypeStandards.Extrapolate(caster, 326, 300, 0.02, 0.02, 1.0, FormulaOf), "at or below the pivot: as measured");
+            Assert.AreSame(caster, DungeonArchetypeStandards.Extrapolate(caster, 326, 300, 0.02, 0.02, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400, FormulaOf), "at or below the pivot: as measured");
 
-            var up = DungeonArchetypeStandards.Extrapolate(caster, 100, 200, 0.02, 0.02, 1.0, FormulaOf);
-            var ratio = DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 100, 200, 0.02, 0.02, 1.0, 326);
+            var up = DungeonArchetypeStandards.Extrapolate(caster, 100, 200, 0.02, 0.02, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400, FormulaOf);
+            var ratio = DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 100, 200, 0.02, 0.02, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400);
 
             Assert.IsTrue(ratio > 1.0, "fixture: the curve rises");
             Assert.IsTrue(caster.SpellOutput > 0, "fixture: the casters carry projectiles");
@@ -293,15 +293,15 @@ namespace ACE.Server.Tests.ThreadDungeons
             var run = DungeonArchetypeStandards.Measure(tables, 100, profileOf, roster, Natural, 0.6, formulaOf: FormulaOf);
             Func<int, DungeonArchetypeStandards> measure = level => DungeonArchetypeStandards.Measure(tables, level, profileOf, roster, Natural, 0.6, formulaOf: FormulaOf);
 
-            var flat = new ArchetypeUpliftContext(100, 100, false, 0.02, 0.02, 1.0, false, run, measure, roster, level => 0.0, 1.0, 1.0, 1.25, FormulaOf);
+            var flat = new ArchetypeUpliftContext(100, 100, false, 0.02, 0.02, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400, false, run, measure, roster, level => 0.0, 1.0, 1.0, 1.25, FormulaOf);
             Assert.AreEqual(600u, flat.AttackSkillCeiling);
             Assert.AreEqual(600u, flat.For(11).AttackSkillCeiling, "every info carries the run's ceiling");
 
             // Extrapolated from pivot 100 to 200: the six weapon values ride the weapon-attack ratio and the two war values
             // the magic-attack ratio; the P75 of the eight (rank 6) is the larger weapon value unless magic outruns it.
-            var up = new ArchetypeUpliftContext(200, 100, true, 0.02, 0.02, 1.0, false, run, measure, roster, level => 0.0, 1.0, 1.0, 1.25, FormulaOf);
-            var weapon = DungeonStatCurve.Scale(600, DungeonStatCurve.Ratio(DungeonStatAxis.WeaponAttack, 100, 200, 0.02, 0.02, 1.0, 326));
-            var magic = DungeonStatCurve.Scale(600, DungeonStatCurve.Ratio(DungeonStatAxis.MagicAttack, 100, 200, 0.02, 0.02, 1.0, 326));
+            var up = new ArchetypeUpliftContext(200, 100, true, 0.02, 0.02, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400, false, run, measure, roster, level => 0.0, 1.0, 1.0, 1.25, FormulaOf);
+            var weapon = DungeonStatCurve.Scale(600, DungeonStatCurve.Ratio(DungeonStatAxis.WeaponAttack, 100, 200, 0.02, 0.02, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400));
+            var magic = DungeonStatCurve.Scale(600, DungeonStatCurve.Ratio(DungeonStatAxis.MagicAttack, 100, 200, 0.02, 0.02, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400));
             var pooled = Enumerable.Repeat(weapon, 6).Concat(Enumerable.Repeat(magic, 2)).OrderBy(v => v).ToList();
 
             Assert.AreEqual(pooled[5], up.AttackSkillCeiling);
@@ -350,13 +350,13 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreEqual(740u, measured.EffectiveSkillMedianFor(Skill.MissileDefense));
 
             // Extrapolated: run 410 carried up from reference 326.
-            var up = new ArchetypeUpliftContext(410, 326, true, 0.5, 0.0, 0.75, true, run, l => run, roster, l => 0.0, 1.0, 1.0, 1.25, FormulaOf);
+            var up = new ArchetypeUpliftContext(410, 326, true, 0.5, 0.0, 0.75, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400, true, run, l => run, roster, l => 0.0, 1.0, 1.0, 1.25, FormulaOf);
             var upCore = up.RunAxes(CreatureArchetype.Unclassified).Core;
 
             Assert.AreEqual(520u, upCore.EffectiveSkillMedianFor(Skill.MagicDefense), "magic frozen at its level-300 value");
-            Assert.AreEqual(DungeonStatCurve.Scale(800, DungeonStatCurve.Ratio(DungeonStatAxis.MeleeDefense, 326, 410, 0.5, 0.0, 1.0, 326)),
+            Assert.AreEqual(DungeonStatCurve.Scale(800, DungeonStatCurve.Ratio(DungeonStatAxis.MeleeDefense, 326, 410, 0.5, 0.0, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400)),
                 upCore.EffectiveSkillMedianFor(Skill.MeleeDefense), "melee at the 0.5-softened rate");
-            Assert.AreEqual(DungeonStatCurve.Scale(740, DungeonStatCurve.Ratio(DungeonStatAxis.MissileDefense, 326, 410, 0.5, 0.0, 1.0, 326)),
+            Assert.AreEqual(DungeonStatCurve.Scale(740, DungeonStatCurve.Ratio(DungeonStatAxis.MissileDefense, 326, 410, 0.5, 0.0, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400)),
                 upCore.EffectiveSkillMedianFor(Skill.MissileDefense), "missile at the 0.5-softened rate");
             Assert.IsTrue(upCore.EffectiveSkillMedianFor(Skill.MeleeDefense) > 800u, "discriminating: melee grows (a swapped rate 0 would freeze it)");
             Assert.AreEqual(run.All.EffectiveDamage * Math.Exp(0.75 * DungeonStatCurve.DamageSlope * 84), up.RunAxes(CreatureArchetype.Unclassified).EffectiveDamage, 1e-9,
@@ -364,7 +364,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreEqual(DungeonStatCurve.Scale(run.All.Core.MaxBodyDamage, Math.Exp(0.75 * DungeonStatCurve.DamageSlope * 84)), upCore.MaxBodyDamage);
 
             // Not extrapolated, retail magic on: run 410 measured directly, only magic defense replaced.
-            var flat = new ArchetypeUpliftContext(410, 410, false, 0.5, 0.0, 1.0, true, run, l => run, roster, l => 0.0, 1.0, 1.0, 1.25, FormulaOf);
+            var flat = new ArchetypeUpliftContext(410, 410, false, 0.5, 0.0, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400, true, run, l => run, roster, l => 0.0, 1.0, 1.0, 1.25, FormulaOf);
             var flatCore = flat.RunAxes(CreatureArchetype.Unclassified).Core;
 
             Assert.AreEqual(520u, flatCore.EffectiveSkillMedianFor(Skill.MagicDefense), "retail magic at 410, frozen (a swapped 0.5 gives 569)");
@@ -380,7 +380,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             var roster = new RosterArchetypes(tables, Natural, 0.6, profileOf, FormulaOf);
             var run = DungeonArchetypeStandards.Measure(tables, 100, profileOf, roster, Natural, 0.6, formulaOf: FormulaOf);
 
-            var context = new ArchetypeUpliftContext(100, 100, false, 0.02, 0.02, 1.0, false, run,
+            var context = new ArchetypeUpliftContext(100, 100, false, 0.02, 0.02, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400, false, run,
                 level => DungeonArchetypeStandards.Measure(tables, level, profileOf, roster, Natural, 0.6, formulaOf: FormulaOf),
                 roster, level => 0.0, 1.0, 1.0, 0.5, FormulaOf);
 
@@ -422,9 +422,9 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreEqual(CreatureArchetype.Ranged, archer.Archetype);
             Assert.AreEqual(CreatureArchetype.Unclassified, archer.Source, "one archer anywhere, so no band to transfer a ratio from: everyone");
 
-            var none = new ArchetypeUpliftContext(100, 100, false, 0.02, 0.02, 1.0, false, run, level => DungeonArchetypeStandards.Empty, roster, null, 1, 1, 0.5);
+            var none = new ArchetypeUpliftContext(100, 100, false, 0.02, 0.02, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400, false, run, level => DungeonArchetypeStandards.Empty, roster, null, 1, 1, 0.5);
             Assert.IsNull(none.For(13), "no own-level data at all: the creature takes the legacy path");
-            Assert.IsNull(new ArchetypeUpliftContext(100, 100, false, 0.02, 0.02, 1.0, false, run, null, roster, null, 1, 1, 0.5).For(13));
+            Assert.IsNull(new ArchetypeUpliftContext(100, 100, false, 0.02, 0.02, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400, false, run, null, roster, null, 1, 1, 0.5).For(13));
         }
     }
 }

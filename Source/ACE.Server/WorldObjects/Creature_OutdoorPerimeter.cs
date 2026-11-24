@@ -147,7 +147,7 @@ namespace ACE.Server.WorldObjects
             if (player == null || !perimeter.ShouldRefuseDamage(true, at))
                 return false;
 
-            player.NotifyOutdoorStrikeRefused();
+            player.NotifyOutdoorStrikeRefused(perimeter.RefusedStrikeLine);
             return true;
         }
 

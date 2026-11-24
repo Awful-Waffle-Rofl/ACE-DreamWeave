@@ -333,6 +333,83 @@ namespace ACE.Server.Tests
                     $"Blood Mage tier {docTier}: trainer 1001950 create_list order must match the SKILL-TABLES.md table row order");
             }
         }
+        [TestMethod]
+        public void PlannerCatalog_ParryCeilingDefaultIs50Percent()
+        {
+            var parry = BuildCatalog(withProvenance: false)["abilities"].AsArray().Single(a => (string)a["id"] == ClassAbilityRegistry.Abilities.Values.Single(d => d.DisplayName == "Parry").Name);
+            var ceiling = parry["ceilings"].AsArray().Single(c => (string)c["id"] == "avoidance");
+
+            // The default tunable is 0.5; the catalog carries it in display units (50, unit "%"), like the feed.
+            Assert.AreEqual(DefaultPropertyManager.DefaultDoubleProperties["class_ability_avoidance_cap"].Item * 100.0, (double)ceiling["defaultValue"], 1e-9);
+            Assert.AreEqual("%", (string)ceiling["unit"]);
+            Assert.IsNull(ceiling["defaultValueByRank"]);
+            Assert.IsFalse(ceiling.AsObject().Any(kv => kv.Key.Contains("class_ability", StringComparison.Ordinal) || (kv.Value is JsonValue jv && jv.TryGetValue<string>(out var sv) && sv.StartsWith("class_ability_", StringComparison.Ordinal))), "no tunable key may reach the catalog");
+        }
+
+        /// <summary>
+        /// The catalog's labelled defaults and the descriptions feed built at the same defaults must agree field for field,
+        /// so the web renderer's "live value, else labelled default" fallback never disagrees with the live feed.
+        /// </summary>
+        [TestMethod]
+        public void PlannerCatalog_AgreesWithTheDefaultsFeed()
+        {
+            var feed = ClassAbilityDescriptionFeed.Build(ClassAbilityText.Defaults).Abilities.ToDictionary(a => a.Id, StringComparer.Ordinal);
+            var rows = BuildCatalog(withProvenance: false)["abilities"].AsArray().Where(a => !(bool)a["retired"]).ToArray();
+
+            Assert.AreEqual(feed.Count, rows.Length);
+
+            foreach (var row in rows)
+            {
+                var id = (string)row["id"];
+                var dto = feed[id];
+                var ceilings = row["ceilings"].AsArray();
+                var feedCeilings = dto.Ceilings ?? new List<ClassAbilityDescriptionFeed.CeilingDto>();
+
+                CollectionAssert.AreEqual(feedCeilings.Select(c => c.Id).ToArray(), ceilings.Select(c => (string)c["id"]).ToArray(), $"{id}: ceiling ids/order");
+
+                for (var i = 0; i < ceilings.Count; i++)
+                {
+                    var c = ceilings[i];
+                    var f = feedCeilings[i];
+                    Assert.AreEqual(f.Value, c["defaultValue"].GetValue<double?>(), $"{id}/{f.Id}: defaultValue vs feed value");
+                    Assert.AreEqual(f.Unit, (string)c["unit"], $"{id}/{f.Id}: unit");
+                    Assert.AreEqual(f.Bounds, (string)c["bounds"], $"{id}/{f.Id}: bounds");
+                    Assert.AreEqual(f.Label, (string)c["label"], $"{id}/{f.Id}: label");
+                    Assert.AreEqual(f.Mod, (string)c["gearMod"], $"{id}/{f.Id}: gearMod");
+                }
+
+                var rate = row["affinityRate"];
+                Assert.AreEqual(dto.Rates == null, rate == null, $"{id}: affinityRate presence");
+
+                if (dto.Rates != null)
+                {
+                    Assert.AreEqual(dto.Rates.Model, (string)rate["model"], $"{id}: rate model");
+                    Assert.AreEqual(dto.Rates.Trained, (double)rate["trained"], 0.0, $"{id}: trained");
+                    Assert.AreEqual(dto.Rates.Specialized, (double)rate["specialized"], 0.0, $"{id}: specialized");
+                }
+            }
+        }
+
+        [TestMethod]
+        public void PlannerCatalog_RankVaryingCeilingCarriesDefaultValueByRank_AndRatesCarryModelAndSkill()
+        {
+            var abilities = BuildCatalog(withProvenance: false)["abilities"].AsArray();
+
+            var varying = abilities.SelectMany(a => a["ceilings"].AsArray()).Where(c => c["defaultValueByRank"] != null).ToArray();
+            Assert.IsTrue(varying.Length > 0, "at least one ceiling varies by rank");
+            Assert.IsTrue(varying.All(c => c["defaultValueByRank"].AsArray().Last().GetValue<double?>() == c["defaultValue"].GetValue<double?>()), "defaultValue is the max-rank entry of defaultValueByRank");
+
+            foreach (var a in abilities.Where(a => a["affinityRate"] != null))
+            {
+                var model = (string)a["affinityRate"]["model"];
+                CollectionAssert.Contains(new[] { "shared", "own", "additive", "uncapped" }, model);
+                Assert.IsNotNull(a["affinityRate"]["skill"], $"{(string)a["id"]}: a rate names its skill");
+            }
+
+            Assert.IsTrue(abilities.Any(a => a["affinityRate"] != null && (string)a["affinityRate"]["model"] == "additive"));
+            Assert.IsTrue(abilities.Where(a => (bool)a["retired"]).All(a => a["affinityRate"] == null && a["ceilings"].AsArray().Count == 0));
+        }
+
         /// <summary>The level milestones come from ClassAbilityMilestones, never from a hand-typed list.</summary>
         [TestMethod]
         public void PlannerCatalog_LevelMilestonesComeFromTheSource()
@@ -387,9 +464,11 @@ namespace ACE.Server.Tests
                         ? JsonValue.Create(definition.AffinitySkill.Value.ToString())
                         : null,
                     ["additionalAffinitySkills"] = ToSkillArray(definition.AdditionalAffinitySkills),
-                    ["description"] = definition.Description,
+                    ["description"] = ClassAbilityText.Describe(definition, ClassAbilityText.Defaults),
                     ["implemented"] = definition.Implemented,
                     ["retired"] = false,
+                    ["ceilings"] = BuildCeilings(definition),
+                    ["affinityRate"] = BuildAffinityRate(definition),
                 }));
             }
 
@@ -413,6 +492,8 @@ namespace ACE.Server.Tests
                     ["description"] = string.Empty,
                     ["implemented"] = false,
                     ["retired"] = true,
+                    ["ceilings"] = new JsonArray(),
+                    ["affinityRate"] = null,
                 }));
             }
 
@@ -430,6 +511,81 @@ namespace ACE.Server.Tests
             root["abilities"] = abilities;
 
             return root;
+        }
+
+        /// <summary>
+        /// The ability's declared ceilings, STRUCTURE plus labelled defaults (no tunable key is emitted; live values come
+        /// from the descriptions feed). Values are read at <see cref="ClassAbilityText.Defaults"/>, in DISPLAY units (50 for
+        /// a 50% cap, the same unit the feed's ceiling "value" carries). defaultValue is the max-rank value; a ceiling whose value differs between ranks also carries
+        /// defaultValueByRank [r1..rMax]; a cap at "no limit" at defaults is null. Always an array.
+        /// </summary>
+        internal static JsonArray BuildCeilings(ClassAbilityDefinition definition)
+        {
+            var array = new JsonArray();
+
+            if (definition.Ceilings == null)
+                return array;
+
+            var values = ClassAbilityText.Defaults;
+            var maxRank = definition.MaxRank > 0 ? definition.MaxRank : 1;
+
+            foreach (var c in definition.Ceilings)
+            {
+                double? At(int rank) => c.IsUncapped(values, rank) ? null : System.Math.Round(c.DisplayValue(values, rank), 4);
+
+                var byRank = Enumerable.Range(1, maxRank).Select(At).ToArray();
+                var varies = byRank.Any(v => v != byRank[0]);
+
+                var row = new JsonObject
+                {
+                    ["id"] = c.Id,
+                    ["bounds"] = c.Bounds.ToString().ToLowerInvariant(),
+                    ["label"] = c.Label,
+                    ["format"] = c.Format,
+                    ["unit"] = ClassAbilityCeilingText.UnitOf(c),
+                };
+
+                // defaultValue is ALWAYS the max-rank figure (equal to the feed's ceiling value); defaultValueByRank is added only when ranks differ.
+                row["defaultValue"] = byRank[maxRank - 1];
+
+                if (varies)
+                {
+                    var list = new JsonArray();
+                    foreach (var v in byRank)
+                        list.Add(v);
+                    row["defaultValueByRank"] = list;
+                }
+
+                row["zeroIsLimit"] = c.ZeroIsLimit;
+                row["topRankOnly"] = c.TopRankOnly;
+                row["affinityScalesMax"] = c.AffinityScalesMax;
+                row["gearMod"] = c.Source == CeilingSource.GearStackCap ? c.GearMod?.ToString() : null;
+
+                array.Add(row);
+            }
+
+            return array;
+        }
+
+        /// <summary>
+        /// How the affinity rider is rated, or null when the ability has none. model is shared | own | additive | uncapped (the
+        /// feed's vocabulary); skill is the display name of the skill the rate is quoted for (honouring AffinityRateSpec.Skill);
+        /// the two defaults are percent of the rank bonus per 100 skill (shared, own, uncapped) or skill points per +1% (additive).
+        /// </summary>
+        internal static JsonObject BuildAffinityRate(ClassAbilityDefinition definition)
+        {
+            if (ClassAbilityCeilingText.AffinityRate(definition, ClassAbilityText.Defaults) is not { } parts)
+                return null;
+
+            var skill = definition.AffinityRate?.Skill ?? definition.AffinitySkill;
+
+            return new JsonObject
+            {
+                ["model"] = parts.Model,
+                ["skill"] = skill.HasValue ? ACE.Entity.Enum.SkillExtensions.ToSentence(skill.Value) : null,
+                ["trained"] = parts.Trained,
+                ["specialized"] = parts.Specialized,
+            };
         }
 
         /// <summary>

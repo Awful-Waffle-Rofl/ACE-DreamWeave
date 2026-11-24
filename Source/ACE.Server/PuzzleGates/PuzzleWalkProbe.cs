@@ -741,10 +741,16 @@ namespace ACE.Server.PuzzleGates
         private static float Horizontal(Vector3 v) => new Vector2(v.X, v.Y).Length();
 
         /// <summary>Drops the body from just above <paramref name="pos"/> onto the floor below. Null = no floor (or no cell).</summary>
-        public BodyState? Settle(uint cell, Vector3 pos)
+        public BodyState? Settle(uint cell, Vector3 pos) => Settle(cell, pos, null);
+
+        /// <summary>
+        /// <see cref="Settle(uint, Vector3)"/> with an ignore predicate (Transition.IgnoresObject): an object it accepts is
+        /// passed through, so a body dropped onto a point where a creature stands lands on the floor under it.
+        /// </summary>
+        public BodyState? Settle(uint cell, Vector3 pos, Func<PhysicsObj, bool> ignore)
         {
             var lifted = new BodyState(cell, pos + new Vector3(0, 0, 0.5f), false, false, default, 0);
-            var landed = Step(lifted, new Vector3(0, 0, -(MaxDrop + 0.5f)), null, out _);
+            var landed = Step(lifted, new Vector3(0, 0, -(MaxDrop + 0.5f)), ignore, out _);
 
             return landed != null && landed.Value.Contact ? landed : null;
         }

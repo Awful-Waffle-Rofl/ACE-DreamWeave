@@ -517,7 +517,7 @@ namespace ACE.Server.SpeedCourses
                 if (moved.TryGetValue(i, out var point))
                 {
                     var role = i == bossIndex ? e.Role : DungeonRole.Elite;
-                    e = new DungeonSpawnPlanEntry(e.Wcid, role, point, e.UpliftLevel, e.StampLevel);
+                    e = new DungeonSpawnPlanEntry(e.Wcid, role, point, e.UpliftLevel, e.StampLevel, e.Stretched);
                 }
 
                 result.Entries.Add(e);
@@ -608,7 +608,7 @@ namespace ACE.Server.SpeedCourses
                     continue;
 
                 var src = sources[i % sources.Count];
-                result.Add(new GuardianPlacement(g, new DungeonSpawnPlanEntry(src.Wcid, DungeonRole.Elite, g.Position, src.UpliftLevel, src.StampLevel)));
+                result.Add(new GuardianPlacement(g, new DungeonSpawnPlanEntry(src.Wcid, DungeonRole.Elite, g.Position, src.UpliftLevel, src.StampLevel, src.Stretched)));
             }
 
             return result;

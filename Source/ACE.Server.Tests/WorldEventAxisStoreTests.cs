@@ -122,6 +122,18 @@ namespace ACE.Server.Tests
                 StringAssert.Contains(note, "also declared in families.json; families.json metadata wins", note);
         }
 
+        /// <summary>
+        /// The reward rows other code depends on: the standard reward and the seven Allegiance Gauntlet tier profiles. Checked by
+        /// id, not by count, so a new reward row does not break this.
+        /// </summary>
+        private static void AssertShippedRewardIds(WorldEventAxisStore store)
+        {
+            Assert.IsTrue(store.Rewards.ContainsKey("standard"), "the standard reward is still shipped");
+
+            for (var t = 0; t <= 6; t++)
+                Assert.IsTrue(store.Rewards.ContainsKey($"gauntlet_t{t}"), $"rewards.json ships the Allegiance Gauntlet tier profile gauntlet_t{t}");
+        }
+
         [TestMethod]
         public void ShippedAxisFiles_ParseCleanly()
         {
@@ -129,13 +141,13 @@ namespace ACE.Server.Tests
 
             var store = WorldEventAxisStore.Parse(sources, families, goals, rewards, anchors, ReadShippedBosses());
 
-            Assert.AreEqual(9, store.Sources.Count,
-                "sources.json should ship ambush + rift + sky_rift + weave_spiral + the five element_portal_* themes (WP-21)");
+            Assert.AreEqual(10, store.Sources.Count,
+                "sources.json should ship ambush + envoy_muster + rift + sky_rift + weave_spiral + the five element_portal_* themes (WP-21)");
             Assert.AreEqual(11, store.Families.Count, "families.json should ship the testclone smoke family plus the ten boss species");
             Assert.AreEqual(12, store.Bosses.Count, "the two built-in entries plus the ten named bosses from bosses.json");
             Assert.AreEqual(4, store.Goals.Count, "goals.json should ship kill_count, destroy_source, kill_boss, defend_envoys");
-            Assert.AreEqual(1, store.Rewards.Count, "rewards.json should ship the standard reward");
-            Assert.AreEqual(0, store.Anchors.Count, "anchors.json is empty in v1");
+            AssertShippedRewardIds(store);
+            Assert.AreEqual(20, store.Anchors.Count, "anchors.json ships the 20 market city anchors (the daily scheduler list)");
             CollectionAssert.AreEqual(Array.Empty<string>(), store.Diagnostics.ToArray(), "shipped files should validate clean");
             Assert.IsFalse(store.IsEmpty);
 
@@ -433,7 +445,7 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void ShippedSources_SkyRiftClearanceIsZero_EveryOtherSourceDefaultsToItsGeometryRadius()
+        public void ShippedSources_SkyRiftAndEnvoyMusterClearanceIsZero_EveryOtherSourceDefaultsToItsGeometryRadius()
         {
             var (sources, _, _, _, _) = ReadShippedFiles();
             var store = WorldEventAxisStore.Parse(sources, null, null, null, null);
@@ -441,7 +453,10 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0f, store.Sources["sky_rift"].ClearanceRadius);
             Assert.AreEqual(25f, store.Sources["sky_rift"].GeometryRadius, "geometryRadius is untouched");
 
-            foreach (var s in store.Sources.Values.Where(s => s.Id != "sky_rift"))
+            // envoy_muster offers only defend_envoys, whose Hold run places its own knights, portals and waves.
+            Assert.AreEqual(0f, store.Sources["envoy_muster"].ClearanceRadius);
+
+            foreach (var s in store.Sources.Values.Where(s => s.Id != "sky_rift" && s.Id != "envoy_muster"))
                 Assert.AreEqual(s.GeometryRadius, s.ClearanceRadius, s.Id);
         }
 
@@ -1047,7 +1062,7 @@ namespace ACE.Server.Tests
 
             Assert.AreEqual(0, store.Sources.Count, "the malformed axis loads empty");
             Assert.AreEqual(4, store.Goals.Count, "the other axes still load");
-            Assert.AreEqual(1, store.Rewards.Count);
+            AssertShippedRewardIds(store);
             Assert.AreEqual(11, store.Families.Count);
             Assert.IsTrue(store.Diagnostics.Any(d => d.Contains("sources.json") && d.Contains("malformed")));
         }
@@ -1253,6 +1268,87 @@ namespace ACE.Server.Tests
 
             Assert.AreEqual(expandedCandidate, folder);
             Assert.AreEqual("content_folder", reason);
+        }
+
+        // ---- random weights ----
+
+        [TestMethod]
+        public void RandomWeights_DefaultToOne_AndShippedContentCarriesTheRulings()
+        {
+            var (sources, _, goals, _, _) = ReadShippedFiles();
+            var store = WorldEventAxisStore.Parse(sources, null, goals, null, null);
+
+            Assert.AreEqual(1.0, WorldEventAxisStore.Parse(PlainSource(""), null, null, null, null).Sources["plain"].RandomWeight);
+            Assert.AreEqual(1.0, store.RandomGroups["portal"]);
+            Assert.AreEqual(0.0, store.Sources["rift"].RandomWeight);
+            Assert.AreEqual(0.0, store.Goals["kill_count"].RandomWeight);
+            Assert.AreEqual(1.0, store.Goals["kill_boss"].RandomWeight);
+
+            foreach (var id in new[] { "fire", "acid", "frost", "lightning", "earth" })
+                Assert.AreEqual("portal", store.Sources["element_portal_" + id].RandomGroup, id);
+
+            Assert.IsNull(store.Sources["sky_rift"].RandomGroup);
+            Assert.IsFalse(store.Diagnostics.Any(d => d.Contains("random")), string.Join("; ", store.Diagnostics));
+        }
+
+        [TestMethod]
+        public void RandomWeights_NegativeSourceWeight_IsDiagnosedAndBecomesZero()
+        {
+            var store = WorldEventAxisStore.Parse(PlainSource(@"""randomWeight"": -1.0,"), null, null, null, null);
+
+            Assert.AreEqual(0.0, store.Sources["plain"].RandomWeight);
+            Assert.AreEqual(1, store.Diagnostics.Count(d => d.Contains("plain") && d.Contains("randomWeight") && d.Contains("never rolled")));
+        }
+
+        [TestMethod]
+        public void RandomWeights_UnknownGroup_IsDiagnosedAndTheSourceIsNeverRolled()
+        {
+            var store = WorldEventAxisStore.Parse(PlainSource(@"""randomGroup"": ""nope"","), null, null, null, null);
+
+            Assert.IsNull(store.Sources["plain"].RandomGroup);
+            Assert.AreEqual(0.0, store.Sources["plain"].RandomWeight, "an unknown group must not leave the source as its own full-weight bucket");
+            Assert.AreEqual(1, store.Diagnostics.Count(d => d.Contains("plain") && d.Contains("randomGroup 'nope'") && d.Contains("never rolled")));
+        }
+
+        [TestMethod]
+        public void RandomWeights_InvalidGroupWeight_KeepsTheGroupAtZero_SoItsMembersNeverRoll()
+        {
+            var json = PlainSource(@"""randomGroup"": ""g"",").Replace(@"{ ""sources"":", @"{ ""randomGroups"": { ""g"": -2.0, ""ok"": 3.0 }, ""sources"":");
+            var store = WorldEventAxisStore.Parse(json, null, null, null, null);
+
+            Assert.IsTrue(store.RandomGroups.ContainsKey("g"), "dropping the group would make its members full buckets");
+            Assert.AreEqual(0.0, store.RandomGroups["g"]);
+            Assert.AreEqual(3.0, store.RandomGroups["ok"]);
+            Assert.AreEqual("g", store.Sources["plain"].RandomGroup, "the member stays in its group");
+            Assert.AreEqual(1, store.Diagnostics.Count(d => d.Contains("randomGroups 'g'") && d.Contains("using 0")));
+            Assert.AreEqual(1, store.Diagnostics.Count(d => d.Contains("random")), string.Join("; ", store.Diagnostics));
+        }
+
+        [TestMethod]
+        public void RandomWeights_NegativeGoalWeight_IsDiagnosedAndBecomesZero()
+        {
+            const string goals = @"{ ""goals"": [ { ""id"": ""g1"", ""displayName"": ""G"", ""randomWeight"": -3.0, ""type"": ""KillBoss"",
+                ""holdSeconds"": 0, ""mvpRule"": ""killingBlowAndTopDamage"", ""progressTemplate"": ""x"" } ] }";
+
+            var store = WorldEventAxisStore.Parse(null, null, goals, null, null);
+
+            Assert.AreEqual(0.0, store.Goals["g1"].RandomWeight);
+            Assert.AreEqual(1, store.Diagnostics.Count(d => d.Contains("g1") && d.Contains("randomWeight") && d.Contains("never rolled")));
+        }
+
+        [TestMethod]
+        public void ShippedAxes_LoadWithZeroRandomWeightDiagnostics()
+        {
+            var dir = FindAxesDir();
+
+            if (dir == null)
+                Assert.Inconclusive("Could not locate Content/events/axes by walking up from the test assembly -- skipping.");
+
+            var store = WorldEventAxisStore.Load(dir);
+
+            Assert.AreEqual(0, store.Diagnostics.Count(d => d.IndexOf("random", StringComparison.OrdinalIgnoreCase) >= 0),
+                string.Join("; ", store.Diagnostics.Where(d => d.IndexOf("random", StringComparison.OrdinalIgnoreCase) >= 0)));
+            Assert.IsTrue(store.RandomGroups.ContainsKey("portal"));
         }
     }
 }

@@ -70,7 +70,14 @@ namespace ACE.Server.Entity
         /// "PvpDaily" covers the PvP daily and weekly rows (Pvp/PvpDailyCatalog.cs): every PvpDaily&lt;Task&gt;Count counter and
         /// PvpDaily&lt;Task&gt;Done flag. They are re-accepted every 20 hours (weekly: 7 days), so without this each character would be
         /// announced and stamped once per row name, up to 38 rows, for bookkeeping that is not a quest.
-        public static readonly string[] ExcludedPrefixes = { "ClassAbility_", "QuestStamp", "ContractAccepted_", "DynDungeonSurvey", "PvpDaily" };
+        ///
+        /// "HuntCount_" covers the Marae Lassel hunter-camp bookkeeping rows (Content/sql/quests/HuntCount_*): the per-hunter Task row, the
+        /// per-species kill counters and the per-hunter cooldown row (HuntCount_&lt;Zone&gt;&lt;Category&gt;Wait). A hunter creates them with
+        /// SetQuestCompletions or StampQuest, which fires a stamp on every new row (QuestManager), and the cooldown is also stamped when a
+        /// hunt is ABANDONED, so without this each fresh hunt would announce and stamp a counter that is not a quest and abandoning would pay
+        /// out. The one row that is NOT excluded is MaraeHunt&lt;Zone&gt;&lt;Category&gt;Cleared, stamped only by the reward set: one stamp per
+        /// hunter is the intended reward for first completing that hunter.
+        public static readonly string[] ExcludedPrefixes = { "ClassAbility_", "QuestStamp", "ContractAccepted_", "DynDungeonSurvey", "PvpDaily", "HuntCount_" };
 
         /// <summary>
         /// TRUE when a quest registry row by this name is worth a stamp: a non-empty name that does not carry

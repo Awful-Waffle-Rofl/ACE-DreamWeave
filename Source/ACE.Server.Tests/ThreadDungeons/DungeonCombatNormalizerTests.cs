@@ -262,6 +262,16 @@ namespace ACE.Server.Tests.ThreadDungeons
             // 9012 HollowIntensity added 2026-09-17 with the hollow-intensity change
             CollectionAssert.AreEquivalent(new[] { 151, 155, 159, 9012 }, DungeonCombatNormalizer.BypassFloats.Select(f => (int)f).ToArray());
             CollectionAssert.AreEquivalent(new[] { 386 }, DungeonCombatNormalizer.BypassInts.Select(i => (int)i).ToArray());
+            // 314 CritDamageRating added 2026-11-21 with the crit-amplifier strip (only when above zero)
+            CollectionAssert.AreEquivalent(new[] { 314 }, DungeonCombatNormalizer.BypassPositiveInts.Select(i => (int)i).ToArray());
+            CollectionAssert.AreEquivalent(new[] { 179, 303, 304, 305, 306 }, DungeonCombatNormalizer.ImbuedEffectSlots.Select(i => (int)i).ToArray());
+            // 2026-11-23: every named imbue bit except the defense trio and Spellbook (0x400, 0x800, 0x1000, 0x2000)
+            Assert.AreEqual(0x400u | 0x800u | 0x1000u | 0x2000u, (uint)DungeonCombatNormalizer.KeptImbues);
+            Assert.AreEqual(0x1u | 0x2u | 0x4u | 0x8u | 0x10u | 0x20u | 0x40u | 0x80u | 0x100u | 0x200u | 0x4000u | 0x8000u | 0x20000000u | 0x40000000u | 0x80000000u,
+                (uint)DungeonCombatNormalizer.StrippedImbues);
+            CollectionAssert.AreEquivalent(new[] { 166, 263, 9103, 9104, 9105, 9106, 9107 }, DungeonCombatNormalizer.ItemStripInts.Select(i => (int)i).ToArray());
+            CollectionAssert.AreEquivalent(new[] { 370, 372, 374 }, DungeonCombatNormalizer.ItemStripGearRatings.Select(i => (int)i).ToArray());
+            CollectionAssert.AreEquivalent(new[] { 138, 157, 152, 156, 8025, 8024 }, DungeonCombatNormalizer.ItemStripFloats.Select(f => (int)f).ToArray());
         }
     }
 }

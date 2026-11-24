@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 
 using ACE.Server.Managers;
 
@@ -25,8 +26,25 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// FORK: the chat line shown after a Focus raise, stating the PvE spell damage bonus the BUFFED Focus earns.
+        /// Built on <see cref="GetFocusSpellDamageMod(uint, double)"/> so it can never disagree with the damage path.
+        /// Null when the bonus is disabled (mod of exactly 1.0), so the caller sends nothing.
+        /// </summary>
+        internal static string? FormatFocusSpellDamageLine(uint buffedFocus, double perPoint)
+        {
+            var mod = GetFocusSpellDamageMod(buffedFocus, perPoint);
+
+            if (mod == 1.0f)
+                return null;
+
+            var pct = ((double)mod - 1.0) * 100.0;
+
+            return $"Your buffed Focus of {buffedFocus} increases your spell damage against monsters by {pct.ToString("0.##", CultureInfo.InvariantCulture)}%.";
+        }
+
+        /// <summary>
         /// FORK: the single home of the Focus spell damage gates. Qualifies only for a direct hit the caster cast
-        /// (not a proc, cascade, echo recast or AOE child) against a non-player (PvE only). The caster-is-Player
+        /// (not a proc, cascade or AOE child; an Echo Cast wisp cast is a direct cast and earns it) against a non-player (PvE only). The caster-is-Player
         /// check stays at each call site as a pattern match.
         /// </summary>
         internal static bool QualifiesForFocusSpellDamage(bool directHit, bool targetIsPlayer, bool fromProc, bool classAbilityProc)

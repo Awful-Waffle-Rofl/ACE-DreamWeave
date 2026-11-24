@@ -54,6 +54,15 @@ namespace ACE.Server.WorldObjects
             if (WorldEvents.WorldEventHooks.TryUseCache(this, player))
                 return;
 
+            // Allegiance Gauntlet: the Gate opts in by PropertyBool.AllegianceGauntletGate and admits a member to the run's arena.
+            // One property read for every other Generic object.
+            if (ACE.Server.Avatars.Gauntlet.GauntletGate.TryHandleUse(this, player))
+                return;
+
+            // Allegiance Gauntlet: the reward cache opts in by PropertyBool.AllegianceGauntletCache and runs its claim here.
+            if (ACE.Server.Avatars.Gauntlet.GauntletCacheHandler.TryHandleUse(this, player))
+                return;
+
             // World Events Hold: a Shrine of Restoration the running Hold run placed heals its knights. One property read for
             // every object no run stamped.
             if (WorldEvents.WorldEventHooks.TryUseHoldShrine(this, player))

@@ -41,6 +41,8 @@ namespace ACE.Server.Tests
             "WorldObjects/Managers/EmoteManager.cs",
             // The raw address world_events_ip_exempt is matched against, and the audit/log field.
             "WorldEvents/WorldEventCacheHandler.cs",
+            // The Gauntlet claimant identity: the raw address world_events_ip_exempt is matched against, beside the household key.
+            "AllegianceAvatar/Gauntlet/GauntletCacheHandler.cs",
             // The /64 puzzle key's address input (the cluster is checked first).
             "ThreadDungeons/ThreadPuzzleIpKey.cs",
         };

@@ -31,10 +31,20 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "whirlwind",
             DisplayName = "Whirlwind",
-            Description = "Your melee swings (any melee style, unarmed included) hit in a full 360-degree arc and " +
-                          "strike 1 / 2 / 3 extra targets by rank on top of your weapon's own cleave - even with no " +
-                          "innate cleave. Each Whirlwind swing costs +35% / +75% / +100% stamina by rank; with too " +
-                          "little stamina it falls back to a normal swing.",
+            DescriptionTemplate = "Your melee swings (any melee style) hit in a full circle and strike extra targets on top of your " +
+                          "weapon's own cleave, even if it has none. Each Whirlwind swing costs extra stamina, and with too little " +
+                          "stamina you swing normally.",
+            // Live text: the surcharge for rank n is SurchargeKey(n) = prefix + n, read at Player_ClassAbilityBuffs.cs:1083 and
+            // GetReadout below. The three keys are built by concatenation, which the source-scan guard accepts from this file alone
+            // (it sees the quoted prefix followed by a rank digit). The extra-target
+            // count is ExtraTargets (the rank itself), a code constant, so the tail quotes it as {rank}. The tail differs in shape
+            // per rank ("1 extra target" / "2 extra targets"), so it is a per-rank array.
+            RankTailTemplate = new[]
+            {
+                "{rank} extra target, +{ranks:class_ability_whirlwind_stamina_surcharge_r|pct}% stamina",
+                "{rank} extra targets, +{ranks:class_ability_whirlwind_stamina_surcharge_r|pct}% stamina",
+                "{rank} extra targets, +{ranks:class_ability_whirlwind_stamina_surcharge_r|pct}% stamina",
+            },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },   // was a single rank at 3 until 2026-10-24 (wave 3 PromoteToPaid)
             Implemented = true,

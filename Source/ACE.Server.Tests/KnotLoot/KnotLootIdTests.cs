@@ -20,6 +20,8 @@ namespace ACE.Server.Tests.KnotLoot
             Assert.AreEqual(9017, (int)PropertyFloat.KnotTraitFrugalHand);
             Assert.AreEqual(9018, (int)PropertyFloat.KnotTraitWristTrade);
             Assert.AreEqual(9020, (int)PropertyFloat.KnotTraitOverpoweringIntent);
+            Assert.AreEqual(9023, (int)PropertyFloat.KnotTraitHarbingerGuard);
+            Assert.AreEqual(9024, (int)PropertyFloat.KnotTraitHarbingerCelerity);
             Assert.AreEqual(9029, (int)PropertyString.KnotLootTable);
         }
     }

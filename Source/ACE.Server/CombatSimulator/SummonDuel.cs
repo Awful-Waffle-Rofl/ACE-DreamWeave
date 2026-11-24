@@ -87,6 +87,53 @@ namespace ACE.Server.CombatSimulator
         /// <summary>True for a launcher shot: Multishot arrows apply to this mode only.</summary>
         public bool IsMissile;
 
+        /// <summary>
+        /// A caster pet's cast (Monster_Magic.TryStartExplicitCast gated by CombatPet.CasterCastReady) when above 0: the
+        /// magic-delay gate in seconds, measured from the spell landing (PrevAttackTime = start + pre-cast). The next
+        /// cast then opens at max(post-cast + Uniform(0, RecoveryMax), CastMagicDelay) after the landing, computed per
+        /// draw rather than through FixedDelay. 0 = not a gated cast (every other mode, monster casts included).
+        /// </summary>
+        public double CastMagicDelay;
+
+        /// <summary>The post-cast seconds of a gated cast (CastMagicDelay above 0), at cast speed 1.0.</summary>
+        public double CastPostSeconds;
+
+        /// <summary>True for a gated pet cast: the mode a cast-speed ramp shortens (and the cast an on=cast ramp counts).</summary>
+        public bool IsGatedCast => CastMagicDelay > 0.0;
+
+        /// <summary>
+        /// Seconds from a gated cast's landing to the next cast start. The post-cast divides by the cast-speed multiplier
+        /// held when the cast STARTED (<paramref name="postSpeed"/>: TryStartExplicitCast scales it into NextAttackTime then),
+        /// the magic delay by the one held when the gate is READ (<paramref name="delaySpeed"/>: CombatPet.CasterMagicDelay is
+        /// live, so it already sees the stack this cast added); the PowerupTime recovery <paramref name="recovery"/> is not
+        /// scaled (only Weakened Blood stretches it).
+        /// </summary>
+        public double GatedGap(double postSpeed, double delaySpeed, double recovery) => Math.Max(CastPostSeconds / postSpeed + recovery, CastMagicDelay / delaySpeed);
+
+        /// <summary>The same gap at one steady multiplier (a held stack count).</summary>
+        public double GatedGap(double speed, double recovery) => GatedGap(speed, speed, recovery);
+
+        /// <summary>The expected <see cref="GatedGap"/> over recovery ~ Uniform(0, RecoveryMax), in closed form.</summary>
+        public double ExpectedGatedGap(double speed)
+        {
+            var a = CastPostSeconds / speed;
+            var b = CastMagicDelay / speed;
+            var r = RecoveryMax;
+
+            if (r <= 0.0)
+                return Math.Max(a, b);
+
+            if (b >= a + r)
+                return b;
+
+            if (b <= a)
+                return a + r / 2.0;
+
+            // b in (a, a + r): the gate binds while u < b - a, the recovery after
+            var k = b - a;
+            return (k * b + a * (r - k) + (r * r - k * k) / 2.0) / r;
+        }
+
         /// <summary>The mean damage of one landed hit.</summary>
         public double MeanLandedDamage => (1.0 - CritChance) * NormalDamage + CritChance * CritDamage;
 
@@ -106,7 +153,17 @@ namespace ACE.Server.CombatSimulator
         public double WindowSeconds;
         public double SpeedCap = double.PositiveInfinity;
 
+        /// <summary>
+        /// FALSE (the default): Frenzy, axis=attackspeed on=hit - a stack per landed hit, scaling melee and missile
+        /// animations. TRUE: Mana Rush, axis=castspeed on=cast - a stack per completed cast (landed or resisted),
+        /// scaling a gated pet cast's whole cycle (pre-cast, post-cast and the magic delay) and nothing else.
+        /// </summary>
+        public bool CastAxis;
+
         public double Multiplier(int stacks) => Math.Min(1.0 + Math.Max(0, stacks) * PerStack, Math.Max(1.0, SpeedCap));
+
+        /// <summary>Whether this ramp's multiplier applies to <paramref name="mode"/>: the cast axis to gated casts only, the attack axis to everything else.</summary>
+        public bool Scales(DuelAttackMode mode) => CastAxis == mode.IsGatedCast;
     }
 
     /// <summary>Extra arrows per missile shot: each is its own hit roll at ArrowMultiplier of the primary's damage.</summary>
@@ -179,7 +236,9 @@ namespace ACE.Server.CombatSimulator
     ///
     /// MODELLED: the incoming multiplier (Soul Tether), the leech (Umbral Siphon, Empowered Summons), Multishot
     /// extra arrows with the owner's overflow rule (an arrow with no secondary target lands on the primary at 1/3 of its
-    /// multiplier), the Frenzy ramp, the pet's lifespan. NOT MODELLED: taunt, movement and range, projectile flight,
+    /// multiplier), the Frenzy ramp, the pet's lifespan, a caster pet's gated cast (one bound damage bolt, the
+    /// magic-delay gate read live from the landing) and its Mana Rush ramp (castspeed on=cast). NOT MODELLED: a caster
+    /// pet's mana pool, its heals and buffs, taunt, movement and range, projectile flight,
     /// the within-hit damage spread (a hit deals the analytic mean, crit or not), monster combat effects, healing or
     /// debuff spells, the pet being targeted by only some of the monsters.
     /// </summary>
@@ -197,8 +256,6 @@ namespace ACE.Server.CombatSimulator
         /// </summary>
         public static double ExpectedDps(DuelCombatant combatant, int rampStacks = 0, bool includeRecovery = true)
         {
-            var speed = combatant.Ramp == null ? 1.0 : combatant.Ramp.Multiplier(rampStacks);
-
             double damage = 0.0, seconds = 0.0, mixTotal = combatant.Modes.Sum(m => m.Mix);
 
             if (mixTotal <= 0.0)
@@ -212,16 +269,38 @@ namespace ACE.Server.CombatSimulator
                 if (weight <= 0.0)
                     continue;
 
+                var speed = combatant.Ramp == null || !combatant.Ramp.Scales(mode) ? 1.0 : combatant.Ramp.Multiplier(rampStacks);
+
                 foreach (var cycle in mode.Cycles)
                 {
                     var w = share * cycle.Weight / weight;
 
                     damage += w * cycle.StrikeFractions.Length * mode.HitChance * mode.MeanLandedDamage;
-                    seconds += w * (cycle.LeadSeconds + cycle.AnimSeconds / speed + cycle.FixedSeconds + (includeRecovery ? mode.RecoveryMax / 2.0 : 0.0) + mode.FixedDelay);
+
+                    if (mode.IsGatedCast)
+                        seconds += w * (cycle.LeadSeconds + CastPreSeconds(cycle) / speed + (includeRecovery ? mode.ExpectedGatedGap(speed) : mode.GatedGap(speed, 0.0)));
+                    else
+                        seconds += w * (cycle.LeadSeconds + cycle.AnimSeconds / speed + cycle.FixedSeconds + (includeRecovery ? mode.RecoveryMax / 2.0 : 0.0) + mode.FixedDelay);
                 }
             }
 
             return seconds > 0.0 ? damage / seconds : 0.0;
+        }
+
+        /// <summary>The pre-cast seconds of a gated cast cycle at speed 1.0: the part of AnimSeconds before its one strike.</summary>
+        internal static double CastPreSeconds(DuelAttackCycle cycle) =>
+            cycle.StrikeFractions.Length == 0 ? 0.0 : cycle.AnimSeconds * cycle.StrikeFractions[0];
+
+        /// <summary>
+        /// Seconds between consecutive landings of a gated pet cast at a fixed ramp stack count, recovery at its mean
+        /// (pre-cast + the expected gap after the landing). The number "the cast cycle" means in a summon-duel report.
+        /// </summary>
+        public static double GatedCastCycle(DuelCombatant combatant, DuelAttackMode mode, int rampStacks)
+        {
+            var speed = combatant.Ramp == null || !combatant.Ramp.Scales(mode) ? 1.0 : combatant.Ramp.Multiplier(rampStacks);
+            var cycle = mode.Cycles[0];
+
+            return cycle.LeadSeconds + CastPreSeconds(cycle) / speed + mode.ExpectedGatedGap(speed);
         }
 
         // ---- the stochastic duel ----
@@ -237,12 +316,17 @@ namespace ACE.Server.CombatSimulator
             /// <summary>The combatant the swing was aimed at when it began; a strike whose target has died meanwhile is dropped.</summary>
             public readonly int Target;
 
-            public Event(EventKind kind, int who, DuelAttackMode mode, int target = -1)
+            /// <summary>A gated cast's strike only: the cast-speed multiplier at its start and its drawn recovery.</summary>
+            public readonly double StartSpeed, Recovery;
+
+            public Event(EventKind kind, int who, DuelAttackMode mode, int target = -1, double startSpeed = 1.0, double recovery = 0.0)
             {
                 Kind = kind;
                 Who = who;
                 Mode = mode;
                 Target = target;
+                StartSpeed = startSpeed;
+                Recovery = recovery;
             }
         }
 
@@ -366,8 +450,6 @@ namespace ACE.Server.CombatSimulator
                     if (me.Ramp != null && stacks[e.Who] > 0 && now - lastTrigger[e.Who] >= me.Ramp.WindowSeconds)
                         stacks[e.Who] = 0;
 
-                    var speed = me.Ramp == null ? 1.0 : me.Ramp.Multiplier(stacks[e.Who]);
-
                     // the swing is aimed at a target when it begins (Monster_Melee.MeleeAttack); with none left there is no swing
                     var aimed = e.Who == 0 ? FirstAlive(alive, 1) : 0;
 
@@ -379,7 +461,25 @@ namespace ACE.Server.CombatSimulator
                     if (mode == null)
                         continue;
 
+                    var speed = me.Ramp == null || !me.Ramp.Scales(mode) ? 1.0 : me.Ramp.Multiplier(stacks[e.Who]);
+
                     var cycle = PickCycle(mode, rng);
+
+                    if (mode.IsGatedCast)
+                    {
+                        // a caster pet: the spell lands when the pre-cast ends (TryStartExplicitCast); the next cast opens at
+                        // max(post-cast + recovery, magic delay) after the landing (CasterCastReady, PrevAttackTime = landing)
+                        var pre = CastPreSeconds(cycle) / speed;
+                        var land = cycle.LeadSeconds + pre;
+
+                        var castRecovery = mode.RecoveryMax > 0.0 ? rng.NextDouble() * mode.RecoveryMax : 0.0;
+
+                        // the next cycle is scheduled when this cast lands (below), because the magic-delay gate reads the
+                        // stack the landing adds
+                        Push(now + land, new Event(EventKind.Strike, e.Who, mode, aimed, speed, castRecovery));
+
+                        continue;
+                    }
 
                     var anim = cycle.AnimSeconds / speed;
 
@@ -402,6 +502,22 @@ namespace ACE.Server.CombatSimulator
                     // a melee strike lands on the target the swing was aimed at and is dropped if that one has died meanwhile
                     // (Monster_Melee.cs: "target.IsDead" returns); a launched arrow flies at whoever is the target at launch
                     var target = e.Mode.IsMissile ? FirstAlive(alive, 1) : e.Target;
+
+                    var castLanded = e.Mode.IsGatedCast && target >= 0 && alive[target];
+
+                    // Mana Rush (ramp on=cast): the completed cast is the trigger, landed or resisted
+                    // (TryStartExplicitCast's OnMonsterEffectCastComplete runs after CastSpellAt either way); a cast whose
+                    // target died in the wind-up is dropped before CastSpellAt and counts nothing
+                    if (castLanded && me.Ramp != null && me.Ramp.CastAxis)
+                        Trigger(me, ref stacks[0], ref lastTrigger[0], now);
+
+                    if (e.Mode.IsGatedCast)
+                    {
+                        // PrevAttackTime was the landing time whether or not the cast went off; the gate reads the live stacks
+                        var delaySpeed = me.Ramp == null || !me.Ramp.Scales(e.Mode) ? 1.0 : me.Ramp.Multiplier(stacks[0]);
+
+                        Push(now + Math.Max(e.Mode.GatedGap(e.StartSpeed, delaySpeed, e.Recovery), 0.05), new Event(EventKind.Cycle, e.Who, null));
+                    }
 
                     if (target < 0 || !alive[target])
                         continue;
@@ -434,7 +550,9 @@ namespace ACE.Server.CombatSimulator
                             petDamage += dealt.Applied;
 
                             Heal(me, ref hp[0], dealt.Applied);
-                            Trigger(me, ref stacks[0], ref lastTrigger[0], now);
+
+                            if (me.Ramp != null && !me.Ramp.CastAxis)
+                                Trigger(me, ref stacks[0], ref lastTrigger[0], now);
                         }
 
                         if (hp[t] <= 0.0)

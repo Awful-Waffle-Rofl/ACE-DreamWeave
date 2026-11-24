@@ -366,8 +366,8 @@ namespace ACE.Server.Tests
             CollectionAssert.AreEqual(new[] { 1, 1, 1 }, def.CostPerRank);
             Assert.AreEqual(Skill.MagicItemTinkering, def.AffinitySkill);
             Assert.AreEqual("Arcane Hollow", def.DisplayName);
-            StringAssert.Contains(def.Description, "not resistance from enchantments");
-            StringAssert.Contains(def.Description, "war magic's elemental and physical damage types");
+            StringAssert.Contains(ClassAbilityText.Describe(def, ClassAbilityText.Defaults), "not resistance from enchantments");
+            StringAssert.Contains(ClassAbilityText.Describe(def, ClassAbilityText.Defaults), "fire, cold, acid, electric, pierce, slash and bludgeon");
         }
 
         [TestMethod]
@@ -476,13 +476,8 @@ namespace ACE.Server.Tests
             var cascade = PooledLootSourceText.Read("Source/ACE.Server/ClassAbilities/Abilities/CascadeAbility.cs");
             StringAssert.Contains(cascade, "child.VolatileWallCounter = null;", "Cascade clears a wall re-fire's own fresh counter");
 
-            // an Echo Cast recast is a separate cast: it keeps the fresh counter its own launch created
-            var echo = NewProjectile();
-            var echoOwn = new VolatileWallAbility.CastCounter();
-            echo.VolatileWallCounter = echoOwn;
-            EchoCastAbility.StampEchoCopy(echo, parent);
-            Assert.AreSame(echoOwn, echo.VolatileWallCounter);
-            Assert.IsTrue(echo.IsEchoCopy);
+            // an Echo Cast wisp cast is its own launch through LaunchSpellProjectiles (pinned by the test below), so it
+            // gets the fresh counter that launch creates; nothing copies a parent's counter onto it
         }
 
         [TestMethod]

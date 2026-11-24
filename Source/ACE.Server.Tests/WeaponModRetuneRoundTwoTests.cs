@@ -127,7 +127,7 @@ namespace ACE.Server.Tests
                     $"{id}: the retunes moved the three RATING rows only; the non-rating {id} must still be {maxRoll}");
             }
 
-            // 2026-08-06: the v3 expansion (Heft, Tension, Leverage, Attunement, Focus, Execution) added six
+            // 2026-08-06: the v3 expansion (Heft, Tension, Leverage, Attunement, Precision, Execution) added six
             // rows to the catalog, but ALL SIX ARE TIER B - see WeaponModRegistry.TierBExpansionBandStart - so
             // Tier A stays at exactly the rows this table already accounts for. No adjustment needed.
             Assert.AreEqual(Retuned.Length + Untouched.Length, WeaponModRegistry.TierAMods.Count,

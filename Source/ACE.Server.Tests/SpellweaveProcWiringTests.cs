@@ -137,9 +137,9 @@ namespace ACE.Server.Tests
 
             Assert.AreEqual(1, Regex.Matches(body, @"OnSpellweaveCast\(\)").Count, "HandleCastSpell must call OnSpellweaveCast exactly once");
 
-            var gated = new Regex(@"if\s*\(\s*this\s+is\s+Player\s+(\w+)\s*&&\s*!\s*\1\.ClassAbilityProcCastActive\s*\)\s*\1\.OnSpellweaveCast\(\)\s*;");
+            var gated = new Regex(@"if\s*\(\s*this\s+is\s+Player\s+(\w+)\s*&&\s*!\s*\1\.ClassAbilityProcCastActive\s*&&\s*\1\.ActiveEchoWispCast\s*==\s*null\s*\)\s*\1\.OnSpellweaveCast\(\)\s*;");
 
-            Assert.IsTrue(gated.IsMatch(body), "HandleCastSpell's OnSpellweaveCast call must be skipped while Player.ClassAbilityProcCastActive is set, or a proc that routes through HandleCastSpell would fire the cast side twice");
+            Assert.IsTrue(gated.IsMatch(body), "HandleCastSpell's OnSpellweaveCast call must be skipped while Player.ClassAbilityProcCastActive is set, or a proc that routes through HandleCastSpell would fire the cast side twice, and while an Echo Cast wisp cast (Player.EchoWispCast) is armed, which neither consumes nor arms the weave");
         }
 
         [TestMethod]
@@ -147,12 +147,16 @@ namespace ACE.Server.Tests
         {
             var launch = MemberBody(ServerSource("WorldObjects", "WorldObject_Magic.cs"), "public List<SpellProjectile> LaunchSpellProjectiles(");
 
-            Assert.IsTrue(Regex.IsMatch(launch, @"sp\.SpellweaveDamageMod\s*=\s*\(this as Player\)\?\.GetSpellweaveSpellDamageMod\(\)"),
-                "LaunchSpellProjectiles must capture the caster's Spellweave stamp onto each projectile as it is built");
+            // through WorldObject.ResolveLaunchStamps, which returns the live value for every cast but an Echo
+            // Cast wisp cast (pinned by value in EchoWispEngineTests)
+            Assert.IsTrue(Regex.IsMatch(launch, @"ResolveLaunchStamps\(\s*sp\.IsEchoWispCast\s*,\s*\(this as Player\)\?\.GetSpellweaveSpellDamageMod\(\)\s*\?\?\s*1\.0f\s*,"),
+                "LaunchSpellProjectiles must hand the caster's live Spellweave stamp to ResolveLaunchStamps");
+            Assert.IsTrue(Regex.IsMatch(launch, @"sp\.SpellweaveDamageMod\s*=\s*launchStamps\.Spellweave\s*;"),
+                "LaunchSpellProjectiles must capture the resolved Spellweave stamp onto each projectile as it is built");
 
             var projectile = ServerSource("WorldObjects", "SpellProjectile.cs");
 
-            Assert.IsTrue(Regex.IsMatch(projectile, @"GetClassAbilitySpellDamageMod\(\s*Spell\s*,\s*SpellweaveDamageMod\s*\)"),
+            Assert.IsTrue(Regex.IsMatch(projectile, @"GetClassAbilitySpellDamageMod\(\s*Spell\s*,\s*SpellweaveDamageMod\s*,\s*IsEchoWispCast\s*\)"),
                 "the war/void impact site must pass the projectile's captured SpellweaveDamageMod");
 
             Assert.IsTrue(Regex.IsMatch(projectile, @"ApplyLifeProjectileClassAbilityDamage\([^;]*SpellweaveDamageMod\s*\)\s*;"),
@@ -168,29 +172,22 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// Echo Cast and Cascade build their children through CreateSpellProjectiles, which stamps each one
-        /// from the LIVE player field. That field belongs to whatever the player cast most recently, so unless
-        /// the handler overwrites it with the parent's capture, a later cast's bonus - and, for Spell AOE and
-        /// Cascade children, the entire LifeProjectileDamage basis - leaks or is lost. Both handlers must call
-        /// SpellProjectile.CopyPerCastStamps to copy the PARENT projectile's stamps onto the children they just
-        /// created; a call to that helper removed at either site is exactly what this guard must catch.
+        /// Cascade builds its children through CreateSpellProjectiles, which stamps each one from the LIVE player
+        /// field. That field belongs to whatever the player cast most recently, so unless the handler overwrites it
+        /// with the parent's capture, a later cast's bonus - and the entire LifeProjectileDamage basis - leaks or is
+        /// lost. Cascade must call SpellProjectile.CopyPerCastStamps to copy the PARENT projectile's stamps onto the
+        /// children it just created; a call to that helper removed there is exactly what this guard must catch.
+        /// (Echo Cast was the second site until the 2026-11-22 wisp rework retired its recast: a wisp cast is a fresh
+        /// launch with the neutral stamps, pinned in EchoWispEngineTests.)
         /// </summary>
         [TestMethod]
-        public void EchoCastAndCascadeChildren_InheritTheParentProjectilesSpellweaveStamp()
+        public void CascadeChildren_InheritTheParentProjectilesSpellweaveStamp()
         {
-            // Echo Cast copies through EchoCastAbility.StampEchoCopy(echo, projectile) since 2026-09-22, which
-            // itself delegates to SpellProjectile.CopyPerCastStamps (pinned just below); Cascade calls the
-            // helper directly. ClassAbilityHandlerTests.EchoCast_StampEchoCopy_InheritsTheParentsPerCastValues
-            // and .CopyPerCastStamps_InheritsTheParentsPerCastValues pin the copy by behavior.
+            // ClassAbilityHandlerTests.CopyPerCastStamps_InheritsTheParentsPerCastValues pins the copy by behavior.
             var cases = new[]
             {
-                (File: "EchoCastAbility.cs", Loop: "echoes", Pattern: @"StampEchoCopy\(\s*(\w+)\s*,\s*projectile\s*\)\s*;"),
                 (File: "CascadeAbility.cs", Loop: "children", Pattern: @"SpellProjectile\.CopyPerCastStamps\(\s*(\w+)\s*,\s*projectile\s*\)\s*;"),
             };
-
-            var stamp = MemberBody(ServerSource("ClassAbilities", "Abilities", "EchoCastAbility.cs"), "public static void StampEchoCopy(");
-            Assert.IsTrue(Regex.IsMatch(stamp, @"CopyPerCastStamps\(\s*echo\s*,\s*parent\s*\)\s*;"),
-                "StampEchoCopy must call SpellProjectile.CopyPerCastStamps(echo, parent) to copy the PARENT's captured stamps (SpellweaveDamageMod, LifeProjectileDamage, LifeProjectileStamp) onto the echo");
 
             foreach (var c in cases)
             {
@@ -219,24 +216,22 @@ namespace ACE.Server.Tests
 
         /// <summary>
         /// The Blood Mage per-cast stamp follows the same capture-at-launch shape as Spellweave: captured in
-        /// LaunchSpellProjectiles, passed from the projectile at impact, copied from the parent onto an echo,
+        /// LaunchSpellProjectiles, passed from the projectile at impact, copied from the parent onto a child,
         /// and NEVER read live inside ApplyLifeProjectileClassAbilityDamage (PR #1271 review: a live read let
-        /// an in-flight bolt or an echo take a later cast's Exsanguinate burst).
+        /// an in-flight bolt or a child take a later cast's Exsanguinate burst).
         /// </summary>
         [TestMethod]
-        public void LifeProjectileStamp_CapturedAtLaunch_PassedAtImpact_CopiedToEchoes_NeverReadLive()
+        public void LifeProjectileStamp_CapturedAtLaunch_PassedAtImpact_CopiedToChildren_NeverReadLive()
         {
             var launch = MemberBody(ServerSource("WorldObjects", "WorldObject_Magic.cs"), "public List<SpellProjectile> LaunchSpellProjectiles(");
-            Assert.IsTrue(Regex.IsMatch(launch, @"sp\.LifeProjectileStamp\s*=\s*\(this as Player\)\?\.GetLifeProjectileCastStamp\(\)"),
-                "LaunchSpellProjectiles must capture the caster's life-projectile stamp onto each projectile as it is built");
+            Assert.IsTrue(Regex.IsMatch(launch, @"ResolveLaunchStamps\([^;]*,\s*\(this as Player\)\?\.GetLifeProjectileCastStamp\(\)\s*\?\?\s*LifeProjectileCastStamp\.None\s*\)\s*;"),
+                "LaunchSpellProjectiles must hand the caster's live life-projectile stamp to ResolveLaunchStamps");
+            Assert.IsTrue(Regex.IsMatch(launch, @"sp\.LifeProjectileStamp\s*=\s*launchStamps\.Stamp\s*;"),
+                "LaunchSpellProjectiles must capture the resolved life-projectile stamp onto each projectile as it is built");
 
             var projectile = ServerSource("WorldObjects", "SpellProjectile.cs");
             Assert.IsTrue(Regex.IsMatch(projectile, @"ApplyLifeProjectileClassAbilityDamage\([^;]*castStamp:\s*LifeProjectileStamp\b"),
                 "the life-projectile impact site must pass the projectile's captured LifeProjectileStamp");
-
-            var stamp = MemberBody(ServerSource("ClassAbilities", "Abilities", "EchoCastAbility.cs"), "public static void StampEchoCopy(");
-            Assert.IsTrue(Regex.IsMatch(stamp, @"CopyPerCastStamps\(\s*echo\s*,\s*parent\s*\)\s*;"),
-                "StampEchoCopy must call SpellProjectile.CopyPerCastStamps(echo, parent) to copy the PARENT's captured LifeProjectileStamp onto the echo");
 
             // The AOE child and Cascade child sites must also inherit LifeProjectileStamp (and
             // LifeProjectileDamage) from the parent via the same helper - an unstamped LifeProjectileDamage

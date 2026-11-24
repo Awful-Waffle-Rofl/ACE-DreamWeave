@@ -471,6 +471,18 @@ namespace ACE.Server.Tests.HazardMechanics
                 return t.HasValue;
             }
 
+            /// <summary>follow_target=random tests set this: every player in the region at a given time. Null = the single player Target/TargetId describe.</summary>
+            public Func<double, IReadOnlyList<(Vector3 Position, uint Id)>> Candidates;
+
+            public IReadOnlyList<(Vector3 Position, uint Id)> FollowCandidates()
+            {
+                if (Candidates != null)
+                    return Candidates(Now);
+
+                var t = Target(Now);
+                return t.HasValue ? new List<(Vector3, uint)> { (t.Value, TargetId(Now)) } : new List<(Vector3, uint)>();
+            }
+
             public FakeHandle SpawnPillar(Vector3 point, double seconds)
             {
                 var ok = !SpawnFails(point);
@@ -513,10 +525,31 @@ namespace ACE.Server.Tests.HazardMechanics
             /// <summary>When set, decides how many players a strike hits (a ledger model); otherwise every strike hits one.</summary>
             public Func<FakeHandle, double, double, int> StrikeHook;
 
-            public int Strike(FakeHandle source, Vector3 centre, float radius, double window)
+            /// <summary>The volley key of each strike, index for index with <see cref="Strikes"/>.</summary>
+            public readonly List<int> StrikeVolleys = new List<int>();
+
+            /// <summary>When set, decides how many players a strike hits from its volley key (a ledger model keyed as HazardContext keys it).</summary>
+            public Func<FakeHandle, int, double, int> VolleyStrikeHook;
+
+            public int Strike(FakeHandle source, Vector3 centre, float radius, double window, int volley)
             {
                 Strikes.Add((source, centre, radius, window, Now));
+                StrikeVolleys.Add(volley);
+
+                if (VolleyStrikeHook != null)
+                    return VolleyStrikeHook(source, volley, Now);
+
                 return StrikeHook != null ? StrikeHook(source, Now, window) : 1;
+            }
+
+            private int hitGroups = 70000;
+
+            public readonly List<int> HitGroups = new List<int>();
+
+            public int NewHitGroup()
+            {
+                HitGroups.Add(++hitGroups);
+                return hitGroups;
             }
 
             public void Say(string line) => Said.Add(line);

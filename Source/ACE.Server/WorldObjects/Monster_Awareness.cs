@@ -54,11 +54,19 @@ namespace ACE.Server.WorldObjects
         /// The taunter is any Creature (Custom Summons: a Tank pet's pulse, CombatPet.TickTauntPulse); every
         /// Player caller is unchanged, since nothing below reads a Player member. The pet pulse only ever
         /// reaches an already-awake monster, so it never takes the WakeUp branch.
+        ///
+        /// A live taunt hold is never overridden by a DIFFERENT taunter (anti ping-pong: two taunters, or a
+        /// player and a pet, used to bounce one monster between them so it ran instead of fighting). The same
+        /// taunter re-applying refreshes its own hold. Returns false, writing nothing, when the taunt is
+        /// refused (tolerance exclusion or another taunter's live hold); true when it took.
         /// </summary>
-        public void ApplyTaunt(Creature taunter, double duration)
+        public bool ApplyTaunt(Creature taunter, double duration)
         {
             if ((Tolerance & PlayerCombatPet_RetaliateExclude) != 0)
-                return;
+                return false;
+
+            if (HasLiveTauntFromOther(taunter))
+                return false;
 
             TauntTarget = taunter;
             TauntExpiry = Timers.RunningTime + duration * GetMonsterEffectTauntHoldMultiplier();
@@ -70,7 +78,35 @@ namespace ACE.Server.WorldObjects
                 WakeUp();
             else if (AttackTarget != prevAttackTarget)
                 EmoteManager.OnNewEnemy(AttackTarget);
+
+            return true;
         }
+
+        /// <summary>
+        /// True while this monster is held by a taunt from any creature (player Taunt or Tank pet pulse): the
+        /// hold is unexpired and its taunter is alive and still spawned. Used to halve its spell-cast chance
+        /// (class_ability_taunt_cast_chance_mult). Does not re-check line of sight.
+        /// </summary>
+        public bool IsTauntHeld =>
+            TauntTarget != null
+            && Timers.RunningTime < TauntExpiry
+            && !TauntTarget.IsDead
+            && !TauntTarget.IsDestroyed
+            && TauntTarget.CurrentLandblock != null;
+
+        /// <summary>
+        /// True while this monster is held by a taunt from a creature other than <paramref name="taunter"/>:
+        /// the hold is unexpired and its taunter is alive and still spawned. Deliberately does not re-check line
+        /// of sight: a hold whose taunter broke it is cleared by FindNextTarget's next retarget, after which a
+        /// new taunter can take the monster.
+        /// </summary>
+        public bool HasLiveTauntFromOther(Creature taunter) =>
+            TauntTarget != null
+            && !ReferenceEquals(TauntTarget, taunter)
+            && Timers.RunningTime < TauntExpiry
+            && !TauntTarget.IsDead
+            && !TauntTarget.IsDestroyed
+            && TauntTarget.CurrentLandblock != null;
 
         /// <summary>
         /// Transitions a monster from awake to idle state

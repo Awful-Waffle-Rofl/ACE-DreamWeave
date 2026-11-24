@@ -35,8 +35,10 @@ namespace ACE.Server.Pinnacles
         /// "immune" record before EnterWorld. <paramref name="tier"/> picks the creature's tier scaling
         /// (PinnacleScaling.Apply); a non-creature ignores it. A creature leaves no corpse unless <paramref name="leavesCorpse"/>
         /// (PinnacleScriptData.HeadLeavesCorpse, for the head only); either way it carries no loot of its own.
+        /// <paramref name="healthMultiplier"/> scales the tier's max health (PinnacleScaling.TierHealth); the core passes
+        /// PinnacleScriptData.HealthMultiplierFor(wcid), 1.0 for a wcid the script does not list.
         /// </summary>
-        PinnacleHandle Spawn(uint wcid, PinnaclePoint at, bool withImmuneRecord, PinnacleTier tier, bool leavesCorpse = false);
+        PinnacleHandle Spawn(uint wcid, PinnaclePoint at, bool withImmuneRecord, PinnacleTier tier, bool leavesCorpse = false, double healthMultiplier = 1.0);
 
         bool IsAlive(PinnacleHandle h);
 
@@ -76,11 +78,27 @@ namespace ACE.Server.Pinnacles
         void Cast(PinnacleHandle caster, uint spellId);
 
         /// <summary>Token &gt; 0, 0 = refused (with <paramref name="error"/>).</summary>
-        int StartHazard(string kind, string pattern, HazardArgs args, out string error);
+        int StartHazard(string kind, string pattern, HazardArgs args, PinnacleHazardOptions options, out string error);
+
+        /// <summary>True when the owner is standing on the ground (not airborne or teleporting).</summary>
+        bool IsOwnerGrounded();
+
+        /// <summary>Sets <paramref name="h"/>'s melee reach in metres; null restores its own.</summary>
+        void SetMeleeReach(PinnacleHandle h, float? metres);
 
         void StopHazard(int token);
 
         int DispelOwnerBuffs(int count, Random rng);
+
+        /// <summary>
+        /// Gives the owner <paramref name="spellId"/> as an enchantment cast by <paramref name="caster"/>, lasting
+        /// <paramref name="seconds"/> instead of the spell's own duration. The live world adds it through the owner's
+        /// EnchantmentManager (keyed by the caster, so it layers with the owner's own buffs and a second grant from the same
+        /// caster refreshes it), overrides the duration, sends the client the enchantment update and runs the owner's spell
+        /// hooks (Player.HandleSpellHooks, as every cast does). False when nothing was granted (no owner on the copy, no such
+        /// caster or spell, a spell that is not an enchantment, or a duration that is not a positive number).
+        /// </summary>
+        bool GrantOwnerBuff(PinnacleHandle caster, uint spellId, double seconds);
 
         void Tell(string line);
 

@@ -24,7 +24,7 @@ namespace ACE.Server.Tests.HazardMechanics
         private static string F(System.Numerics.Vector3 v) => $"({F(v.X)},{F(v.Y)},{F(v.Z)})";
 
         /// <summary>Every observable call the director made, in a stable text form (handles by id).</summary>
-        internal static string Trace(WispDirectorTests.FakePort port)
+        internal static string Trace(WispDirectorTests.FakePort port, bool volleys = true)
         {
             var sb = new StringBuilder();
 
@@ -40,8 +40,12 @@ namespace ACE.Server.Tests.HazardMechanics
             foreach (var l in port.Legs)
                 sb.Append($"leg t={F(l.At)} {l.Handle.Id} {F(l.End)} {F(l.Seconds)}\n");
 
-            foreach (var s in port.Strikes)
-                sb.Append($"strike t={F(s.At)} {s.Source.Id} {F(s.Centre)} {F(s.Radius)} {F(s.Window)}\n");
+            // the volley key each strike carries (one per firing tick), so the fingerprint pins the one-hit-per-volley rule too
+            for (var i = 0; i < port.Strikes.Count; i++)
+            {
+                var s = port.Strikes[i];
+                sb.Append($"strike t={F(s.At)} {s.Source.Id} {F(s.Centre)} {F(s.Radius)} {F(s.Window)}{(volleys ? " v=" + port.StrikeVolleys[i] : "")}\n");
+            }
 
             foreach (var d in port.Destroyed)
                 sb.Append($"destroy t={F(d.At)} {d.Handle.Id}\n");
@@ -77,7 +81,23 @@ namespace ACE.Server.Tests.HazardMechanics
             ["ring"] = "BB96293999FF16CD1322DB7E3B2311700F33DF52C52B88312499F2CC76B9F695",
             ["sweep"] = "0310C28C6314A33174830571676217D28A2E17E98B490B8389C0F8D7D141C37A",
             ["mixed"] = "9D701D776A194CD355DA8E83BBBB655598E3AF89E527F5C3F0EABD41C917A312",
-            ["follow"] = "5F2BBF7412BF801C2E2DE9363E217E915CB5850501F56AB3FBC28F9163F4F756",
+            // re-baselined 2026-11-16 (follower settle arrives by the hold start): only the follower's legs, beat point and
+            // pillar changed; the crew's moves, pillars, marks and strikes are identical to the S0 trace
+            ["follow"] = "E4DB5B7600BC5BE6A8DAC4651000B1B24CCEF2C7D78A9B29DE3C7FE716CD98F5",
+        };
+
+        /// <summary>
+        /// The same traces WITH each strike's volley key (2026-11-16, one hit per volley): pins which pillars share a key. The
+        /// volley-free trace still has to match <see cref="Baseline"/>, so the keys are the only thing these add.
+        /// </summary>
+        private static readonly Dictionary<string, string> VolleyBaseline = new Dictionary<string, string>
+        {
+            ["scatter"] = "4BF0BF63281E5005B746CF8553AF1A3A83C1C39D424FFEA04AAE8D43F1BFB9D4",
+            ["row"] = "5639C362FF658F2179B731A411969AAF6291DB94A2878E225FE0F2C62B6CDA1D",
+            ["ring"] = "87332016615C7F86BD99A74103A26FB4CA8E90D94B8C40BC9A26717E5796CD72",
+            ["sweep"] = "1915D298D177DB5E3D676DF79AAEA5EF736D6625DECD5FF79C0225BA1CAC5F50",
+            ["mixed"] = "49E4263FAE44F3A42DDD03E25054F8E1F3B2D4A845CDAE03ED0B6BC8A6388FA5",
+            ["follow"] = "78A43BC2E4C6DAEAEC4049D3980E964254D01BF22CDBA50F5119F03791503C61",
         };
 
         private static WispDirectorTests.FakePort RunScenario(string args, string pattern, Action<WispDirectorTests.FakePort> arrange = null, int squad = -1, List<WispDirectorTests.FakeHandle> wisps = null)
@@ -104,7 +124,7 @@ namespace ACE.Server.Tests.HazardMechanics
             foreach (var (name, args, pattern) in Scenarios)
             {
                 var port = RunScenario(args, pattern);
-                var trace = Trace(port);
+                var trace = Trace(port, volleys: false);
 
                 Assert.AreEqual(0, port.WispSpawns.Count, name + ": a null live count never spawns a wisp");
                 Assert.AreEqual(0, port.Destroyed.Count(d => !port.MarkHandles.Contains(d.Handle)), name + ": and never destroys one");
@@ -112,6 +132,11 @@ namespace ACE.Server.Tests.HazardMechanics
 
                 if (Baseline[name] != Fingerprint(trace))
                     changed.Add(name + "=" + Fingerprint(trace));
+
+                var withVolleys = Fingerprint(Trace(port));
+
+                if (VolleyBaseline[name] != withVolleys)
+                    changed.Add(name + " (volleys)=" + withVolleys);
             }
 
             Assert.AreEqual(0, changed.Count, "the fake-port action trace changed: " + string.Join(" ", changed));

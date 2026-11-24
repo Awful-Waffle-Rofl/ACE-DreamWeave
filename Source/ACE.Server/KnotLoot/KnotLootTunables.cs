@@ -57,7 +57,7 @@ namespace ACE.Server.KnotLoot
         }
 
         /// <summary>
-        /// Reads a trait. Range key names per prefix: cast_speed, frugal_hand and overpowering_intent use min/max (Primary);
+        /// Reads a trait. Range key names per prefix: cast_speed, frugal_hand, overpowering_intent and harbinger_guard use min/max (Primary); harbinger_celerity uses attack_* (Primary) and cast_* (Secondary);
         /// shield_trade uses armor_* (Primary) and health_* (Secondary); wrist_trade uses gain_* (Primary) and cost_*
         /// (Secondary). An unknown prefix reads only the switch; the ranges are the fallback.
         /// </summary>
@@ -70,6 +70,7 @@ namespace ACE.Server.KnotLoot
                 case "cast_speed":
                 case "frugal_hand":
                 case "overpowering_intent":
+                case "harbinger_guard":
                     return new KnotTraitSettings(enabled, ReadRange(prefix, "min", "max", fallback.Primary), fallback.Secondary);
 
                 case "shield_trade":
@@ -77,6 +78,9 @@ namespace ACE.Server.KnotLoot
 
                 case "wrist_trade":
                     return new KnotTraitSettings(enabled, ReadRange(prefix, "gain_min", "gain_max", fallback.Primary), ReadRange(prefix, "cost_min", "cost_max", fallback.Secondary));
+
+                case "harbinger_celerity":
+                    return new KnotTraitSettings(enabled, ReadRange(prefix, "attack_min", "attack_max", fallback.Primary), ReadRange(prefix, "cast_min", "cast_max", fallback.Secondary));
 
                 default:
                     return new KnotTraitSettings(enabled, fallback.Primary, fallback.Secondary);

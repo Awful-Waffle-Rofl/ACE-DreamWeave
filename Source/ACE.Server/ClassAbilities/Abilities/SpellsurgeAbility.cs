@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 using ACE.Server.EquipmentMods;
 using ACE.Server.Managers;
@@ -43,13 +44,58 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "spellsurge",
             DisplayName = "Spellsurge",
-            Description = "Each landed war proc raises your proc chance by 0.67/1.33/2 percentage points (by rank), up " +
-                          "to 5 stacks (+3.3/6.7/10 points), decaying after 10 seconds without a proc. Sundermark's " +
-                          "vulnerability proc does not build stacks.",
+            // Live text. Per-stack value per rank: SpellsurgeAbility.cs ~122-124 (Player_ClassAbilityBuffs.cs ~2255); stack cap and
+            // decay window: Player_ClassAbilityBuffs.cs ~2157-2162. The full-stack "+3.35/6.65/10 points" is full_stack: ProcChanceBonus at
+            // the stack cap (the method GetSpellsurgeProcChanceBonus calls, with no Surge gear), shown in points. It was typed "3.3/6.7/10",
+            // rounded from the per-stack rates; the mechanic's own product is 5 x 0.0067 = 3.35 and 5 x 0.0133 = 6.65.
+            DescriptionTemplate = "Each war proc you land raises your proc chance, up to {v:class_ability_spellsurge_max_stacks|int} " +
+                          "stacks. Stacks decay after {v:class_ability_spellsurge_window_seconds|num} seconds without a proc. " +
+                          "Sundermark's Vulnerability proc does not build stacks.",
+            RankTailTemplate = "+{ranks:class_ability_spellsurge_per_stack_r|pct} points per stack (+{fn:full_stack|pct} when full)",
+            TextFormulas = new Dictionary<string, TextFormula>
+            {
+                ["full_stack"] = new TextFormula(
+                    (values, rank) => ProcChanceBonusFor(values, rank, MaxStacks(values)),
+                    "class_ability_spellsurge_max_stacks",
+                    "class_ability_spellsurge_per_stack_r1",
+                    "class_ability_spellsurge_per_stack_r2",
+                    "class_ability_spellsurge_per_stack_r3"),
+            },
+            TunableSourceFiles = new[] { "WorldObjects/Player_ClassAbilityBuffs.cs" },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },   // Spellsword pass 2026-10-24: one rank at 3 -> three at 1/1/1 (ClassAbilityRepricing wave 4, PromoteToPaid)
             Implemented = true,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "stacks", Bounds = CeilingBounds.Stacks, Source = CeilingSource.Tunable, Key = "class_ability_spellsurge_max_stacks", Label = "max stacks", Format = "int", ZeroIsLimit = true },
+                new ClassAbilityCeiling { Id = "gear", Bounds = CeilingBounds.Gear, Source = CeilingSource.GearStackCap, GearMod = EquipmentModId.Surge, Label = "max from gear per stack", Format = "pct" },
+            },
         };
+
+        /// <summary>
+        /// <see cref="PerStack(int, double, double, double)"/> with the three tunables read through <paramref name="values"/>.
+        /// </summary>
+        public static double PerStack(ITunableValues values, int rank) => PerStack(rank,
+            values.GetDouble("class_ability_spellsurge_per_stack_r1"),
+            values.GetDouble("class_ability_spellsurge_per_stack_r2"),
+            values.GetDouble("class_ability_spellsurge_per_stack_r3"));
+
+        /// <summary>The stack cap (class_ability_spellsurge_max_stacks, 5) read through <paramref name="values"/>.</summary>
+        public static int MaxStacks(ITunableValues values) => (int)values.GetLong("class_ability_spellsurge_max_stacks");
+
+        /// <summary>
+        /// The stack count after one more landed war proc: one more, unless the pool already holds the cap
+        /// (<paramref name="cap"/> from <see cref="MaxStacks"/>). Player.AddSpellsurgeStack grows the pool through this.
+        /// </summary>
+        public static int NextStacks(int stacks, int cap) => stacks >= cap ? stacks : stacks + 1;
+
+        /// <summary>
+        /// <see cref="ProcChanceBonus(int, int, double, double)"/> over the rank's <see cref="PerStack(ITunableValues, int)"/>.
+        /// Player.GetSpellsurgeProcChanceBonus calls this with <see cref="ClassAbilityText.Live"/>; the live text's full_stack
+        /// formula calls it at the stack cap with no gear.
+        /// </summary>
+        public static float ProcChanceBonusFor(ITunableValues values, int rank, int stacks, double gearPerStack = 0.0) =>
+            ProcChanceBonus(rank, stacks, PerStack(values, rank), gearPerStack);
 
         /// <summary>
         /// The per-stack proc-chance fraction at a given rank: the r1/r2/r3 tunables (0.0067 / 0.0133 / 0.02).
@@ -118,10 +164,7 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
-            var perStack = PerStack(rank,
-                PropertyManager.GetDouble("class_ability_spellsurge_per_stack_r1").Item,
-                PropertyManager.GetDouble("class_ability_spellsurge_per_stack_r2").Item,
-                PropertyManager.GetDouble("class_ability_spellsurge_per_stack_r3").Item);
+            var perStack = PerStack(ClassAbilityText.Live, rank);
 
             var gearPerStack = rank <= 0
                 ? 0.0
@@ -141,6 +184,11 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "proc chance",
                 Per = "/stack",
                 CapNote = null,
+                Ceilings = new[]
+                {
+                    ClassAbilityCeilings.Read(Definition, "stacks", player?.GetSpellsurgeStacks() ?? 0, rank, ClassAbilityText.Live),
+                    ClassAbilityCeilings.Read(Definition, "gear", gear, rank, ClassAbilityText.Live),
+                },
             };
         }
     }

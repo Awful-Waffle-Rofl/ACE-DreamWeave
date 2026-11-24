@@ -37,8 +37,9 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "umbral_siphon",
             DisplayName = "Umbral Siphon",
-            Description = "Every hit one of your combat pets lands heals that pet for 2/4/6/8/10% of the " +
-                          "damage it dealt (by rank). Higher Loyalty multiplies the leech.",
+            // Live text: heal fraction = rank * class_ability_umbralsiphon_percent_per_rank (GetReadout below; Player_ClassAbilityBuffs.cs:783).
+            DescriptionTemplate = "Every hit your combat pets land heals them for part of the damage.",
+            RankTailTemplate = "+{per:class_ability_umbralsiphon_percent_per_rank|pct}% of damage healed",
             MaxRank = 5,
             CostPerRank = new[] { 1, 1, 1, 1, 1 },
             Implemented = true,

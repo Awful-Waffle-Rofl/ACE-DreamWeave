@@ -109,6 +109,22 @@ namespace ACE.Server.Tests
             Assert.IsTrue(QuestStamps.IsEligible("ArenaPvpDailyLegend"), "control: the prefix only matches at the start");
         }
 
+        /// <summary>
+        /// The hunter-camp Task and per-species counter rows are bookkeeping the hunter creates and erases every hunt, so they award no stamp,
+        /// whatever the case. The cooldown row (HuntCount_...Wait) is bookkeeping too (abandon stamps it); the reward-only MaraeHunt...Cleared row is the real once-per-hunter milestone and stays eligible.
+        /// </summary>
+        [TestMethod]
+        public void IsEligible_HuntCountRowsRejected_ClearedRowsKept()
+        {
+            Assert.IsFalse(QuestStamps.IsEligible("HuntCount_SouthAunTask"));
+            Assert.IsFalse(QuestStamps.IsEligible("HuntCount_NorthAunAunWindreave"));
+            Assert.IsFalse(QuestStamps.IsEligible("huntcount_plateauolthoiolthoihivemutilator"));
+            Assert.IsFalse(QuestStamps.IsEligible("HuntCount_SouthAunWait"), "abandon stamps the cooldown, so it must never pay");
+            Assert.IsTrue(QuestStamps.IsEligible("MaraeHuntSouthAunCleared"), "control: the reward-only row keeps its stamp");
+            Assert.IsTrue(QuestStamps.IsEligible("MaraeHuntSouthAunAunRunner"), "control: the retired PR counter name was NOT excluded");
+            Assert.IsTrue(QuestStamps.IsEligible("ReHuntCount_Quest"), "control: the prefix only matches at the start");
+        }
+
         [TestMethod]
         public void IsEligible_LedgerRowsRejected()
         {

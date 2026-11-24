@@ -27,6 +27,9 @@ namespace ACE.Server.Tests
             ClassAbilityId.CrimsonHarvest, ClassAbilityId.HealBoostRating,
         };
 
+        /// <summary>Every Unlearn row across all waves in bit order: only wave 1's five (no later wave unlearns).</summary>
+        private static readonly ClassAbilityId[] AllUnlearned = Unlearned;
+
         private static readonly ClassAbilityId[] Kept =
         {
             ClassAbilityId.SanguineWard, ClassAbilityId.BloodPrice, ClassAbilityId.SanguineReserve,
@@ -127,7 +130,7 @@ namespace ACE.Server.Tests
             var names = ClassAbilityRepricing.UnlearnedAbilityNames(W, 0);
 
             CollectionAssert.AreEquivalent(
-                Unlearned.Select(id => ClassAbilityRegistry.Abilities[id].Name).ToArray(), names.ToArray());
+                AllUnlearned.Select(id => ClassAbilityRegistry.Abilities[id].Name).ToArray(), names.ToArray());
 
             Assert.AreEqual(0, ClassAbilityRepricing.UnlearnedAbilityNames(W, ClassAbilityRepricing.LatestWave).Count);
         }
@@ -317,7 +320,7 @@ namespace ACE.Server.Tests
             }
 
             // control: the same character unstamped IS migrated
-            Assert.AreEqual(5, ClassAbilityRepricing.PlanUnlearns(0, maxed).Count);
+            Assert.AreEqual(AllUnlearned.Length, ClassAbilityRepricing.PlanUnlearns(0, maxed).Count);
             Assert.IsTrue(ClassAbilityRepricing.OwnsAnyPendingAbility(W, 0, maxed));
         }
 
@@ -532,7 +535,10 @@ namespace ACE.Server.Tests
             AssertGuarded(abilities, "private bool ValidateClassAbilityRankPrerequisites(", "private bool ApplyClassAbilityRankCore(");
             AssertGuarded(tokens, "public bool CanBuyClassAbilityToken(", "private bool TryFindClassAbilityVoucher(");
             AssertGuarded(tokens, "public bool RefundUnusedVoucher(", "private bool TryRefundRetiredVoucher(");
-            AssertGuarded(abilities, "public bool UnlearnClassAbility(", "refunded = skill.CumulativeCost(rank);");
+            // UnlearnClassAbility and LowerClassAbilityRank both run this core before anything moves
+            AssertGuarded(abilities, "private bool ValidateClassAbilityRankRemoval(", "private static long ClassAbilityRemovalFee()");
+            AssertGuarded(abilities, "public bool UnlearnClassAbility(", "refunded = skill.CumulativeCost(rank);", viaRemovalCore: true);
+            AssertGuarded(abilities, "public bool LowerClassAbilityRank(", "refunded = ClassAbilityRankRemoval.Refund(", viaRemovalCore: true);
 
             // the trainer's full respec charges its fee before unlearning, so it must refuse up front
             var trainer = File.ReadAllText(Path.Combine(ClassAbilityAffinityDeclarationTests.RepoRoot(),
@@ -584,7 +590,8 @@ namespace ACE.Server.Tests
                 "ClassAbilityRepricing.RecomputePoints(",
                 "AdjustClassAbilityPoints(netDelta, 0, CapLedgerReason.Reprice",
                 "SetProperty(PropertyInt.ClassAbilityRepriceWave, latestWave)",
-                "if (!touched && run.StrippedFacets == 0)",
+                "ClassAbilityRepricing.OwnsAnyNoticeOnlyAbility(",
+                "if (!touched && run.StrippedFacets == 0 && run.NoticeFacetNames.Count == 0 && !ownsNoticeOnly)",
                 "SaveBiotaToDatabase();",
             };
 
@@ -869,9 +876,307 @@ namespace ACE.Server.Tests
             }
 
             var all = ClassAbilityRepricing.UnlearnBitOrder(W);
-            CollectionAssert.AreEqual(Unlearned, all.ToArray(), "bit order is wave and row order");
+            CollectionAssert.AreEqual(AllUnlearned, all.ToArray(), "bit order is wave and row order");
             CollectionAssert.AreEqual(all.ToArray(), ClassAbilityRepricing.DecodeUnlearnMask(W, ClassAbilityRepricing.EncodeUnlearnMask(W, all)).ToArray());
             Assert.AreEqual(0, ClassAbilityRepricing.EncodeUnlearnMask(W, new[] { ClassAbilityId.SanguineWard }), "a kept ability has no bit");
+        }
+
+        // ---- the per-row ability change notice -----------------------------------------------------
+
+        private static string DisplayOf(ClassAbilityId id) => ClassAbilityRegistry.Abilities[id].DisplayName;
+
+        [TestMethod]
+        public void ChangeNoticeLine_CostOnly_SummaryOnly_AndBoth()
+        {
+            var costOnly = new RepriceRow(ClassAbilityId.Taunt, new[] { 1, 1, 1 }, new[] { 2, 2, 2 }, RepriceAction.Unlearn);
+            Assert.AreEqual("Ability change - Taunt: cost per rank 1/1/1 -> 2/2/2.", ClassAbilityRepricing.BuildChangeNoticeLine("Taunt", costOnly));
+
+            var summaryOnly = new RepriceRow(ClassAbilityId.SanguineReserve, new[] { 1, 1, 1 }, new[] { 1, 1, 1 }, RepriceAction.Keep, "now refills faster");
+            Assert.AreEqual("Ability change - Sanguine Reserve: now refills faster.", ClassAbilityRepricing.BuildChangeNoticeLine("Sanguine Reserve", summaryOnly));
+
+            var both = new RepriceRow(ClassAbilityId.Cascade, new[] { 1, 1, 1 }, new[] { 2, 2, 2 }, RepriceAction.Unlearn, "radius 15/30/65m -> 20/40/70m");
+            Assert.AreEqual("Ability change - Cascade: cost per rank 1/1/1 -> 2/2/2; radius 15/30/65m -> 20/40/70m.", ClassAbilityRepricing.BuildChangeNoticeLine("Cascade", both));
+
+            var nothing = new RepriceRow(ClassAbilityId.SanguineReserve, new[] { 1, 1, 1 }, new[] { 1, 1, 1 }, RepriceAction.Keep);
+            Assert.IsNull(ClassAbilityRepricing.BuildChangeNoticeLine("X", nothing), "no price change and no summary announces nothing");
+
+            var longSummary = new RepriceRow(ClassAbilityId.SanguineReserve, new[] { 1 }, new[] { 1 }, RepriceAction.Keep, new string('x', 400));
+            Assert.AreEqual(ClassAbilityRepricing.MaxChatLineLength, ClassAbilityRepricing.BuildChangeNoticeLine("X", longSummary).Length, "truncated defensively");
+        }
+
+        [TestMethod]
+        public void EveryRowOfEveryWaveWithANoticeContract_ProducesAShortAsciiLine()
+        {
+            var contract = W.Where(w => w.Number >= ClassAbilityRepricing.FirstWaveWithChangeNotice).ToList();
+            Assert.IsTrue(contract.Count > 0);
+
+            foreach (var wave in contract)
+                foreach (var row in wave.Rows)
+                {
+                    Assert.IsTrue(ClassAbilityRepricing.ChangeNoticeParts(row).Count > 0,
+                        $"wave {wave.Number} {row.Ability}: cost must differ or a Summary must be given");
+
+                    var line = ClassAbilityRepricing.BuildChangeNoticeLine(DisplayOf(row.Ability), row);
+                    Assert.IsNotNull(line);
+                    Assert.IsTrue(line.Length <= ClassAbilityRepricing.MaxChatLineLength, $"{line} is over 255 characters");
+                    Assert.IsTrue(line.All(c => c >= 32 && c < 127), $"{line} must be printable ASCII");
+                }
+        }
+
+        [TestMethod]
+        public void Wave8Lines_AreTheOwnerWording()
+        {
+            var lines = ClassAbilityRepricing.BuildChangeNoticeLines(W, 7, _ => true, DisplayOf);
+
+            CollectionAssert.AreEqual(new[]
+            {
+                "Ability change - Acid Proc: moved from Rogue tier 2 to tier 3.",
+                "Ability change - Killer Instinct: moved from Rogue tier 3 to tier 2.",
+            }, lines);
+        }
+
+        [TestMethod]
+        public void ChangeNoticeLogin_RankThreeOwnerOfBoth_GetsBothLines()
+        {
+            var ranks = new Dictionary<ClassAbilityId, int> { [ClassAbilityId.AcidProc] = 3, [ClassAbilityId.KillerInstinct] = 3 };
+            var lines = ClassAbilityRepricing.BuildChangeNoticeLines(W, 7, id => ranks.TryGetValue(id, out var r) && r > 0, DisplayOf);
+
+            Assert.AreEqual(2, lines.Count);
+            StringAssert.Contains(lines[0], "Acid Proc");
+            StringAssert.Contains(lines[1], "Killer Instinct");
+        }
+
+        [TestMethod]
+        public void ChangeNoticeLogin_FacetOnlyHolder_GetsTheLine()
+        {
+            // the login path counts an ability stripped from a stored facet build as held, same as a rank
+            var stripped = new HashSet<string> { ClassAbilityRegistry.Abilities[ClassAbilityId.AcidProc].Name };
+            var lines = ClassAbilityRepricing.BuildChangeNoticeLines(W, 7, id => stripped.Contains(ClassAbilityRegistry.Abilities[id].Name), DisplayOf);
+
+            Assert.AreEqual(1, lines.Count);
+            StringAssert.Contains(lines[0], "Acid Proc");
+        }
+
+        [TestMethod]
+        public void ChangeNoticeLogin_NonOwner_AndAlreadyMigrated_GetNothing()
+        {
+            Assert.AreEqual(0, ClassAbilityRepricing.BuildChangeNoticeLines(W, 7, _ => false, DisplayOf).Count, "non-owner");
+            Assert.AreEqual(0, ClassAbilityRepricing.BuildChangeNoticeLines(W, ClassAbilityRepricing.LatestWave, _ => true, DisplayOf).Count, "already migrated");
+            Assert.AreEqual(0, ClassAbilityRepricing.BuildChangeNoticeLines(W, 0, null, DisplayOf).Count, "no predicate");
+        }
+
+        [TestMethod]
+        public void ChangeNoticeLogin_WavesBelowTheContract_AnnounceNothing()
+        {
+            // a character stamped at 0 owes waves 1-7 as well, but only wave 8 (two Rogue rows) has a notice contract
+            var lines = ClassAbilityRepricing.BuildChangeNoticeLines(W, 0, _ => true, DisplayOf);
+            Assert.AreEqual(2, lines.Count);
+        }
+
+        [TestMethod]
+        public void ChangeNoticeLogin_SeveralWavesNamingOneAbility_SendOneLinePerWaveInOrder()
+        {
+            var waves = new[]
+            {
+                new RepriceWave(8, "a", "s", "t", new RepriceRow(ClassAbilityId.Taunt, new[] { 1, 1, 1 }, new[] { 2, 2, 2 }, RepriceAction.Keep)),
+                new RepriceWave(9, "b", "s", "t", new RepriceRow(ClassAbilityId.Taunt, new[] { 2, 2, 2 }, new[] { 2, 2, 2 }, RepriceAction.Keep, "radius 15/30/65m -> 20/40/70m")),
+            };
+
+            var lines = ClassAbilityRepricing.BuildChangeNoticeLines(waves, 7, _ => true, DisplayOf);
+
+            CollectionAssert.AreEqual(new[]
+            {
+                "Ability change - Taunt: cost per rank 1/1/1 -> 2/2/2.",
+                "Ability change - Taunt: radius 15/30/65m -> 20/40/70m.",
+            }, lines);
+        }
+
+        // ---- facet-only holders of Keep / PromoteToPaid abilities --------------------------------------
+
+        private static IReadOnlyList<RepriceWave> NoticeWavesKeepAndPromote() => new[]
+        {
+            new RepriceWave(8, "keep", "s", "t",
+                new RepriceRow(ClassAbilityId.Taunt, new[] { 1, 1, 1 }, new[] { 2, 2, 2 }, RepriceAction.Keep, "radius up")),
+            new RepriceWave(9, "promote", "s", "t",
+                new RepriceRow(ClassAbilityId.Cascade, new[] { 3 }, new[] { 1, 1, 1 }, RepriceAction.PromoteToPaid, "now three ranks")),
+        };
+
+        private static List<string> FacetOnlyLines(IReadOnlyList<RepriceWave> waves, Func<ClassAbilityId, bool> hasRank, IReadOnlyList<CharacterFacet> rows, out int fetches, out bool failed)
+        {
+            var count = 0;
+            var names = ClassAbilityRepricing.FacetOnlyNoticeNames(waves, 7, hasRank, null,
+                () => { count++; return rows; }, out failed);
+            fetches = count;
+
+            return ClassAbilityRepricing.BuildChangeNoticeLines(waves, 7,
+                id => hasRank(id) || (ClassAbilityRegistry.Abilities.TryGetValue(id, out var d) && names.Contains(d.Name)), DisplayOf);
+        }
+
+        [TestMethod]
+        public void FacetOnlyHolder_OfAKeepAbility_GetsTheLine()
+        {
+            var taunt = ClassAbilityRegistry.Abilities[ClassAbilityId.Taunt].Name;
+            var rows = new[] { Facet(1, new Dictionary<string, int> { [taunt] = 2 }) };
+
+            var lines = FacetOnlyLines(NoticeWavesKeepAndPromote(), _ => false, rows, out var fetches, out var failed);
+
+            Assert.IsFalse(failed);
+            Assert.AreEqual(1, fetches);
+            Assert.AreEqual(1, lines.Count);
+            StringAssert.Contains(lines[0], "Taunt");
+        }
+
+        [TestMethod]
+        public void FacetOnlyHolder_OfAPromoteAbility_GetsTheLine()
+        {
+            var cascade = ClassAbilityRegistry.Abilities[ClassAbilityId.Cascade].Name;
+            var rows = new[] { Facet(2, new Dictionary<string, int> { [cascade] = 1 }) };
+
+            var lines = FacetOnlyLines(NoticeWavesKeepAndPromote(), _ => false, rows, out _, out var failed);
+
+            Assert.IsFalse(failed);
+            Assert.AreEqual(1, lines.Count);
+            StringAssert.Contains(lines[0], "Cascade");
+            StringAssert.Contains(lines[0], "now three ranks");
+        }
+
+        [TestMethod]
+        public void FacetOnlyNotice_DoesNotReadWhenEveryRowIsCoveredByALiveRank_AndNeverReadsTwice()
+        {
+            var waves = NoticeWavesKeepAndPromote();
+            var fetches = 0;
+
+            ClassAbilityRepricing.FacetOnlyNoticeNames(waves, 7, _ => true, null, () => { fetches++; return new CharacterFacet[0]; }, out var failed);
+            Assert.AreEqual(0, fetches, "every notice row already has a live rank: no read");
+            Assert.IsFalse(failed);
+
+            var reused = new[] { Facet(1, new Dictionary<string, int> { [ClassAbilityRegistry.Abilities[ClassAbilityId.Taunt].Name] = 1 }) };
+            var names = ClassAbilityRepricing.FacetOnlyNoticeNames(waves, 7, _ => false, reused, () => { fetches++; return new CharacterFacet[0]; }, out failed);
+            Assert.AreEqual(0, fetches, "rows the Unlearn sweep already read are reused, never fetched again");
+            CollectionAssert.AreEquivalent(new[] { ClassAbilityRegistry.Abilities[ClassAbilityId.Taunt].Name }, names.ToArray());
+
+            ClassAbilityRepricing.FacetOnlyNoticeNames(waves, 0, _ => false, null, () => { fetches++; return new CharacterFacet[0]; }, out _);
+            Assert.AreEqual(1, fetches, "one read when it is needed");
+
+            ClassAbilityRepricing.FacetOnlyNoticeNames(waves, 9, _ => false, null, () => { fetches++; return null; }, out _);
+            Assert.AreEqual(1, fetches, "no pending wave: no read");
+        }
+
+        [TestMethod]
+        public void FacetOnlyNotice_FailedRead_SkipsTheLines_WithoutThrowing()
+        {
+            var names = ClassAbilityRepricing.FacetOnlyNoticeNames(NoticeWavesKeepAndPromote(), 7, _ => false, null, () => null, out var failed);
+
+            Assert.IsTrue(failed, "the caller logs the skip");
+            Assert.AreEqual(0, names.Count);
+
+            // the live-rank lines are unaffected by the skipped read
+            var lines = ClassAbilityRepricing.BuildChangeNoticeLines(NoticeWavesKeepAndPromote(), 7,
+                id => id == ClassAbilityId.Taunt || names.Contains(ClassAbilityRegistry.Abilities[id].Name), DisplayOf);
+            Assert.AreEqual(1, lines.Count);
+            StringAssert.Contains(lines[0], "Taunt");
+        }
+
+        [TestMethod]
+        public void FacetOnlyNotice_PlayerWiringNeverRefusesOnTheNoticeRead()
+        {
+            var src = Source("Player_ClassAbilities.cs");
+            var from = src.IndexOf("FacetOnlyNoticeNames(", StringComparison.Ordinal);
+            var to = src.IndexOf("var unlearns = ClassAbilityRepricing.PlanUnlearns(", from, StringComparison.Ordinal);
+
+            Assert.IsTrue(from > 0 && to > from);
+            var body = src.Substring(from, to - from);
+
+            StringAssert.Contains(body, "unlearnFacetRows", "reuses the Unlearn sweep's read");
+            StringAssert.Contains(body, "noticeReadFailed");
+            Assert.IsFalse(body.Contains("return"), "a failed notice read must not return from the migration");
+        }
+
+        // ---- who is affected: each disjunct by behaviour ----------------------------------------------
+
+        private static bool Affected(ClassAbilityId id, int rank, ClassAbilityId[] erased, string[] stripped, string[] facetOnly) =>
+            ClassAbilityRepricing.ChangeNoticeAffected(id, _ => rank, erased, stripped, facetOnly);
+
+        [TestMethod]
+        public void ChangeNoticeAffected_EachDisjunctAlone_AndNone()
+        {
+            var id = ClassAbilityId.Whirlwind;
+            var name = ClassAbilityRegistry.Abilities[id].Name;
+            var none = new ClassAbilityId[0];
+            var noNames = new string[0];
+
+            Assert.IsTrue(Affected(id, 3, none, noNames, noNames), "live rank only");
+            Assert.IsTrue(Affected(id, 0, new[] { id }, noNames, noNames), "marker-erased only (rank already 0)");
+            Assert.IsTrue(Affected(id, 0, none, new[] { name }, noNames), "stripped from a facet build only");
+            Assert.IsTrue(Affected(id, 0, none, noNames, new[] { name }), "facet-only holder only");
+            Assert.IsFalse(Affected(id, 0, none, noNames, noNames), "none");
+
+            // other abilities' evidence does not leak across
+            Assert.IsFalse(Affected(id, 0, new[] { ClassAbilityId.BerserkRage }, new[] { "berserk_rage" }, new[] { "berserk_rage" }));
+            Assert.IsFalse(ClassAbilityRepricing.ChangeNoticeAffected(id, null, null, null, null), "null inputs are none, not a throw");
+        }
+
+        [TestMethod]
+        public void BuildChangeNoticeLine_Truncation_KeepsTheClosingPeriodWithin255()
+        {
+            var row = new RepriceRow(ClassAbilityId.SanguineReserve, new[] { 1 }, new[] { 1 }, RepriceAction.Keep, new string('x', 400));
+            var line = ClassAbilityRepricing.BuildChangeNoticeLine("X", row);
+
+            Assert.AreEqual(ClassAbilityRepricing.MaxChatLineLength, line.Length);
+            Assert.IsTrue(line.EndsWith("."), "still reads as a sentence");
+        }
+
+        [TestMethod]
+        public void LoginWiring_Pins_TheThreeMutantsTheReviewerFound()
+        {
+            var src = Source("Player_ClassAbilities.cs");
+
+            // (a) the Unlearn sweep's facet rows must be kept for the notice read to reuse
+            StringAssert.Contains(src, "unlearnFacetRows = facetRows;");
+
+            // (c) the notice read is guarded by "the character ever earned a point", directly
+            Assert.IsTrue(System.Text.RegularExpressions.Regex.IsMatch(src,
+                @"if \(TotalClassAbilityPointsEarned > 0\)\s*\{\s*noticeFacetNames = ClassAbilityRepricing\.FacetOnlyNoticeNames\("),
+                "the earned-points guard must sit directly before the notice facet read");
+
+            // (b) the affected predicate is the pure, behaviour-tested one
+            var from = src.IndexOf("ClassAbilityRepricing.BuildChangeNoticeLines(", StringComparison.Ordinal);
+            var to = src.IndexOf("lines.AddRange(changeLines)", from, StringComparison.Ordinal);
+            Assert.IsTrue(from > 0 && to > from);
+            StringAssert.Contains(src.Substring(from, to - from), "ClassAbilityRepricing.ChangeNoticeAffected(");
+        }
+
+        [TestMethod]
+        public void NoticeFacetRead_HasItsOwnShortTimeout_NotTheMutationGuardOne()
+        {
+            var src = Source("Player_ClassAbilities.cs");
+
+            StringAssert.Contains(src, "private const int NoticeFacetDbTimeoutMs = 1000;");
+
+            var from = src.IndexOf("private bool TryGetCharacterFacetRowsForNotice(", StringComparison.Ordinal);
+            Assert.IsTrue(from > 0);
+            var body = src.Substring(from, src.IndexOf(';', from) - from);
+            StringAssert.Contains(body, "NoticeFacetDbTimeoutMs");
+            Assert.IsFalse(body.Replace("NoticeFacetDbTimeoutMs", "").Contains("FacetDbTimeoutMs"), "must not use the 5000 ms FacetDbTimeoutMs");
+
+            // and the login path calls the notice read, never the refusing 5000 ms one, for the notice
+            var apply = src.IndexOf("FacetOnlyNoticeNames(", StringComparison.Ordinal);
+            var end = src.IndexOf("var unlearns = ClassAbilityRepricing.PlanUnlearns(", apply, StringComparison.Ordinal);
+            var window = src.Substring(apply, end - apply);
+            StringAssert.Contains(window, "TryGetCharacterFacetRowsForNotice(");
+            Assert.IsFalse(window.Contains("TryGetCharacterFacetRows(out"));
+        }
+        [TestMethod]
+        public void ChangeNoticeLogin_PlayerSendsThemAfterTheRefundLines_OnTheSameChannel()
+        {
+            var src = Source("Player_ClassAbilities.cs");
+            var build = src.IndexOf("ClassAbilityRepricing.BuildNoticeLines(", StringComparison.Ordinal);
+            var change = src.IndexOf("ClassAbilityRepricing.BuildChangeNoticeLines(", StringComparison.Ordinal);
+            var send = src.IndexOf("new GameMessageSystemChat(line, ChatMessageType.Advancement)", change, StringComparison.Ordinal);
+
+            Assert.IsTrue(build > 0 && change > build, "change lines are built after the refund/promote lines");
+            Assert.IsTrue(send > change, "and are sent through the same Advancement chat loop");
+            StringAssert.Contains(src.Substring(change, send - change), "lines.AddRange(changeLines)");
         }
 
         // ---- wave 3: Berserker pass -----------------------------------------------------------------
@@ -908,19 +1213,22 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void WhirlwindOwner_EndsAtRank3_WithNoNetPointChange()
         {
+            // pins wave 3's own behaviour against the waves that existed when it shipped
+            var waves = (IReadOnlyList<RepriceWave>)W.Where(w => w.Number < 8).ToList();
+
             foreach (var appliedWave in new[] { 0, 1, 2 })
             {
                 var rankOf = RankOf(new Dictionary<ClassAbilityId, int> { [ClassAbilityId.Whirlwind] = 1 });
 
-                var promotions = ClassAbilityRepricing.PlanPromotions(W, appliedWave, rankOf);
+                var promotions = ClassAbilityRepricing.PlanPromotions(waves, appliedWave, rankOf);
 
                 Assert.AreEqual(1, promotions.Count, $"applied {appliedWave}: the owner is promoted");
                 Assert.AreEqual(ClassAbilityId.Whirlwind, promotions[0].Ability);
                 Assert.AreEqual(3, promotions[0].Wave);
                 Assert.AreEqual(3, promotions[0].NewRank, "rank 1 bought at 3 becomes rank 3 at 1/1/1");
 
-                Assert.AreEqual(3, ClassAbilityRegistry.Abilities[ClassAbilityId.Whirlwind].CumulativeCost(3), "control: rank 3 costs 3 live");
-                Assert.AreEqual(0, ClassAbilityRepricing.OldPriceRefund(W, appliedWave, rankOf, 0, 0));
+                Assert.AreEqual(3, waves.Single(w => w.Number == 3).Rows.Single(r => r.Ability == ClassAbilityId.Whirlwind).NewCosts.Sum(), "control: rank 3 cost 3 at wave 3's prices");
+                Assert.AreEqual(0, ClassAbilityRepricing.OldPriceRefund(waves, appliedWave, rankOf, 0, 0));
                 Assert.AreEqual(0, ClassAbilityRepricing.RecomputePoints(20, 17, 3, 0, 0).Delta, "no net point change");
             }
         }
@@ -1012,6 +1320,222 @@ namespace ACE.Server.Tests
 
             // a character already stamped at wave 6 owes nothing
             Assert.AreEqual(0, ClassAbilityRepricing.ExpectedDelta(W, 6, rankOf, 0));
+        }
+
+        // ---- wave 8: Rogue tier swap ---------------------------------------------------------------
+
+        /// <summary>The Rogue tier swap's wave number, looked up by label: the number is renumbered when another
+        /// pending PR's wave lands first, so no test hard-codes it.</summary>
+        private static int RogueWaveNumber => W.Single(w => w.Label == "Rogue tier swap").Number;
+
+        [TestMethod]
+        public void Wave8_RogueTierSwap_PinsItsTwoRows()
+        {
+            var n = RogueWaveNumber;
+            var wave = W.Single(w => w.Number == n);
+
+            Assert.AreEqual("Rogue tier swap", wave.Label);
+            Assert.AreEqual("Rogue abilities", wave.Subject);
+            Assert.AreEqual("the Rogue trainer", wave.Trainer);
+            Assert.IsTrue(ClassAbilityRepricing.LatestWave >= n, "the Rogue tier swap is shipped");
+
+            Assert.AreEqual(2, wave.Rows.Count);
+            var row = wave.Rows[0];
+            Assert.AreEqual(ClassAbilityId.AcidProc, row.Ability);
+            Assert.AreEqual(RepriceAction.Keep, row.Action, "owner ruling: existing Acid Proc owners are grandfathered, not unlearned");
+            CollectionAssert.AreEqual(new[] { 2, 2, 2 }, row.OldCosts.ToArray());
+            CollectionAssert.AreEqual(new[] { 2, 2, 2 }, row.NewCosts.ToArray());
+            Assert.AreEqual("moved from Rogue tier 2 to tier 3", row.Summary);
+
+            // Killer Instinct's gate only loosens: a Keep row with equal costs that exists to carry the notice
+            var ki = wave.Rows[1];
+            Assert.AreEqual(ClassAbilityId.KillerInstinct, ki.Ability);
+            Assert.AreEqual(RepriceAction.Keep, ki.Action);
+            CollectionAssert.AreEqual(new[] { 2, 2, 2 }, ki.OldCosts.ToArray());
+            CollectionAssert.AreEqual(new[] { 2, 2, 2 }, ki.NewCosts.ToArray());
+            Assert.AreEqual("moved from Rogue tier 3 to tier 2", ki.Summary);
+            // the live definitions: Acid Proc now T3, Killer Instinct now T2, same prices
+            Assert.AreEqual(3, ClassAbilityRegistry.Abilities[ClassAbilityId.AcidProc].Tier);
+            Assert.AreEqual(2, ClassAbilityRegistry.Abilities[ClassAbilityId.KillerInstinct].Tier);
+            CollectionAssert.AreEqual(new[] { 2, 2, 2 }, ClassAbilityRegistry.Abilities[ClassAbilityId.AcidProc].CostPerRank.ToArray());
+            CollectionAssert.AreEqual(new[] { 2, 2, 2 }, ClassAbilityRegistry.Abilities[ClassAbilityId.KillerInstinct].CostPerRank.ToArray());
+        }
+
+        [TestMethod]
+        public void AcidProcOwners_AreGrandfathered_KeepTheirRanksAndMoveNoPoints_AtEveryRank()
+        {
+            var n = RogueWaveNumber;
+            var upToRogue = W.Where(w => w.Number <= n).ToList();
+
+            // ranks 1/2/3 paid 2/4/6 at 2/2/2, and the prices do not change
+            foreach (var (rank, paid) in new[] { (1, 2), (2, 4), (3, 6) })
+            {
+                var rankOf = RankOf(new Dictionary<ClassAbilityId, int> { [ClassAbilityId.AcidProc] = rank });
+
+                Assert.AreEqual(0, ClassAbilityRepricing.PlanUnlearns(upToRogue, n - 1, rankOf).Count, $"rank {rank}: nothing is unlearned");
+                Assert.AreEqual(0, ClassAbilityRepricing.PlanPromotions(upToRogue, n - 1, rankOf).Count, $"rank {rank}: nothing is promoted");
+                Assert.AreEqual(0, ClassAbilityRepricing.RankAfterPendingWaves(upToRogue, n - 1, ClassAbilityId.AcidProc, rank) - rank, $"rank {rank}: the rank is unchanged");
+                Assert.AreEqual(0, ClassAbilityRepricing.ExpectedDelta(upToRogue, n - 1, rankOf, 0), $"rank {rank}: no refund is owed");
+                Assert.AreEqual(0, ClassAbilityRepricing.OldPriceRefund(upToRogue, n - 1, rankOf, 0, 0), $"rank {rank}: no floor");
+                Assert.IsFalse(ClassAbilityRepricing.UnlearnedAbilityNames(upToRogue, n - 1).Contains("acidproc"), $"rank {rank}: not stripped from facet builds");
+                Assert.IsFalse(ClassAbilityRepricing.IsAbilityRepricePending(W, n - 1, ClassAbilityId.AcidProc), $"rank {rank}: a notice-only row does not lock Acid Proc");
+                Assert.IsFalse(ClassAbilityRepricing.OwnsAnyPendingAbility(upToRogue, n - 1, rankOf), $"rank {rank}: a notice-only row does not make the owner touched");
+
+                // the recompute with the rank still owned: earned 20 = (20 - paid) available + paid owned, nothing returned
+                var points = ClassAbilityRepricing.RecomputePoints(20, 20 - paid, paid, 0, 0);
+                Assert.AreEqual(0, points.Delta, $"rank {rank}: unspent points are unchanged");
+                Assert.IsFalse(points.FloorBinds);
+
+                // the invariant: a later full respec refunds exactly what was spent, no more
+                Assert.AreEqual(paid, ClassAbilityRegistry.Abilities[ClassAbilityId.AcidProc].CumulativeCost(rank), $"rank {rank}: respec refunds exactly {paid}");
+            }
+        }
+
+        [TestMethod]
+        public void KillerInstinctOwners_KeepTheirRanks_AndOnlyGetTheNotice()
+        {
+            var n = RogueWaveNumber;
+            var upToRogue = W.Where(w => w.Number <= n).ToList();
+            var rankOf = RankOf(new Dictionary<ClassAbilityId, int> { [ClassAbilityId.KillerInstinct] = 3 });
+
+            Assert.AreEqual(0, ClassAbilityRepricing.PlanUnlearns(upToRogue, n - 1, rankOf).Count, "no unlearn");
+            Assert.AreEqual(0, ClassAbilityRepricing.PlanPromotions(upToRogue, n - 1, rankOf).Count, "no promotion");
+            Assert.AreEqual(0, ClassAbilityRepricing.ExpectedDelta(upToRogue, n - 1, rankOf, 0), "no refund");
+            Assert.IsFalse(ClassAbilityRepricing.OwnsAnyPendingAbility(upToRogue, n - 1, rankOf), "a notice-only row does not trigger the recompute");
+            Assert.IsTrue(ClassAbilityRepricing.OwnsAnyNoticeOnlyAbility(upToRogue, n - 1, rankOf), "but the notice and the stamp still go out");
+            Assert.IsFalse(ClassAbilityRepricing.IsAbilityRepricePending(upToRogue, n - 1, ClassAbilityId.KillerInstinct), "and the ability is not pending-locked");
+            Assert.IsFalse(ClassAbilityRepricing.UnlearnedAbilityNames(upToRogue, n - 1).Contains("killer_instinct"));
+
+            var lines = ClassAbilityRepricing.BuildChangeNoticeLines(upToRogue, n - 1, id => id == ClassAbilityId.KillerInstinct, DisplayOf);
+            Assert.AreEqual(1, lines.Count);
+            StringAssert.Contains(lines[0], "moved from Rogue tier 3 to tier 2");
+            Assert.IsFalse(lines[0].Contains("cost per rank"), "equal costs: no price part");
+
+            // carried Killer Instinct tokens of every rank stay in the pack
+            foreach (var tier in new[] { 1, 2, 3 })
+                Assert.IsFalse(ClassAbilityRepricing.DecideTokenRefund(upToRogue, n - 1, (int)ClassAbilityId.KillerInstinct, tier, 1).Refund,
+                    $"Killer Instinct rank {tier} token");
+        }
+
+        [TestMethod]
+        public void KillerInstinctOwner_ConsistentBalance_RecomputeReturnsNothing()
+        {
+            var n = RogueWaveNumber;
+            var upToRogue = W.Where(w => w.Number <= n).ToList();
+            var rankOf = RankOf(new Dictionary<ClassAbilityId, int> { [ClassAbilityId.KillerInstinct] = 3 });
+
+            var expected = ClassAbilityRepricing.OldPriceRefund(upToRogue, n - 1, rankOf, 0, 0);
+            var points = ClassAbilityRepricing.RecomputePoints(20, 20, 0, 0, expected);
+            Assert.AreEqual(0, points.Delta, "a Keep row at equal costs returns no points");
+            Assert.IsFalse(points.FloorBinds);
+        }
+
+        [TestMethod]
+        public void NoticeOnlyKeepWave_OwnerWithAnUnseenToken_IsNotTouched_MovesNoPoints_AndStillGetsTheNotice()
+        {
+            var n = RogueWaveNumber;
+            var upToRogue = W.Where(w => w.Number <= n).ToList();
+            var wave = upToRogue.Single(w => w.Number == n);
+
+            foreach (var row in wave.Rows)
+                Assert.IsTrue(ClassAbilityRepricing.IsNoticeOnly(wave, row), $"{row.Ability}: equal-price Keep in a notice wave is notice-only");
+
+            foreach (var id in new[] { ClassAbilityId.AcidProc, ClassAbilityId.KillerInstinct })
+            {
+                var rankOf = RankOf(new Dictionary<ClassAbilityId, int> { [id] = 3 });
+
+                // touched == ownsPendingAbility || tokens taken || marker || erased; the last three are empty here
+                Assert.IsFalse(ClassAbilityRepricing.OwnsAnyPendingAbility(upToRogue, n - 1, rankOf), $"{id}: not touched");
+                Assert.IsTrue(ClassAbilityRepricing.OwnsAnyNoticeOnlyAbility(upToRogue, n - 1, rankOf), $"{id}: the idle-return guard must let the notice out");
+                Assert.IsFalse(ClassAbilityRepricing.DecideTokenRefund(upToRogue, n - 1, (int)id, 1, 1).Refund, $"{id}: no token taken back");
+
+                var lines = ClassAbilityRepricing.BuildChangeNoticeLines(upToRogue, n - 1, x => rankOf(x) > 0, DisplayOf);
+                Assert.AreEqual(1, lines.Count, $"{id}: the notice line is still produced");
+                StringAssert.Contains(lines[0], "moved from Rogue tier");
+            }
+
+            // The balance a recompute would wrongly credit: earned 20 = 12 available + 6 owned + a 2-point token
+            // held where the sweep cannot see it (house chest / alt). A full derivation returns +2; because the
+            // character is not touched the recompute never runs, so the delta stays 0.
+            var wouldRecompute = ClassAbilityRepricing.RecomputePoints(20, 12, 6, 0, 0);
+            Assert.AreEqual(2, wouldRecompute.Delta, "control: a recompute WOULD credit the unseen token");
+        }
+
+        [TestMethod]
+        public void PriceChangingKeepRows_StillTouchTheOwner_AndStillLock()
+        {
+            // regression: only EQUAL-price Keep rows in a notice wave are notice-only
+            var vanguard = W.Single(w => w.Number == 7);
+            var cr = vanguard.Rows.Single(r => r.Ability == ClassAbilityId.CritResistRating);
+            Assert.AreEqual(RepriceAction.Keep, cr.Action);
+            Assert.IsFalse(ClassAbilityRepricing.IsNoticeOnly(vanguard, cr), "a price drop is not notice-only");
+
+            var rankOf = RankOf(new Dictionary<ClassAbilityId, int> { [ClassAbilityId.CritResistRating] = 3 });
+            Assert.IsTrue(ClassAbilityRepricing.OwnsAnyPendingAbility(W, 6, rankOf), "a repriced Keep owner is touched");
+            Assert.IsTrue(ClassAbilityRepricing.IsAbilityRepricePending(W, 6, ClassAbilityId.CritResistRating), "and locked until migrated");
+
+            // a synthetic price-changing Keep row inside a notice wave
+            var synth = new RepriceWave(8, "k", "s", "t", new RepriceRow(ClassAbilityId.Taunt, new[] { 1, 1, 1 }, new[] { 2, 2, 2 }, RepriceAction.Keep, "x"));
+            Assert.IsTrue(ClassAbilityRepricing.OwnsAnyPendingAbility(new[] { synth }, 7, RankOf(new Dictionary<ClassAbilityId, int> { [ClassAbilityId.Taunt] = 1 })));
+
+            // waves below the notice contract keep their behaviour even with equal costs (wave 1 Sanguine Reserve)
+            var w1 = W.Single(x => x.Number == 1);
+            var sr = w1.Rows.Single(r => r.Ability == ClassAbilityId.SanguineReserve);
+            Assert.IsFalse(ClassAbilityRepricing.IsNoticeOnly(w1, sr));
+            Assert.IsTrue(ClassAbilityRepricing.OwnsAnyPendingAbility(W, 0, RankOf(new Dictionary<ClassAbilityId, int> { [ClassAbilityId.SanguineReserve] = 1 })));
+        }
+
+        [TestMethod]
+        public void NoticeWording_AcidProcAndKillerInstinctOwner_StampedAtSeven_NamesTheRogueWave()
+        {
+            var both = new[] { ClassAbilityId.KillerInstinct, ClassAbilityId.AcidProc };
+            var wording = ClassAbilityRepricing.NoticeWording(W, 7, both, new ClassAbilityId[0]);
+
+            Assert.AreEqual("Rogue abilities", wording.Subject);
+            Assert.AreEqual("the Rogue trainer", wording.Trainer);
+        }
+
+        [TestMethod]
+        public void AcidProcTokens_OfEveryRank_StayInThePack_BecauseThePriceDidNotChange()
+        {
+            var n = RogueWaveNumber;
+            var upToRogue = W.Where(w => w.Number <= n).ToList();
+            foreach (var tier in new[] { 1, 2, 3 })
+                Assert.IsFalse(ClassAbilityRepricing.DecideTokenRefund(upToRogue, n - 1, (int)ClassAbilityId.AcidProc, tier, 1).Refund,
+                    $"Acid Proc rank {tier} token: an equal-price Keep row takes nothing back");
+        }
+
+        [TestMethod]
+        public void Wave8_StoredFacetBuilds_KeepAcidProc()
+        {
+            var n = RogueWaveNumber;
+            var names = ClassAbilityRepricing.UnlearnedAbilityNames(W.Where(w => w.Number <= n).ToList(), n - 1);
+            Assert.AreEqual(0, names.Count, "the Rogue wave unlearns nothing, so it strips nothing from stored facet builds");
+
+            var a = Facet(1, new Dictionary<string, int> { ["acidproc"] = 3, ["killer_instinct"] = 2, ["poisonweapon"] = 1 });
+            var writes = 0;
+
+            var ok = ClassAbilityRepricing.TryStripStoredAbilities(new[] { a }, names.ToArray(), 50,
+                (r, cb) => { writes++; cb(true); }, out var rows, out var removed);
+
+            Assert.IsTrue(ok);
+            Assert.AreEqual(0, rows);
+            Assert.AreEqual(0, writes);
+            Assert.AreEqual(3, FacetSnapshot.DeserializeAbilities(a.AbilitiesJson)["acidproc"]);
+        }
+
+        [TestMethod]
+        public void Wave8_NoticeText_NamesRogueAbilitiesAndTheRogueTrainer()
+        {
+            var n = RogueWaveNumber;
+            var wave = ClassAbilityRepricing.NoticeWave(W.Where(w => w.Number <= n).ToList(), n - 1, new[] { ClassAbilityId.AcidProc });
+            Assert.AreEqual(n, wave.Number);
+            Assert.AreEqual("Rogue abilities", wave.Subject);
+            Assert.AreEqual("the Rogue trainer", wave.Trainer);
+
+            var lines = ClassAbilityRepricing.BuildChangeNoticeLines(W.Where(w => w.Number <= n).ToList(), n - 1, id => id == ClassAbilityId.AcidProc, DisplayOf);
+            Assert.AreEqual(1, lines.Count);
+            Assert.AreEqual("Ability change - Acid Proc: moved from Rogue tier 2 to tier 3.", lines[0]);
         }
 
         // ---- wave 2: Taunt, PromoteToPaid ----------------------------------------------------------
@@ -1524,13 +2048,20 @@ namespace ACE.Server.Tests
             Assert.AreEqual(expectedPrice, d.UnitPrice, $"{id} tier {tier}: price paid");
         }
 
-        private static void AssertGuarded(string text, string start, string end)
+        private static void AssertGuarded(string text, string start, string end, bool viaRemovalCore = false)
         {
             var from = text.IndexOf(start, StringComparison.Ordinal);
             var to = text.IndexOf(end, from + 1, StringComparison.Ordinal);
             Assert.IsTrue(from >= 0 && to > from, $"could not isolate {start}");
 
             var body = text.Substring(from, to - from);
+
+            // A rank-removal path is guarded by running the shared core (itself asserted guarded) before it moves anything.
+            if (viaRemovalCore)
+            {
+                StringAssert.Contains(body, "ValidateClassAbilityRankRemoval(", $"{start} must run the shared removal core before anything moves");
+                return;
+            }
 
             StringAssert.Contains(body, "ClassAbilityRepricePendingFor(", $"{start} must refuse while a reprice is pending");
             StringAssert.Contains(body, "ClassAbilityRepricing.PendingRefusal", $"{start} must use the shared refusal text");

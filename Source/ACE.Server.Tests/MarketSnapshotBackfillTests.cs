@@ -1106,10 +1106,10 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void CurrentVersion_IsFive_TheSuitProjection()
+        public void CurrentVersion_IsEight_TheEquipmentModRequirement()
         {
-            Assert.AreEqual(5, MarketSnapshot.CurrentVersion,
-                            "suit shipped in projection version 5 (mods, mod_capacity and weapon_quality_tier in 4)");
+            Assert.AreEqual(8, MarketSnapshot.CurrentVersion,
+                            "equipment mod rows carry requirement from projection version 8 (Paragon rows in 7, cloak/jewelry in 6, suit in 5, mods in 4)");
         }
 
         [TestMethod]
@@ -1142,27 +1142,40 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void AStoredSnapshotAtVersionThree_IsRewrittenWithItsModRows()
         {
-            var item = SeedStoredItem(SellerAccount);
-            var heft = WeaponModRegistry.Get(WeaponModId.Heft);
+            // The projection reads weapon_mod_magnitude_scale; an unseeded read goes to the database and throws when
+            // this class runs alone. Seed it and put the default back afterwards.
+            DefaultPropertyManager.LoadDefaultProperties();
+            var scaleKey = "weapon_mod_magnitude_scale";
+            PropertyManager.ModifyDouble(scaleKey, DefaultPropertyManager.DefaultDoubleProperties[scaleKey].Item);
 
-            WeaponModTinkerSet.ApplySpecial(item, heft, WeaponModValue.MaxMagnitude(heft));
+            try
+            {
+                var item = SeedStoredItem(SellerAccount);
+                var heft = WeaponModRegistry.Get(WeaponModId.Heft);
 
-            var row = SeedListingRow(1, SellerAccount, item.Guid.Full, StoredWcid, item.Name);
+                WeaponModTinkerSet.ApplySpecial(item, heft, WeaponModValue.MaxMagnitude(heft));
 
-            var stored = MarketSnapshot.Deserialize(row.SnapshotJson);
-            stored.SnapshotVersion = 3;
-            row.SnapshotJson = MarketSnapshot.Serialize(stored);
+                var row = SeedListingRow(1, SellerAccount, item.Guid.Full, StoredWcid, item.Name);
 
-            Boot();
+                var stored = MarketSnapshot.Deserialize(row.SnapshotJson);
+                stored.SnapshotVersion = 3;
+                row.SnapshotJson = MarketSnapshot.Serialize(stored);
 
-            var report = MarketManager.BackfillSnapshots(100, false);
+                Boot();
 
-            Assert.AreEqual(1, report.Rewritten);
+                var report = MarketManager.BackfillSnapshots(100, false);
 
-            var mods = MarketManager.GetListing(1).Snapshot.Mods;
+                Assert.AreEqual(1, report.Rewritten);
 
-            Assert.IsNotNull(mods, "the re-projected snapshot must carry the seeded weapon mod");
-            Assert.IsTrue(mods.Any(m => m.Token == "Heft"), "the Heft row must survive the backfill round trip");
+                var mods = MarketManager.GetListing(1).Snapshot.Mods;
+
+                Assert.IsNotNull(mods, "the re-projected snapshot must carry the seeded weapon mod");
+                Assert.IsTrue(mods.Any(m => m.Token == "Heft"), "the Heft row must survive the backfill round trip");
+            }
+            finally
+            {
+                PropertyManager.ModifyDouble(scaleKey, DefaultPropertyManager.DefaultDoubleProperties[scaleKey].Item);
+            }
         }
 
         /// <summary>

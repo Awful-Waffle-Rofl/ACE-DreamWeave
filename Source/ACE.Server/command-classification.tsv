@@ -26,6 +26,7 @@ attackable	ACE.Server.Command.Handlers.AdvocateCommands.HandleAttackable	in_game
 auditobjectmaint	ACE.Server.Command.Handlers.DeveloperCommands.HandleAuditObjectMaint	web	scan_safe	captured	-	
 aug	ACE.Server.Command.Handlers.AugmentationCommands.HandleAug	in_game_character	requires_world	captured	-	
 augs	ACE.Server.Command.Handlers.AugmentationCommands.HandleAugs	in_game_character	requires_world	captured	-	
+avatar	ACE.Server.Command.Handlers.AllegianceAvatarCommands.HandleAvatar	in_game_character	requires_world	captured	-	
 b	ACE.Server.Command.Handlers.PlayerCommands.HandleBankShort	in_game_character	requires_world	captured	-	
 ban	ACE.Server.Command.Handlers.SentinelCommands.HandleBanAccount	web	scan_safe	captured	-	
 bank	ACE.Server.Command.Handlers.PlayerCommands.HandleBank	in_game_character	requires_world	captured	-	
@@ -154,6 +155,7 @@ gamecast	ACE.Server.Command.Handlers.AdminCommands.HandleGamecast	in_game_charac
 gamecastemote	ACE.Server.Command.Handlers.AdminCommands.HandleGameCastEmote	web	scan_safe	captured	-	
 gamecastlocal	ACE.Server.Command.Handlers.AdminCommands.HandleGameCastLocal	in_game_character	scan_unsafe	captured	-	
 gamecastlocalemote	ACE.Server.Command.Handlers.AdminCommands.HandleGameCastLocalEmote	web	scan_safe	captured	-	
+gauntlet	ACE.Server.Command.Handlers.GauntletAdminCommands.HandleGauntlet	in_game_character	requires_world	captured	-	
 gcstatus	ACE.Server.Command.Handlers.AdminStatCommands.HandleGCStatus	web	scan_safe	captured	-	
 generate-classnames	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleGenerateClassNames	in_game_only	override	captured	-	O2-class: writes server files (content_folder is the host-mounted Content tree on stage/prod)
 generatordump	ACE.Server.Command.Handlers.DeveloperCommands.HandleGeneratorDump	in_game_character	requires_world	captured	-	
@@ -252,6 +254,7 @@ nudge	ACE.Server.Command.Handlers.DeveloperCommands.HandleNudge	in_game_characte
 nudge	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleNudge	in_game_character	scan_unsafe	captured	-	
 objsend	ACE.Server.Command.Handlers.PlayerCommands.HandleObjSend	in_game_character	requires_world	captured	-	
 offlinebonus	ACE.Server.Command.Handlers.PlayerCommands.HandleOfflineBonus	in_game_character	requires_world	captured	-	
+paragonmod	ACE.Server.Command.Handlers.ParagonModTestCommands.HandleParagonMod	in_game_character	requires_world	captured	-	
 passwd	ACE.Server.Command.Handlers.AccountCommands.HandlePasswd	in_game_character	requires_world	captured	-	
 pickupspeed	ACE.Server.Command.Handlers.PlayerCommands.HandlePickupSpeed	in_game_character	requires_world	captured	-	
 pinnacle	ACE.Server.Command.Handlers.PinnacleCommands.HandlePinnacle	in_game_character	requires_world	captured	-	
@@ -322,6 +325,7 @@ rotate-z	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleR
 rrtm	ACE.Server.Command.Handlers.TreasureMapRerollCommands.HandleRerollTreasureMap	in_game_character	requires_world	captured	-	
 run	ACE.Server.Command.Handlers.SentinelCommands.HandleRun	in_game_character	requires_world	captured	-	
 safecomps	ACE.Server.Command.Handlers.DeveloperCommands.HandleSafeComps	in_game_character	requires_world	captured	-	
+salvageroller	ACE.Server.Command.Handlers.SalvageRollerCommands.HandleSalvageRoller	in_game_character	requires_world	captured	-	
 save	ACE.Server.Command.Handlers.AdminCommands.HandleSave	in_game_character	requires_world	captured	-	
 save-now	ACE.Server.Command.Handlers.DeveloperCommands.HandleSaveNow	in_game_character	requires_world	captured	-	
 savebatchstats	ACE.Server.Command.Handlers.DeveloperDatabaseCommands.HandleSaveBatchStats	web	scan_safe	captured	-	
@@ -364,6 +368,7 @@ sticky	ACE.Server.Command.Handlers.AdminCommands.HandleSticky	in_game_character	
 stop-now	ACE.Server.Command.Handlers.AdminShardCommands.ShutdownServerNow	in_game_only	override	captured	-	O1: a web-triggered shutdown is an outage, the same class of action as a deploy.
 stormnumstormed	ACE.Server.Command.Handlers.AdminCommands.Handlestormnumstormed	in_game_character	requires_world	captured	-	
 stormthresh	ACE.Server.Command.Handlers.AdminCommands.Handlestormthresh	in_game_character	requires_world	captured	-	
+summonaggro	ACE.Server.Command.Handlers.PlayerCommands.HandleSummonAggro	in_game_character	requires_world	captured	-	
 summonattackontarget	ACE.Server.Command.Handlers.PlayerCommands.HandleSummonAttackOnTarget	in_game_character	requires_world	captured	-	
 summondamage	ACE.Server.Command.Handlers.PlayerCommands.HandleSummonDamage	in_game_character	requires_world	captured	-	
 targetloc	ACE.Server.Command.Handlers.DeveloperCommands.HandleTargetLoc	in_game_character	requires_world	captured	-	
@@ -375,6 +380,7 @@ teleloc	ACE.Server.Command.Handlers.AdminCommands.HandleTeleportLOC	in_game_char
 telepoi	ACE.Server.Command.Handlers.AdminCommands.HandleTeleportPoi	in_game_character	requires_world	captured	-	
 telerealm	ACE.Server.Command.Handlers.InstanceCommands.HandleTeleRealm	in_game_character	requires_world	captured	-	
 telereturn	ACE.Server.Command.Handlers.AdminCommands.HandleTeleReturn	in_game_character	requires_world	captured	-	
+telesummon	ACE.Server.Command.Handlers.PlayerCommands.HandleTeleSummon	in_game_character	requires_world	captured	-	
 teleto	ACE.Server.Command.Handlers.AdminCommands.HandleTeleto	in_game_character	requires_world	captured	-	
 teletome	ACE.Server.Command.Handlers.AdminCommands.HandleTeleToMe	in_game_character	requires_world	captured	-	
 teletype	ACE.Server.Command.Handlers.DeveloperCommands.HandleTeleType	in_game_character	requires_world	captured	-	
@@ -391,6 +397,7 @@ tn	ACE.Server.Command.Handlers.PlayerCommands.HandleTownNetworkRecall	in_game_ch
 top	ACE.Server.Command.Handlers.PlayerCommands.HandleTop	in_game_character	requires_world	captured	-	
 top-exempt	ACE.Server.Command.Handlers.LeaderboardExemptionCommands.HandleTopExempt	web	scan_safe	captured	-	
 trainskill	ACE.Server.Command.Handlers.AdminCommands.Handletrainskill	in_game_character	requires_world	captured	-	
+trial	ACE.Server.Command.Handlers.TrialCommands.HandleTrial	in_game_character	requires_world	captured	-	
 trophies	ACE.Server.Command.Handlers.AdminCommands.HandleTrophies	in_game_character	requires_world	captured	-	
 trywield	ACE.Server.Command.Handlers.DeveloperCommands.HandleTryWield	in_game_character	requires_world	captured	-	
 ttm	ACE.Server.Command.Handlers.MlTreasureTestCommands.HandleTestTreasureMap	in_game_character	requires_world	captured	-	
@@ -437,6 +444,7 @@ waveencounter	ACE.Server.Command.Handlers.WaveEncounterCommands.HandleWaveEncoun
 we	ACE.Server.Command.Handlers.AdminCommands.HandleWe	web	scan_safe	captured	-	
 weaponmodkit	ACE.Server.Command.Handlers.WeaponModTestCommands.HandleWeaponModKit	in_game_character	requires_world	captured	-	
 weapons	ACE.Server.Command.Handlers.DeveloperCommands.HandleWeapons	in_game_character	requires_world	captured	-	
+weblogin	ACE.Server.Command.Handlers.WebLaunchCommands.HandleWebLogin	in_game_character	requires_world	captured	-	
 whoami	ACE.Server.Command.Handlers.DeveloperCommands.HandleWhoAmI	in_game_character	requires_world	captured	-	
 world	ACE.Server.Command.Handlers.AdminShardCommands.HandleHelp	web	override	captured	-	null-safe: WorldManager passes a possibly-null Player to BroadcastToAuditChannel; O3 keeps world close boot available
 worldevent	ACE.Server.Command.Handlers.WorldEventCommands.HandleWorldEvent	in_game_character	scan_unsafe	captured	-	

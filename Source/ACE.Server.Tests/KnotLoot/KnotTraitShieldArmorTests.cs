@@ -211,8 +211,9 @@ namespace ACE.Server.Tests.KnotLoot
         /// second flat term in GetShieldMod beside this file's Knot bonus. It is NOT a stored shield AL and NOT in the
         /// base term: with a real shield it is added AFTER the Shield-skill cap and BEFORE the ignore-shield term; with
         /// no shield it joins Defensive Weapon (formerly Arcane Defender) on the uncapped virtual-shield path. Since 2026-10-25 Defensive
-        /// Weapon also joins the ward in the equipped-shield slot (DefensiveWeaponMath.AfterShieldCap), summed with it. It must never reach Thorns or
+        /// Weapon also joins the ward in the equipped-shield slot (DefensiveWeaponMath.AfterShieldCap), summed with it. The ward's SHIELD path (GetWardShieldLevel) must never reach Thorns or
         /// Shield Block (both gate on an equipped shield directly), so GetWardShieldLevel has exactly one caller.
+        /// Thorns does add the ward level since 2026-11-05, but through its own GetWardThornsLevel, not this path.
         ///
         /// THE COMBAT SIMULATOR MIRROR (CombatSimulator/ProfileBuilder.cs BuildShieldRow) IS DELIBERATELY NOT
         /// UPDATED: a ward is a transient pool, not a gear property, and the simulator profiles gear.
@@ -224,19 +225,19 @@ namespace ACE.Server.Tests.KnotLoot
 
             // equipped-shield path: cap, then ward (with Defensive Weapon in the same call), then ignore-shield
             var cap = shieldMod.IndexOf("effectiveLevel = Math.Min(effectiveLevel, shieldCap);", StringComparison.Ordinal);
-            var ward = shieldMod.IndexOf("effectiveLevel = (float)DefensiveWeaponMath.AfterShieldCap(effectiveLevel, wardShieldPlayer.GetDefensiveWeaponShieldLevel(), wardShieldPlayer.GetWardShieldLevel(attacker, facing));", StringComparison.Ordinal);
+            var ward = shieldMod.IndexOf("effectiveLevel = (float)DefensiveWeaponMath.AfterShieldCap(effectiveLevel, wardShieldPlayer.GetDefensiveWeaponShieldLevel(), wardShieldPlayer.GetWardShieldLevel(attacker, facing), wardShieldPlayer.GetManaBarrierShieldLevel(attacker));", StringComparison.Ordinal);
             var ignore = shieldMod.IndexOf("effectiveLevel *= ignoreShieldMod;", StringComparison.Ordinal);
             Assert.IsTrue(cap >= 0 && ward > cap && ignore > ward, "the ward is added after the Shield-skill cap and before the ignore-shield term");
 
             // no-shield path: the ward joins Defensive Weapon's level on the uncapped ArcaneShieldMod row
             var noShield = shieldMod.IndexOf("if (shield == null)", StringComparison.Ordinal);
-            var virtualLevel = shieldMod.IndexOf("var virtualShieldLevel = defensiveWeapon + wardShieldLevel;", StringComparison.Ordinal);
+            var virtualLevel = shieldMod.IndexOf("var virtualShieldLevel = ManaBarrierShieldMath.VirtualShieldLevel(defensiveWeapon, wardShieldLevel, manaBarrierShieldLevel);", StringComparison.Ordinal);
             var arcaneRow = shieldMod.IndexOf("return WeaponModCombat.ArcaneShieldMod(virtualShieldLevel, attacker.GetIgnoreShieldMod(weapon));", StringComparison.Ordinal);
             Assert.IsTrue(noShield >= 0 && virtualLevel > noShield && arcaneRow > virtualLevel && arcaneRow < cap,
                 "with no shield the ward rides the uncapped virtual-shield row, before the equipped-shield path");
             Assert.AreEqual(2, Count(shieldMod, ".GetWardShieldLevel(attacker, facing)"), "one read per branch");
 
-            // Thorns never sees the ward, and GetShieldMod is the only caller anywhere
+            // Thorns never sees the ward's SHIELD path (it adds the ward level via GetWardThornsLevel instead), and GetShieldMod is the only caller of GetWardShieldLevel anywhere
             var thorns = Code(PooledLootSourceText.MethodBody(PooledLootSourceText.Read(ServerRoot + "WorldObjects/Player_ClassAbilityCombat.cs"), "public void ApplyThornsReflect("));
             Assert.IsFalse(thorns.Contains("GetWardShieldLevel", StringComparison.Ordinal));
 

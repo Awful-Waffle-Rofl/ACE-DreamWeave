@@ -83,6 +83,14 @@ namespace ACE.Server.Tests
                 { MarketError.InvalidTransfer, "invalid_transfer" },
                 { MarketError.TransferNotFound, "transfer_not_found" },
                 { MarketError.InPvp, "in_pvp" },
+                { MarketError.LaunchDisabled, "launch_disabled" },
+                { MarketError.NotLaunchSession, "not_launch_session" },
+                { MarketError.Stale, "stale" },
+                { MarketError.RuleRefused, "rule_refused" },
+                { MarketError.InvalidChange, "invalid_change" },
+                { MarketError.PanelDisabled, "panel_disabled" },
+                { MarketError.BarrelFull, "barrel_full" },
+                { MarketError.DetailsDisabled, "details_disabled" },
             };
 
             foreach (var kvp in expected)

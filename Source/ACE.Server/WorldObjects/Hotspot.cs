@@ -179,7 +179,7 @@ namespace ACE.Server.WorldObjects
                     amount *= creature.GetResistanceMod(DamageType, this, null);
 
                     if (player != null)
-                        iAmount = player.TakeDamage(this, DamageType, amount, BodyPart.Foot);
+                        iAmount = player.TakeDamage(this, DamageType, amount, BodyPart.Foot, attackKind: DamageAttackKind.Hazard);
                     else
                         iAmount = (int)creature.TakeDamage(this, DamageType, amount);
 

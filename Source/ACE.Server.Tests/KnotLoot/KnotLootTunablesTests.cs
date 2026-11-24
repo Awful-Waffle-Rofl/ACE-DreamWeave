@@ -12,12 +12,13 @@ namespace ACE.Server.Tests.KnotLoot
     [TestClass]
     public class KnotLootTunablesTests
     {
-        private static readonly string[] Traits = { "cast_speed", "shield_trade", "frugal_hand", "wrist_trade", "overpowering_intent" };
+        private static readonly string[] Traits = { "cast_speed", "shield_trade", "frugal_hand", "wrist_trade", "overpowering_intent", "harbinger_guard", "harbinger_celerity" };
 
         private static readonly string[] BoolKeys =
         {
-            "knot_loot_grael_enabled", "knot_loot_matron_enabled",
+            "knot_loot_grael_enabled", "knot_loot_matron_enabled", "knot_loot_harbinger_enabled",
             "knot_trait_cast_speed_enabled", "knot_trait_shield_trade_enabled", "knot_trait_frugal_hand_enabled", "knot_trait_wrist_trade_enabled", "knot_trait_overpowering_intent_enabled",
+            "knot_trait_harbinger_guard_enabled", "knot_trait_harbinger_celerity_enabled",
         };
 
         private static readonly string[] LongKeys =
@@ -27,9 +28,11 @@ namespace ACE.Server.Tests.KnotLoot
             "knot_loot_grael_mmd_min", "knot_loot_grael_mmd_max", "knot_loot_grael_note_min", "knot_loot_grael_note_max",
             "knot_loot_grael_window_low_level", "knot_loot_grael_window_high_level",
             "knot_loot_matron_weight_elemental_infusion", "knot_loot_matron_weight_armor_infusion", "knot_loot_matron_weight_crippling_infusion", "knot_loot_matron_weight_voidclaw",
-            "knot_loot_matron_weight_spines", "knot_loot_matron_weight_torc", "knot_loot_matron_weight_hive_stinger_baton", "knot_loot_matron_weight_hive_nether_baton",
+            "knot_loot_matron_weight_spines", "knot_loot_matron_weight_torc", "knot_loot_matron_weight_hive_stinger_baton", "knot_loot_matron_weight_hive_nether_baton", "knot_loot_matron_weight_hive_ichor_baton",
             "knot_loot_matron_mmd_min", "knot_loot_matron_mmd_max", "knot_loot_matron_note_min", "knot_loot_matron_note_max",
             "knot_loot_matron_window_low_level", "knot_loot_matron_window_high_level",
+            "knot_loot_harbinger_weight_elemental_infusion", "knot_loot_harbinger_weight_armor_infusion", "knot_loot_harbinger_weight_crippling_infusion", "knot_loot_harbinger_weight_arm_guard", "knot_loot_harbinger_weight_caustic_wings", "knot_loot_harbinger_weight_storm_eye",
+            "knot_loot_harbinger_weight_frore_crystal", "knot_loot_harbinger_weight_burning_limb", "knot_loot_harbinger_weight_corroding_scythe", "knot_loot_harbinger_weight_thundering_scythe", "knot_loot_harbinger_weight_freezing_scythe", "knot_loot_harbinger_weight_burning_scythe", "knot_loot_harbinger_weight_caustic_eye", "knot_loot_harbinger_weight_jolting_eye", "knot_loot_harbinger_weight_frozen_eye", "knot_loot_harbinger_weight_burning_eye", "knot_loot_harbinger_mmd_min", "knot_loot_harbinger_mmd_max", "knot_loot_harbinger_note_min", "knot_loot_harbinger_note_max", "knot_loot_harbinger_window_low_level", "knot_loot_harbinger_window_high_level",
         };
 
         private static readonly string[] DoubleKeys =
@@ -37,11 +40,14 @@ namespace ACE.Server.Tests.KnotLoot
             "knot_loot_grael_window_low_start", "knot_loot_grael_window_high_start", "knot_loot_grael_window_width",
             "knot_loot_matron_chance_spines",
             "knot_loot_matron_window_low_start", "knot_loot_matron_window_high_start", "knot_loot_matron_window_width",
+            "knot_loot_harbinger_window_low_start", "knot_loot_harbinger_window_high_start", "knot_loot_harbinger_window_width",
             "knot_trait_cast_speed_min", "knot_trait_cast_speed_max",
             "knot_trait_shield_trade_armor_min", "knot_trait_shield_trade_armor_max", "knot_trait_shield_trade_health_min", "knot_trait_shield_trade_health_max",
             "knot_trait_frugal_hand_min", "knot_trait_frugal_hand_max",
             "knot_trait_wrist_trade_gain_min", "knot_trait_wrist_trade_gain_max", "knot_trait_wrist_trade_cost_min", "knot_trait_wrist_trade_cost_max",
             "knot_trait_overpowering_intent_min", "knot_trait_overpowering_intent_max",
+            "knot_trait_harbinger_guard_min", "knot_trait_harbinger_guard_max",
+            "knot_trait_harbinger_celerity_attack_min", "knot_trait_harbinger_celerity_attack_max", "knot_trait_harbinger_celerity_cast_min", "knot_trait_harbinger_celerity_cast_max",
         };
 
         [TestInitialize]
@@ -78,7 +84,7 @@ namespace ACE.Server.Tests.KnotLoot
         [TestMethod]
         public void EveryKey_IsInDefaultsAndMetadataSnapshots()
         {
-            Assert.AreEqual(55, BoolKeys.Length + LongKeys.Length + DoubleKeys.Length);
+            Assert.AreEqual(90, BoolKeys.Length + LongKeys.Length + DoubleKeys.Length);
 
             var defaults = Source("Source/config-defaults.tsv");
             var meta = Source("Source/ACE.Server/config-metadata.tsv");
@@ -155,6 +161,7 @@ namespace ACE.Server.Tests.KnotLoot
             Assert.AreEqual(1L, DefaultPropertyManager.DefaultLongProperties["knot_loot_matron_weight_torc"].Item);
             Assert.AreEqual(1L, DefaultPropertyManager.DefaultLongProperties["knot_loot_matron_weight_hive_stinger_baton"].Item);
             Assert.AreEqual(1L, DefaultPropertyManager.DefaultLongProperties["knot_loot_matron_weight_hive_nether_baton"].Item);
+            Assert.AreEqual(1L, DefaultPropertyManager.DefaultLongProperties["knot_loot_matron_weight_hive_ichor_baton"].Item);
             Assert.AreEqual(25L, DefaultPropertyManager.DefaultLongProperties["knot_loot_matron_mmd_min"].Item);
             Assert.AreEqual(50L, DefaultPropertyManager.DefaultLongProperties["knot_loot_matron_mmd_max"].Item);
             Assert.AreEqual(0.7, DefaultPropertyManager.DefaultDoubleProperties["knot_loot_matron_window_high_start"].Item, 1e-9);
@@ -210,6 +217,20 @@ namespace ACE.Server.Tests.KnotLoot
             Assert.AreEqual(new KnotTraitRange(0.05, 0.10), intent.Primary);
             Assert.IsTrue(PropertyManager.ModifyDouble("knot_trait_overpowering_intent_max", 0.2));
             Assert.AreEqual(new KnotTraitRange(0.05, 0.2), KnotLootTunables.Trait("overpowering_intent", none).Primary, "the max is read live");
+
+            var guard = KnotLootTunables.Trait("harbinger_guard", none);
+            Assert.IsTrue(guard.Enabled);
+            Assert.AreEqual(new KnotTraitRange(50, 100), guard.Primary);
+            Assert.IsTrue(PropertyManager.ModifyDouble("knot_trait_harbinger_guard_max", 150));
+            Assert.AreEqual(new KnotTraitRange(50, 150), KnotLootTunables.Trait("harbinger_guard", none).Primary, "the max is read live");
+
+            var celerity = KnotLootTunables.Trait("harbinger_celerity", none);
+            Assert.IsTrue(celerity.Enabled);
+            Assert.AreEqual(new KnotTraitRange(0.05, 0.05), celerity.Primary, "attack speed");
+            Assert.AreEqual(new KnotTraitRange(0.05, 0.05), celerity.Secondary, "cast speed");
+            Assert.IsTrue(PropertyManager.ModifyDouble("knot_trait_harbinger_celerity_cast_max", 0.07));
+            Assert.AreEqual(new KnotTraitRange(0.05, 0.07), KnotLootTunables.Trait("harbinger_celerity", none).Secondary, "cast reads cast_*");
+            Assert.AreEqual(new KnotTraitRange(0.05, 0.05), KnotLootTunables.Trait("harbinger_celerity", none).Primary, "attack is untouched by cast_*");
 
             Assert.IsTrue(PropertyManager.ModifyBool("knot_trait_wrist_trade_enabled", false));
             Assert.IsFalse(KnotLootTunables.Trait("wrist_trade", none).Enabled);

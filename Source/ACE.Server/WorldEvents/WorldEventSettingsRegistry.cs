@@ -294,10 +294,28 @@ namespace ACE.Server.WorldEvents
             yield return Global(GroupBosses, "boss_throughput_cap_health", SettingKind.Long, "0", 0, 100000000, unset, SettingApplies.NextRun,
                 "Named-boss health cap when sized from the wave phase. 0 = use bosses.json.");
 
+            yield return Global(GroupBosses, "boss_budget_enabled", SettingKind.Bool, "True", 0, 1, always, SettingApplies.NextRun,
+                "Slay the Champion: size the named boss from the power of the players present (health per power x power). Needs the boss to have a non-zero health per power and floor (bosses.json or the settings below). Off: the throughput or power-curve sizing.");
+
+            yield return Global(GroupBosses, "boss_health_per_power", SettingKind.Double, "0", 0, 10000000, unset, SettingApplies.NextRun,
+                "Slay the Champion boss health per unit of audience power (budget sizing). 0 = use bosses.json.");
+
+            yield return Global(GroupBosses, "boss_power_exponent", SettingKind.Double, "0", 0, 3, unset, SettingApplies.NextRun,
+                "Exponent on audience power in the budget sizing (1 = linear). 0 = use bosses.json.");
+
+            yield return Global(GroupBosses, "boss_budget_floor_health", SettingKind.Long, "0", 0, 100000000, unset, SettingApplies.NextRun,
+                "Slay the Champion budget sizing: the least health the boss gets. 0 = use bosses.json.");
+
+            yield return Global(GroupBosses, "boss_budget_cap_health", SettingKind.Long, "0", 0, 100000000, unset, SettingApplies.NextRun,
+                "Slay the Champion budget sizing: the most health the boss gets. 0 = use bosses.json.");
+
             yield return Global(GroupRewards, "participation_payout_enabled", SettingKind.Bool, "True", 0, 1, always, SettingApplies.Live,
                 "A claimant with no damage or kill credit gets the coal prize instead of the crate.");
 
             foreach (var row in HoldRows())
+                yield return row;
+
+            foreach (var row in DestroySourceRows())
                 yield return row;
         }
     }

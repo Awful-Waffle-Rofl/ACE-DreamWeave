@@ -43,5 +43,44 @@ namespace ACE.Server.WorldObjects
                 GetClassAbilityAffinityMultiplier(Skill.ArmorTinkering),
                 PropertyManager.GetDouble("class_ability_affinity_chance_cap").Item);
         }
+
+        /// <summary>
+        /// Unix time (seconds) at which the Critical Thorns window closes; 0 (or any past time) means closed.
+        /// Per-instance, never persisted: a window is at most a second and a half long.
+        /// </summary>
+        private double criticalThornsUntil;
+
+        /// <summary>
+        /// Cloaked in Power (Vanguard T2, ranks 2-3 added 2026-11-06): opens the Critical Thorns window for the
+        /// rank's duration (0.5 / 1.0 / 1.5 s), or REFRESHES an open one to now + duration (it never stacks
+        /// beyond that). Called from Cloak.RollSpellProc on a successful cloak SPELL proc roll only: the
+        /// damage-reduction cloak roll never reaches it, and the Shield Block path does (it rolls through the
+        /// same entry point).
+        ///
+        /// TryGetClassAbility, not a raw rank read, so class_abilities_enabled and the PK-facet / arena-mask
+        /// suppression both apply: a suppressed Vanguard's proc opens nothing.
+        /// </summary>
+        public void OpenCriticalThornsWindow()
+        {
+            if (GetClassAbilityCache().Count == 0)
+                return;
+
+            if (!TryGetClassAbility(ClassAbilityId.CloakedInPower, out var rank))
+                return;
+
+            OpenCriticalThornsWindow(ACE.Common.Time.GetUnixTime(), CloakedInPowerAbility.CritWindowSeconds(rank));
+        }
+
+        /// <summary>The testable core: a proc at <paramref name="now"/> for <paramref name="durationSeconds"/>.</summary>
+        internal void OpenCriticalThornsWindow(double now, double durationSeconds)
+        {
+            criticalThornsUntil = CloakedInPowerAbility.WindowEnd(now, durationSeconds, criticalThornsUntil);
+        }
+
+        /// <summary>TRUE while the Critical Thorns window is open at <paramref name="now"/> (unix seconds).</summary>
+        internal bool IsCriticalThornsWindowOpen(double now) => now < criticalThornsUntil;
+
+        /// <summary>The window's closing time, for tests.</summary>
+        internal double CriticalThornsWindowEnd => criticalThornsUntil;
     }
 }

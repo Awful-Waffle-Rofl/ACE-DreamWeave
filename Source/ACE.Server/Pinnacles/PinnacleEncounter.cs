@@ -180,6 +180,37 @@ namespace ACE.Server.Pinnacles
             => TryEnterAdmin(admin, kind, level, null, out refusal);
 
         /// <summary>
+        /// A boss script tuned by <paramref name="overrides"/>, dispatched by kind: matron and harbinger take overrides, any
+        /// other kind is refused naming it. False carries the refusal (an unknown key, a bad value, an unsupported kind).
+        /// </summary>
+        internal static bool TryBuildOverrideScript(string kind, HazardArgs overrides, out IPinnacleBossScript script, out string refusal)
+        {
+            script = null;
+            refusal = null;
+
+            if (string.Equals(kind, Matron.MatronData.Kind, StringComparison.Ordinal))
+            {
+                if (!Matron.MatronOverrides.TryCreateScript(PinnacleTunables.Matron(), overrides, out var tuned, out refusal))
+                    return false;
+
+                script = tuned;
+                return true;
+            }
+
+            if (string.Equals(kind, Harbinger.HarbingerData.Kind, StringComparison.Ordinal))
+            {
+                if (!Harbinger.HarbingerOverrides.TryCreateScript(PinnacleTunables.Harbinger(), overrides, out var tuned, out refusal))
+                    return false;
+
+                script = tuned;
+                return true;
+            }
+
+            refusal = $"Per-copy overrides are only supported for {Matron.MatronData.Kind} and {Harbinger.HarbingerData.Kind}, not {kind}.";
+            return false;
+        }
+
+        /// <summary>
         /// As above, with per-copy tuning overrides (plan T9): "key=value" settings that apply to the FRESH copy only.
         /// A refused override (unknown key, unparsable value, a kind with no overrides) is reported before anything is
         /// created, and overrides asked of an entry that would only return to a held copy are refused, not ignored.
@@ -213,19 +244,8 @@ namespace ACE.Server.Pinnacles
 
             if (overrides != null && overrides.Count > 0)
             {
-                if (!string.Equals(kind, Matron.MatronData.Kind, StringComparison.Ordinal))
-                {
-                    refusal = $"Per-copy overrides are only supported for {Matron.MatronData.Kind}.";
+                if (!TryBuildOverrideScript(kind, overrides, out script, out refusal))
                     return false;
-                }
-
-                if (!Matron.MatronOverrides.TryCreateScript(PinnacleTunables.Matron(), overrides, out var tuned, out var overrideError))
-                {
-                    refusal = overrideError;
-                    return false;
-                }
-
-                script = tuned;
             }
 
             PinnacleFightManager.TryGetFight(admin.Guid.Full, out var lf);

@@ -109,6 +109,14 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public bool SealedShut { get; set; }
 
+        /// <summary>
+        /// The door never blocks: it stays Ethereal through every Close, so it only animates. Ephemeral, never persisted;
+        /// set before EnterWorld by LivePinnacleWorld.SpawnProp for a prop spawned with PinnacleProp.Ethereal (the Olthoi
+        /// Matron's pit and north doors, which wedged players who stood in a niche as a door swung shut). Ethereal also
+        /// takes the door out of the anti-blink crossing scan (Player.CheckDoorCollision skips an Ethereal door).
+        /// </summary>
+        public bool AlwaysEthereal { get; set; }
+
         public override void ActOnUse(WorldObject worldObject)
         {
             // DIVERGES FROM UPSTREAM (WaffleACE, 2026-10-27): a door the player's own Pinnacle fight spawned (the Olthoi Matron's
@@ -262,6 +270,10 @@ namespace ACE.Server.WorldObjects
         private void FinalizeClose(double closeTimestamp)
         {
             if (IsOpen || closeTimestamp != CloseTimestamp)
+                return;
+
+            // never made solid: Open already set Ethereal and it stays set, so there is no physics state to rebroadcast
+            if (AlwaysEthereal)
                 return;
 
             // ethereal must be set to false for ethereal_check_for_collisions

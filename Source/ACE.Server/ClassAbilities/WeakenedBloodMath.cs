@@ -267,6 +267,32 @@ namespace ACE.Server.ClassAbilities
         }
 
         /// <summary>
+        /// <see cref="RankSlow(int, double, double, double)"/> with the slow_r1..r3 tunables read through
+        /// <paramref name="values"/>.
+        /// </summary>
+        public static double RankSlow(ITunableValues values, int rank) => RankSlow(rank,
+            values.GetDouble("class_ability_weakenedblood_slow_r1"),
+            values.GetDouble("class_ability_weakenedblood_slow_r2"),
+            values.GetDouble("class_ability_weakenedblood_slow_r3"));
+
+        /// <summary>
+        /// The speed factor a rank's slow leaves a monster at, with every tunable read through
+        /// <paramref name="values"/>: max(1 - rankSlow x <paramref name="affinityMultiplier"/>, floor), the
+        /// arithmetic of <see cref="SpeedFactor(double, double)"/>. Player.ComputeWeakenedBloodSpeedFactor calls this
+        /// with <see cref="ClassAbilityText.Live"/> and the caster's Creature Enchantment affinity; the live text
+        /// formula passes the neutral 1.0, so the quoted slow is the clamped value the mechanic grants.
+        /// </summary>
+        public static double SpeedFactor(ITunableValues values, int rank, double affinityMultiplier) =>
+            SpeedFactor(RankSlow(values, rank) * affinityMultiplier, values.GetDouble("class_ability_weakenedblood_slow_floor"));
+
+        /// <summary>
+        /// The largest slow any rank or affinity can produce: 1 minus the speed factor an unbounded slow
+        /// leaves, which is exactly the (clamped) class_ability_weakenedblood_slow_floor.
+        /// </summary>
+        public static double MaxSlow(ITunableValues values) =>
+            1.0 - SpeedFactor(1.0, values.GetDouble("class_ability_weakenedblood_slow_floor"));
+
+        /// <summary>
         /// Merges an incoming speed factor with the one the target already carries. The slow SHARES THE
         /// MARK'S EXPIRY, so <paramref name="existingExpire"/> is the mark's expiry before this application.
         /// While that is still running the STRONGER slow wins (the smaller factor, i.e. the max slow), so a

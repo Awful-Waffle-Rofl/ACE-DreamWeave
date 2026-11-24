@@ -293,6 +293,15 @@ namespace ACE.Server.WorldObjects
             // Mules remain mortal in every other respect - they take normal combat damage and leave corpses.
             if (IsMule) return;
 
+            // Thread Jump encounter (WaffleACE, Docs/Threads/ENCOUNTERS.md "Jump"): a fall from a running course, or in
+            // the short grace after it despawns, only sets the player back on the climb. Lock-free read; one volatile
+            // read when no course is running anywhere.
+            if (ACE.Server.ThreadDungeons.JumpFallGuard.IsExempt(this)) return;
+
+            // Pinnacle copy whose script waives fall damage (PinnacleScriptData.WaiveFallDamage; only the Harbinger fight):
+            // its floor is a long drop. A registry read, false for every player outside such a copy.
+            if (ACE.Server.Pinnacles.PinnacleFightManager.WaivesFallDamage(this)) return;
+
             // handle lifestone protection?
             if (UnderLifestoneProtection)
             {

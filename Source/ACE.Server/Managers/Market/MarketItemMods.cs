@@ -7,6 +7,7 @@ using log4net;
 
 using ACE.Common.Extensions;
 using ACE.Entity.Enum.Properties;
+using ACE.Server.Entity;
 using ACE.Server.EquipmentMods;
 using ACE.Server.WeaponMods;
 using ACE.Server.WorldObjects;
@@ -23,6 +24,11 @@ namespace ACE.Server.Managers.Market
     /// the Effect helpers Describe itself calls - so a web row and a panel line can never disagree. Never add
     /// a parallel formatter here.
     ///
+    /// PARAGON (2026-11-16). A weapon carrying Paragon gems also lists them: a mod held from both sources carries the
+    /// combined (Tourmaline + Paragon, clamped) magnitude from WeaponModParagonDisplay, Paragon-only mods follow as
+    /// rows, and <see cref="ParagonSummary"/> is appended to the description. Paragon rows are EXCLUDED from
+    /// WeaponQualityTier, which stays summed from the Tourmaline-only rows.
+    ///
     /// NULL, NEVER EMPTY (HARD). Mods is null when nothing is shown; MarketSnapshotFieldTests' FromItem /
     /// FromWeenie mirror test depends on it, since FromWeenie leaves all three fields null.
     /// </summary>
@@ -32,6 +38,7 @@ namespace ACE.Server.Managers.Market
 
         public const string KindWeapon = "weapon";
         public const string KindArmor = "armor";
+        public const string KindJewelry = "jewelry";
 
         /// <summary>
         /// Test seam for weapon_mods_enabled. PropertyManager reads throw on a cache miss inside ACE.Server.Tests,
@@ -77,11 +84,46 @@ namespace ACE.Server.Managers.Market
             {
                 var mods = new List<ItemMod>();
 
-                if (HasAnyWeaponMod(item) && IsOn(WeaponModsEnabledSource, true))
+                // Paragon gems are read through WeaponModParagonDisplay (the one formatter); a Paragon-only weapon
+                // has no Tourmaline record, so HasAnyWeaponMod alone would list it with no mods.
+                var paragonGems = WeaponModParagonDisplay.ReadGems(item);
+
+                if ((HasAnyWeaponMod(item) || paragonGems.Count > 0) && IsOn(WeaponModsEnabledSource, true))
                 {
-                    var weaponRows = WeaponModTinkerSet.ReadSpecials(item)
+                    var specials = WeaponModTinkerSet.ReadSpecials(item);
+
+                    // The Tourmaline-only rows. The quality tier is summed from THESE and never from the combined
+                    // rows below: Paragon mods do not count toward the aura (owner ruling).
+                    var tourmalineRows = specials
                         .Select(s => WeaponRow(s.Definition, s.Magnitude, item))
                         .ToList();
+
+                    var weaponRows = new List<ItemMod>();
+                    var scale = WeaponModValue.MagnitudeScale();
+
+                    for (var i = 0; i < specials.Count; i++)
+                    {
+                        var definition = specials[i].Definition;
+
+                        // A row the weapon also holds Paragon gems for carries the COMBINED (Tourmaline + Paragon,
+                        // clamped) magnitude, the same figure the appraisal line prints.
+                        weaponRows.Add(paragonGems.Any(g => g.Definition.Id == definition.Id)
+                            ? WeaponRow(definition, WeaponModParagonDisplay.CombinedMagnitude(item, definition, scale), item)
+                            : tourmalineRows[i]);
+                    }
+
+                    // Paragon-only mods follow, in slot order, skipping a row a muted scale resolves to nothing
+                    // (the same rule WeaponModParagonDisplay.ModLines applies).
+                    foreach (var (definition, _) in paragonGems)
+                    {
+                        if (item.GetProperty(definition.Record) != null)
+                            continue;
+
+                        var magnitude = WeaponModParagonDisplay.CombinedMagnitude(item, definition, scale);
+
+                        if (WeaponModValue.IsLiveMagnitude(definition, magnitude))
+                            weaponRows.Add(WeaponRow(definition, magnitude, item));
+                    }
 
                     mods.AddRange(weaponRows);
 
@@ -89,10 +131,10 @@ namespace ACE.Server.Managers.Market
                     // re-walks ReadSpecials and re-reads weapon_mod_magnitude_scale independently, so a
                     // scale retune between building the rows and computing the tier (as can happen mid
                     // backfill) could sum the rows to one total and the tier to another. Summing the
-                    // already-built weapon rows' IntensityPct (0 when unreportable, exactly what
+                    // already-built Tourmaline rows' IntensityPct (0 when unreportable, exactly what
                     // TotalIntensity accumulates via the same WeaponModDisplay.IntensityPercent call)
-                    // keeps the projected tier and the projected rows internally consistent, always.
-                    var tier = WeaponQualityTiers.FromTotal(weaponRows.Sum(r => r.IntensityPct ?? 0));
+                    // keeps the projected tier and the Tourmaline rows internally consistent, always.
+                    var tier = WeaponQualityTiers.FromTotal(tourmalineRows.Sum(r => r.IntensityPct ?? 0));
 
                     if (tier != WeaponQualityTier.None)
                         snapshot.WeaponQualityTier = WeaponQualityTiers.NameFor(tier);
@@ -109,6 +151,11 @@ namespace ACE.Server.Managers.Market
                         snapshot.ModCapacity = capacity;
                 }
 
+                // Cloak Mantle rows follow the equipment rows (kind "armor"), then the Jewelry Aspect rows. Presence is
+                // checked first, so an item with neither reads no setting.
+                mods.AddRange(CloakRows(item));
+                mods.AddRange(JewelryRows(item));
+
                 snapshot.Mods = mods.Count > 0 ? mods : null;
             }
             catch (Exception ex)
@@ -119,6 +166,48 @@ namespace ACE.Server.Managers.Market
 
                 log.Error($"[MARKET] could not project the mods of 0x{item.Guid.Full:X8}; listing it with none: {ex.GetFullMessage()}");
             }
+        }
+
+        /// <summary>
+        /// The mod names on a live item, for free-text search (ItemTextSearch): exactly the Name of each row
+        /// <see cref="Apply"/> projects for the web market (weapon rows first, then equipment rows, each in
+        /// registry order, each only while its switch is on), which is the definition's DisplayName. It runs
+        /// Apply itself rather than a second walk, so /mule search and the web search can never disagree
+        /// about which mods an item has. Empty, never null.
+        /// </summary>
+        public static IReadOnlyList<string> SearchNames(WorldObject item) => SearchNames(item, includeJewelryMods: true);
+
+        /// <summary>
+        /// <see cref="SearchNames(WorldObject)"/>, optionally without the Jewelry Aspect rows (kind "jewelry").
+        /// </summary>
+        public static IReadOnlyList<string> SearchNames(WorldObject item, bool includeJewelryMods)
+        {
+            var snapshot = new ListingSnapshot();
+
+            Apply(item, snapshot);
+
+            return snapshot.Mods == null
+                ? Array.Empty<string>()
+                : snapshot.Mods.Where(mod => includeJewelryMods || mod.Kind != KindJewelry).Select(mod => mod.Name).Where(name => !string.IsNullOrEmpty(name)).ToList();
+        }
+
+        /// <summary>
+        /// The Paragon summary for the description field ("Paragon 53/55: Devastation x2, Ambush x1"), or null. Gated by
+        /// the same weapon_mods_enabled seam <see cref="Apply"/> uses, so the web never shows Paragon text the game hides.
+        /// Null for every non-Paragon item.
+        /// </summary>
+        public static string ParagonSummary(WorldObject item)
+        {
+            if (item == null || !WeaponModParagonDisplay.IsParagonCarrier(item) || !IsOn(WeaponModsEnabledSource, true))
+                return null;
+
+            var summary = WeaponModParagonDisplay.SummaryLine(item);
+
+            if (string.IsNullOrEmpty(summary))
+                return null;
+
+            // SummaryLine is an appraisal bullet ("- Paragon ..."); the description field is prose.
+            return summary.StartsWith("- ") ? summary.Substring(2) : summary;
         }
 
         private static bool HasAnyWeaponMod(WorldObject item) =>
@@ -158,7 +247,63 @@ namespace ACE.Server.Managers.Market
                 Name = definition.DisplayName,
                 IntensityPct = percent > 0 ? percent : (int?)null,
                 Effect = EquipmentModDisplay.Effect(definition, potency),
+                Requirement = EquipmentModDisplay.AbilityRequirement(definition),
             };
+        }
+
+        public const string RearGuardName = "Rear Guard";
+        public const string ProcAmplifierName = "Proc Amplifier";
+
+        /// <summary>
+        /// The Cloak Mantle rows of a cloak, Rear Guard then Proc Amplifier, each only when the cloak carries it and, for Rear Guard, cloak_rear_guard_enabled is on. The
+        /// effect text is CloakMantleDisplay's, the same text the appraisal line prints. Token and name are the same string.
+        /// </summary>
+        internal static List<ItemMod> CloakRows(WorldObject item)
+        {
+            var rows = new List<ItemMod>();
+
+            // Rear Guard is gated by cloak_rear_guard_enabled (off: the mantle gives no armor, so no row). The Proc Amplifier has no switch.
+            var rearGuard = ReadSwitch("cloak_rear_guard_enabled", true) ? CloakMantleDisplay.RearGuardEffect(item) : null;
+
+            if (rearGuard != null)
+                rows.Add(new ItemMod { Kind = KindArmor, Token = RearGuardName, Name = RearGuardName, Effect = rearGuard });
+
+            var amplifier = CloakMantleDisplay.ProcAmplifierEffect(item);
+
+            if (amplifier != null)
+                rows.Add(new ItemMod { Kind = KindArmor, Token = ProcAmplifierName, Name = ProcAmplifierName, Effect = amplifier });
+
+            return rows;
+        }
+
+        /// <summary>
+        /// The Jewelry Aspect rows of an aspected ring, bracelet or necklace: one per aspect type with a count of at least
+        /// 1, in the order Defense, Attack, Utility. Token is the type, name carries the layer, count is the type's aspect
+        /// count, and the effect is JewelryAspectDisplay.LayerText (the text after the label on the appraisal line). None while jewelry_aspects_enabled is off (the
+        /// appraisal advertises no layer then either).
+        /// </summary>
+        internal static List<ItemMod> JewelryRows(WorldObject item)
+        {
+            var rows = new List<ItemMod>();
+
+            if (!JewelryAspectMath.IsAspected(item) || !ReadSwitch("jewelry_aspects_enabled", true))
+                return rows;
+
+            var counts = JewelryAspectMath.ReadCounts(item);
+
+            AddJewelryRow(rows, AspectType.Defense, "Defense", "Defense (Fortitude)", counts.Defense);
+            AddJewelryRow(rows, AspectType.Attack, "Attack", "Attack (Penetration)", counts.Attack);
+            AddJewelryRow(rows, AspectType.Utility, "Utility", "Utility (Resolve)", counts.Utility);
+
+            return rows;
+        }
+
+        private static void AddJewelryRow(List<ItemMod> rows, AspectType type, string token, string name, int count)
+        {
+            if (count < 1)
+                return;
+
+            rows.Add(new ItemMod { Kind = KindJewelry, Token = token, Name = name, Count = count, Effect = JewelryAspectDisplay.LayerText(type, count) });
         }
 
         public static string Token(WeaponModId id) => Token(id.ToString());

@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using ACE.Entity.Models;
 
 namespace ACE.Server.Entity.AccountVault
 {
@@ -18,6 +20,11 @@ namespace ACE.Server.Entity.AccountVault
     /// appraisal. A donor with an entry here is also exempt from the "draws nothing" refusal at
     /// attunement, because the stand-in is what makes it visible.
     ///
+    /// A stand-in may also carry TEXTURE-SWAP rows (partIndex, oldTexture, newTexture) that re-skin the
+    /// stand-in's own parts. They name the stand-in Setup's parts, never the donor's, and MuleFormBody
+    /// builds a fresh list from them on every clone. The coffin is re-skinned with a black and white
+    /// streaked surface (see <see cref="DarkSarcophagusStoneTexture"/>), a lookalike of the retail look.
+    ///
     /// The table is code-side and keyed by DONOR wcid. The saved form is per-account by wcid and is
     /// read at every summon, so an entry here repairs an existing saved form with no data change.
     /// </summary>
@@ -30,8 +37,15 @@ namespace ACE.Server.Entity.AccountVault
         /// </summary>
         public readonly struct Body
         {
-            public Body(uint setup, uint motionTable, uint soundTable, uint icon, double defaultScale)
+            private static readonly (byte PartIndex, uint OldTexture, uint NewTexture)[] NoTextures =
+                new (byte, uint, uint)[0];
+
+            private readonly (byte PartIndex, uint OldTexture, uint NewTexture)[] textureSwaps;
+
+            public Body(uint setup, uint motionTable, uint soundTable, uint icon, double defaultScale,
+                (byte PartIndex, uint OldTexture, uint NewTexture)[] textureSwaps = null)
             {
+                this.textureSwaps = textureSwaps ?? NoTextures;
                 Setup = setup;
                 MotionTable = motionTable;
                 SoundTable = soundTable;
@@ -44,6 +58,21 @@ namespace ACE.Server.Entity.AccountVault
             public uint SoundTable { get; }
             public uint Icon { get; }
             public double DefaultScale { get; }
+
+            /// <summary>The stand-in's texture-swap rows (partIndex, oldTexture, newTexture).</summary>
+            public IReadOnlyList<(byte PartIndex, uint OldTexture, uint NewTexture)> TextureSwaps => Array.AsReadOnly(textureSwaps ?? NoTextures);
+
+            /// <summary>
+            /// A FRESH list of texture-map rows for a clone's biota, new on every call: biotas get
+            /// mutated, so a list instance must never be shared between clones.
+            /// </summary>
+            public List<PropertiesTextureMap> BuildTextureMap()
+            {
+                var list = new List<PropertiesTextureMap>();
+                foreach (var swap in TextureSwaps)
+                    list.Add(new PropertiesTextureMap { PartIndex = swap.PartIndex, OldTexture = swap.OldTexture, NewTexture = swap.NewTexture });
+                return list;
+            }
         }
 
         /// <summary>The Dark Sarcophagus weenie (mysterioussarcophagus).</summary>
@@ -55,13 +84,25 @@ namespace ACE.Server.Entity.AccountVault
         /// </summary>
         public const double CoffinDefaultScale = 1.0;
 
+        /// <summary>
+        /// SurfaceTexture painted over the coffin. Chosen as a lookalike for the retail wiki screenshot
+        /// (black and white streaked surface); a tuning knob for in-game review.
+        /// </summary>
+        public const uint DarkSarcophagusStoneTexture = 0x05001AFB;
+
         // The retail coffin used by Sarcophagus (wcid 167) and its coffin* siblings.
         private static readonly Body Coffin = new Body(
             setup: 0x020000CE,
             motionTable: 0x09000024,
             soundTable: 0x20000025,
             icon: 0x060012C7,
-            defaultScale: CoffinDefaultScale);
+            defaultScale: CoffinDefaultScale,
+            textureSwaps: new (byte, uint, uint)[]
+            {
+                (0, 0x05000E21, DarkSarcophagusStoneTexture),
+                (0, 0x05000E19, DarkSarcophagusStoneTexture),
+                (1, 0x05000E21, DarkSarcophagusStoneTexture),
+            });
 
         private static readonly Dictionary<uint, Body> byDonorWcid = new Dictionary<uint, Body>
         {

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Numerics;
 
 using ACE.Entity.Enum;
@@ -85,6 +86,13 @@ namespace ACE.Server.HazardMechanics
 
         public double UnderMargin { get; private set; }
 
+        /// <summary>
+        /// args "quiet", default false: true starts the run without its "The {element} is rising." line
+        /// (FillDirector.Start). For a host that starts many small fills (the Harbinger's acid pools), where one line per
+        /// pool would be noise. Off, the run talks exactly as before.
+        /// </summary>
+        public bool Quiet { get; private set; }
+
         public static FillSettings From(HazardArgs args, HazardRegion region)
         {
             args ??= HazardArgs.Empty;
@@ -131,6 +139,7 @@ namespace ACE.Server.HazardMechanics
                 Duration = args.GetDouble("duration", 0.0, 0.0, 86400.0),
                 SheetMargin = (float)args.GetDouble("sheet_margin", 0.3, 0.0, 2.0),
                 UnderMargin = args.GetDouble("under_margin", 0.1, 0.0, 1.0),
+                Quiet = args.GetBool("quiet", false),
             };
         }
 
@@ -177,6 +186,11 @@ namespace ACE.Server.HazardMechanics
 
             if (element != null && !string.Equals(element, "acid", StringComparison.OrdinalIgnoreCase) && !string.Equals(element, "lava", StringComparison.OrdinalIgnoreCase))
                 return $"element='{element}' is not one of acid|lava";
+
+            var quiet = args.GetString("quiet");
+
+            if (quiet != null && !new[] { "1", "true", "on", "yes", "0", "false", "off", "no" }.Contains(quiet.Trim().ToLowerInvariant()))
+                return $"quiet='{quiet}' is not one of 1|0";
 
             var colour = args.GetString("color");
 

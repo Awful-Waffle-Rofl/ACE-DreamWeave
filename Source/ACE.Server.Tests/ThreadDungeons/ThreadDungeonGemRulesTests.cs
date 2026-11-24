@@ -262,11 +262,11 @@ namespace ACE.Server.Tests.ThreadDungeons
                 "Savage: monsters attack with +13 damage rating, hitting harder",
                 "Champions: 19% of the run's monsters are elites",
                 // None of these three modifiers name a reward field, so ModifierDef's identity defaults
-                // (rewardXpBase/rewardLumBase 1.0) leave both products at 1.0 - but the shipped 2.0 default
-                // scale still totals x2.00 on Experience/Luminance (see the reward block on ComposeLongDesc),
+                // (rewardXpBase/rewardLumBase 1.0) leave both products at 1.0 - but the shipped 2.7 default
+                // scale still totals x2.70 on Experience/Luminance (see the reward block on ComposeLongDesc),
                 // so these two lines appear with no per-modifier attribution.
-                "Experience: x2.00",
-                "Luminance: x2.00",
+                "Experience: x2.70",
+                "Luminance: x2.70",
                 "Entries: 2 of 3",
                 "Unbound. Use it to open a dungeon.",
             });
@@ -292,8 +292,8 @@ namespace ACE.Server.Tests.ThreadDungeons
                 // 8.6 x s = 2.91.
                 "Vicious: monsters have +4 critical damage rating, so their critical hits hurt more",
                 "Vicious: the boss has +3 critical damage rating, so its critical hits hurt more",
-                "Experience: x2.00",
-                "Luminance: x2.00",
+                "Experience: x2.70",
+                "Luminance: x2.70",
                 "Entries: 2 of 3",
                 "Unbound. Use it to open a dungeon.",
             });
@@ -314,8 +314,8 @@ namespace ACE.Server.Tests.ThreadDungeons
                 "Level: 50",
                 "Loot Tier: 3",
                 "Modifiers: none",
-                "Experience: x2.00",
-                "Luminance: x2.00",
+                "Experience: x2.70",
+                "Luminance: x2.70",
                 "Entries: 1 of 3",
                 "Bound to Filo's Doom. It crumbles when you leave the cleared dungeon by recall or its exit portal, or when the dungeon closes.",
             });
@@ -392,8 +392,8 @@ namespace ACE.Server.Tests.ThreadDungeons
                 "Level: 10",
                 "Loot Tier: 1",
                 "Modifiers: none",
-                "Experience: x2.00",
-                "Luminance: x2.00",
+                "Experience: x2.70",
+                "Luminance: x2.70",
                 "Entries: 3 of 3",
                 "Unbound. Use it to open a dungeon.",
             });

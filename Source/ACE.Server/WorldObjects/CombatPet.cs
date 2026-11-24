@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 using ACE.Entity;
 using ACE.Entity.Enum;
@@ -54,23 +55,25 @@ namespace ACE.Server.WorldObjects
         {
             // Custom Summons: the two combat-role flags are weenie data that never change while the pet is out,
             // so they are read once here rather than on every tick and every target candidate
-            NeverInitiates = GetProperty(PropertyBool.SummonNeverInitiates) ?? false;
+            neverInitiatesFlag = GetProperty(PropertyBool.SummonNeverInitiates) ?? false;
             SummonTauntInterval = GetProperty(PropertyFloat.SummonTauntInterval) ?? 0.0;
 
-            // Custom Summons Task 6: a caster brain pet never starts a fight, whatever its weenie says
+            // Custom Summons Task 6: a caster brain pet is never-initiates by design, whatever its weenie says (unless the owner
+            // has /summonaggro on: casters then start fights only by casting; they do not wake monsters)
             if (GetProperty(PropertyBool.SummonCasterBrain) ?? false)
                 MarkCasterPet();
         }
 
         /// <summary>
         /// Puts this pet on the caster brain (CombatPet_Caster): from the weenie's SummonCasterBrain flag, or from a
-        /// bound spell at summon time. A caster also never initiates (design doc: "Ranged summons never initiate
-        /// aggro" applies to all casters).
+        /// bound spell at summon time. A caster is also never-initiates by design (design doc: "Ranged
+        /// summons never initiate aggro" applies to all casters), unless the owner has /summonaggro on (casters start
+        /// fights only by casting; they do not wake monsters).
         /// </summary>
         private void MarkCasterPet()
         {
             IsCasterPet = true;
-            NeverInitiates = true;
+            neverInitiatesFlag = true;
         }
 
         public override bool? Init(Player player, PetDevice petDevice, PetSummonSource source, bool spawnStagger = false)
@@ -103,6 +106,8 @@ namespace ACE.Server.WorldObjects
 
             // doing this the easiest way for the code here, and just removing during appraisal
             Faction1Bits = player.Faction1Bits;
+
+            LogSummoned(player, petDevice, source);
 
             return true;
         }
@@ -258,6 +263,16 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public override uint TakeDamage(WorldObject source, DamageType damageType, float amount, bool crit = false, IncomingDamageOrigin origin = IncomingDamageOrigin.Secondary)
         {
+            // Hunter's Echo: no Soul Tether (it is not the owner's summon); the owner-equivalent armor, resistance and
+            // damage resist rating snapshot instead (CombatPet_HuntersEcho.SnapshotHuntersEchoDefenses)
+            if (IsHuntersEcho)
+            {
+                if (amount > 0.0f)
+                    amount *= HuntersEchoPhysicalMitigation(damageType);
+
+                return base.TakeDamage(source, damageType, amount, crit, origin);
+            }
+
             var mod = P_PetOwner?.GetSoulTetherDamageReductionMod() ?? 1.0f;
 
             if (mod < 1.0f && amount > 0.0f)
@@ -273,7 +288,20 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public override DeathMessage OnDeath(DamageHistoryInfo lastDamager, DamageType damageType, bool criticalHit = false)
         {
+            // Hunter's Echo: not a summon, so it never arms Soul Tether; it only unlinks from its owner
+            if (IsHuntersEcho)
+            {
+                if (P_PetOwner != null && ReferenceEquals(P_PetOwner.HuntersEcho, this))
+                    P_PetOwner.HuntersEcho = null;
+
+                RemovalReason ??= "death";
+
+                return base.OnDeath(lastDamager, damageType, criticalHit);
+            }
+
             P_PetOwner?.OnCombatPetDied();
+
+            RemovalReason ??= "death";
 
             return base.OnDeath(lastDamager, damageType, criticalHit);
         }
@@ -304,11 +332,11 @@ namespace ACE.Server.WorldObjects
             var currentValid = current != null && !current.IsDead && IsVisibleTarget(current)
                 && PetEngagement.HoldsCurrentTarget(neverInitiates, current, P_PetOwner);
 
-            var owner = P_PetOwner;
+            var owner = FollowLeader;
             var assistCandidate = owner?.LastAttackedMonster;
 
             // the property read is skipped when there is nothing to assist with
-            var assistOn = assistCandidate != null && owner.SummonAttackOnTarget;
+            var assistOn = assistCandidate != null && AssistsLeaderTarget(owner);
             var assistValid = assistOn && IsValidAssistTarget(assistCandidate, neverInitiates);
 
             switch (PetAssistTargeting.Decide(assistOn, assistValid, ReferenceEquals(assistCandidate, AttackTarget), currentValid, IsAnimating,
@@ -487,13 +515,23 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// Custom Summons (PropertyBool 9088): this pet never starts a fight. It skips PetCheckMonsters' waking,
+        /// Custom Summons (PropertyBool 9088): by design, unless the owner has /summonaggro on, this pet never starts a
+        /// fight (a caster then starts one only by casting on an unengaged monster; it does not wake monsters). It skips PetCheckMonsters' waking,
         /// and picks targets - nearest, owner assist, and multishot extra arrows - only among monsters already
         /// engaged with its owner or the owner's pets. The Archer and every caster carry it; Tank, Melee and
-        /// every retail pet do not, and behave exactly as before. Cached from the weenie at construction
-        /// (SetEphemeralValues).
+        /// every retail pet do not, and behave exactly as before. The stored flag is cached from the weenie at
+        /// construction (SetEphemeralValues); the value this returns is that flag AND NOT the owner's
+        /// /summonaggro setting (PropertyBool 9097), read live, so a toggle takes effect on the pet's next tick. A
+        /// pet with no owner reads the toggle as off. A pet whose stored flag is false is never affected, and its
+        /// owner is never read at all (the stored flag short-circuits, so a retail, Tank or Melee pet takes no owner
+        /// biota lock per candidate). Same truth table as <see cref="PetEngagement.EffectiveNeverInitiates"/>.
         /// </summary>
-        public bool NeverInitiates { get; private set; }
+        public bool NeverInitiates => neverInitiatesFlag && !(P_PetOwner?.SummonAggro ?? false);
+
+        /// <summary>The stored never-initiates flag (the weenie's SummonNeverInitiates, or a caster), whatever the owner's /summonaggro setting says.</summary>
+        public bool NeverInitiatesByDesign => neverInitiatesFlag;
+
+        private bool neverInitiatesFlag;
 
         /// <summary>
         /// Custom Summons (item 3 of the review): whether this pet may loose a missile at
@@ -533,8 +571,18 @@ namespace ACE.Server.WorldObjects
         public override bool AcceptsMultiShotExtraTarget(Creature creature) => AcceptsPetTarget(creature, NeverInitiates);
 
         /// <summary>
+        /// A pet's multishot extra targets come from VisibleTargets, the monsters it tracks and already picks its
+        /// own targets from (GetNearbyMonsters). The base source, VisibleObjects, is kept for players only, so a
+        /// pet reading it found no secondary target and every extra arrow overflowed onto the primary.
+        /// GetMultiShotTargets still applies every filter, AcceptsMultiShotExtraTarget among them.
+        /// </summary>
+        internal override List<ACE.Server.Physics.PhysicsObj> GetMultiShotCandidates() =>
+            PhysicsObj.ObjMaint.GetVisibleTargetsValues().Where(o => o.WeenieObj.WorldObject != null).ToList();
+
+        /// <summary>
         /// The pet half of Monster_Tick's combat branch, run after this pet's attack step: wakes nearby monsters
-        /// (PetCheckMonsters, today's behaviour) unless this is a never-initiates pet, then fires the Tank's
+        /// (PetCheckMonsters, today's behaviour) unless this is a never-initiates pet (by design, and its owner has not
+        /// turned /summonaggro on; casters never reach here), then fires the Tank's
         /// taunt pulse when one is due.
         /// </summary>
         public void PetCombatTick()
@@ -564,9 +612,10 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// Custom Summons Tank: every SummonTauntInterval seconds (PropertyFloat 9021, read from the pet's weenie),
-        /// taunt every monster already engaged with the owner's side within the player Taunt ability's rank-3
-        /// radius, for the player Taunt's base hold. Never wakes an idle monster. A pet without the property
-        /// never pulses.
+        /// taunt the monsters already engaged with the owner's side within TauntPulseRadius (15 m, fixed, not
+        /// the player Taunt's radius tunables), for the player Taunt's base hold, holding at most
+        /// MaxTauntTargets (3) at once: monsters it already holds are refreshed first, then the nearest new
+        /// ones fill the free slots. Never wakes an idle monster. A pet without the property never pulses.
         ///
         /// THREADING: runs on this pet's landblock tick. Each candidate is only WRITTEN (ApplyTaunt) when it is
         /// in this pet's own landblock group - the same cross-group guard Monster_Magic.TryRollSpell uses - and
@@ -592,28 +641,96 @@ namespace ACE.Server.WorldObjects
             if (owner == null || Location == null)
                 return 0;
 
-            var radius = TauntAbility.RadiusForRank(TauntAbility.TopRank);
+            var radius = TauntPulseRadius;
             var duration = TauntAbility.EffectiveDuration(TauntAbility.BaseDuration());
 
-            var taunted = 0;
+            // the eligible set, nearest first
+            var eligible = new List<(Creature Monster, double Distance)>();
 
             foreach (var monster in candidates)
             {
                 if (monster?.Location == null)
                     continue;
 
-                if (!PetEngagement.IsTauntPulseCandidate(monster, owner, Location.DistanceTo(monster.Location), radius))
+                var distance = Location.DistanceTo(monster.Location);
+
+                if (!PetEngagement.IsTauntPulseCandidate(monster, owner, distance, radius))
                     continue;
 
                 if (!canReach(monster))
                     continue;
 
-                monster.ApplyTaunt(this, duration);
+                eligible.Add((monster, distance));
+            }
+
+            eligible.Sort((a, b) => a.Distance.CompareTo(b.Distance));
+
+            // The hold lives on the monster (TauntTarget / TauntExpiry); tauntRecord only remembers which monsters to
+            // look at, so a held monster that left the candidate set (out of range or sight) still counts against the
+            // cap until its hold lapses. Entries whose hold is over are dropped here.
+            tauntRecord.RemoveAll(m => !HoldsTauntFrom(m));
+
+            var activeHolds = tauntRecord.Count;
+            var taunted = 0;
+
+            // 1. refresh what this pet already holds and is still eligible (keeps the hold sticky); never raises the count
+            foreach (var entry in eligible)
+            {
+                if (!tauntRecord.Contains(entry.Monster))
+                    continue;
+
+                if (entry.Monster.ApplyTaunt(this, duration))
+                    taunted++;
+            }
+
+            // 2. fill the free slots, nearest first. A held monster that stopped being eligible keeps its slot until
+            // its hold expires, so the number held at once never passes MaxTauntTargets.
+            foreach (var entry in eligible)
+            {
+                if (activeHolds >= MaxTauntTargets)
+                    break;
+
+                if (tauntRecord.Contains(entry.Monster))
+                    continue;
+
+                // ApplyTaunt refuses a monster excluded from pet retaliation or held by another taunter: no hold,
+                // no slot, and the scan moves on to the next candidate
+                if (!entry.Monster.ApplyTaunt(this, duration) || !HoldsTauntFrom(entry.Monster))
+                    continue;
+
+                tauntRecord.Add(entry.Monster);
+                activeHolds++;
                 taunted++;
             }
 
             return taunted;
         }
+
+        /// <summary>The most monsters one Tank pet holds under its taunt at once. Fixed, not a server tunable.</summary>
+        public const int MaxTauntTargets = 3;
+
+        /// <summary>
+        /// How far from the pet, in metres, the pulse reaches. Fixed, deliberately not the player Taunt's radius
+        /// tunables, so retuning the player ability never moves the pet.
+        /// </summary>
+        public const double TauntPulseRadius = 15.0;
+
+        /// <summary>Monsters this pet has taunted whose hold may still be running; see ApplyTauntPulse.</summary>
+        private readonly List<Creature> tauntRecord = new List<Creature>();
+
+        /// <summary>
+        /// True while <paramref name="monster"/> is under an unexpired taunt from this pet and is still a live,
+        /// spawned creature (dead or despawned frees the slot at once).
+        /// THREADING: record entries may sit in another landblock group, so this only reads; every write stays
+        /// behind CanTauntReach.
+        /// </summary>
+        private bool HoldsTauntFrom(Creature monster) =>
+            monster != null
+            && ReferenceEquals(monster.TauntTarget, this)
+            && Timers.RunningTime < monster.TauntExpiry
+            && !monster.IsDead
+            && !monster.IsDestroyed
+            && monster.CurrentLandblock != null;
 
         /// <summary>The world-touching half of the pulse filter: same landblock group, then line of sight.</summary>
         private bool CanTauntReach(Creature monster)
@@ -642,6 +759,10 @@ namespace ACE.Server.WorldObjects
             if (unreachableTargets.IsIgnored(creature.Guid.Full, Timers.RunningTime))
                 return false;
 
+            // a subclass's own refusal (the Allegiance Avatar fighter never takes a World Event objective source); false for every other pet
+            if (RefusesPetTarget(creature))
+                return false;
+
             // combat pets do not aggro monsters belonging to the same faction as the pet owner?
             if (SameFaction(creature))
             {
@@ -652,6 +773,9 @@ namespace ACE.Server.WorldObjects
 
             return true;
         }
+
+        /// <summary>A target this pet must never take, whatever else admits it. False for every pet but the Allegiance Avatar fighter.</summary>
+        protected virtual bool RefusesPetTarget(Creature creature) => false;
 
         public override void Sleep()
         {

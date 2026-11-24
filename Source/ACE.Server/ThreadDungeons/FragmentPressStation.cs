@@ -325,10 +325,9 @@ namespace ACE.Server.ThreadDungeons
         /// The pure half of <see cref="BuildLimits"/>: everything but the two tunable reads, so the compiled
         /// budgets - the level ceiling in particular - are pinnable by a unit test without a PropertyManager.
         ///
-        /// The level ceiling is the RUN one (owner ruling 2026-10-08): the scarab's set_difficulty offset may
-        /// carry a 375 fragment past the gem ceiling, to 410 with the shipped Mana Scarab (+35). Before the split
-        /// this read the single 375 ceiling and the same scarab on the same fragment pressed to 375 - the +35 was
-        /// silently discarded. See DungeonGemSpec.MaxRunLevel.
+        /// The level ceiling is the RUN one (owner ruling 2026-10-08), 500, which since the 2026-11-16 gem ceiling raise
+        /// is also the gem ceiling: a 375 fragment plus the shipped Mana Scarab (+35) presses to 410, and a 500
+        /// fragment plus the same scarab clamps back to 500 (its entries still count). See DungeonGemSpec.MaxRunLevel.
         /// </summary>
         internal static PressLimits ComposeLimits(int maxMods, double aimChance, System.Collections.Generic.IEnumerable<string> guaranteedTypes = null)
             => new PressLimits(

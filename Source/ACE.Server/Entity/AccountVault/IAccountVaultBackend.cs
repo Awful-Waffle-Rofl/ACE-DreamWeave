@@ -257,6 +257,9 @@ namespace ACE.Server.Entity.AccountVault
         /// <summary>Rows still holding an item: neither restored nor purged, barreled before the cutoff. NULL means the read failed.</summary>
         List<AccountVaultBarrel> GetExpiredAccountVaultBarrels(DateTime cutoffUtc, int limit);
 
+        /// <summary>One account's open ITEM rows (guid set, not restored, not purged), newest first. NULL means the read failed.</summary>
+        List<AccountVaultBarrel> GetOpenAccountVaultBarrelItems(uint accountId, int limit);
+
         bool AddAccountVaultBarrel(AccountVaultBarrel row);
 
         bool UpdateAccountVaultBarrel(AccountVaultBarrel row);
@@ -494,6 +497,11 @@ namespace ACE.Server.Entity.AccountVault
         public List<AccountVaultBarrel> GetExpiredAccountVaultBarrels(DateTime cutoffUtc, int limit)
         {
             return Read($"GetExpiredAccountVaultBarrels({cutoffUtc:o})", () => Db.GetExpiredAccountVaultBarrels(cutoffUtc, limit));
+        }
+
+        public List<AccountVaultBarrel> GetOpenAccountVaultBarrelItems(uint accountId, int limit)
+        {
+            return Read($"GetOpenAccountVaultBarrelItems({accountId})", () => Db.GetOpenAccountVaultBarrelItems(accountId, limit));
         }
 
         public bool AddAccountVaultBarrel(AccountVaultBarrel row)

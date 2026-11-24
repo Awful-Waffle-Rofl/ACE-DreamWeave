@@ -300,6 +300,15 @@ namespace ACE.Server.ThreadDungeons
         /// </summary>
         public static void Initialize()
         {
+            // Thread encounters (Docs/Threads/ENCOUNTERS.md): the concrete types. Registered before the store is published,
+            // so the first run that rolls its encounters finds them.
+            ThreadEncounterTypes.Register(new ShrineEncounterType());
+            ThreadEncounterTypes.Register(new DefenseEncounterType());
+            ThreadEncounterTypes.Register(new JumpEncounterType());
+            ThreadEncounterTypes.Register(new GolemEncounterType());
+            ThreadEncounterTypes.Register(new GambleEncounterType());
+            ThreadEncounterTypes.Register(new PeddlerEncounterType());
+
             var store = ThreadDungeonStore.LoadFromServerConfig();
             ValidateBossWeenies(store);
             ValidateWorldWcids(store);
@@ -914,6 +923,22 @@ namespace ACE.Server.ThreadDungeons
             var puzzleGatesPerRun = (int)Math.Clamp(PropertyManager.GetLong("dynamic_dungeons_puzzle_gates_per_run", 1).Item, 0, ThreadPuzzleSitePicker.MaxGatesPerRun);
             var puzzleRewardScene = PropertyManager.GetBool("dynamic_dungeons_puzzle_reward_scene_enabled", true).Item;
 
+            // Thread encounters (Docs/Threads/ENCOUNTERS.md): same place, same reason - the encounter pass runs on a
+            // LANDBLOCK thread. Explicit fallbacks equal to the shipped defaults; NaN reads as the default chance.
+            var encountersEnabled = PropertyManager.GetBool("dynamic_dungeons_encounters_enabled", true).Item;
+            var encountersMaxPerRun = ThreadDungeonRun.ClampEncountersMaxPerRun(PropertyManager.GetLong("dynamic_dungeons_encounters_max_per_run", ThreadDungeonRun.DefaultEncountersMaxPerRun).Item);
+            var encounterSlotChance = ThreadDungeonRun.ClampEncounterSlotChance(PropertyManager.GetDouble("dynamic_dungeons_encounters_slot_chance", ThreadDungeonRun.DefaultEncounterSlotChance).Item);
+            var encounterPrizeEnabled = PropertyManager.GetBool("dynamic_dungeons_encounter_prize_enabled", true).Item;
+            var shrineBoonCap = ThreadDungeonRun.ClampShrineBoonCap(PropertyManager.GetDouble("dynamic_dungeons_shrine_boon_cap", ThreadDungeonRun.DefaultShrineBoonCap).Item);
+            var defenseUndefendedSeconds = ThreadDungeonRun.ClampDefenseUndefendedSeconds(PropertyManager.GetDouble("dynamic_dungeons_defense_undefended_seconds", ThreadDungeonRun.DefaultDefenseUndefendedSeconds).Item);
+            var defenseMinDeathSeconds = ThreadDungeonRun.ClampDefenseMinDeathSeconds(PropertyManager.GetDouble("dynamic_dungeons_defense_min_death_seconds", ThreadDungeonRun.DefaultDefenseMinDeathSeconds).Item);
+            var defenseSwitchSeconds = ThreadDungeonRun.ClampDefenseSwitchSeconds(PropertyManager.GetDouble("dynamic_dungeons_defense_switch_seconds", ThreadDungeonRun.DefaultDefenseSwitchSeconds).Item);
+            var defenseMaxSeconds = ThreadDungeonRun.ClampDefenseMaxSeconds(PropertyManager.GetLong("dynamic_dungeons_defense_max_seconds", ThreadDungeonRun.DefaultDefenseMaxSeconds).Item);
+            var jumpTimeSeconds = ThreadDungeonRun.ClampJumpTimeSeconds(PropertyManager.GetLong("dynamic_dungeons_jump_time_seconds", ThreadDungeonRun.DefaultJumpTimeSeconds).Item);
+            var golemPickScale = ThreadDungeonRun.ClampGolemPickScale(PropertyManager.GetDouble("dynamic_dungeons_golem_pick_scale", ThreadDungeonRun.DefaultGolemPickScale).Item);
+            var golemHealthMult = ThreadDungeonRun.ClampGolemHealthMult(PropertyManager.GetDouble("dynamic_dungeons_golem_health_mult", ThreadDungeonRun.DefaultGolemHealthMult).Item);
+            var golemAuraSeconds = ThreadDungeonRun.ClampGolemAuraSeconds(PropertyManager.GetDouble("dynamic_dungeons_golem_aura_seconds", ThreadDungeonRun.DefaultGolemAuraSeconds).Item);
+
             // Open World Threads (R2): the outdoor kill switch and cap, re-checked here because TryStart is the authority
             // (the rotation read them at gem-use time). Read before startLock like every other dial, and only for an
             // outdoor row, so a dungeon start reads nothing new. Explicit fallbacks equal to the shipped defaults.
@@ -1018,6 +1043,19 @@ namespace ACE.Server.ThreadDungeons
                     PuzzleGatesEnabled = puzzleGatesEnabled,
                     PuzzleGatesPerRun = puzzleGatesPerRun,
                     PuzzleRewardSceneEnabled = puzzleRewardScene,
+                    EncountersEnabled = encountersEnabled,
+                    EncountersMaxPerRun = encountersMaxPerRun,
+                    EncounterSlotChance = encounterSlotChance,
+                    EncounterPrizeEnabled = encounterPrizeEnabled,
+                    ShrineBoonCap = shrineBoonCap,
+                    DefenseUndefendedSeconds = defenseUndefendedSeconds,
+                    DefenseMinDeathSeconds = defenseMinDeathSeconds,
+                    DefenseSwitchSeconds = defenseSwitchSeconds,
+                    DefenseMaxSeconds = defenseMaxSeconds,
+                    JumpTimeSeconds = jumpTimeSeconds,
+                    GolemPickScale = golemPickScale,
+                    GolemHealthMult = golemHealthMult,
+                    GolemAuraSeconds = golemAuraSeconds,
                     LazyBufferRing = lazyBufferRing,
                 };
 
@@ -1145,6 +1183,15 @@ namespace ACE.Server.ThreadDungeons
             if (run == null || !runs.TryGetValue(run.RunId, out var live) || !ReferenceEquals(live, run))
                 return;
 
+            // Thread encounters: a tracked creature's death reaches its type first (the Craftwork Golem's reward), then
+            // it takes the bonus-kill route like any encounter creature.
+            ThreadEncounterPass.OnTrackedCreatureDied(creature);
+
+            // Thread encounters: a shrine guardian (or any creature shaped ExcludedFromClear) never counts toward the
+            // clear - no RecordKill, no armed notice, no progress line. Its pooled loot was already banked by Die.
+            if (TryRecordBonusKill(run, creature))
+                return;
+
             run.RecordKill(creature.DungeonRole == DungeonRole.Boss);
 
             // The boss death, BEFORE the clear announcement. A pooled run only marks the boss bonus here
@@ -1176,6 +1223,31 @@ namespace ACE.Server.ThreadDungeons
         }
 
         /// <summary>
+        /// The bonus-kill route of <see cref="OnRunCreatureDied"/>: true (and the kill handled) for a creature shaped
+        /// with CreatureShapeOptions.ExcludedFromClear (Creature.IsThreadBonusCreature). It counts on the run's
+        /// separate bonus counter and never reaches RecordKill, so killed, the clear target and the clear progress are
+        /// all unchanged, and the caller skips the armed notice and the progress line. A run that has already cleared
+        /// still asks for pooled delivery, exactly as any later kill does, so the guardian's banked loot reaches a cache.
+        /// False for every other creature.
+        /// </summary>
+        internal static bool TryRecordBonusKill(ThreadDungeonRun run, Creature creature)
+        {
+            if (run == null || creature == null || !creature.IsThreadBonusCreature)
+                return false;
+
+            run.RecordBonusKill();
+
+            // As OnRunCreatureDied's own call: TriggerPooledLoot is a no-op until the run is Cleared.
+            if (run.PooledLoot)
+                PooledLootTrigger(run);
+
+            if (log.IsDebugEnabled)
+                log.Debug($"[DYNDUNGEON] bonus kill {run.BonusKills} ({creature.Name}) for {run}");
+
+            return true;
+        }
+
+        /// <summary>
         /// Called by ThreadDungeonSpawner on the landblock action queue, immediately after the run's one
         /// MarkPopulated. Its only job today is the clear announcement: a plan that placed NOTHING (no
         /// eligible family, no boss, or a copy whose every placement failed) reaches Cleared the instant it
@@ -1193,6 +1265,18 @@ namespace ACE.Server.ThreadDungeons
             // A run whose last kills landed while it was still Starting is Cleared here, with loot already banked.
             if (run.PooledLoot)
                 PooledLootTrigger(run);
+
+            // Thread encounters (Docs/Threads/ENCOUNTERS.md): planned and dispatched once per run (the pass latches,
+            // because a reward unseal reaches this method too), and only for a run still Active. Guarded: an encounter
+            // failure never reaches the populate chain.
+            try
+            {
+                ThreadEncounterPass.OnRunPopulated(run);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[DYNDUNGEON] {run} encounter pass threw", ex);
+            }
         }
 
         /// <summary>
@@ -2126,6 +2210,11 @@ namespace ACE.Server.ThreadDungeons
                     PooledLootTrigger(run);
                 }
 
+                // Wandering Peddler liveness: an open shop whose NPC is gone, or whose poll has stopped (its landblock torn
+                // down without a Depart), can never release anyone, so every open shop is released here.
+                if (state == ThreadDungeonRunState.Cleared)
+                    ThreadPeddlerShop.SweepLiveness(run);
+
                 // Thread cache display sort: a cache that had a VIEWER when its delivery chain finished was left
                 // in arrival order (ThreadCacheSort's doc comment says why a server must not reorder a container
                 // the client is already displaying). This is the retry that picks it up once the player closes
@@ -2548,6 +2637,17 @@ namespace ACE.Server.ThreadDungeons
             catch (Exception ex)
             {
                 log.Error($"[DYNDUNGEON] failed to clear puzzle placements for {run}", ex);
+            }
+
+            // Thread encounters: every placed encounter hears OnRunEnded once, and the run releases its populate context.
+            // Guarded like the puzzle sweep above: nothing here may stop the eviction below.
+            try
+            {
+                ThreadEncounterPass.OnRunEnded(run, why);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[DYNDUNGEON] failed to end the encounters of {run}", ex);
             }
 
             // Pooled loot invariant 5: overflow items and held rares are out of world, so nothing else would ever

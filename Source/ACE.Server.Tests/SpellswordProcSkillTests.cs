@@ -81,23 +81,29 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void EchoOfAProc_InheritsItemEnchantment_WithoutBecomingAProc()
+        public void WispOfAProc_InheritsItemEnchantment_WithoutBecomingAProc()
         {
-            var parent = NewProjectile();
-            parent.IsClassAbilityProc = true;
+            // a wisp spawned off a Spellsword proc: LaunchSpellProjectiles stamps InheritsProcCasterSkill from the scope
+            var wispBolt = NewProjectile();
+            wispBolt.IsEchoWispCast = true;
+            wispBolt.InheritsProcCasterSkill = true;
 
-            var echo = NewProjectile();
-            ACE.Server.ClassAbilities.Abilities.EchoCastAbility.StampEchoCopy(echo, parent);
+            Assert.AreEqual(Skill.ItemEnchantment, wispBolt.CasterSkillOverride, "a wisp of a proc reads the proc's skill");
+            Assert.IsFalse(wispBolt.IsClassAbilityProc, "the wisp's bolt must not become a proc - IsClassAbilityProc is Cascade's gate");
 
-            Assert.AreEqual(Skill.ItemEnchantment, echo.CasterSkillOverride, "an echo of a proc reads the proc's skill");
-            Assert.IsFalse(echo.IsClassAbilityProc, "the echo must not become a proc - IsClassAbilityProc is Cascade's gate");
+            // a wisp of an ordinary cast keeps the spell's school
+            var plainWispBolt = NewProjectile();
+            plainWispBolt.IsEchoWispCast = true;
 
-            // An echo of an ordinary cast keeps the spell's school.
-            var plainEcho = NewProjectile();
-            ACE.Server.ClassAbilities.Abilities.EchoCastAbility.StampEchoCopy(plainEcho, NewProjectile());
+            Assert.IsNull(plainWispBolt.CasterSkillOverride);
+            Assert.IsFalse(plainWispBolt.InheritsProcCasterSkill);
 
-            Assert.IsNull(plainEcho.CasterSkillOverride);
-            Assert.IsFalse(plainEcho.InheritsProcCasterSkill);
+            // and the proc sites hand the flag to the wisp (inheritsProcCasterSkill: true), the hand cast does not
+            foreach (var file in new[] { "SpellbladeAbility.cs", "RunebladeAbility.cs", "SpellstormAbility.cs" })
+                StringAssert.Contains(PooledLootSourceText.Read("Source/ACE.Server/ClassAbilities/Abilities/" + file),
+                    "attacker.TryTriggerEchoWisp(spell, target, 0, inheritsProcCasterSkill: true, procDamageScale: procDamageScale, rendSourceDamageType: damageEvent.OriginalDamageType, procWeapon: damageEvent.Weapon);", file);
+            StringAssert.Contains(PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/Player_Magic.cs"),
+                "TryTriggerEchoWisp(spell, target, EchoWispBasis.Take(), inheritsProcCasterSkill: false);");
         }
 
         [TestMethod]

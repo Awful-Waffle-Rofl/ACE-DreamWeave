@@ -385,6 +385,174 @@ namespace ACE.Server.Tests
             }
         }
 
+        private static readonly Dictionary<string, string> Durable = new Dictionary<string, string>
+        {
+            [K.KnightDurabilityPerParticipant] = "0.12",
+            [K.KnightDurabilityCap] = "2.8",
+        };
+
+        private static Dictionary<string, string> With(IDictionary<string, string> a, IDictionary<string, string> b)
+        {
+            var d = new Dictionary<string, string>(a);
+            foreach (var kv in b)
+                d[kv.Key] = kv.Value;
+            return d;
+        }
+
+        [TestMethod]
+        public void Shrine_AtTwentyParticipants_HealsTheDividedShare()
+        {
+            var saved = WorldEventHoldHeals.Enqueue;
+
+            try
+            {
+                foreach (var (participants, divisor) in new[] { (1, 1.0), (20, 2.8) })
+                {
+                    var queued = new List<Action>();
+                    WorldEventHoldHeals.Enqueue = (k, a) => { queued.Add(a); return true; };
+
+                    var run = new WorldEventHoldRun(60, Resolver(With(ShrineOn, Durable)));
+                    run.Stage(null, participants, T0);
+                    run.SetWaveNumber(1);
+                    run.MarkActive();
+
+                    var knight = HoldFixtures.Tagged(run, HoldUnitKind.Knight, name: "Envoy Donovan");
+                    var max = knight.Health.MaxValue;
+                    knight.Health.Current = max / 2;
+                    knight.Location = HoldFixtures.At(10, 10);
+                    run.PublishKnights(new[] { knight });
+
+                    var shrine = HoldFixtures.MakeCreature("Restoration Shrine");
+                    shrine.Location = HoldFixtures.At(12, 10);
+                    run.RegisterShrines(new[] { shrine });
+
+                    Assert.IsTrue(run.TryUseShrineCore(shrine, 1, "Roz", null, T0, out _));
+                    Assert.AreEqual(1, queued.Count);
+
+                    var before = knight.Health.Current;
+                    queued[0]();
+
+                    Assert.AreEqual((int)Math.Floor(0.1 / divisor * max), (int)(knight.Health.Current - before), 1, $"{participants} participants: shrine_heal 0.1 / {divisor}");
+                }
+            }
+            finally
+            {
+                WorldEventHoldHeals.Enqueue = saved;
+            }
+        }
+
+        [TestMethod]
+        public void ClearRegen_AtTwentyParticipants_HealsTheDividedShare()
+        {
+            var saved = WorldEventHoldHeals.Enqueue;
+
+            try
+            {
+                foreach (var (participants, divisor) in new[] { (1, 1.0), (20, 2.8) })
+                {
+                    var queued = new List<Action>();
+                    WorldEventHoldHeals.Enqueue = (k, a) => { queued.Add(a); return true; };
+
+                    var props = With(Durable, new Dictionary<string, string> { [K.RegenPerSecond] = "0.05", [K.RegenIntervalSeconds] = "1", [K.HealBudgetPerWave] = "0" });
+                    var run = new WorldEventHoldRun(61, Resolver(props));
+                    run.Stage(null, participants, T0);
+                    run.SetWaveNumber(1);
+                    run.MarkActive();
+
+                    var knight = HoldFixtures.Tagged(run, HoldUnitKind.Knight, name: "Envoy Donovan");
+                    var max = knight.Health.MaxValue;
+                    knight.Health.Current = max / 2;
+                    knight.Location = HoldFixtures.At(10, 10);
+                    run.PublishKnights(new[] { knight });
+
+                    run.TickRuntime(T0 + 5, 0);
+                    Assert.AreEqual(1, queued.Count, "one regen heal for the one hurt, clear knight");
+
+                    var before = knight.Health.Current;
+                    queued[0]();
+
+                    Assert.AreEqual((int)Math.Floor(0.05 / divisor * max), (int)(knight.Health.Current - before), 1, $"{participants} participants: regen 0.05 / {divisor}");
+                }
+            }
+            finally
+            {
+                WorldEventHoldHeals.Enqueue = saved;
+            }
+        }
+
+        /// <summary>Runs <paramref name="act"/> against a staged run with one half-health knight, at 1 and 20 participants, and checks the heal it queued is <paramref name="share"/> / D of max.</summary>
+        private static void AssertDividedHeal(IDictionary<string, string> props, double share, Action<WorldEventHoldRun, Creature> act, string what)
+        {
+            var saved = WorldEventHoldHeals.Enqueue;
+
+            try
+            {
+                foreach (var (participants, divisor) in new[] { (1, 1.0), (20, 2.8) })
+                {
+                    var queued = new List<Action>();
+                    WorldEventHoldHeals.Enqueue = (k, a) => { queued.Add(a); return true; };
+
+                    var all = With(With(Durable, new Dictionary<string, string> { [K.HealBudgetPerWave] = "0" }), props);
+                    var run = new WorldEventHoldRun(70, Resolver(all));
+                    run.Stage(null, participants, T0);
+                    run.SetWaveNumber(1);
+                    run.MarkActive();
+
+                    var knight = HoldFixtures.Tagged(run, HoldUnitKind.Knight, name: "Envoy Donovan");
+                    var max = knight.Health.MaxValue;
+                    knight.Health.Current = max / 2;
+                    knight.Location = HoldFixtures.At(10, 10);
+                    run.PublishKnights(new[] { knight });
+
+                    act(run, knight);
+                    Assert.AreEqual(1, queued.Count, $"{what}: one heal queued at {participants} participants");
+
+                    var before = knight.Health.Current;
+                    queued[0]();
+
+                    Assert.AreEqual((int)Math.Floor(share / divisor * max), (int)(knight.Health.Current - before), 1, $"{what}: {participants} participants, {share} / {divisor}");
+                }
+            }
+            finally
+            {
+                WorldEventHoldHeals.Enqueue = saved;
+            }
+        }
+
+        [TestMethod]
+        public void BetweenWavesHeal_AtTwentyParticipants_HealsTheDividedShare()
+            => AssertDividedHeal(new Dictionary<string, string> { [K.HealBetweenWaves] = "0.1" }, 0.1, (run, _) => run.TickRuntime(T0 + 5, 1), "heal_between_waves");
+
+        [TestMethod]
+        public void CorruptedKillHeal_AtTwentyParticipants_HealsTheDividedShare()
+            => AssertDividedHeal(new Dictionary<string, string> { [K.CorruptedKillHeal] = "0.1" }, 0.1,
+                (run, _) => run.OnCreatureDied(HoldFixtures.Tagged(run, HoldUnitKind.Monster, corrupted: true), true, false), "corrupted_kill_heal");
+
+        [TestMethod]
+        public void RescueHeal_AtTwentyParticipants_HealsTheDividedShare()
+            => AssertDividedHeal(new Dictionary<string, string> { [K.RescueHeal] = "0.2", [K.RescueCapPerWave] = "0.5" }, 0.2,
+                (run, knight) =>
+                {
+                    var monster = HoldFixtures.Tagged(run, HoldUnitKind.Monster);
+                    monster.AttackTarget = knight;
+                    run.OnCreatureDied(monster, true, false);
+                }, "rescue_heal");
+
+        [TestMethod]
+        public void PlayerHealBucketAndBudget_AreNotDivided_AtTwentyParticipants()
+        {
+            var props = new Dictionary<string, string> { [K.PlayerHealCap] = "0.1", [K.PlayerHealMult] = "1.5", [K.HealBudgetPerWave] = "0.3" };
+
+            var solo = HoldFixtures.Tuning(With(Durable, props), null, 1);
+            var group = HoldFixtures.Tuning(With(Durable, props), null, 20);
+
+            Assert.AreEqual(2.8, group.KnightDurability, 1e-9);
+            Assert.AreEqual(solo.PlayerHealCap, group.PlayerHealCap);
+            Assert.AreEqual(0.1, group.PlayerHealCap, 1e-9);
+            Assert.AreEqual(1.5, group.PlayerHealMult, 1e-9);
+            Assert.AreEqual(0.3, group.HealBudgetPerWave, 1e-9);
+        }
+
         [TestMethod]
         public void IsParticipant_WithoutATest_EveryoneCounts()
         {

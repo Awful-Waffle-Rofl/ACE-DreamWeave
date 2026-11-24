@@ -621,10 +621,10 @@ namespace ACE.Server.Tests
             // not a bolt (a war or void spell landing in the same branch)
             Assert.IsFalse(BloodChargeMath.LifeHealthBoltGrantsCharge(false, aimedNonEchoProjectile: true, accrue));
 
-            // not the aimed projectile, or an Echo Cast copy: one charge per CAST (Hecatomb rule)
+            // not the aimed projectile, or an Echo Cast wisp cast: one charge per CAST (Hecatomb rule), none for a wisp
             Assert.IsFalse(BloodChargeMath.LifeHealthBoltGrantsCharge(true, aimedNonEchoProjectile: false, accrue));
             Assert.IsFalse(BloodChargeMath.LifeHealthBoltGrantsCharge(true,
-                Server.WorldObjects.SpellProjectile.GrantsLifeProjectileCharge(hasProjectileTarget: true, isEchoCopy: true), accrue));
+                Server.WorldObjects.SpellProjectile.GrantsLifeProjectileCharge(hasProjectileTarget: true, isEchoWispCast: true), accrue));
 
             // an outcome that spent the pool never accrues (unreachable for a bolt, kept uniform with the other sites)
             Assert.IsFalse(BloodChargeMath.LifeHealthBoltGrantsCharge(true, aimedNonEchoProjectile: true, burst));
@@ -680,7 +680,7 @@ namespace ACE.Server.Tests
             var warBranch = projectile.IndexOf("// war/void magic projectiles", StringComparison.Ordinal);
             Assert.IsTrue(warBranch >= 0, "war/void branch marker not found");
 
-            var spellMod = projectile.IndexOf("GetClassAbilitySpellDamageMod(Spell, SpellweaveDamageMod)", warBranch, StringComparison.Ordinal);
+            var spellMod = projectile.IndexOf("GetClassAbilitySpellDamageMod(Spell, SpellweaveDamageMod, IsEchoWispCast)", warBranch, StringComparison.Ordinal);
             var hook = projectile.IndexOf("ApplyLifeHealthBoltBloodCharge(", warBranch, StringComparison.Ordinal);
 
             Assert.IsTrue(spellMod > warBranch, "GetClassAbilitySpellDamageMod not found in the war/void branch");
@@ -690,7 +690,7 @@ namespace ACE.Server.Tests
             var callEnd = projectile.IndexOf(';', hook);
             var call = projectile.Substring(hook, callEnd - hook);
             Assert.IsTrue(call.Contains("castStamp: LifeProjectileStamp"), "the hook must read the projectile's launch-time stamp, never the live pool");
-            Assert.IsTrue(call.Contains("GrantsLifeProjectileCharge(ProjectileTarget != null, IsEchoCopy)"), "one charge per cast: the aimed, non-echo projectile only");
+            Assert.IsTrue(call.Contains("GrantsLifeProjectileCharge(ProjectileTarget != null, IsEchoWispCast)"), "one charge per cast: the aimed, non-wisp projectile only");
 
             var buffs = ReadServerSource("ACE.Server/WorldObjects/Player_ClassAbilityBuffs.cs");
             var start = buffs.IndexOf("public float ApplyLifeHealthBoltBloodCharge(", StringComparison.Ordinal);
@@ -1204,6 +1204,53 @@ namespace ACE.Server.Tests
             var unset = TestCreatures.CreateQuestBearer();
             Assert.IsNull(unset.ResistHealthDrain);
             Assert.AreEqual(1.0, unset.GetEffectiveResistHealthDrain(), 1e-9);
+        }
+
+        // ---- Transfusion feeds World Event envoys: call-graph pins (review F2, F5) ------------------------------
+
+        private static string PayoutLoop(string magic)
+        {
+            var from = magic.IndexOf("for (var i = 0; i < fellowShares.Length; i++)", StringComparison.Ordinal);
+            Assert.IsTrue(from > 0, "the surplus payout loop must exist");
+
+            var to = magic.IndexOf("fellow.DamageHistory.OnHeal(fellowGain);", from, StringComparison.Ordinal);
+            Assert.IsTrue(to > from, "the payout loop's heal bookkeeping must follow");
+
+            return magic.Substring(from, to - from);
+        }
+
+        [TestMethod]
+        public void Transfusion_KnightShare_IsQueuedAsAPlayerHeal_BeforeAnyDirectWrite()
+        {
+            var loop = PayoutLoop(ReadServerSource("ACE.Server/WorldObjects/WorldObject_Magic.cs").Replace("\r\n", "\n"));
+
+            const string branch = "if (ACE.Server.WorldEvents.WorldEventHooks.IsHoldKnight(fellow))";
+            const string queue = "ACE.Server.WorldEvents.WorldEventHooks.TryQueuePlayerHeal(this as Player, fellow, fellowShares[i], false, null, ChatMessageType.Magic);";
+
+            Assert.AreEqual(1, CountOf(loop, branch), "exactly one knight branch in the payout loop");
+            Assert.AreEqual(1, CountOf(loop, queue), "the knight branch queues the share as a Player heal");
+
+            var at = loop.IndexOf(branch, StringComparison.Ordinal);
+            var queueAt = loop.IndexOf(queue, at, StringComparison.Ordinal);
+            var continueAt = loop.IndexOf("continue;", queueAt, StringComparison.Ordinal);
+            var write = loop.IndexOf("UpdateVitalDelta(", StringComparison.Ordinal);
+            var pvp = loop.IndexOf("PvpRules.ApplyHealingModToRecipient(", StringComparison.Ordinal);
+
+            Assert.IsTrue(queueAt > at && continueAt > queueAt, "the branch queues, then continues");
+            Assert.IsTrue(continueAt < write && continueAt < pvp, "the branch ends before the first direct write and the PvP healing mod");
+        }
+
+        [TestMethod]
+        public void Transfusion_EnvoyScan_IsGatedOnRankPrimaryStrikeAndTheScalarChecks()
+        {
+            var magic = ReadServerSource("ACE.Server/WorldObjects/WorldObject_Magic.cs").Replace("\r\n", "\n");
+
+            Assert.AreEqual(1, CountOf(magic, "var holdKnights = !isSecondaryStrike && caster != null && destination == caster\n"
+                + "                && targetCreature != null && targetCreature is not Player && transfusionRank >= 1\n"
+                + "                ? ACE.Server.WorldEvents.WorldEventHooks.HoldTransfusionKnights(caster) : null;"),
+                "the scan is primary-strike only (Crimson Harvest), after the scalar gates, and needs Transfusion rank 1");
+
+            Assert.AreEqual(1, CountOf(magic, "out var drainShareFraction, isSecondaryStrike);"), "the strike flag reaches GetDrainSurplusFellows");
         }
     }
 }

@@ -2,6 +2,7 @@ using ACE.Common;
 using ACE.Database.Models.World;
 using ACE.Entity.Enum;
 using ACE.Server.Entity.Mutations;
+using ACE.Server.Entity;
 using ACE.Server.Factories.Entity;
 using ACE.Server.Factories.Enum;
 using ACE.Server.Factories.Tables;
@@ -32,7 +33,9 @@ namespace ACE.Server.Factories
             mutationFilter.TryMutate(wo, profile.Tier);
 
             // mutate ElementalDamageMod / WieldRequirements
-            var isElemental = wo.W_DamageType != DamageType.Undef;
+            // fork addition (Summoner casters): a marked focus is Undef but rolls the elemental script, because its
+            // rolled ElementalDamageMod is the power its wielder's combat pets receive
+            var isElemental = wo.W_DamageType != DamageType.Undef || SummonerFocus.IsSummonerFocus(wo);
             var scriptName = GetCasterScript(isElemental);
 
             mutationFilter = MutationCache.GetMutation(scriptName);
@@ -41,7 +44,11 @@ namespace ACE.Server.Factories
             // this part was not handled by mutation filter
             if (wo.WieldRequirements == WieldRequirement.RawSkill)
             {
-                if (wo.W_DamageType == DamageType.Nether)
+                if (SummonerFocus.IsSummonerFocus(wo))
+                    // fork addition (Summoner casters): the focus is Undef, so without this case it would fall
+                    // into the WarMagic else below
+                    wo.WieldSkillType = (int)Skill.Summoning;
+                else if (wo.W_DamageType == DamageType.Nether)
                     wo.WieldSkillType = (int)Skill.VoidMagic;
                 else if (wo.W_DamageType == DamageType.Health)
                     // fork addition (Sanguine casters): retail has no Health-typed caster, so this

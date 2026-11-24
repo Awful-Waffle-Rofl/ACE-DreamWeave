@@ -132,5 +132,42 @@ namespace ACE.Server.Tests.HazardMechanics
             Assert.AreEqual(1, logs.Count(l => l.StartsWith("balls stop outcome=Stopped", StringComparison.Ordinal)), "OnStop logs once: " + string.Join(" | ", logs));
             Assert.AreEqual(1, host.Ended, "OnEnded still exactly once");
         }
+
+        [TestMethod]
+        public void StopLine_CarriesAHitsCount_OnTheCadencePath()
+        {
+            Tick();
+            HazardManager.Stop(run, HazardOutcome.Stopped, "test stop");
+            run.Context.DestroyForTeardown = _ => true;
+            run.Context.Teardown(HazardOutcome.Stopped, wasStarted: true);
+
+            var stop = logs.Single(l => l.StartsWith("balls stop outcome=Stopped", StringComparison.Ordinal));
+
+            StringAssert.Contains(stop, "(cadence)", "control: this is the cadence line");
+            Assert.IsTrue(stop.EndsWith(" hits=0", StringComparison.Ordinal), "no player was hit, and the field is there: " + stop);
+        }
+
+        [TestMethod]
+        public void StopLine_CarriesAHitsCount_OnTheSingleWaveClockPath()
+        {
+            var lines = new List<string>();
+            var single = HazardManager.RegisterForTest("balls", new RollingBallMechanic(), HazardRegionPresets.Pinnacle(0), new CountingHost(), DateTime.UtcNow, BallPatterns.Row,
+                HazardArgs.Merge(HazardArgs.Parse(Args), HazardArgs.Parse(HazardDefaults.Balls)));
+
+            try
+            {
+                single.Context.LogForTest = lines.Add;
+                new RollingBallMechanic().OnStop(single.Context, HazardOutcome.Stopped);
+
+                var stop = lines.Single(l => l.StartsWith("balls stop outcome=Stopped", StringComparison.Ordinal));
+
+                Assert.IsFalse(stop.Contains("(cadence)"), "control: the non-cadence line: " + stop);
+                Assert.IsTrue(stop.EndsWith(" hits=0", StringComparison.Ordinal), stop);
+            }
+            finally
+            {
+                HazardManager.Stop(single, HazardOutcome.Stopped, "test cleanup");
+            }
+        }
     }
 }

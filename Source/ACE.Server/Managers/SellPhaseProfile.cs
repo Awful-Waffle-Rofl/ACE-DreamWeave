@@ -168,8 +168,8 @@ namespace ACE.Server.Managers
     /// thread that enqueued it. Enqueue appends the item under the store's drainLock and then calls Drain
     /// (AccountVaultStore.cs:2310-2334); Drain executes EVERY item then queued, on whichever thread won the
     /// lock (AccountVaultStore.cs:2419-2484). Two background threads enqueue against the SAME per-account
-    /// store - AccountVaultBarrelReaper's hourly sweep (AccountVaultBarrelReaper.cs:216 starts the thread,
-    /// :160 enqueues TryPurgeFromBarrel) and AccountVaultFoldMigration (AccountVaultFoldMigration.cs:264,
+    /// store - AccountVaultBarrelReaper's hourly sweep (AccountVaultBarrelReaper.Start starts the thread,
+    /// AccountVaultBarrelReaper.TryPurgeRow enqueues TryPurgeFromBarrel) and AccountVaultFoldMigration (AccountVaultFoldMigration.cs:264,
     /// :499) - so one of them can win the lock in the window between a sale's append and its own Drain call
     /// and run the sale's deposit closure on its thread while the world thread blocks in Drain.
     ///

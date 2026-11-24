@@ -28,6 +28,9 @@ namespace ACE.Server.HazardMechanics
 
             public double Until { get; internal set; }
 
+            /// <summary>The volley this pillar fired in (the hit-ledger key it strikes under; IWispPort.NewHitGroup), 0 = none.</summary>
+            public int Volley { get; internal set; }
+
             internal bool Struck { get; set; }
 
             /// <summary>Set by <see cref="StrikeFirst"/>: the next <see cref="Due"/> leaves this entry out once, as it was struck in that tick already.</summary>
@@ -39,12 +42,12 @@ namespace ACE.Server.HazardMechanics
         public int Count => entries.Count;
 
         /// <summary>Adds a pillar; returns its entry (null for a sourceless one, which is never added).</summary>
-        public Entry Add(object source, Vector3 centre, double start, double duration)
+        public Entry Add(object source, Vector3 centre, double start, double duration, int volley = 0)
         {
             if (source == null)
                 return null;
 
-            var entry = new Entry { Source = source, Centre = centre, Start = start, Until = start + Math.Max(0.0, duration) };
+            var entry = new Entry { Source = source, Centre = centre, Start = start, Until = start + Math.Max(0.0, duration), Volley = volley };
             entries.Add(entry);
             return entry;
         }

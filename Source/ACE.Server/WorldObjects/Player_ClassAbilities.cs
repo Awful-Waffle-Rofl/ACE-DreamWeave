@@ -97,23 +97,24 @@ namespace ACE.Server.WorldObjects
                 return true;
 
             var (cspKey, spentKey) = skill.Tier >= 3
-                ? ("class_ability_tier3_cap_required", "class_ability_tier3_spent_required")
-                : ("class_ability_tier2_cap_required", "class_ability_tier2_spent_required");
+                ? (ClassAbilityTierGate.Tier3EarnedKey, ClassAbilityTierGate.Tier3SpentKey)
+                : (ClassAbilityTierGate.Tier2EarnedKey, ClassAbilityTierGate.Tier2SpentKey);
 
             var cspRequired = (int)PropertyManager.GetLong(cspKey).Item;
             var spentRequired = (int)PropertyManager.GetLong(spentKey).Item;
 
-            if (TotalClassAbilityPointsEarned < cspRequired)
-            {
-                error = $"{skill.DisplayName} is a Tier {skill.Tier} skill - you must have earned at least {cspRequired:N0} class ability points to unlock it (you have earned {TotalClassAbilityPointsEarned:N0}).";
-                return false;
-            }
-
             var spent = PointsSpentInClass(skill.AbilityClass);
-            if (spent < spentRequired)
+
+            // The rule itself is ClassAbilityTierGate.CheckTierUnlock, shared with the web panel's tier rows.
+            switch (ClassAbilityTierGate.CheckTierUnlock(TotalClassAbilityPointsEarned, spent, cspRequired, spentRequired))
             {
-                error = $"{skill.DisplayName} is a Tier {skill.Tier} {skill.AbilityClass} skill - you must have spent at least {spentRequired:N0} points on {skill.AbilityClass} skills to unlock it (you have spent {spent:N0}).";
-                return false;
+                case ClassAbilityTierGate.TierUnlockShortfall.Earned:
+                    error = $"{skill.DisplayName} is a Tier {skill.Tier} skill - you must have earned at least {cspRequired:N0} class ability points to unlock it (you have earned {TotalClassAbilityPointsEarned:N0}).";
+                    return false;
+
+                case ClassAbilityTierGate.TierUnlockShortfall.Spent:
+                    error = $"{skill.DisplayName} is a Tier {skill.Tier} {skill.AbilityClass} skill - you must have spent at least {spentRequired:N0} points on {skill.AbilityClass} skills to unlock it (you have spent {spent:N0}).";
+                    return false;
             }
 
             return true;
@@ -243,12 +244,16 @@ namespace ACE.Server.WorldObjects
             var gearMod = GetEquippedModValue(EquipmentModId.Bulwark);
 
             // TryGetClassAbility already gates on class_abilities_enabled and a learned rank
-            var owned = TryGetClassAbility(ClassAbilityId.BattleHardened, out _);
+            var owned = TryGetClassAbility(ClassAbilityId.BattleHardened, out var battleHardenedRank);
 
             if (!owned && gearMod <= 0.0)
                 return 1.0f;
 
-            var reductionPerStrength = owned ? PropertyManager.GetDouble("class_ability_battlehardened_reduction_per_strength").Item : 0.0;
+            // rank x the per-rank rate (0.025% / 0.05% / 0.075% per Strength point at the defaults, Vanguard pass
+            // 2026-11-06); 0 at rank 0
+            var reductionPerStrength = owned
+                ? BattleHardenedAbility.ReductionPerStrength(battleHardenedRank, PropertyManager.GetDouble("class_ability_battlehardened_reduction_per_strength_per_rank").Item)
+                : 0.0;
             var maxReduction = PropertyManager.GetDouble("class_ability_battlehardened_max_reduction").Item;
 
             return BattleHardenedAbility.GetDamageResistMod(Strength.Current, reductionPerStrength, maxReduction, gearMod);
@@ -393,6 +398,9 @@ namespace ACE.Server.WorldObjects
 
         private void InvalidateClassAbilityHookCaches()
         {
+            // The web panel's revision (Player_ClassAbilityPanel.cs): every rank-changing path calls this.
+            ClassAbilityRevision.Bump();
+
             outgoingDamageClassAbilities = null;
             incomingDamageClassAbilities = null;
             preWriteDamageClassAbilities = null;
@@ -533,15 +541,18 @@ namespace ACE.Server.WorldObjects
         /// TRUE only from Player.TakeDamage when HazardContext.HitPlayers dealt the hit. Carried as
         /// PreWriteDamageContext.IsHazard; every ward skips such a hit (owner ruling R3; the list is on IsHazard).
         /// </param>
-        public uint ApplyPreWriteDamageClassAbilities(WorldObject source, DamageType damageType, uint incomingDamage, bool isDamageOverTime = false, bool isSpell = false, uint? enemyCreatureSpellDamage = null, bool isHazard = false)
+        public uint ApplyPreWriteDamageClassAbilities(WorldObject source, DamageType damageType, uint incomingDamage, bool isDamageOverTime = false, bool isSpell = false, uint? enemyCreatureSpellDamage = null, bool isHazard = false, uint? fortitudeEligibleDamage = null)
         {
             var learned = preWriteDamageClassAbilities ??= BuildClassAbilityHookCache(ClassAbilityRegistry.PreWriteDamageAbilities);
 
+            // JEWELRY ASPECT FORTITUDE is gear, not a class ability: it must still apply when no class-ability handler
+            // may run (empty rank cache, or the class_abilities_enabled kill switch off). Both early returns therefore
+            // hand back the Fortitude-reduced hit rather than the raw one, and no handler runs on either path.
             if (learned.Length == 0)
-                return incomingDamage;
+                return ApplyGearFortitude(source, incomingDamage, isHazard, fortitudeEligibleDamage, 0, out _);
 
             if (!PropertyManager.GetBool("class_abilities_enabled").Item)
-                return incomingDamage;
+                return ApplyGearFortitude(source, incomingDamage, isHazard, fortitudeEligibleDamage, 0, out _);
 
             // the same attacker filter ApplyIncomingDamageClassAbilities applies, evaluated once and carried
             // on the context rather than early-returning on it - see the summary for why. Shared with the DoT
@@ -562,13 +573,55 @@ namespace ACE.Server.WorldObjects
                 Damage = incomingDamage,
             };
 
+            // Gear Fortitude runs ONCE, immediately before the first handler at or above DamageMitigationOrder.GearFortitude
+            // (after the observers and the immunity window, before every absorb pool), or after the loop when none is.
+            var fortitudeApplied = false;
+
             foreach (var (skill, rank) in learned)
             {
+                if (DamageMitigationOrder.RunsFortitudeBefore(skill.MitigationOrder, fortitudeApplied))
+                {
+                    var before = context.Damage;
+
+                    context.Damage = ApplyGearFortitude(source, before, context.IsHazard, fortitudeEligibleDamage, incomingDamage - before, out var eligibleUsed);
+
+                    // A handler that runs AFTER this step (an absorb pool) reads SpellDamageFromEnemyCreature, so the share
+                    // shrinks by its proportional part of what Fortitude removed. The post-loop and early-return paths need
+                    // no rescale: no handler runs after Fortitude on either.
+                    context.SpellDamageFromEnemyCreature = ClassAbilityAttackerFilter.ReduceShareByFortitude(context.SpellDamageFromEnemyCreature, eligibleUsed, before - context.Damage);
+                    fortitudeApplied = true;
+                }
+
                 if (DamageMitigationOrder.ShouldDispatchPreWriteHandler(skill.MitigationOrder, incomingDamage))
                     skill.ModifyIncomingDamage(this, rank, context);
             }
 
+            if (!fortitudeApplied)
+                context.Damage = ApplyGearFortitude(source, context.Damage, context.IsHazard, fortitudeEligibleDamage, incomingDamage - context.Damage, out _);
+
             return context.Damage;
+        }
+
+        /// <summary>
+        /// Jewelry Aspect Fortitude on one hit: untouched for a hazard and for a hit already at 0 (an Immunity handler
+        /// cancelled it); otherwise reduced by GetFortitude over the eligible part of the hit. A DoT tick passes its own
+        /// eligible share (<paramref name="fortitudeEligibleDamage"/>) and a null source; every other site derives
+        /// eligibility from <paramref name="source"/> (a PvP pair or self-inflicted damage is not eligible).
+        /// </summary>
+        private uint ApplyGearFortitude(WorldObject source, uint damage, bool isHazard, uint? fortitudeEligibleDamage, uint removedSoFar, out uint eligible)
+        {
+            eligible = 0;
+
+            // damage == 0 is redundant by arithmetic (ApplyFortitude returns damage unchanged for 0); kept as an early-out
+            if (isHazard || damage == 0)
+                return damage;
+
+            eligible = ClassAbilityAttackerFilter.FortitudeEligibleDamage(ClassAbilityAttackerFilter.IsFortitudeEligibleSource(source, this), damage, fortitudeEligibleDamage, removedSoFar);
+
+            if (eligible == 0)
+                return damage;
+
+            return JewelryAspectMath.ApplyFortitude(damage, eligible, GetFortitude(source));
         }
 
         /// <summary>
@@ -795,6 +848,9 @@ namespace ACE.Server.WorldObjects
 
             if (totalDelta != 0)
                 SetTotalClassAbilityPointsEarnedRaw(TotalClassAbilityPointsEarned + totalDelta);
+
+            // The web panel's revision (Player_ClassAbilityPanel.cs): every CAP balance write funnels here.
+            ClassAbilityRevision.Bump();
 
             try
             {
@@ -1429,21 +1485,37 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// Learns the next rank of a class ability, spending available points.
-        /// Returns FALSE with a player-facing error and no state change on any validation failure.
+        /// Every refusal of a PAID learn of the next rank: <see cref="ValidateClassAbilityRankPrerequisites"/>, then
+        /// the point balance. Reads only; moves nothing. Shared by <see cref="LearnClassAbility"/> and the web
+        /// panel's side-effect-free <see cref="CanRaiseClassAbility"/>, so the two can never disagree. On success
+        /// <paramref name="rank"/> is the rank held now and <paramref name="cost"/> the price of rank + 1.
         /// </summary>
-        public bool LearnClassAbility(ClassAbilityDefinition skill, out string error)
+        private bool ValidateClassAbilityLearn(ClassAbilityDefinition skill, out int rank, out int cost, out string error)
         {
-            if (!ValidateClassAbilityRankPrerequisites(skill, out var rank, out error))
+            cost = 0;
+
+            if (!ValidateClassAbilityRankPrerequisites(skill, out rank, out error))
                 return false;
 
-            var cost = skill.CostPerRank[rank];
+            cost = skill.CostPerRank[rank];
 
             if (AvailableClassAbilityPoints < cost)
             {
                 error = $"Rank {rank + 1} of {skill.DisplayName} requires {cost:N0} class ability point{(cost == 1 ? "" : "s")}; you have {AvailableClassAbilityPoints:N0}.";
                 return false;
             }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Learns the next rank of a class ability, spending available points.
+        /// Returns FALSE with a player-facing error and no state change on any validation failure.
+        /// </summary>
+        public bool LearnClassAbility(ClassAbilityDefinition skill, out string error)
+        {
+            if (!ValidateClassAbilityLearn(skill, out var rank, out var cost, out error))
+                return false;
 
             AdjustClassAbilityPoints(-cost, 0, CapLedgerReason.Learn,
                 ability: skill.Name, rankAfter: rank + 1, ownedCostDelta: cost,
@@ -1896,6 +1968,7 @@ namespace ACE.Server.WorldObjects
             // ---- 1. stored facet builds, first, confirmed, or nothing happens ----
 
             var unlearnNames = ClassAbilityRepricing.UnlearnedAbilityNames(waves, appliedWave);
+            List<CharacterFacet> unlearnFacetRows = null;
             var strippedFacets = 0;
             var strippedNames = new HashSet<string>(StringComparer.Ordinal);
 
@@ -1908,6 +1981,8 @@ namespace ACE.Server.WorldObjects
                     log.Warn($"[CAREPRICE] {Name} (0x{Guid.Full:X8}): the character_facet read did not complete, so the class ability reprice migration is SKIPPED this login. Nothing was changed and the wave was not stamped - the next login retries.");
                     return false;
                 }
+
+                unlearnFacetRows = facetRows;
 
                 if (!ClassAbilityRepricing.TryStripStoredAbilities(facetRows, unlearnNames, FacetDbTimeoutMs,
                         DatabaseManager.Shard.SaveCharacterFacet, out strippedFacets, out strippedNames))
@@ -1925,6 +2000,22 @@ namespace ACE.Server.WorldObjects
                 ranksBefore[row.Ability] = GetClassAbilityRank(row.Ability);
 
             int RankBefore(ClassAbilityId id) => ranksBefore.TryGetValue(id, out var r) ? r : 0;
+
+            // FACET-ONLY NOTICE HOLDERS: abilities a notice row names that the character holds in a stored facet
+            // build but not as a live rank. The facet rows are read only if some notice row is not already covered
+            // by a live rank, reuse the Unlearn sweep's read when it happened (never twice in one login), and a
+            // failed read only skips these notices - it never refuses or delays the migration or the points work.
+            // A character that never earned a point cannot hold a stored build.
+            var noticeFacetNames = new HashSet<string>(StringComparer.Ordinal);
+
+            if (TotalClassAbilityPointsEarned > 0)
+            {
+                noticeFacetNames = ClassAbilityRepricing.FacetOnlyNoticeNames(waves, appliedWave, id => RankBefore(id) > 0, unlearnFacetRows,
+                    () => TryGetCharacterFacetRowsForNotice(out var noticeRows) ? noticeRows : null, out var noticeReadFailed);
+
+                if (noticeReadFailed)
+                    log.Warn($"[CAREPRICE] {Name} (0x{Guid.Full:X8}): the character_facet read for the ability change notice did not complete, so facet-only change notices are SKIPPED this login. The migration is unaffected.");
+            }
 
             var unlearns = ClassAbilityRepricing.PlanUnlearns(waves, appliedWave, RankBefore);
             var unlearned = new List<(UnlearnStep Step, ClassAbilityDefinition Def)>();
@@ -1994,6 +2085,7 @@ namespace ACE.Server.WorldObjects
                 Promoted = promoted,
                 StrippedFacets = strippedFacets,
                 StrippedNames = strippedNames,
+                NoticeFacetNames = noticeFacetNames,
             };
 
             if (unlearned.Count == 0 && promoted.Count == 0)
@@ -2117,6 +2209,7 @@ namespace ACE.Server.WorldObjects
             public List<(PromoteStep Step, ClassAbilityDefinition Def)> Promoted;
             public int StrippedFacets;
             public HashSet<string> StrippedNames;
+            public HashSet<string> NoticeFacetNames;
         }
 
         /// <summary>
@@ -2242,8 +2335,15 @@ namespace ACE.Server.WorldObjects
             // confirmed saved - see the crash windows on ApplyClassAbilityRepricing.
             SetProperty(PropertyInt.ClassAbilityRepriceWave, latestWave);
 
-            // Nothing touched: no explicit save. The stamp rides the normal save cycle.
-            if (!touched && run.StrippedFacets == 0)
+            // Nothing touched: no explicit save, and the stamp rides the normal save cycle. The two notice
+            // clauses add an explicit save to an otherwise idle login so the notice and the stamp go out
+            // together: NoticeFacetNames for a facet-only holder of a Keep/PromoteToPaid notice row (an Unlearn
+            // row's facet holders are already counted in StrippedFacets), and ownsNoticeOnly for a live-rank
+            // holder of a notice-only row (equal-price Keep, e.g. the Rogue tier swap), which is deliberately
+            // not "touched" and so never runs the points recompute.
+            var ownsNoticeOnly = ClassAbilityRepricing.OwnsAnyNoticeOnlyAbility(waves, appliedWave, RankBefore);
+
+            if (!touched && run.StrippedFacets == 0 && run.NoticeFacetNames.Count == 0 && !ownsNoticeOnly)
                 return;
 
             if (Session != null)
@@ -2271,6 +2371,16 @@ namespace ACE.Server.WorldObjects
                     delta, tokensTaken.Count, strippedDisplay,
                     run.Promoted.Select(p => (p.Def.DisplayName, p.Step.NewRank)).ToList());
 
+                // The per-row ability change notice (wave 8 and later), after the refund/promote lines: one line
+                // per pending row for an ability the character held a rank in BEFORE the migration, had erased
+                // by an earlier interrupted run (the marker), or had in a stored facet build (stripped above).
+                // Reuses the data already computed here; nothing is re-queried.
+                var changeLines = ClassAbilityRepricing.BuildChangeNoticeLines(waves, appliedWave,
+                    id => ClassAbilityRepricing.ChangeNoticeAffected(id, RankBefore, erasedIds, run.StrippedNames, run.NoticeFacetNames),
+                    id => ClassAbilityRegistry.Abilities.TryGetValue(id, out var d) ? d.DisplayName : id.ToString());
+
+                lines.AddRange(changeLines);
+
                 foreach (var line in lines)
                     Session.Network.EnqueueSend(new GameMessageSystemChat(line, ChatMessageType.Advancement));
             }
@@ -2283,9 +2393,20 @@ namespace ACE.Server.WorldObjects
             log.Info($"[CAREPRICE] {Name} (0x{Guid.Full:X8}): reprice waves {appliedWave + 1}..{latestWave} applied - unlearned {erasedIds.Count} ability(s) ({run.Unlearned.Count} this login, marker refund {markerRefund}), promoted {run.Promoted.Count}, took back {tokensTaken.Count} token(s), stripped {run.StrippedFacets} stored facet build(s), {delta} point(s) returned; available {AvailableClassAbilityPoints}.");
         }
 
+        /// <summary>The advisory notice read waits at most this long on the world tick thread - far less than the
+        /// 5000 ms a mutation-guarding facet read gets, because a miss here only skips a chat line.</summary>
+        private const int NoticeFacetDbTimeoutMs = 1000;
+
         /// <summary>
-        /// TRUE while a reprice wave naming <paramref name="ability"/> has not yet been applied to this
-        /// character (<see cref="ClassAbilityRepricing.IsAbilityRepricePending(int, ClassAbilityId)"/> against
+        /// The facet read behind the facet-only change notices. Advisory: it uses its own short
+        /// <see cref="NoticeFacetDbTimeoutMs"/>, publishes nothing, and a false return only skips those notices.
+        /// </summary>
+        private bool TryGetCharacterFacetRowsForNotice(out List<CharacterFacet> rows) =>
+            FacetRowFetch.TryFetch(Character.Id, NoticeFacetDbTimeoutMs, DatabaseManager.Shard.GetCharacterFacets, out rows);
+
+        /// <summary>
+        /// TRUE while a reprice wave naming <paramref name="ability"/> (other than a notice-only row) has not
+        /// yet been applied to this character (<see cref="ClassAbilityRepricing.IsAbilityRepricePending(int, ClassAbilityId)"/> against
         /// PropertyInt 9092). Every path that buys, applies or refunds a rank or token of that ability refuses
         /// with <see cref="ClassAbilityRepricing.PendingRefusal"/> while this holds - otherwise a rank learned
         /// now would be swept by the pending unlearn, a token bought at the NEW price would later be taken back
@@ -2313,39 +2434,13 @@ namespace ACE.Server.WorldObjects
             error = null;
             refunded = 0;
 
-            // PvP arena (S6): refused in a match, before any rank, refund or fee moves
-            if (IsInPvpMatch)
-            {
-                error = PvpArenaText.AbilitySpendRefused;
+            // Every refusal (arena, reprice, not learned, tier strand) BEFORE the fee and before any rank or
+            // refund moves - the core shared with LowerClassAbilityRank and the web panel's CanLower.
+            if (!ValidateClassAbilityRankRemoval(skill, lowerOneRank: false, reason, out var rank, out _, out error))
                 return false;
-            }
 
-            // Reprice wave not yet applied: an unlearn now would refund at the NEW price a rank the pending
-            // migration still prices at the OLD one (or is about to unlearn and recompute itself).
-            if (ClassAbilityRepricePendingFor(skill.Id))
-            {
-                error = ClassAbilityRepricing.PendingRefusal;
+            if (!ignoreFee && !TryChargeClassAbilityRemovalFee(out error))
                 return false;
-            }
-
-            var rank = GetClassAbilityRank(skill.Id);
-
-            if (rank <= 0)
-            {
-                error = $"You have not learned {skill.DisplayName}.";
-                return false;
-            }
-
-            if (!ignoreFee)
-            {
-                var fee = PropertyManager.GetLong("class_ability_respec_lum_cost").Item;
-
-                if (!TrySpendLuminanceIncludingBank(fee))
-                {
-                    error = $"Unlearning a class ability costs {fee:N0} Luminance; you have {GetSpendableLuminance():N0}.";
-                    return false;
-                }
-            }
 
             refunded = skill.CumulativeCost(rank);
 
@@ -2363,6 +2458,162 @@ namespace ACE.Server.WorldObjects
             AdjustClassAbilityPoints(refunded, 0, reason,
                 ability: skill.Name, rankAfter: 0, batchId: batchId,
                 detail: $"unlearned rank {rank} (cumulative {refunded})");
+
+            InvalidateClassAbilityHookCaches();
+            SendEnhancedStatUpdate(skill);
+
+            SaveBiotaToDatabase();
+            SaveCharacterToDatabase();
+
+            return true;
+        }
+
+        /// <summary>
+        /// EVERY non-fee refusal for removing ranks of a class ability, shared by <see cref="UnlearnClassAbility"/>
+        /// (all ranks), <see cref="LowerClassAbilityRank"/> (one rank) and the web panel's side-effect-free
+        /// <see cref="CanLowerClassAbility"/>, so the three can never disagree. In order: the PvP arena, the PvP
+        /// template lock, a pending reprice wave, not learned, and the tier strand check. Reads only; moves nothing.
+        ///
+        /// On success <paramref name="rank"/> is the rank held NOW and <paramref name="newRank"/> the rank the
+        /// removal would leave (rank - 1 for a one-rank lower, 0 for an unlearn).
+        /// </summary>
+        private bool ValidateClassAbilityRankRemoval(ClassAbilityDefinition skill, bool lowerOneRank, CapLedgerReason reason,
+            out int rank, out int newRank, out string error)
+        {
+            error = null;
+            rank = 0;
+            newRank = 0;
+
+            // PvP arena (S6): refused in a match, before any rank, refund or fee moves
+            if (IsInPvpMatch)
+            {
+                error = PvpArenaText.AbilitySpendRefused;
+                return false;
+            }
+
+            // PvP template (progression lock): no rank is removed or refunded while templated, on every removal path
+            // (the in-game unlearn confirmation is already refused by ConfirmationManager.HandleResponse; the web panel
+            // has no confirmation, so the shared core carries the gate itself).
+            var tpl = PvpTemplateBlocked(PvpTemplateAction.ClassAbilityPoints);
+            if (tpl != null)
+            {
+                error = tpl;
+                return false;
+            }
+
+            // Reprice wave not yet applied: an unlearn now would refund at the NEW price a rank the pending
+            // migration still prices at the OLD one (or is about to unlearn and recompute itself).
+            if (ClassAbilityRepricePendingFor(skill.Id))
+            {
+                error = ClassAbilityRepricing.PendingRefusal;
+                return false;
+            }
+
+            rank = GetClassAbilityRank(skill.Id);
+
+            if (rank <= 0)
+            {
+                error = $"You have not learned {skill.DisplayName}.";
+                return false;
+            }
+
+            newRank = lowerOneRank ? rank - 1 : 0;
+
+            // Tier gate: removing ranks must not strand a higher-tier skill whose "points spent in class"
+            // prerequisite they were helping to satisfy. A full respec unlearns everything, so its
+            // intermediate states are exempt. Checked before the fee so a refusal charges nothing.
+            if (reason != CapLedgerReason.Respec)
+            {
+                int tier2Required, tier3Required;
+                try
+                {
+                    tier2Required = (int)PropertyManager.GetLong(ClassAbilityTierGate.Tier2SpentKey).Item;
+                    tier3Required = (int)PropertyManager.GetLong(ClassAbilityTierGate.Tier3SpentKey).Item;
+                }
+                catch (Exception)
+                {
+                    tier2Required = ClassAbilityTierGate.DefaultTier2SpentRequired;
+                    tier3Required = ClassAbilityTierGate.DefaultTier3SpentRequired;
+                }
+
+                var strand = ClassAbilityRankRemoval.StrandRefusal(skill, GetClassAbilityCache(), newRank, tier2Required, tier3Required);
+
+                if (strand != null)
+                {
+                    error = strand;
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>The luminance fee for removing class ability ranks (class_ability_respec_lum_cost, default 0).</summary>
+        private static long ClassAbilityRemovalFee() => PropertyManager.GetLong("class_ability_respec_lum_cost").Item;
+
+        /// <summary>The fee refusal, one copy for the charge and for the panel's affordability check.</summary>
+        private static string ClassAbilityRemovalFeeRefusal(long fee, long spendable) =>
+            $"Unlearning a class ability costs {fee:N0} Luminance; you have {spendable:N0}.";
+
+        /// <summary>Charges the removal fee (available then banked Luminance), or refuses with the fee sentence and charges nothing.</summary>
+        private bool TryChargeClassAbilityRemovalFee(out string error)
+        {
+            error = null;
+
+            var fee = ClassAbilityRemovalFee();
+
+            if (!TrySpendLuminanceIncludingBank(fee))
+            {
+                error = ClassAbilityRemovalFeeRefusal(fee, GetSpendableLuminance());
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Removes ONE rank of a class ability, refunding exactly the cost of the rank removed
+        /// (<c>CostPerRank[rank - 1]</c>) and charging the same removal fee as an unlearn. Lowering rank 1
+        /// delegates to <see cref="UnlearnClassAbility"/> (an Unlearn ledger row, never a Lower row with
+        /// rank_After 0). Every refusal is the shared
+        /// <see cref="ValidateClassAbilityRankRemoval"/> and happens before the fee and before anything moves.
+        ///
+        /// Finishes exactly like the unlearn tail: rank cache, the CAP ledger row (reason
+        /// <see cref="CapLedgerReason.Lower"/>, written AFTER the cache update so owned_Cost_After is the
+        /// post-lower figure), hook-cache invalidation, the live stat update, and the two saves.
+        /// </summary>
+        public bool LowerClassAbilityRank(ClassAbilityDefinition skill, out string error, out int refunded)
+        {
+            error = null;
+            refunded = 0;
+
+            if (!ValidateClassAbilityRankRemoval(skill, lowerOneRank: true, CapLedgerReason.Lower, out var rank, out var newRank, out error))
+                return false;
+
+            // Lowering rank 1 IS an unlearn: delegate, so it writes an Unlearn ledger row (rank_After 0), never a Lower
+            // row with rank_After 0, and charges the fee exactly once. UnlearnClassAbility re-runs the same refusals.
+            if (newRank <= 0)
+                return UnlearnClassAbility(skill, out error, out refunded);
+
+            if (!TryChargeClassAbilityRemovalFee(out error))
+                return false;
+
+            refunded = ClassAbilityRankRemoval.Refund(skill, rank, newRank);
+
+            var quest = Character.GetOrCreateQuest(ClassAbilityRegistry.QuestKey(skill), CharacterDatabaseLock, out var created);
+            if (created)
+                quest.CharacterId = Guid.Full;   // same value QuestManager.IDtoUseForQuestRegistry uses for players
+            quest.NumTimesCompleted = newRank;
+            quest.LastTimeCompleted = (uint)Time.GetUnixTime();
+            CharacterChangesDetected = true;
+
+            GetClassAbilityCache()[skill.Id] = newRank;
+
+            // AFTER the cache write, for the same reason as the unlearn tail: owned_Cost_After must describe the
+            // state the character is actually left in.
+            AdjustClassAbilityPoints(refunded, 0, CapLedgerReason.Lower,
+                ability: skill.Name, rankAfter: newRank,
+                detail: $"lowered rank {rank} to {newRank} (refunded {refunded})");
 
             InvalidateClassAbilityHookCaches();
             SendEnhancedStatUpdate(skill);

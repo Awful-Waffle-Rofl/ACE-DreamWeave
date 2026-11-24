@@ -45,12 +45,18 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "thorns",
             DisplayName = "Thorns",
-            Description = "While you have a shield equipped, creatures that hit you with melee, missile or spell attacks " +
-                          "from within 8 metres take reflected damage equal to 5% of your shield's armor level per rank.",
+            // Live text: rank * class_ability_thorns_percent_per_rank (ComputeReflectDamage); the range gate is
+            // class_ability_thorns_max_range, read in Player.ApplyThornsReflect (Player_ClassAbilityCombat).
+            DescriptionTemplate = "While you have a shield equipped, creatures within {v:class_ability_thorns_max_range|num} metres " +
+                          "that hit you with melee, missiles or spells take damage back, based on your shield's armor level. While " +
+                          "a Runic Ward or Sanguine Ward stands, its shield level adds to that armor level.",
+            RankTailTemplate = "+{per:class_ability_thorns_percent_per_rank|pct}% of shield armor",
+            TunableSourceFiles = new[] { "WorldObjects/Player_ClassAbilityCombat.cs" },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },   // flat 1/rank (class ability overhaul repricing, 2026-09-12)
             Implemented = true,
             AffinitySkill = Skill.Shield,
+            AffinityRate = AffinityRateSpec.LegacyAdditive("class_ability_thorns_shield_per_trained", "class_ability_thorns_shield_per_spec"),
         };
 
         public void OnDamageTaken(Player defender, int rank, Creature attacker, DamageType damageType, uint damageTaken)
@@ -60,6 +66,20 @@ namespace ACE.Server.ClassAbilities.Abilities
             // path and the magic sites). Fires even when the hit is fully mitigated to 0 (still enemy
             // contact - user ruling), provided the attacker is within range.
             defender.ApplyThornsReflect(attacker, damageType, 1.0);
+        }
+
+        /// <summary>
+        /// The final reflect: the base reflect x the trigger's strength x the Critical Thorns multiplier (1.0
+        /// outside Cloaked in Power's window) x the Damage Resist Rating multiplier (1.0 without that rating),
+        /// rounded to the nearest whole point. All three factors multiply, none adds, and each is floored at 0
+        /// so no factor can turn a reflect into a heal. With both multipliers at 1.0 this is exactly the
+        /// pre-2026-11-06 <c>Math.Round(baseReflect * strengthMultiplier)</c>.
+        /// </summary>
+        public static uint ScaleReflect(uint baseReflect, double strengthMultiplier, double critMultiplier, double drrMultiplier)
+        {
+            var scaled = baseReflect * Math.Max(0.0, strengthMultiplier) * Math.Max(0.0, critMultiplier) * Math.Max(0.0, drrMultiplier);
+
+            return (uint)Math.Round(scaled);
         }
 
         /// <summary>

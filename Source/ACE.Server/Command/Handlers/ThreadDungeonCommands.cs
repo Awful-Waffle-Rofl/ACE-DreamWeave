@@ -19,7 +19,7 @@ namespace ACE.Server.Command.Handlers
     /// </summary>
     public static class ThreadDungeonCommands
     {
-        private const string Usage = "/dd status | list | give <level> <tier> <modCount> [dungeon|any] [family|any] [entries] [player] | end [0xInstance] | reload | guide <player> [show|reset|set N]";
+        private const string Usage = "/dd status | list | give <level> <tier> <modCount> [dungeon|any] [family|any] [entries] [player] | end [0xInstance] | reload | guide <player> [show|reset|set N] | encounter list|place <kind>";
 
         [CommandHandler("dd", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, 0, "Threads: status, and admin controls", Usage)]
         public static void HandleDd(Session session, params string[] parameters)
@@ -38,6 +38,7 @@ namespace ACE.Server.Command.Handlers
                 case "give": HandleGive(session, rest); break;
                 case "end": HandleEnd(session, rest); break;
                 case "guide": HandleGuide(session, rest); break;
+                case "encounter": HandleEncounter(session, rest); break;
                 case "reload":
                     ThreadDungeonManager.Reload();
                 {
@@ -45,7 +46,7 @@ namespace ACE.Server.Command.Handlers
                     // "disabled" kill switch takes effect for every run that picks or arms after this; placed puzzles stay.
                     var store = ThreadDungeonManager.Store;
                     var sites = store.PuzzleSites.Values.SelectMany(s => s).ToList();
-                    Reply(session, $"Reloaded: {store.Dungeons.Count} dungeons, {store.Bosses.Count} bosses, {store.Modifiers.Count} modifiers, {sites.Count} puzzle sites ({sites.Count(s => s.Disabled)} disabled, {sites.Count(s => !s.Disabled && s.RewardDisabled)} reward-disabled), {store.Diagnostics.Count} diagnostics.");
+                    Reply(session, $"Reloaded: {store.Dungeons.Count} dungeons, {store.Bosses.Count} bosses, {store.Modifiers.Count} modifiers, {sites.Count} puzzle sites ({sites.Count(s => s.Disabled)} disabled, {sites.Count(s => !s.Disabled && s.RewardDisabled)} reward-disabled), {store.Encounters.Types.Count} encounter types, {store.Diagnostics.Count} diagnostics.");
                     break;
                 }
                 default: Reply(session, Usage); break;
@@ -68,6 +69,13 @@ namespace ACE.Server.Command.Handlers
 
             // One inside rule for every pooled-loot path (Instance AND Landblock), shared with delivery and the exit guard.
             var inside = run != null && ThreadCachePlacer.IsOwnerInside(run, player);
+
+            // The Wandering Peddler (clear only): /spawncache from a member whose shop is open is a done signal. The release
+            // forms their caches through its own placement request (ThreadPeddlerShop.Release), so the normal
+            // /spawncache path (and its cooldown) does not also run.
+            if (inside && SpawnCacheEndsPeddlerShop(run, player.Guid.Full))
+                return;
+
             var state = run?.State ?? ThreadDungeonRunState.Ended;
             var hasUnclaimed = run != null && (run.IsGroup ? run.HasUnclaimedLootFor(player.Guid.Full) : run.HasUnclaimedLoot);
             var holdsItems = run != null && (run.IsGroup ? ThreadLootPool.AnyCacheHoldsItemsFor(run, player.Guid.Full) : ThreadLootPool.AnyCacheHoldsItems(run));
@@ -91,6 +99,88 @@ namespace ACE.Server.Command.Handlers
                 Reply(session, SpawnCacheRules.FormingMessage);
         }
 
+        /// <summary>
+        /// /spawncache as the Wandering Peddler's done signal (owner ruling 2026-11-19, done source c): true when the member's
+        /// shop was open and this call released it. Any thread: the release touches only the run's locked state.
+        /// </summary>
+        internal static bool SpawnCacheEndsPeddlerShop(ThreadDungeonRun run, uint memberGuid)
+            => run != null && run.IsPeddlerShopOpen(memberGuid) && ThreadPeddlerShop.Release(run, memberGuid, "/spawncache");
+
+        /// <summary>
+        /// /dd encounter list | place &lt;kind&gt;, admin-only like every /dd subcommand but status, for the run the admin
+        /// stands in (Docs/Threads/ENCOUNTERS.md). list prints the run's encounter roll (slots, picks, why slots dropped)
+        /// and every placement outcome; place forces one encounter of a registered kind at the fitting curated point
+        /// nearest the admin, through the same queue and Place path a rolled pick takes.
+        /// </summary>
+        private static void HandleEncounter(Session session, string[] a)
+        {
+            var player = session.Player;
+            var run = ThreadDungeonManager.GetRunForMember(player.Guid.Full, player.Location.Instance);
+
+            if (run == null || run.Instance != player.Location.Instance)
+            {
+                Reply(session, "Stand inside a live run to use /dd encounter.");
+                return;
+            }
+
+            var action = a.Length > 0 ? a[0].ToLowerInvariant() : "list";
+
+            switch (action)
+            {
+                case "list":
+                    Reply(session, EncounterListText(run, ThreadEncounterTypes.Kinds));
+                    return;
+
+                case "place":
+                    if (a.Length < 2) { Reply(session, "/dd encounter place <kind>"); return; }
+                    var loc = player.Location;
+                    ThreadEncounterPass.TryForcePlace(run, a[1], loc.Cell, new System.Numerics.Vector3(loc.PositionX, loc.PositionY, loc.PositionZ), out var message);
+                    Reply(session, message);
+                    return;
+
+                default:
+                    Reply(session, "/dd encounter list | place <kind>");
+                    return;
+            }
+        }
+
+        /// <summary>The /dd encounter list text for a run. Pure over the run's locked getters.</summary>
+        internal static string EncounterListText(ThreadDungeonRun run, System.Collections.Generic.IReadOnlyList<string> registeredKinds)
+        {
+            var sb = new StringBuilder();
+            var plan = run.EncounterPlan;
+
+            sb.AppendLine($"Encounters for 0x{run.Instance:X8} ({run.Dungeon?.Id}): enabled={run.EncountersEnabled} max={run.EncountersMaxPerRun} chance={run.EncounterSlotChance.ToString("0.##", CultureInfo.InvariantCulture)} registered={(registeredKinds == null || registeredKinds.Count == 0 ? "none" : string.Join(",", registeredKinds))}");
+
+            if (plan == null)
+                sb.AppendLine("Not rolled yet.");
+            else if (plan.Skipped != null)
+                sb.AppendLine($"Not rolled: {plan.Skipped}.");
+            else
+            {
+                sb.AppendLine($"Rolled {plan.SlotsActive}/{plan.SlotsRolled} slot(s); {plan.Picks.Count} picked.");
+                sb.AppendLine($"Count: {plan.CountSummary(run.EncounterSlotChance)}.");
+
+                foreach (var pick in plan.Picks)
+                    sb.AppendLine($"  slot {pick.Slot}: {pick.Def?.Id} ({pick.Def?.Kind}) at {pick.Point}");
+
+                foreach (var drop in plan.Dropped)
+                    sb.AppendLine($"  {drop}");
+            }
+
+            var placed = run.PlacedEncounters;
+            var granted = run.GrantedBoonKinds;
+            sb.AppendLine($"Placed: {placed.Count}. Bonus kills: {run.BonusKills}. Blessings granted: {(granted.Count == 0 ? "none" : string.Join(",", granted))}.");
+
+            foreach (var instance in placed)
+                sb.AppendLine($"  {instance} objects={instance.Objects.Count}");
+
+            foreach (var line in run.EncounterOutcomes)
+                sb.AppendLine($"  log: {line}");
+
+            return sb.ToString().TrimEnd();
+        }
+
         private static void HandleStatus(Session session)
         {
             if (!ThreadDungeonManager.IsEnabled) { Reply(session, "Threads are not enabled on this server."); return; }
@@ -99,7 +189,15 @@ namespace ACE.Server.Command.Handlers
             if (run == null) { Reply(session, "You have no dungeon open."); return; }
             var left = run.ExpiresUtc - DateTime.UtcNow;
             Reply(session, $"{run.Dungeon.Name}: {run.State}, trash={run.TrashKilled}/{run.TrashSpawned} (need {run.ClearTarget}), boss {(run.BossKilled ? "slain" : run.BossSpawned ? "alive" : "none")}, progress={run.ClearProgress:P0}/{run.ClearFraction:P0}, closes in {Math.Max(0, (int)left.TotalMinutes)} min.");
+
+            // Thread Shrine blessings this player holds in this run, one line each.
+            foreach (var line in BlessingLines(run, player.Guid.Full))
+                Reply(session, line);
         }
+
+        /// <summary>The /dd status blessing lines for a member, e.g. "Blessing: +25% damage dealt". Pure over the run's locked read.</summary>
+        internal static System.Collections.Generic.IReadOnlyList<string> BlessingLines(ThreadDungeonRun run, uint guid)
+            => run.BoonsHeldBy(guid).Select(b => ThreadBoons.StatusLine(b.Kind, b.Magnitude)).Where(l => l != null).ToList();
 
         private static void HandleList(Session session)
         {
@@ -107,7 +205,7 @@ namespace ACE.Server.Command.Handlers
             if (runs.Count == 0) { Reply(session, "No live runs."); return; }
             var sb = new StringBuilder();
             foreach (var r in runs)
-                sb.AppendLine($"0x{r.Instance:X8} {r.Dungeon.Id} owner={r.OwnerName} roster={r.Group.RosterSize} {r.State} trash={r.TrashKilled}/{r.TrashSpawned} (need {r.ClearTarget}) boss={(r.BossKilled ? "dead" : r.BossSpawned ? "alive" : "none")} progress={r.ClearProgress:P0}/{r.ClearFraction:P0} expires={r.ExpiresUtc:HH:mm}Z");
+                sb.AppendLine($"0x{r.Instance:X8} {r.Dungeon.Id} owner={r.OwnerName} roster={r.Group.RosterSize} {r.State} trash={r.TrashKilled}/{r.TrashSpawned} (need {r.ClearTarget}) boss={(r.BossKilled ? "dead" : r.BossSpawned ? "alive" : "none")} progress={r.ClearProgress:P0}/{r.ClearFraction:P0} bonus_kills={r.BonusKills} expires={r.ExpiresUtc:HH:mm}Z");
             Reply(session, sb.ToString().TrimEnd());
         }
 

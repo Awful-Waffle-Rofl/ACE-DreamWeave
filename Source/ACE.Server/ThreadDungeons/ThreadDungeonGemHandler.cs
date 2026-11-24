@@ -1045,10 +1045,10 @@ namespace ACE.Server.ThreadDungeons
         ///    LuminanceFor multiplies by the identical RoleRate(role) term (DungeonPopulationBuilder.cs:601).
         ///
         /// 3. Experience and Luminance show the TOTAL - modifier product * the axis's global scale
-        ///    (dynamic_dungeons_xp_scale / dynamic_dungeons_lum_scale, 2.0 by default) - with the gem's own
+        ///    (dynamic_dungeons_xp_scale / dynamic_dungeons_lum_scale, 2.7 by default) - with the gem's own
         ///    modifier product added as a parenthetical whenever showing it would say something the total does
         ///    not already say (see <see cref="AddScaledMultiplierLine"/> for the exact rounded-text
-        ///    comparison): "Experience: x2.32 (x1.16 from this gem)" on a modified gem, "Experience: x2.00"
+        ///    comparison): "Experience: x3.13 (x1.16 from this gem)" on a modified gem, "Experience: x2.70"
         ///    alone on a plain one (product == 1.00, nothing to add), and "Experience: x1.16" alone when the
         ///    scale itself is 1.0 (product and total are the same number, so the parenthetical would just
         ///    repeat the total). This REVERSES an earlier version of this comment, which argued the scale should never

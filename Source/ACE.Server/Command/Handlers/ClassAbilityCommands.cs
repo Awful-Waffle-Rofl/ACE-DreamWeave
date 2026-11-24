@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 
@@ -80,7 +81,7 @@ namespace ACE.Server.Command.Handlers
         private static string PointsSummary(Session session)
         {
             var player = session.Player;
-            return $"Points: {player.AvailableClassAbilityPoints:N0} available, {player.TotalClassAbilityPointsEarned:N0} lifetime earned.";
+            return ClassAbilityChangeMessages.PointsSummary(player.AvailableClassAbilityPoints, player.TotalClassAbilityPointsEarned);
         }
 
         private static void HandleList(Session session)
@@ -102,11 +103,24 @@ namespace ACE.Server.Command.Handlers
                         ? readoutSource.GetReadout(session.Player, rank)
                         : default;
 
-                    Reply(session, FormatReadoutLine(skill, rank, readout));
+                    foreach (var line in ListEntryLines(skill, rank, readout))
+                        Reply(session, line);
                 }
             }
 
             Reply(session, PointsSummary(session));
+        }
+
+        /// <summary>One owned ability's /abilities list output: its readout line, then one compact limits line when it has ceiling readings. Pure so the 255-character bound is unit-testable.</summary>
+        internal static List<string> ListEntryLines(ClassAbilityDefinition skill, int rank, ClassAbilityReadout readout)
+        {
+            var lines = new List<string> { FormatReadoutLine(skill, rank, readout) };
+
+            var limits = ClassAbilityCeilingText.CompactReadingLine(skill, readout);
+            if (limits != null)
+                lines.Add(limits);
+
+            return lines;
         }
 
         /// <summary>
@@ -272,9 +286,40 @@ namespace ACE.Server.Command.Handlers
 
             var rank = session.Player.GetClassAbilityRank(skill.Id);
 
-            Reply(session, $"{skill.DisplayName} ({skill.Name}){(skill.Implemented ? "" : " [Coming soon]")}");
-            Reply(session, $"  {skill.Description}");
-            Reply(session, $"  Max rank: {skill.MaxRank}. Cost per rank: {string.Join(", ", skill.CostPerRank)}. Your rank: {rank}.");
+            // One message per line (chat lines are capped at 255 characters).
+            foreach (var line in BuildInfoLines(skill, rank, ClassAbilityText.Live))
+                Reply(session, line);
+        }
+
+        /// <summary>
+        /// The /abilities info lines, in print order: header, live description, the affinity line (when the ability has one), one "Rank N: tail" line per rank
+        /// (none for an ability with no tail template; the tail is the text its token shows after "This token
+        /// teaches rank N: "), then the cost line. Ceiling lines and the affinity rate line sit after the affinity line. Pure so the order is unit-testable.
+        /// </summary>
+        internal static List<string> BuildInfoLines(ClassAbilityDefinition skill, int rank, ITunableValues values)
+        {
+            var lines = new List<string>
+            {
+                $"{skill.DisplayName} ({skill.Name}){(skill.Implemented ? "" : " [Coming soon]")}",
+                $"  {ClassAbilityText.Describe(skill, values)}",
+            };
+
+            var affinity = ClassAbilityText.AffinityLine(skill);
+            if (affinity != null)
+                lines.Add($"  {affinity}");
+
+            // Ceilings, then the rate line: what affinity adds is read against what bounds it. Both are absent for an ability that declares none.
+            lines.AddRange(ClassAbilityCeilingText.InfoLines(skill, rank, values));
+
+            var rateLine = ClassAbilityCeilingText.AffinityRateLine(skill, values);
+            if (rateLine != null)
+                lines.Add($"  {rateLine}");
+
+            lines.AddRange(ClassAbilityText.RankLines(skill, values));
+
+            lines.Add($"  Max rank: {skill.MaxRank}. Cost per rank: {string.Join(", ", skill.CostPerRank)}. Your rank: {rank}.");
+
+            return lines;
         }
 
         private static void HandleLearn(Session session, string name)
@@ -354,7 +399,7 @@ namespace ACE.Server.Command.Handlers
                 return;
             }
 
-            Reply(session, $"You have unlearned {skill.DisplayName} and recovered {refunded:N0} class ability point{(refunded == 1 ? "" : "s")}. {PointsSummary(session)}");
+            Reply(session, ClassAbilityChangeMessages.Unlearned(skill.DisplayName, refunded, player.AvailableClassAbilityPoints, player.TotalClassAbilityPointsEarned));
         }
 
         private static void HandlePoints(Session session)
@@ -364,17 +409,14 @@ namespace ACE.Server.Command.Handlers
             var nextCost = WorldObjects.Player.LumCostForClassAbilityPoints(purchased, 1);
 
             Reply(session, PointsSummary(session));
-            Reply(session, $"Luminance purchases: {purchased:N0} bought so far; the next point costs {nextCost:N0} Luminance. Exchange it at the reckoning-stone by the Skillmaster in the Drift Network. Prices rise with each point and there is no cap.");
+            Reply(session, ClassAbilityPointPriceText.Luminance(purchased, nextCost));
 
             // the xp lane runs its own counter and its own curve, so both prices are quoted (XP-LANE-SPEC sec 3.3)
             var xpPurchased = player.ClassAbilityPointsPurchasedWithXp;
             var nextXpCost = WorldObjects.Player.XpCostForClassAbilityPoints(xpPurchased, 1);
             var minLevel = WorldObjects.Player.ClassAbilityXpMinLevel;
 
-            if ((player.Level ?? 1) < minLevel)
-                Reply(session, $"Experience purchases: unlocked at level {minLevel:N0} (you are {player.Level ?? 1:N0}).");
-            else
-                Reply(session, $"Experience purchases: {xpPurchased:N0} bought so far; the next point costs {nextXpCost:N0} experience and you have {player.AvailableExperience ?? 0:N0} unassigned. Prices rise with each point and there is no cap.");
+            Reply(session, ClassAbilityPointPriceText.Experience(player.Level ?? 1, minLevel, xpPurchased, nextXpCost, player.AvailableExperience ?? 0));
         }
 
         private static void HandleBuy(Session session, string arg)

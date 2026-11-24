@@ -21,20 +21,22 @@ namespace ACE.Server.Tests.ThreadDungeons
         private const double Cap = DungeonPopulationLimits.DefaultRewardScaleCap;
 
         /// <summary>
-        /// The reference table the spec is built against: 2.87 is chosen so ratio(185) = 0.25 exactly with
-        /// the shipped anchor of 300, and ratio(300) = 1.00. Tolerance 0.01 per level, matching the spec.
+        /// The reference table at the shipped defaults (anchor 300, exponent 2): ratio = (level / 300)^2, so
+        /// ratio(300) = 1.00 exactly. Each row below is that square worked by hand; tolerance 0.01 per level.
         /// </summary>
         [TestMethod]
         public void Ratio_matches_the_reference_table_at_the_shipped_defaults()
         {
             Assert.AreEqual(300.0, Anchor, 1e-9, "guard: the shipped anchor these expectations are written against");
-            Assert.AreEqual(2.87, Exponent, 1e-9, "guard: the shipped exponent these expectations are written against");
+            Assert.AreEqual(2.0, Exponent, 1e-9, "guard: the shipped exponent these expectations are written against");
             Assert.AreEqual(0.10, Floor, 1e-9, "guard: the shipped floor these expectations are written against");
             Assert.AreEqual(0.0, Cap, 1e-9, "guard: the shipped cap (0 = uncapped) these expectations are written against");
 
             var expected = new (int Level, double Ratio)[]
             {
-                (185, 0.25), (215, 0.38), (245, 0.56), (275, 0.78), (300, 1.00), (350, 1.56), (400, 2.28),
+                // (185/300)^2 = 0.3803, (215/300)^2 = 0.5136, (245/300)^2 = 0.6669, (275/300)^2 = 0.8403,
+                // (300/300)^2 = 1, (350/300)^2 = 1.3611, (400/300)^2 = 1.7778
+                (185, 0.38), (215, 0.51), (245, 0.67), (275, 0.84), (300, 1.00), (350, 1.36), (400, 1.78),
             };
 
             foreach (var (level, ratio) in expected)
@@ -90,7 +92,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         public void A_cap_of_zero_does_not_clamp()
         {
             var ratio = DungeonRewardMath.RewardScaleRatio(1000, Anchor, Exponent, Floor, 0.0);
-            Assert.IsTrue(ratio > 2.28, $"level 1000 must exceed the level-400 reference ratio of 2.28 uncapped; got {ratio}");
+            Assert.IsTrue(ratio > 1.78, $"level 1000 must exceed the level-400 reference ratio of 1.78 uncapped; got {ratio}");
 
             // Negative reads the same as zero - both mean "no upper clamp", never "clamp to 0" or "fallback".
             var ratioNegativeCap = DungeonRewardMath.RewardScaleRatio(1000, Anchor, Exponent, Floor, -5.0);

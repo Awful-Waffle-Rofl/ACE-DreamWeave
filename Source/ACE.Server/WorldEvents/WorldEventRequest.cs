@@ -8,12 +8,30 @@ namespace ACE.Server.WorldEvents
     /// Everything /worldevent start (WP-07) hands the manager: the axis ids to compose from, where the
     /// event is anchored, and the per-run timer overrides. Plain data, no behaviour.
     ///
-    /// Either <see cref="AnchorId"/> (a loaded AnchorDef, P2) or <see cref="AnchorPosition"/> plus
+    /// Either <see cref="AnchorId"/> (a loaded AnchorDef: a city in anchors.json) or <see cref="AnchorPosition"/> plus
     /// <see cref="AnchorLabel"/> (the "--here" path, P0/P1) must be present; the composer refuses otherwise.
     /// </summary>
     public class WorldEventRequest
     {
         public string SourceId { get; set; }
+
+        /// <summary>
+        /// Set when an Allegiance Avatar's private event starts this run (Avatar phase 1, Task 12); null for every
+        /// ordinary run. XP earned during a private Avatar event never feeds an Avatar.
+        /// </summary>
+        public uint? AvatarId { get; set; }
+
+        /// <summary>
+        /// True (the default) sends the run's announcements server-wide. False, with <see cref="AvatarId"/> set, keeps them to the
+        /// Avatar's allegiance and out of Discord (a quiet private event).
+        /// </summary>
+        public bool AnnounceServerWide { get; set; } = true;
+
+        /// <summary>
+        /// The Favor an Avatar's private event reserved (Task 12). The run commits it when it first reaches Active and releases it
+        /// if it ends before that. Zero for every ordinary run.
+        /// </summary>
+        public ulong AvatarFavorPrice { get; set; }
 
         /// <summary>
         /// The composed families, in slot order (two-family composition, 2026-08-29). One or two ids; the
@@ -99,12 +117,19 @@ namespace ACE.Server.WorldEvents
         /// <summary>Seconds between the start announcement and the event going Active. 0 is allowed.</summary>
         public int AnnounceLeadSeconds { get; set; } = WorldEvent.DefaultAnnounceLeadSeconds;
 
-        public int MaxDurationSeconds { get; set; } = WorldEvent.DefaultMaxDurationSeconds;
+        /// <summary>
+        /// The run's EXPLICIT maximum length in seconds, or null when none was given (the default for every
+        /// start path today: no command flag sets it). Null resolves to the larger of
+        /// <see cref="WorldEvent.DefaultMaxDurationSeconds"/> and the goal's maxDurationSeconds; an explicit value
+        /// always wins over the goal's, shorter or longer. 0 or negative means "no limit" to the timers.
+        /// See <see cref="WorldEvent.ResolveMaxDuration"/>.
+        /// </summary>
+        public int? MaxDurationSeconds { get; set; }
 
         /// <summary>
         /// The floor on how long the run lasts, from the moment it goes Active (TECH-DESIGN 2.15). Set by
         /// "--min-duration &lt;seconds&gt;". 0 disables the minimum for this run; anything at or above
-        /// <see cref="MaxDurationSeconds"/> is refused at start, never clamped.
+        /// the effective maximum (<see cref="MaxDurationSeconds"/>, else the default or goal value) is refused at start, never clamped.
         /// </summary>
         public int MinDurationSeconds { get; set; } = WorldEvent.DefaultMinDurationSeconds;
 

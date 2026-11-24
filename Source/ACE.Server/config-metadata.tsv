@@ -18,6 +18,79 @@ advocate_fane_auto_bestow	social	Advocates	upstream	no
 advocate_fane_auto_bestow_level	social	Advocates	upstream	no
 aetheria_drop_rate	items	Loot	upstream	no
 aetheria_heal_color	items	Loot	upstream	no
+allegiance_avatar_absorb_fraction	social	Allegiance	fork	no
+allegiance_avatar_account_daily_falloff	social	Allegiance	fork	no
+allegiance_avatar_account_daily_hard_cap_multiple	social	Allegiance	fork	no
+allegiance_avatar_account_daily_soft_cap	social	Allegiance	fork	no
+allegiance_avatar_active_window_days	social	Allegiance	fork	no
+allegiance_avatar_base_rate	social	Allegiance	fork	no
+allegiance_avatar_dress_cooldown_seconds	social	Allegiance	fork	no
+allegiance_avatar_enabled	social	Allegiance	fork	no
+allegiance_avatar_event_min_level	social	Allegiance	fork	no
+allegiance_avatar_event_price_announced	social	Allegiance	fork	no
+allegiance_avatar_event_price_quiet	social	Allegiance	fork	no
+allegiance_avatar_event_schedule_buffer_minutes	social	Allegiance	fork	no
+allegiance_avatar_favor_cap	social	Allegiance	fork	no
+allegiance_avatar_favor_decay_daily_fraction	social	Allegiance	fork	no
+allegiance_avatar_favor_decay_grace_days	social	Allegiance	fork	no
+allegiance_avatar_favor_rate	social	Allegiance	fork	no
+allegiance_avatar_fellowship_multiplier	social	Allegiance	fork	no
+allegiance_avatar_fighter_probe_log	social	Allegiance	fork	no
+allegiance_avatar_fighter_voice_seconds	social	Allegiance	fork	no
+allegiance_avatar_flush_seconds	social	Allegiance	fork	no
+allegiance_avatar_keeper_idle_days	social	Allegiance	fork	no
+allegiance_avatar_level_xp_fraction	social	Allegiance	fork	no
+allegiance_avatar_min_active_accounts	social	Allegiance	fork	no
+allegiance_avatar_reseat_cooldown_days	social	Allegiance	fork	no
+allegiance_avatar_roster_excess_exponent	social	Allegiance	fork	no
+allegiance_avatar_roster_threshold_fraction	social	Allegiance	fork	no
+allegiance_avatar_scale	social	Allegiance	fork	no
+allegiance_avatar_summon_seconds	social	Allegiance	fork	no
+allegiance_avatar_thread_multiplier	social	Allegiance	fork	no
+allegiance_avatar_top_contributors_days	social	Allegiance	fork	no
+allegiance_avatar_world_event_multiplier	social	Allegiance	fork	no
+allegiance_gauntlet_boss_every	social	Allegiance	fork	no
+allegiance_gauntlet_boss_wave_bonus_seconds	social	Allegiance	fork	no
+allegiance_gauntlet_boss_wave_trash_fraction	social	Allegiance	fork	no
+allegiance_gauntlet_cooldown_hours	social	Allegiance	fork	no
+allegiance_gauntlet_crate_max_tier	social	Allegiance	fork	no
+allegiance_gauntlet_death_hold_seconds	social	Allegiance	fork	no
+allegiance_gauntlet_enabled	social	Allegiance	fork	no
+allegiance_gauntlet_fighter_burst_seconds	social	Allegiance	fork	no
+allegiance_gauntlet_fighter_damage_base	social	Allegiance	fork	no
+allegiance_gauntlet_fighter_damage_per_level	social	Allegiance	fork	no
+allegiance_gauntlet_fighter_health_base	social	Allegiance	fork	no
+allegiance_gauntlet_fighter_health_per_level	social	Allegiance	fork	no
+allegiance_gauntlet_fighter_min_death_seconds	social	Allegiance	fork	no
+allegiance_gauntlet_fighter_offense_base	social	Allegiance	fork	no
+allegiance_gauntlet_fighter_offense_per_level	social	Allegiance	fork	no
+allegiance_gauntlet_fighter_respawn_seconds	social	Allegiance	fork	no
+allegiance_gauntlet_headcount_cap	social	Allegiance	fork	no
+allegiance_gauntlet_health_curve_top_level	social	Allegiance	fork	no
+allegiance_gauntlet_intermission_seconds	social	Allegiance	fork	no
+allegiance_gauntlet_kill_xp_scale	social	Allegiance	fork	no
+allegiance_gauntlet_level_step	social	Allegiance	fork	no
+allegiance_gauntlet_max_alive	social	Allegiance	fork	no
+allegiance_gauntlet_max_concurrent	social	Allegiance	fork	no
+allegiance_gauntlet_max_creature_health	social	Allegiance	fork	no
+allegiance_gauntlet_min_avatar_level	social	Allegiance	fork	no
+allegiance_gauntlet_min_contact_waves	social	Allegiance	fork	no
+allegiance_gauntlet_pen_min_distance	social	Allegiance	fork	no
+allegiance_gauntlet_portal_max_distance	social	Allegiance	fork	no
+allegiance_gauntlet_portal_min_distance	social	Allegiance	fork	no
+allegiance_gauntlet_portals_max	social	Allegiance	fork	no
+allegiance_gauntlet_portals_min	social	Allegiance	fork	no
+allegiance_gauntlet_price	social	Allegiance	fork	no
+allegiance_gauntlet_sites	social	Allegiance	fork	no
+allegiance_gauntlet_stagger_max_seconds	social	Allegiance	fork	no
+allegiance_gauntlet_stagger_min_seconds	social	Allegiance	fork	no
+allegiance_gauntlet_staging_seconds	social	Allegiance	fork	no
+allegiance_gauntlet_start_level	social	Allegiance	fork	no
+allegiance_gauntlet_straggler_count	social	Allegiance	fork	no
+allegiance_gauntlet_straggler_seconds	social	Allegiance	fork	no
+allegiance_gauntlet_wave_base_count	social	Allegiance	fork	no
+allegiance_gauntlet_wave_count_per_player	social	Allegiance	fork	no
+allegiance_gauntlet_wave_seconds	social	Allegiance	fork	no
 allegiance_passup_grandpatron_rate	social	Allegiance	fork	no
 allegiance_passup_patron_rate	social	Allegiance	fork	no
 allow_combat_mode_crafting	items	Crafting	upstream	no
@@ -37,6 +110,8 @@ anti_blink_door_width	combat	Combat	fork	no
 anti_blink_z_height_limit	combat	Combat	fork	no
 assess_creature_mod	server	General	upstream	no
 attribute_augmentation_safety_cap	progression	Custom Augs	upstream	no
+balance_trials_data_dir	server	Balance Trials	fork	no
+balance_trials_enabled	server	Balance Trials	fork	no
 beta_gift_account_cutoff_unix	server	General	fork	no
 beta_gift_wcid	server	General	fork	no
 bluespire_ladder_currency_wcid	server	General	fork	no
@@ -63,6 +138,7 @@ cantrip_drop_rate	items	Loot	upstream	no
 capacity_upgrade_base_cost_mmd	server	General	fork	no
 capacity_upgrade_cost_growth_percent	server	General	fork	no
 char_delete_time	server	Accounts	upstream	no
+character_details_web_enabled	server	Web	fork	no
 charsheet_cache_seconds	server	Web	fork	no
 charsheet_enabled	server	Web	fork	no
 charsheet_site_url	server	Web	fork	no
@@ -120,6 +196,7 @@ class_ability_attackspeed_percent_per_rank	class_abilities	attackspeed	fork	no
 class_ability_avoidance_cap	class_abilities	avoidance	fork	no
 class_ability_battlehardened_max_reduction	class_abilities	battlehardened	fork	no
 class_ability_battlehardened_reduction_per_strength	class_abilities	battlehardened	fork	no
+class_ability_battlehardened_reduction_per_strength_per_rank	class_abilities	battlehardened	fork	no
 class_ability_berserkrage_cooldown_seconds_r1	class_abilities	berserkrage	fork	no
 class_ability_berserkrage_cooldown_seconds_r2	class_abilities	berserkrage	fork	no
 class_ability_berserkrage_cooldown_seconds_r3	class_abilities	berserkrage	fork	no
@@ -147,14 +224,23 @@ class_ability_cascade_chance_r2	class_abilities	cascade	fork	no
 class_ability_cascade_chance_r3	class_abilities	cascade	fork	no
 class_ability_cascade_max_generation	class_abilities	cascade	fork	no
 class_ability_cascade_radius	class_abilities	cascade	fork	no
+class_ability_cloakedinpower_crit_window_r1	class_abilities	cloakedinpower	fork	no
+class_ability_cloakedinpower_crit_window_r2	class_abilities	cloakedinpower	fork	no
+class_ability_cloakedinpower_crit_window_r3	class_abilities	cloakedinpower	fork	no
 class_ability_cloakedinpower_floor	class_abilities	cloakedinpower	fork	no
 class_ability_crimsonharvest_extra_targets_r1	class_abilities	crimsonharvest	fork	no
 class_ability_crimsonharvest_extra_targets_r2	class_abilities	crimsonharvest	fork	no
 class_ability_crimsonharvest_extra_targets_r3	class_abilities	crimsonharvest	fork	no
 class_ability_crimsonharvest_radius	class_abilities	crimsonharvest	fork	no
+class_ability_critresistrating_damage_conversion_r1	class_abilities	critresistrating	fork	no
+class_ability_critresistrating_damage_conversion_r2	class_abilities	critresistrating	fork	no
+class_ability_critresistrating_damage_conversion_r3	class_abilities	critresistrating	fork	no
 class_ability_damagerating_critdamage_conversion_r1	class_abilities	damagerating	fork	no
 class_ability_damagerating_critdamage_conversion_r2	class_abilities	damagerating	fork	no
 class_ability_damagerating_critdamage_conversion_r3	class_abilities	damagerating	fork	no
+class_ability_damageresistrating_thorns_conversion_r1	class_abilities	damageresistrating	fork	no
+class_ability_damageresistrating_thorns_conversion_r2	class_abilities	damageresistrating	fork	no
+class_ability_damageresistrating_thorns_conversion_r3	class_abilities	damageresistrating	fork	no
 class_ability_deadeye_percent_per_rank	class_abilities	deadeye	fork	no
 class_ability_dispellingedge_chance_base	class_abilities	dispellingedge	fork	no
 class_ability_dispellingedge_chance_step	class_abilities	dispellingedge	fork	no
@@ -162,6 +248,12 @@ class_ability_doublevolley_chance_base	class_abilities	doublevolley	fork	no
 class_ability_doublevolley_chance_step	class_abilities	doublevolley	fork	no
 class_ability_echocast_chance_base	class_abilities	echocast	fork	no
 class_ability_echocast_chance_step	class_abilities	echocast	fork	no
+class_ability_echocast_wisp_duration_seconds	class_abilities	echocast	fork	no
+class_ability_echocast_wisp_enabled	class_abilities	echocast	fork	no
+class_ability_echocast_wisp_interval_max_seconds	class_abilities	echocast	fork	no
+class_ability_echocast_wisp_interval_min_seconds	class_abilities	echocast	fork	no
+class_ability_echocast_wisp_max_active	class_abilities	echocast	fork	no
+class_ability_echocast_wisp_translucency	class_abilities	echocast	fork	no
 class_ability_elementalinversion_chance_per_rank	class_abilities	elementalinversion	fork	no
 class_ability_elementalproficiency_acid_fraction_per_rank	class_abilities	elementalproficiency	fork	no
 class_ability_elementalproficiency_acid_seconds	class_abilities	elementalproficiency	fork	no
@@ -177,6 +269,8 @@ class_ability_elementalproficiency_lightning_percent_per_rank	class_abilities	el
 class_ability_elementalproficiency_lightning_seconds	class_abilities	elementalproficiency	fork	no
 class_ability_elementalproficiency_pierce_ignore_per_rank	class_abilities	elementalproficiency	fork	no
 class_ability_elementalproficiency_slashcrit_points_per_rank	class_abilities	elementalproficiency	fork	no
+class_ability_elementalrend_chance_base	class_abilities	elementalrend	fork	no
+class_ability_elementalrend_chance_step	class_abilities	elementalrend	fork	no
 class_ability_empoweredsummons_leech_percent_per_rank	class_abilities	empoweredsummons	fork	no
 class_ability_empoweredsummons_loyalty_per_spec	class_abilities	empoweredsummons	fork	no
 class_ability_empoweredsummons_loyalty_per_trained	class_abilities	empoweredsummons	fork	no
@@ -207,6 +301,12 @@ class_ability_hemomancy_damage_percent_per_rank	class_abilities	hemomancy	fork	n
 class_ability_hemomancy_duration_seconds	class_abilities	hemomancy	fork	no
 class_ability_hemomancy_heal_threshold_fraction	class_abilities	hemomancy	fork	no
 class_ability_hemomancy_leech_window_seconds	class_abilities	hemomancy	fork	no
+class_ability_huntersecho_absorb_enabled	class_abilities	huntersecho	fork	no
+class_ability_huntersecho_affinity_cap_seconds	class_abilities	huntersecho	fork	no
+class_ability_huntersecho_cooldown_seconds	class_abilities	huntersecho	fork	no
+class_ability_huntersecho_duration_seconds	class_abilities	huntersecho	fork	no
+class_ability_huntersecho_enabled	class_abilities	huntersecho	fork	no
+class_ability_huntersecho_translucency	class_abilities	huntersecho	fork	no
 class_ability_huntersmark_duration_seconds	class_abilities	huntersmark	fork	no
 class_ability_huntersmark_percent_per_rank	class_abilities	huntersmark	fork	no
 class_ability_intimidate_defense_per_rank	class_abilities	intimidate	fork	no
@@ -235,6 +335,7 @@ class_ability_manabarrier_base	class_abilities	manabarrier	fork	no
 class_ability_manabarrier_mana_floor	class_abilities	manabarrier	fork	no
 class_ability_manabarrier_mana_per_health	class_abilities	manabarrier	fork	no
 class_ability_manabarrier_max_share	class_abilities	manabarrier	fork	no
+class_ability_manabarrier_shield_level	class_abilities	manabarrier	fork	no
 class_ability_manabarrier_step	class_abilities	manabarrier	fork	no
 class_ability_multishot_damage_mult	class_abilities	multishot	fork	no
 class_ability_multishot_damage_mult_cap	class_abilities	multishot	fork	no
@@ -251,6 +352,8 @@ class_ability_overhaul_respec_sweep_enabled	class_abilities	overhaul	fork	no
 class_ability_parry_percent_per_rank	class_abilities	parry	fork	no
 class_ability_pinningshot_chance_base	class_abilities	pinningshot	fork	no
 class_ability_pinningshot_chance_step	class_abilities	pinningshot	fork	no
+class_ability_pinningshot_damage_reduction	class_abilities	pinningshot	fork	no
+class_ability_pinningshot_damage_reduction_affinity_cap	class_abilities	pinningshot	fork	no
 class_ability_pinningshot_duration_seconds	class_abilities	pinningshot	fork	no
 class_ability_pinningshot_immunity_seconds	class_abilities	pinningshot	fork	no
 class_ability_pinningshot_slow_factor	class_abilities	pinningshot	fork	no
@@ -300,7 +403,9 @@ class_ability_shieldcheck_strength_base	class_abilities	shieldcheck	fork	no
 class_ability_shieldcheck_strength_step	class_abilities	shieldcheck	fork	no
 class_ability_souljump_cooldown_seconds_base	class_abilities	souljump	fork	no
 class_ability_souljump_cooldown_seconds_step	class_abilities	souljump	fork	no
+class_ability_souljump_immunity_seconds	class_abilities	souljump	fork	no
 class_ability_souljump_restore_fraction	class_abilities	souljump	fork	no
+class_ability_souljump_restore_fraction_step	class_abilities	souljump	fork	no
 class_ability_soultether_base	class_abilities	soultether	fork	no
 class_ability_soultether_max_reduction	class_abilities	soultether	fork	no
 class_ability_soultether_step	class_abilities	soultether	fork	no
@@ -331,6 +436,7 @@ class_ability_sundermark_nether_max_level	class_abilities	sundermark	fork	no
 class_ability_surefooted_expire_seconds	class_abilities	surefooted	fork	no
 class_ability_surefooted_percent_per_rank_per_stack	class_abilities	surefooted	fork	no
 class_ability_surefooted_stack_cap	class_abilities	surefooted	fork	no
+class_ability_taunt_cast_chance_mult	class_abilities	taunt	fork	no
 class_ability_taunt_duration	class_abilities	taunt	fork	no
 class_ability_taunt_radius_r1	class_abilities	taunt	fork	no
 class_ability_taunt_radius_r2	class_abilities	taunt	fork	no
@@ -364,6 +470,7 @@ class_ability_weakenedblood_slow_floor	class_abilities	weakenedblood	fork	no
 class_ability_weakenedblood_slow_r1	class_abilities	weakenedblood	fork	no
 class_ability_weakenedblood_slow_r2	class_abilities	weakenedblood	fork	no
 class_ability_weakenedblood_slow_r3	class_abilities	weakenedblood	fork	no
+class_ability_web_panel_enabled	class_abilities	web	fork	no
 class_ability_whirlwind_stamina_surcharge_r1	class_abilities	whirlwind	fork	no
 class_ability_whirlwind_stamina_surcharge_r2	class_abilities	whirlwind	fork	no
 class_ability_whirlwind_stamina_surcharge_r3	class_abilities	whirlwind	fork	no
@@ -376,10 +483,14 @@ class_ability_xp_ratio_1	class_abilities	xp	fork	no
 class_ability_xp_ratio_2	class_abilities	xp	fork	no
 class_ability_xp_ratio_3	class_abilities	xp	fork	no
 client_movement_formula	server	General	upstream	no
+cloak_amplifier_roll_max_pct	items	Cloaks	fork	no
+cloak_amplifier_roll_min_pct	items	Cloaks	fork	no
 cloak_cooldown_seconds	items	Cloaks	upstream	no
 cloak_max_proc_base	items	Cloaks	upstream	no
 cloak_max_proc_damage_percentage	items	Cloaks	upstream	no
 cloak_min_proc	items	Cloaks	upstream	no
+cloak_rear_guard_armor_per_level	items	Cloaks	fork	no
+cloak_rear_guard_enabled	items	Cloaks	fork	no
 container_opener_name	server	General	upstream	no
 content_folder	server	General	upstream	no
 corpse_decay_tick_logging	server	General	upstream	no
@@ -396,6 +507,9 @@ custom_aug_spell_duration_bonus	progression	Custom Augs	fork	no
 dat_newer_warning_msg	server	General	upstream	no
 dat_older_warning_msg	server	General	upstream	no
 default_subscription_level	server	Accounts	upstream	no
+dereth_network_enabled	social	Dereth Network	fork	no
+dereth_network_room_mirroring	social	Dereth Network	fork	no
+dereth_network_traffic_log	social	Dereth Network	fork	no
 discord_relay_enabled	social	Discord	fork	no
 discord_webhook_url_audit	social	Discord	fork	yes
 discord_webhook_url_events	social	Discord	fork	yes
@@ -450,16 +564,28 @@ dynamic_dungeons_damage_ceiling_reference_ratio	threads	damage	fork	no
 dynamic_dungeons_damage_curve_rate_above_pivot	threads	damage	fork	no
 dynamic_dungeons_data_folder	threads	data	fork	no
 dynamic_dungeons_defense_curve_rate_above_375	threads	defense	fork	no
+dynamic_dungeons_defense_max_seconds	threads	defense	fork	no
+dynamic_dungeons_defense_min_death_seconds	threads	defense	fork	no
 dynamic_dungeons_defense_skill_cap_offset	threads	defense	fork	no
+dynamic_dungeons_defense_switch_seconds	threads	defense	fork	no
+dynamic_dungeons_defense_undefended_seconds	threads	defense	fork	no
 dynamic_dungeons_empty_grace_minutes	threads	empty	fork	no
 dynamic_dungeons_enabled	threads	enabled	fork	no
+dynamic_dungeons_encounter_prize_enabled	threads	encounters	fork	no
+dynamic_dungeons_encounters_enabled	threads	encounters	fork	no
+dynamic_dungeons_encounters_max_per_run	threads	encounters	fork	no
+dynamic_dungeons_encounters_slot_chance	threads	encounters	fork	no
 dynamic_dungeons_family_archetype_weighting	threads	family	fork	no
+dynamic_dungeons_family_stretch	threads	family	fork	no
 dynamic_dungeons_fiber_chance	threads	fiber	fork	no
 dynamic_dungeons_fiber_enabled	threads	fiber	fork	no
 dynamic_dungeons_fiber_per_seat	threads	fiber	fork	no
 dynamic_dungeons_fiber_pity_step	threads	fiber	fork	no
 dynamic_dungeons_fit_filter	threads	fit	fork	no
 dynamic_dungeons_fit_headroom_margin	threads	fit	fork	no
+dynamic_dungeons_golem_aura_seconds	threads	golem	fork	no
+dynamic_dungeons_golem_health_mult	threads	golem	fork	no
+dynamic_dungeons_golem_pick_scale	threads	golem	fork	no
 dynamic_dungeons_group_count_share	threads	group	fork	no
 dynamic_dungeons_group_damage_rating_cap	threads	group	fork	no
 dynamic_dungeons_group_damage_rating_per_member	threads	group	fork	no
@@ -475,6 +601,7 @@ dynamic_dungeons_health_curve	threads	health	fork	no
 dynamic_dungeons_health_curve_anchor_high	threads	health	fork	no
 dynamic_dungeons_health_curve_anchor_low	threads	health	fork	no
 dynamic_dungeons_health_curve_top_level	threads	health	fork	no
+dynamic_dungeons_jump_time_seconds	threads	jump	fork	no
 dynamic_dungeons_loot_miss_attribution	threads	loot	fork	no
 dynamic_dungeons_loot_quality_cap	threads	loot	fork	no
 dynamic_dungeons_loot_quantity_cap	threads	loot	fork	no
@@ -490,10 +617,13 @@ dynamic_dungeons_max_concurrent_runs	threads	max	fork	no
 dynamic_dungeons_max_monsters_per_run	threads	max	fork	no
 dynamic_dungeons_max_runs_per_account	threads	max	fork	no
 dynamic_dungeons_max_unloads_per_tick	threads	max	fork	no
+dynamic_dungeons_melee_defense_curve_rate_above_400	threads	defense	fork	no
 dynamic_dungeons_min_eligible_families	threads	min	fork	no
 dynamic_dungeons_min_family_pool	threads	min	fork	no
 dynamic_dungeons_min_monsters_per_run	threads	min	fork	no
 dynamic_dungeons_min_player_level	threads	min	fork	no
+dynamic_dungeons_missile_defense_skill_cap	threads	missile	fork	no
+dynamic_dungeons_missile_variance_floor	threads	missile	fork	no
 dynamic_dungeons_modifier_level_exponent	threads	modifier	fork	no
 dynamic_dungeons_modifier_reward_scale	threads	modifier	fork	no
 dynamic_dungeons_outdoor_backstop_enabled	threads	outdoor	fork	no
@@ -539,6 +669,7 @@ dynamic_dungeons_roster_band_high	threads	roster	fork	no
 dynamic_dungeons_roster_band_low	threads	roster	fork	no
 dynamic_dungeons_run_ttl_minutes	threads	run	fork	no
 dynamic_dungeons_salvage_affinity_chance_cap	threads	salvage	fork	no
+dynamic_dungeons_shrine_boon_cap	threads	shrine	fork	no
 dynamic_dungeons_spawn_batch_size	threads	spawn	fork	no
 dynamic_dungeons_spawn_step_budget_ms	threads	spawn	fork	no
 dynamic_dungeons_stat_curve	threads	stat	fork	no
@@ -561,6 +692,7 @@ dynamic_dungeons_uplift_rename	threads	uplift	fork	no
 dynamic_dungeons_uplift_resist_floor	threads	uplift	fork	no
 dynamic_dungeons_weak_point	threads	weak	fork	no
 dynamic_dungeons_weak_point_armor_cut	threads	weak	fork	no
+dynamic_dungeons_weapon_attack_curve_rate_above_400	threads	damage	fork	no
 dynamic_dungeons_xp_mult_cap	threads	xp	fork	no
 dynamic_dungeons_xp_scale	threads	xp	fork	no
 emote_give_preflight	server	General	fork	no
@@ -578,6 +710,7 @@ facet_pk_level	pvp	World Type	fork	no
 facet_slot2_level	progression	Facets	fork	no
 facet_slot3_level	progression	Facets	fork	no
 facet_slot4_level	progression	Facets	fork	no
+facet_vault_deposit_enabled	progression	Facets	fork	no
 fast_missile_modifier	combat	Combat	upstream	no
 fast_tick_all_players	server	General	fork	no
 fastbuff	server	General	upstream	no
@@ -615,6 +748,7 @@ house_purchase_requirements	social	Housing	upstream	no
 house_rent_enabled	social	Housing	upstream	no
 ignore_magic_armor_pvp_scalar	pvp	Scalars	upstream	no
 ignore_magic_resist_pvp_scalar	pvp	Scalars	upstream	no
+imbue_gem_success_chance	items	Jewelry Aspects	fork	no
 iou_trades	economy	Vendors	upstream	no
 ip_household_clusters	server	General	fork	no
 ip_limit_activity_tail_seconds	server	IP Limit	fork	no
@@ -631,6 +765,14 @@ ip_limit_max_confined	server	IP Limit	fork	no
 ip_limit_max_free	server	IP Limit	fork	no
 ip_limit_sweep_seconds	server	IP Limit	fork	no
 item_dispel	combat	Magic	upstream	no
+jewelry_aspects_enabled	items	Jewelry Aspects	fork	no
+jewelry_aspects_fortitude_cap	items	Jewelry Aspects	fork	no
+jewelry_aspects_fortitude_per_slot	items	Jewelry Aspects	fork	no
+jewelry_aspects_penetration_amplify	items	Jewelry Aspects	fork	no
+jewelry_aspects_penetration_cap	items	Jewelry Aspects	fork	no
+jewelry_aspects_penetration_per_slot	items	Jewelry Aspects	fork	no
+jewelry_aspects_resolve_cap	items	Jewelry Aspects	fork	no
+jewelry_aspects_resolve_per_slot	items	Jewelry Aspects	fork	no
 knot_loot_grael_enabled	items	Knot Loot	fork	no
 knot_loot_grael_mmd_max	items	Knot Loot	fork	no
 knot_loot_grael_mmd_min	items	Knot Loot	fork	no
@@ -648,6 +790,32 @@ knot_loot_grael_window_high_start	items	Knot Loot	fork	no
 knot_loot_grael_window_low_level	items	Knot Loot	fork	no
 knot_loot_grael_window_low_start	items	Knot Loot	fork	no
 knot_loot_grael_window_width	items	Knot Loot	fork	no
+knot_loot_harbinger_enabled	items	Knot Loot	fork	no
+knot_loot_harbinger_mmd_max	items	Knot Loot	fork	no
+knot_loot_harbinger_mmd_min	items	Knot Loot	fork	no
+knot_loot_harbinger_note_max	items	Knot Loot	fork	no
+knot_loot_harbinger_note_min	items	Knot Loot	fork	no
+knot_loot_harbinger_weight_arm_guard	items	Knot Loot	fork	no
+knot_loot_harbinger_weight_armor_infusion	items	Knot Loot	fork	no
+knot_loot_harbinger_weight_burning_eye	items	Knot Loot	fork	no
+knot_loot_harbinger_weight_burning_limb	items	Knot Loot	fork	no
+knot_loot_harbinger_weight_burning_scythe	items	Knot Loot	fork	no
+knot_loot_harbinger_weight_caustic_eye	items	Knot Loot	fork	no
+knot_loot_harbinger_weight_caustic_wings	items	Knot Loot	fork	no
+knot_loot_harbinger_weight_corroding_scythe	items	Knot Loot	fork	no
+knot_loot_harbinger_weight_crippling_infusion	items	Knot Loot	fork	no
+knot_loot_harbinger_weight_elemental_infusion	items	Knot Loot	fork	no
+knot_loot_harbinger_weight_freezing_scythe	items	Knot Loot	fork	no
+knot_loot_harbinger_weight_frore_crystal	items	Knot Loot	fork	no
+knot_loot_harbinger_weight_frozen_eye	items	Knot Loot	fork	no
+knot_loot_harbinger_weight_jolting_eye	items	Knot Loot	fork	no
+knot_loot_harbinger_weight_storm_eye	items	Knot Loot	fork	no
+knot_loot_harbinger_weight_thundering_scythe	items	Knot Loot	fork	no
+knot_loot_harbinger_window_high_level	items	Knot Loot	fork	no
+knot_loot_harbinger_window_high_start	items	Knot Loot	fork	no
+knot_loot_harbinger_window_low_level	items	Knot Loot	fork	no
+knot_loot_harbinger_window_low_start	items	Knot Loot	fork	no
+knot_loot_harbinger_window_width	items	Knot Loot	fork	no
 knot_loot_matron_chance_spines	items	Knot Loot	fork	no
 knot_loot_matron_enabled	items	Knot Loot	fork	no
 knot_loot_matron_mmd_max	items	Knot Loot	fork	no
@@ -657,6 +825,7 @@ knot_loot_matron_note_min	items	Knot Loot	fork	no
 knot_loot_matron_weight_armor_infusion	items	Knot Loot	fork	no
 knot_loot_matron_weight_crippling_infusion	items	Knot Loot	fork	no
 knot_loot_matron_weight_elemental_infusion	items	Knot Loot	fork	no
+knot_loot_matron_weight_hive_ichor_baton	items	Knot Loot	fork	no
 knot_loot_matron_weight_hive_nether_baton	items	Knot Loot	fork	no
 knot_loot_matron_weight_hive_stinger_baton	items	Knot Loot	fork	no
 knot_loot_matron_weight_spines	items	Knot Loot	fork	no
@@ -673,6 +842,14 @@ knot_trait_cast_speed_min	items	Knot Loot	fork	no
 knot_trait_frugal_hand_enabled	items	Knot Loot	fork	no
 knot_trait_frugal_hand_max	items	Knot Loot	fork	no
 knot_trait_frugal_hand_min	items	Knot Loot	fork	no
+knot_trait_harbinger_celerity_attack_max	items	Knot Loot	fork	no
+knot_trait_harbinger_celerity_attack_min	items	Knot Loot	fork	no
+knot_trait_harbinger_celerity_cast_max	items	Knot Loot	fork	no
+knot_trait_harbinger_celerity_cast_min	items	Knot Loot	fork	no
+knot_trait_harbinger_celerity_enabled	items	Knot Loot	fork	no
+knot_trait_harbinger_guard_enabled	items	Knot Loot	fork	no
+knot_trait_harbinger_guard_max	items	Knot Loot	fork	no
+knot_trait_harbinger_guard_min	items	Knot Loot	fork	no
 knot_trait_overpowering_intent_enabled	items	Knot Loot	fork	no
 knot_trait_overpowering_intent_max	items	Knot Loot	fork	no
 knot_trait_overpowering_intent_min	items	Knot Loot	fork	no
@@ -873,6 +1050,7 @@ outbound_ring_dump_entries	server	General	fork	no
 outbound_ring_enabled	server	General	fork	no
 outbound_ring_entries	server	General	fork	no
 override_encounter_spawn_rates	combat	Monsters	upstream	no
+paragon_mod_refund_fraction	items	Weapon Mods	fork	no
 permit_corpse_all	server	General	upstream	no
 persist_movement	server	General	upstream	no
 pet_combat_unreachable_ignore_seconds	combat	Pets	fork	no
@@ -882,9 +1060,11 @@ pet_follow_stuck_seconds	combat	Pets	fork	no
 pet_follow_teleport_distance	combat	Pets	fork	no
 pet_speed_floor	combat	Pets	fork	no
 pet_stow_replace	combat	Pets	upstream	no
+pet_telesummon_cooldown_seconds	combat	Pets	fork	no
 pickup_animation_speed	server	General	fork	no
 pickup_animation_speed_max	server	General	fork	no
 pickup_speed_quest_bonus	server	General	fork	no
+pinnacle_cache_foolproof_chance	server	General	fork	no
 pinnacle_encounters_enabled	server	General	fork	no
 pinnacle_grael_p2_wisps	server	General	fork	no
 pinnacle_grael_p3_dispel_count	server	General	fork	no
@@ -896,6 +1076,8 @@ pinnacle_grael_p4_stream	server	General	fork	no
 pinnacle_grael_p5_cast_seconds	server	General	fork	no
 pinnacle_grael_p5_respawn_seconds	server	General	fork	no
 pinnacle_grael_p5_wisps	server	General	fork	no
+pinnacle_harbinger_head_health_multiplier	server	General	fork	no
+pinnacle_harbinger_health_multiplier	server	General	fork	no
 pinnacle_hazard_pct_max	server	General	fork	no
 pinnacle_hazard_pct_min	server	General	fork	no
 pinnacle_hold_seconds	server	General	fork	no
@@ -1268,6 +1450,9 @@ salvage_forge_enabled	economy	Salvage	fork	no
 salvage_forge_skill_for_7	economy	Salvage	fork	no
 salvage_forge_skill_for_8	economy	Salvage	fork	no
 salvage_forge_skill_for_9	economy	Salvage	fork	no
+salvage_roller_enabled	economy	Salvage	fork	no
+salvage_roller_max_candidates	economy	Salvage	fork	no
+salvage_roller_window_rot_seconds	economy	Salvage	fork	no
 serpentine_reroll_enabled	server	General	fork	no
 server_motd	social	Messages	upstream	no
 shield_applies_in_noncombat	combat	Combat	fork	no
@@ -1287,6 +1472,12 @@ stage_self_grants_enabled	server	General	fork	no
 suicide_instant_death	server	General	upstream	no
 suit_builder_enabled	server	Web	fork	no
 suit_character_moves_enabled	server	Web	fork	no
+summoner_pet_damage_scale	combat	Pets	fork	no
+summoner_pet_defense_floor	combat	Pets	fork	no
+summoner_pet_defense_scale	combat	Pets	fork	no
+summoner_pet_imbue_transfer_percent	combat	Pets	fork	no
+summoner_pet_mod_transfer_percent	combat	Pets	fork	no
+summoner_wielder_spell_damage_mod	combat	Pets	fork	no
 summoning_killtask_multicredit_cap	combat	Pets	upstream	no
 summoning_mastery_unrestricted	combat	Pets	fork	no
 survival_stall_eject_seconds	server	General	fork	no
@@ -1298,6 +1489,7 @@ teleport_flush_scope	server	General	fork	no
 teleport_forced_complete_on_movement	server	General	fork	no
 teleport_forced_complete_seconds	server	General	fork	no
 teleport_visibility_fix	server	General	upstream	no
+thread_cache_foolproof_chance	threads	boss	fork	no
 top_exempt_accounts	social	Leaderboards	fork	no
 trajectory_alt_solver	combat	Combat	upstream	no
 trophy_drop_rate	items	Loot	upstream	no
@@ -1329,6 +1521,7 @@ weapon_mod_special_chance_3	items	Weapon Mods	fork	no
 weapon_mod_special_chance_4	items	Weapon Mods	fork	no
 weapon_mod_swap_special_chance	items	Weapon Mods	fork	no
 weapon_mods_enabled	items	Weapon Mods	fork	no
+web_launch_enabled	server	Web	fork	no
 weenie_bulk_load	server	General	fork	no
 weenie_bulk_selfcheck_sample	server	General	fork	no
 workmanship_refire_enabled	items	Crafting	fork	no
@@ -1340,6 +1533,9 @@ world_events_auto_enabled	world_events	auto	fork	no
 world_events_axis_folder	world_events	axis	fork	no
 world_events_band_low_floor	world_events	band	fork	no
 world_events_band_uplift	world_events	band	fork	no
+world_events_boss_budget_cap_health	world_events	boss	fork	no
+world_events_boss_budget_enabled	world_events	boss	fork	no
+world_events_boss_budget_floor_health	world_events	boss	fork	no
 world_events_boss_damage_rating_max	world_events	boss	fork	no
 world_events_boss_damage_rating_min	world_events	boss	fork	no
 world_events_boss_damage_sample_hits	world_events	boss	fork	no
@@ -1347,10 +1543,12 @@ world_events_boss_damage_scaling_enabled	world_events	boss	fork	no
 world_events_boss_damage_step_cap	world_events	boss	fork	no
 world_events_boss_health_cap	world_events	boss	fork	no
 world_events_boss_health_milestones_enabled	world_events	boss	fork	no
+world_events_boss_health_per_power	world_events	boss	fork	no
 world_events_boss_hits_to_kill	world_events	boss	fork	no
 world_events_boss_min_sample_seconds	world_events	boss	fork	no
 world_events_boss_per_player	world_events	boss	fork	no
 world_events_boss_phase_trash_multiplier	world_events	boss	fork	no
+world_events_boss_power_exponent	world_events	boss	fork	no
 world_events_boss_retarget_margin	world_events	boss	fork	no
 world_events_boss_retarget_seconds	world_events	boss	fork	no
 world_events_boss_scale_multiplier	world_events	boss	fork	no
@@ -1370,7 +1568,16 @@ world_events_claim_window_seconds	world_events	claim	fork	no
 world_events_crowd_health_cap	world_events	crowd	fork	no
 world_events_crowd_health_per_participant	world_events	crowd	fork	no
 world_events_crowd_health_start_at	world_events	crowd	fork	no
+world_events_damage_ceiling	world_events	damage	fork	no
+world_events_damage_ceiling_ratio	world_events	damage	fork	no
+world_events_damage_ceiling_reference_ratio	world_events	damage	fork	no
 world_events_defense_skill_cap_offset	world_events	defense	fork	no
+world_events_destroy_source_bank_max	world_events	destroy	fork	no
+world_events_destroy_source_hard_timeout_seconds	world_events	destroy	fork	no
+world_events_destroy_source_phase_count	world_events	destroy	fork	no
+world_events_destroy_source_phases_enabled	world_events	destroy	fork	no
+world_events_destroy_source_quota_fraction	world_events	destroy	fork	no
+world_events_destroy_source_soft_timeout_seconds	world_events	destroy	fork	no
 world_events_elite_band_high	world_events	elite	fork	no
 world_events_elite_band_low	world_events	elite	fork	no
 world_events_enabled	world_events	enabled	fork	no
@@ -1447,6 +1654,8 @@ world_events_hold_hit_interval_seconds	world_events	hold	fork	no
 world_events_hold_hold_seconds	world_events	hold	fork	no
 world_events_hold_knight_count	world_events	hold	fork	no
 world_events_hold_knight_damage_taken_mult	world_events	hold	fork	no
+world_events_hold_knight_durability_cap	world_events	hold	fork	no
+world_events_hold_knight_durability_per_participant	world_events	hold	fork	no
 world_events_hold_knight_max_health	world_events	hold	fork	no
 world_events_hold_knight_max_health_by_wcid	world_events	hold	fork	no
 world_events_hold_max_corrupted	world_events	hold	fork	no
@@ -1524,6 +1733,7 @@ world_events_hold_wave_size_max_players	world_events	hold	fork	no
 world_events_hold_wave_size_per_player	world_events	hold	fork	no
 world_events_ip_exempt	world_events	ip	fork	no
 world_events_ip_gate_enabled	world_events	ip	fork	no
+world_events_magic_attack_skill_cap	world_events	magic	fork	no
 world_events_max_alive	world_events	max	fork	no
 world_events_min_slot_pool	world_events	min	fork	no
 world_events_overflow_per_champion	world_events	overflow	fork	no
@@ -1539,12 +1749,17 @@ world_events_presence_payout_enabled	world_events	presence	fork	no
 world_events_presence_ring_enabled	world_events	presence	fork	no
 world_events_presence_snap_pct	world_events	presence	fork	no
 world_events_progress_interval_seconds	world_events	progress	fork	no
+world_events_schedule	world_events	schedule	fork	no
+world_events_schedule_late_minutes	world_events	schedule	fork	no
+world_events_schedule_timezone	world_events	schedule	fork	no
 world_events_share_roll_batch_size	world_events	share	fork	no
 world_events_share_step_budget_ms	world_events	share	fork	no
+world_events_stat_curve	world_events	stat	fork	no
 world_events_strip_combat_traits	world_events	strip	fork	no
 world_events_synthetic_champion_health_mult	world_events	synthetic	fork	no
 world_events_synthetic_elite_health_mult	world_events	synthetic	fork	no
 world_events_teaser_lead_seconds	world_events	teaser	fork	no
+world_events_threads_uplift	world_events	threads	fork	no
 world_events_trash_band_high	world_events	trash	fork	no
 world_events_trash_band_low	world_events	trash	fork	no
 world_events_wave_count_base	world_events	wave	fork	no

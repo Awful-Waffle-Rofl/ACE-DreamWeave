@@ -5,14 +5,12 @@ namespace ACE.Server.WorldObjects
     partial class Player
     {
         /// <summary>
-        /// Called from QuestManager's created-row branches (Update and SetQuestCompletions) for EVERY quest
-        /// row this character has ever created, and returns immediately for the overwhelming majority that
-        /// are not Bluespire ladder clears. The rung lookup is a dictionary miss, which is the whole cost on
-        /// that path.
-        ///
-        /// Also called from QuestManager.HandleKillTask with firstClear:false for the ladder's daily repeat
-        /// payout - a bootstrap row re-stamped after its cooldown elapsed. See BluespireLadderRewards.Pay's
-        /// firstClear parameter for the wording/log split; the amount paid is identical either way.
+        /// Called only from QuestManager.PayBluespireLadderReward, which has already filtered to the six
+        /// rung-clear names: with firstClear:true from the created-row branches (Update and
+        /// SetQuestCompletions), and with firstClear:false from Update's existing-row branch for a re-clear
+        /// landed after the rung's cooldown, whether the rung was cleared by an NPC StampQuest or by a boss
+        /// kill. See BluespireLadderRewards.Pay's firstClear parameter for the wording/log split; the amount
+        /// paid is identical either way.
         ///
         /// Wrapped in its own try/catch because it runs INSIDE quest bookkeeping: a payout that throws must
         /// not be able to abandon the registry row, the stamp ledger or the contract notification that

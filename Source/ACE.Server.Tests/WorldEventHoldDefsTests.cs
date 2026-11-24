@@ -570,6 +570,10 @@ namespace ACE.Server.Tests
             Refused(@"""shrine"": { ""readyEffect"": ""Sparkles"" },", "protect.shrine effect");
             Refused(@"""undefendedSecondsPerParticipant"": -5,", "protect.undefendedSecondsPerParticipant");
             Refused(@"""maxWaveIntervalSeconds"": -1,", "protect.maxWaveIntervalSeconds");
+            Refused(@"""durabilityPerParticipant"": 1.5,", "protect.durabilityPerParticipant");
+            Refused(@"""durabilityPerParticipant"": -0.1,", "protect.durabilityPerParticipant");
+            Refused(@"""durabilityCap"": 0.5,", "protect.durabilityCap");
+            Refused(@"""durabilityCap"": 11,", "protect.durabilityCap");
 
             var ok = SampleProtectJson.Replace(@"""radius"": 6.0,",
                 @"""radius"": 6.0, ""healBudgetPerWave"": 0.25, ""corruptedKillHeal"": 0.1, ""rescueHeal"": 0.01, ""clearRegenPerSecond"": 0.005, ""shrine"": { },");

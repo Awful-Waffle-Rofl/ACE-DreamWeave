@@ -191,10 +191,12 @@ namespace ACE.Server.Tests
             Assert.IsTrue(def.AdditionalAffinitySkills == null || def.AdditionalAffinitySkills.Length == 0,
                 "Void Magic was dropped from AdditionalAffinitySkills (owner ruling 2026-10-30)");
 
-            Assert.AreEqual("Your landed hits with any weapon and your damaging spell projectiles have a 7/13/19% chance (by rank) " +
-                            "to inflict the matching element's Vulnerability on the target. The level applied is set by your Life " +
-                            "Magic, and higher Life Magic also increases the chance. A Nether hit instead inflicts a random void " +
-                            "curse - Corruption, Corrosion or Destructive Curse - at the level your Life Magic sets.", def.Description);
+            Assert.AreEqual("Your weapon hits and damaging spell projectiles can put the matching element's Vulnerability on the " +
+                            "target. Your Life Magic sets its level. A Nether hit puts a random void curse on the target instead " +
+                            "(Corruption, Corrosion or Destructive Curse), at the level your Life Magic sets.", ClassAbilityText.Describe(def, ClassAbilityText.Defaults));
+            Assert.AreEqual("7% chance", ClassAbilityText.RankTail(def, 1, ClassAbilityText.Defaults));
+            Assert.AreEqual("19% chance", ClassAbilityText.RankTail(def, 3, ClassAbilityText.Defaults));
+            Assert.AreEqual("Affinity: Life Magic", ClassAbilityText.AffinityLine(def));
         }
 
         /// <summary>

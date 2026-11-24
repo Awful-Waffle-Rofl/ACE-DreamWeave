@@ -20,7 +20,11 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "executioner",
             DisplayName = "Executioner",
-            Description = "Deal 7% more melee damage per rank to targets below 25% health. Higher Recklessness increases the bonus.",
+            // Live text: bonus = rank * class_ability_executioner_percent_per_rank, threshold = class_ability_executioner_hp_fraction
+            // (ModifyOutgoingDamage and GetReadout below).
+            DescriptionTemplate = "Your melee hits deal more damage to targets below {v:class_ability_executioner_hp_fraction|pct}% " +
+                          "health.",
+            RankTailTemplate = "+{per:class_ability_executioner_percent_per_rank|pct}% damage",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,

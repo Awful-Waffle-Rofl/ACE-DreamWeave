@@ -10,6 +10,11 @@ using ACE.Server.WorldEvents.Defs;
 using ACE.Server.WorldEvents.Objectives;
 using ACE.Server.WorldObjects;
 
+using log4net;
+using log4net.Appender;
+using log4net.Core;
+using log4net.Repository.Hierarchy;
+
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace ACE.Server.Tests
@@ -54,10 +59,15 @@ namespace ACE.Server.Tests
 
             public void SetLiveCount(int? count) => Counts.Add(count);
 
+            public bool ThrowOnStop { get; set; }
+
             public void Stop(string reason)
             {
                 Stops++;
                 StopReason = reason;
+
+                if (ThrowOnStop)
+                    throw new InvalidOperationException("stop failed");
             }
         }
 
@@ -70,6 +80,9 @@ namespace ACE.Server.Tests
 
             /// <summary>When true the starter refuses (returns null).</summary>
             public bool Refuse;
+
+            /// <summary>What the presence scan reports (int.MaxValue = the scan failed).</summary>
+            public int Presence = 1;
 
             public WorldEvent Event;
 
@@ -150,7 +163,7 @@ namespace ACE.Server.Tests
             h.Event = new WorldEvent(1, composition, request, h.Objective,
                 audienceSampler: () => new AudienceEstimate(3, 100, 150),
                 clock: () => h.Clock,
-                presenceCounter: () => 1,
+                presenceCounter: () => h.Presence,
                 presenceSampler: () => new List<PresenceSample>(),
                 presenceSettings: () => (120, 2),
                 ringFlag: () => false,
@@ -277,8 +290,189 @@ namespace ACE.Server.Tests
             Assert.IsTrue(Enum.IsDefined(typeof(WorldEventHazardElement), h.Starts[0].Element));
         }
 
-        // ---- the hold -----------------------------------------------------------------------------------------
+        // ---- the per-run hit summary ---------------------------------------------------------------------------
 
+        private static List<string> CaptureSummaries(Action body)
+        {
+            var appender = new MemoryAppender();
+            var hierarchy = (Hierarchy)LogManager.GetRepository(typeof(WorldEvent).Assembly);
+            var root = hierarchy.Root;
+            var priorLevel = root.Level;
+            var priorConfigured = hierarchy.Configured;
+
+            try
+            {
+                root.AddAppender(appender);
+                root.Level = Level.All;
+                hierarchy.Configured = true;
+
+                body();
+
+                return appender.GetEvents().Where(e => e.Level == Level.Info && e.RenderedMessage.Contains("hazard summary")).Select(e => e.RenderedMessage).ToList();
+            }
+            finally
+            {
+                root.RemoveAppender(appender);
+                root.Level = priorLevel;
+                hierarchy.Configured = priorConfigured;
+            }
+        }
+
+        [TestMethod]
+        public void Summary_Format_IsOneLine_WithPatternDashAndOneDecimalPct()
+        {
+            var line = WorldEventHazardHost.FormatSummary(7, "rain", null, 41.6, 3, (12, 2, 87.456));
+
+            Assert.AreEqual("[WORLDEVENT] run=7 hazard summary kind=rain pattern=- seconds=42 players=3 hits=12 players_hit=2 dmg_pct_sum=87.5", line);
+            Assert.AreEqual("[WORLDEVENT] run=7 hazard summary kind=balls pattern=ring seconds=0 players=0 hits=0 players_hit=0 dmg_pct_sum=0.0",
+                WorldEventHazardHost.FormatSummary(7, "balls", "ring", -1, 0, (0, 0, 0.0)));
+        }
+
+        [TestMethod]
+        public void Summary_Tally_CountsHits_DistinctPlayers_AndDamageAsPercentOfEachVictimsMaxHealth()
+        {
+            var host = new WorldEventHazardHost();
+            var a = new object();
+            var b = new object();
+
+            host.RecordHit(a, 1, 30, 100);   // 30 %
+            host.RecordHit(a, 1, 60, 200);   // 30 %
+            host.RecordHit(a, 2, 50, 500);   // 10 %
+            host.RecordHit(a, 3, 0, 500);    // a zero-damage hit is not a hit
+            host.RecordHit(b, 9, 10, 100);   // another run: its own tally
+
+            var (hits, players, pct) = host.TakeTally(a);
+
+            Assert.AreEqual(3, hits);
+            Assert.AreEqual(2, players);
+            Assert.AreEqual(70.0, pct, 1e-9);
+            Assert.AreEqual((0, 0, 0.0), host.TakeTally(a), "taking a tally clears it");
+            Assert.AreEqual(1, host.TakeTally(b).Hits);
+            Assert.AreEqual((0, 0, 0.0), host.TakeTally(new object()), "a run that was never hit reads zeros");
+        }
+
+        [TestMethod]
+        public void Summary_LoggedOnce_WhenARunEnds_WithItsTally()
+        {
+            var h = Active(new HazardDef { Kind = "balls", Element = "fire" });
+            var host = (WorldEventHazardHost)h.Starts[0].Host;
+            var run = h.Live;
+            var pattern = h.Starts[0].Pattern ?? "-";
+
+            var lines = CaptureSummaries(() =>
+            {
+                host.RecordHit(run, 1, 30, 100);
+                host.RecordHit(run, 1, 30, 100);
+                host.RecordHit(run, 2, 150, 1000);
+
+                h.End(run, HazardOutcome.Completed);
+                TickAt(h, T0 + 60);
+                TickAt(h, T0 + 61);
+            });
+
+            Assert.AreEqual(1, lines.Count, string.Join(" | ", lines));
+            Assert.AreEqual($"[WORLDEVENT] run=1 hazard summary kind={h.Starts[0].Kind} pattern={pattern} seconds=60 players=1 hits=3 players_hit=2 dmg_pct_sum=75.0", lines[0]);
+            Assert.AreEqual(2, h.Starts.Count, "control: the Completed run chained a second one, which has no summary yet");
+        }
+
+        [TestMethod]
+        public void Summary_LoggedOnce_WhenFinishStopsTheLiveRun_AndNotAgain()
+        {
+            var h = Active();
+            var host = (WorldEventHazardHost)h.Starts[0].Host;
+            var run = h.Live;
+
+            var lines = CaptureSummaries(() =>
+            {
+                host.RecordHit(run, 5, 10, 100);
+                h.Clock = T0 + 30;
+                h.Event.Finish(WorldEventOutcome.FailedTimeout);
+                h.Event.Finish(WorldEventOutcome.AbortedShutdown);
+                host.NotifyEnded(run, HazardOutcome.Stopped);
+                TickAt(h, T0 + 31);
+            });
+
+            Assert.AreEqual(1, lines.Count, string.Join(" | ", lines));
+            StringAssert.Contains(lines[0], "kind=wisps pattern=mixed seconds=30");
+            StringAssert.Contains(lines[0], "hits=1 players_hit=1 dmg_pct_sum=10.0");
+        }
+        [TestMethod]
+        public void Summary_TwoChainedRuns_EachGetTheirOwnLine_WithTheirOwnHit()
+        {
+            var h = Active(new HazardDef { Kind = "wisps", Element = "fire" });
+            var host = (WorldEventHazardHost)h.Starts[0].Host;
+
+            var lines = CaptureSummaries(() =>
+            {
+                host.RecordHit(h.Runs[0], 1, 10, 100);
+                h.End(h.Runs[0], HazardOutcome.Completed);
+                TickAt(h, T0 + 20);
+
+                Assert.AreEqual(2, h.Runs.Count, "fixture: the Completed run chained a second");
+
+                host.RecordHit(h.Runs[1], 2, 20, 100);
+                h.End(h.Runs[1], HazardOutcome.Completed);
+                TickAt(h, T0 + 40);
+            });
+
+            Assert.AreEqual(2, lines.Count, string.Join(" | ", lines));
+            StringAssert.Contains(lines[0], " hits=1 players_hit=1 dmg_pct_sum=10.0");
+            StringAssert.Contains(lines[1], " hits=1 players_hit=1 dmg_pct_sum=20.0");
+        }
+
+        [TestMethod]
+        public void Summary_ALateHit_AfterTheTallyWasTaken_LeavesNoOrphanEntry()
+        {
+            var host = new WorldEventHazardHost();
+            var run = new object();
+
+            host.RecordHit(run, 1, 10, 100);
+            Assert.AreEqual(1, host.OpenTallyCount, "control: a live run has an entry");
+
+            host.TakeTally(run);
+            host.RecordHit(run, 1, 10, 100);
+
+            Assert.AreEqual(0, host.OpenTallyCount, "the late hit of a finished run is dropped");
+            Assert.AreEqual((0, 0, 0.0), host.TakeTally(run));
+        }
+
+        [TestMethod]
+        public void Summary_StillLogged_WhenTheRunsStopThrows()
+        {
+            var h = Active();
+            var run = h.Live;
+
+            run.ThrowOnStop = true;
+
+            var lines = CaptureSummaries(() =>
+            {
+                ((WorldEventHazardHost)h.Starts[0].Host).RecordHit(run, 1, 10, 100);
+                h.Event.Finish(WorldEventOutcome.FailedTimeout);
+            });
+
+            Assert.AreEqual(1, lines.Count, string.Join(" | ", lines));
+            StringAssert.Contains(lines[0], "hits=1");
+        }
+
+        [TestMethod]
+        public void Summary_PlayersIsMinusOne_WhenThePresenceScanFailed()
+        {
+            var h = Active();
+            var run = h.Live;
+
+            h.Presence = int.MaxValue;
+
+            var lines = CaptureSummaries(() =>
+            {
+                h.End(run, HazardOutcome.Completed);
+                TickAt(h, T0 + 5);
+            });
+
+            Assert.AreEqual(1, lines.Count, string.Join(" | ", lines));
+            StringAssert.Contains(lines[0], " players=-1 ");
+        }
+
+        // ---- the hold -----------------------------------------------------------------------------------------
         [TestMethod]
         public void HoldsAdjacents_OnlyWhenAHazardIsPlannedAndTheArenaCrossesTheEdge()
         {

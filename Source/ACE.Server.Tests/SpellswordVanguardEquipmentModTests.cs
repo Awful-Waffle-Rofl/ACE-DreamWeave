@@ -601,9 +601,9 @@ namespace ACE.Server.Tests
             }
 
             // and still the shipped ladder, at the neutral factor
-            Assert.AreEqual(0.08, ShieldBlockAbility.BlockChance(1, 0.08, 0.06, 1.0, 0.0, 0.0), 1e-9);
-            Assert.AreEqual(0.14, ShieldBlockAbility.BlockChance(2, 0.08, 0.06, 1.0, 0.0, 0.0), 1e-9);
-            Assert.AreEqual(0.20, ShieldBlockAbility.BlockChance(3, 0.08, 0.06, 1.0, 0.0, 0.0), 1e-9);
+            Assert.AreEqual(0.08, ShieldBlockAbility.BlockChance(1, 0.08, 0.08, 1.0, 0.0, 0.0), 1e-9);
+            Assert.AreEqual(0.16, ShieldBlockAbility.BlockChance(2, 0.08, 0.08, 1.0, 0.0, 0.0), 1e-9);
+            Assert.AreEqual(0.24, ShieldBlockAbility.BlockChance(3, 0.08, 0.08, 1.0, 0.0, 0.0), 1e-9);
         }
 
         [TestMethod]
@@ -612,22 +612,22 @@ namespace ACE.Server.Tests
             var cap = D("class_ability_affinity_chance_cap"); // 0.20
             var gear = Max(EquipmentModId.ShieldWall);        // 0.0141
 
-            // control: uncapped, the saturating affinity multiplies the whole 0.20 rank ladder by 9.8842
-            Assert.AreEqual(0.20 * SaturatingAffinityMultiplier,
-                ShieldBlockAbility.BlockChance(3, 0.08, 0.06, SaturatingAffinityMultiplier), 1e-9,
+            // control: uncapped, the saturating affinity multiplies the whole 0.24 rank ladder by 9.8842
+            Assert.AreEqual(0.24 * SaturatingAffinityMultiplier,
+                ShieldBlockAbility.BlockChance(3, 0.08, 0.08, SaturatingAffinityMultiplier), 1e-9,
                 "control: with no cap the affinity is unbounded, which is the defect this clamp exists for");
 
-            // the rank ladder survives the clamp untouched: 0.20 base ladder + 0.20 capped affinity
-            Assert.AreEqual(0.40, ShieldBlockAbility.BlockChance(3, 0.08, 0.06, SaturatingAffinityMultiplier, cap), 1e-9,
+            // the rank ladder survives the clamp untouched: 0.24 base ladder + 0.20 capped affinity
+            Assert.AreEqual(0.44, ShieldBlockAbility.BlockChance(3, 0.08, 0.08, SaturatingAffinityMultiplier, cap), 1e-9,
                 "the clamp must bound the added amount only, never the rank ladder");
 
-            // and so does the gear term: 0.20 ladder + 0.20 capped affinity + 0.0141 gear
-            Assert.AreEqual(0.4141, ShieldBlockAbility.BlockChance(3, 0.08, 0.06, SaturatingAffinityMultiplier, cap, gear), 1e-9,
+            // and so does the gear term: 0.24 ladder + 0.20 capped affinity + 0.0141 gear
+            Assert.AreEqual(0.4541, ShieldBlockAbility.BlockChance(3, 0.08, 0.08, SaturatingAffinityMultiplier, cap, gear), 1e-9,
                 "the clamp must bound the added amount only, never the gear term");
 
             // an added amount UNDER the cap passes through unchanged - the clamp is a ceiling, not a floor.
-            // A factor of 1.4 on a 0.20 rank bonus adds 0.08.
-            Assert.AreEqual(0.28, ShieldBlockAbility.BlockChance(3, 0.08, 0.06, 1.4, cap), 1e-9);
+            // A factor of 1.4 on a 0.24 rank bonus adds 0.096 (0.24 + 0.096 = 0.336).
+            Assert.AreEqual(0.336, ShieldBlockAbility.BlockChance(3, 0.08, 0.08, 1.4, cap), 1e-9);
         }
 
         [TestMethod]
@@ -640,21 +640,21 @@ namespace ACE.Server.Tests
             var gear = Max(EquipmentModId.ShieldWall);
             var cap = D("class_ability_affinity_chance_cap");
 
-            var cappedNoGear = ShieldBlockAbility.BlockChance(3, 0.08, 0.06, SaturatingAffinityMultiplier, cap);
-            var cappedWithGear = ShieldBlockAbility.BlockChance(3, 0.08, 0.06, SaturatingAffinityMultiplier, cap, gear);
+            var cappedNoGear = ShieldBlockAbility.BlockChance(3, 0.08, 0.08, SaturatingAffinityMultiplier, cap);
+            var cappedWithGear = ShieldBlockAbility.BlockChance(3, 0.08, 0.08, SaturatingAffinityMultiplier, cap, gear);
 
-            Assert.AreEqual(0.40, cappedNoGear, 1e-9, "the 20pp ladder plus the added amount clamped to 20pp");
+            Assert.AreEqual(0.44, cappedNoGear, 1e-9, "the 24pp ladder plus the added amount clamped to 20pp");
 
             Assert.AreEqual(gear, cappedWithGear - cappedNoGear, 1e-12,
                 "a fully saturated Armor Tinkering affinity must not eat one point of the gear term");
 
-            // CONTROL - the axis rule. A separate multiplier would be 0.40 * 1.0141 = 0.405640, a DIFFERENT
+            // CONTROL - the axis rule. A separate multiplier would be 0.44 * 1.0141 = 0.446204, a DIFFERENT
             // number, so the assertion above can actually fail if the shape ever changes.
-            Assert.AreNotEqual(0.40 * (1.0 + gear), cappedWithGear, 1e-6,
+            Assert.AreNotEqual(0.44 * (1.0 + gear), cappedWithGear, 1e-6,
                 "the gear term must be a summand on the block chance, not a factor on it");
 
             // and the machinery gate: rank 0 is inert however much is equipped
-            Assert.AreEqual(0.0, ShieldBlockAbility.BlockChance(0, 0.08, 0.06, SaturatingAffinityMultiplier, cap, gear), 1e-12);
+            Assert.AreEqual(0.0, ShieldBlockAbility.BlockChance(0, 0.08, 0.08, SaturatingAffinityMultiplier, cap, gear), 1e-12);
         }
 
         [TestMethod]
@@ -676,9 +676,9 @@ namespace ACE.Server.Tests
 
             var stackedGear = gear * stackCap; // 0.0423
 
-            var block = ShieldBlockAbility.BlockChance(3, 0.08, 0.06, SaturatingAffinityMultiplier, affinityCap, stackedGear);
+            var block = ShieldBlockAbility.BlockChance(3, 0.08, 0.08, SaturatingAffinityMultiplier, affinityCap, stackedGear);
 
-            Assert.AreEqual(0.4423, block, 1e-9, "20pp ladder + 20pp capped affinity + 4.23pp of Shield Wall");
+            Assert.AreEqual(0.4823, block, 1e-9, "24pp ladder + 20pp capped affinity + 4.23pp of Shield Wall");
 
             var (pooledBlock, pooledParry, capped) = ClassAbilityAvoidance.Pooled(block, 0.0, avoidanceCap);
 
@@ -688,7 +688,7 @@ namespace ACE.Server.Tests
 
             // CONTROL - the pooled cap is genuinely reachable, so "IsFalse(capped)" above is a real result
             // rather than a cap that never fires. This is the pre-fix state: an UNCAPPED affinity.
-            var uncapped = ShieldBlockAbility.BlockChance(3, 0.08, 0.06, SaturatingAffinityMultiplier, 0.0, stackedGear);
+            var uncapped = ShieldBlockAbility.BlockChance(3, 0.08, 0.08, SaturatingAffinityMultiplier, 0.0, stackedGear);
             var (_, _, cappedControl) = ClassAbilityAvoidance.Pooled(uncapped, 0.0, avoidanceCap);
 
             Assert.IsTrue(cappedControl, "control: without the affinity clamp the rider alone saturates the pooled cap");

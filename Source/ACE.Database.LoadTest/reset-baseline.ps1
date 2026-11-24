@@ -10,15 +10,19 @@
 
 $ErrorActionPreference = "Stop"
 
-$mysql = "C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe"
-$mysqldump = "C:\Program Files\MySQL\MySQL Server 8.0\bin\mysqldump.exe"
+# Windows PowerShell 5.1 has no $IsWindows; it only runs on Windows.
+$isWin = ($PSVersionTable.PSEdition -eq 'Desktop') -or $IsWindows
+
+$mysql = if ($isWin) { "C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe" } else { "mysql" }
+$mysqldump = if ($isWin) { "C:\Program Files\MySQL\MySQL Server 8.0\bin\mysqldump.exe" } else { "mysqldump" }
 $mysqlHost = "127.0.0.1"
 $mysqlPort = 3306
 $mysqlUser = "root"
 $mysqlPassword = "WeakPassword1!"
 
-$exe = Join-Path $PSScriptRoot "bin\x64\Debug\net10.0\ACE.Database.LoadTest.exe"
-$dumpFile = Join-Path $env:TEMP "ace_shard_loadtest_reset_$PID.sql"
+$exeName = if ($isWin) { "ACE.Database.LoadTest.exe" } else { "ACE.Database.LoadTest" }
+$exe = Join-Path $PSScriptRoot "bin/x64/Debug/net10.0/$exeName"
+$dumpFile = Join-Path ([System.IO.Path]::GetTempPath()) "ace_shard_loadtest_reset_$PID.sql"
 
 # The password is passed via the MYSQL_PWD environment variable, never as a -p"..." command-line argument.
 # mysql.exe/mysqldump.exe both emit "[Warning] Using a password on the command line interface can be
@@ -34,7 +38,11 @@ try
     # good dump in hand do we drop and recreate the target database. Do not reorder this to dump-and-pipe
     # directly into a freshly-dropped database - that destroys the target before the dump is known-good.
     Write-Host "Dumping ace_shard to a temp file..."
-    & $mysqldump -h $mysqlHost -P $mysqlPort -u $mysqlUser --routines --triggers --single-transaction ace_shard | Out-File -FilePath $dumpFile -Encoding utf8
+    & $mysqldump -h $mysqlHost -P $mysqlPort -u $mysqlUser --routines --triggers --single-transaction --result-file=$dumpFile ace_shard
+    if ($LASTEXITCODE -ne 0)
+    {
+        throw "mysqldump failed with exit code $LASTEXITCODE. ace_shard_loadtest has NOT been touched."
+    }
 
     if (-not (Test-Path $dumpFile))
     {
@@ -49,7 +57,12 @@ try
 
     Write-Host "Dump OK ($dumpSize bytes). Recreating ace_shard_loadtest from the dump..."
     & $mysql -h $mysqlHost -P $mysqlPort -u $mysqlUser -e "DROP DATABASE IF EXISTS ace_shard_loadtest; CREATE DATABASE ace_shard_loadtest;"
-    Get-Content $dumpFile | & $mysql -h $mysqlHost -P $mysqlPort -u $mysqlUser ace_shard_loadtest
+    if ($LASTEXITCODE -ne 0) { throw "mysql failed (exit $LASTEXITCODE)" }
+    # "source" reads the file inside the mysql client: no PowerShell pipeline re-encoding the dump. The client
+    # wants forward slashes on both OSes.
+    $dumpFileForMysql = $dumpFile -replace '\\', '/'
+    & $mysql -h $mysqlHost -P $mysqlPort -u $mysqlUser ace_shard_loadtest -e "source $dumpFileForMysql"
+    if ($LASTEXITCODE -ne 0) { throw "mysql failed (exit $LASTEXITCODE)" }
 
     Write-Host "Seeding fixed baseline data (landblock 0x7D64, 500 characters, 100k bulk rows)..."
     & $exe seed-landblock --landblock=0x7D64 --staticCount=200 --dynamicCount=300 --yes

@@ -91,11 +91,14 @@ namespace ACE.Server.Tests
             // Archer pass (reprice wave 5) took crit_rating to flat 1/1/1, which is 3.
             // Archer T2 is 12, down from 15: Pinning Shot's 2026-09-13 premium reprice (2/rank) was
             // REVERSED 2026-09-29 back to 1/rank (Fast Aim rework companion change), -3.
-            (ClassAbilityClass.Archer,     14, 12, 9, 35),   // entries 4/4/3
-            // Rogue T3 is the highest T3 in the system at 18: Killer Instinct (2/2/2 = 6, priced that way by
-            // the design table for a stacking crit-damage-and-crit-chance engine) now sits beside
-            // attackspeed, repriced to 2/2/2 as well. Rogue T2 is 18 because Enhanced Melee Defense returned
-            // to it from Spellsword AND acidproc was repriced.
+            // Archer T3 is 12, up from 9, and gains an entry: Hunter's Echo (2026-11-10) is a new single rank at
+            // 3 CAP, an addition rather than a reprice.
+            (ClassAbilityClass.Archer,     14, 12, 12, 38),  // entries 4/4/4
+            // Rogue T3 is the highest T3 in the system at 18: Acid Proc (2/2/2 = 6) sits beside attackspeed
+            // (2/2/2 = 6). Rogue T2 is 18 because Enhanced Melee Defense returned to it from Spellsword AND
+            // Killer Instinct (2/2/2 = 6, priced that way by the design table for a stacking crit-damage-and-
+            // crit-chance engine) sits there. The 2026-11-06 Rogue tier swap (reprice wave 8) exchanged Acid
+            // Proc and Killer Instinct between T2 and T3; both are 6 CAP, so no column moved.
             (ClassAbilityClass.Rogue,      14, 18, 18, 50),   // entries 4/5/4
             // VANGUARD PASS 2026-09-29, and the two moves are deliberate rather than a failure being papered
             // over (which is what this table's doc comment above warns against). Kinetic Charge's 1/1/1
@@ -109,7 +112,12 @@ namespace ACE.Server.Tests
             // Spellsword already have at 17. EveryClass_CanReachItsOwnTierGatesWhenMaxed only asserts the
             // gates are REACHABLE, so it stays green; this is a real balance consequence of the ruling, not a
             // test artifact.
-            (ClassAbilityClass.Vanguard,   17, 16, 15, 48),   // entries 5/5/4
+            // VANGUARD PASS 2026-11-06 (ClassAbilityRepricing wave 7), deliberate rather than papered over. T1 is
+            // unchanged at 17. T2 16 -> 15: Cloaked in Power went from one rank to three at 1/1/1 (+2) and Crit
+            // Resist Rating from 2/2/2 to 1/1/1 (-3). T3 15 -> 12: Enhanced Health from 2/2/2 to 1/1/1 (-3), and
+            // Battle Hardened from one rank at 3 to three ranks at 1/1/1 (net 0). Class total 48 -> 44. Entry
+            // counts are unchanged (5/5/4).
+            (ClassAbilityClass.Vanguard,   17, 15, 12, 44),   // entries 5/5/4
             // BERSERKER PASS 2026-10-24 (ClassAbilityRepricing wave 3), deliberate rather than papered over.
             // T1 stays 17 with the same 5 entries but a different roster: Enhanced Stamina RETIRED (-3) and
             // Bloodlust moved T3 -> T1 (+3). T2 18 -> 15: Savage Blows (3) and Vengeance (2/2/2 = 6) RETIRED,
@@ -123,7 +131,9 @@ namespace ACE.Server.Tests
             // Overchannel 2/2/2 -> 1/1/1 (-3). T3 15 -> 12: Echo Cast 2/2/2 -> 1/1/1 (-3), Mana Barrier 1/2/3 ->
             // 1/1/1 (-3) - it was the last 1/2/3 escalator entry in the system - and Volatile Wall (1/1/1) added
             // (+3). Class total 47 -> 41. Entry counts 5/4/3 -> 5/4/4.
-            (ClassAbilityClass.Archmage,   17, 12, 12, 41),   // entries 5/4/4
+            // ELEMENTAL REND RETURNED 2026-11-03 (owner ruling): a new, additional T3 entry at 1/1/1 beside Elemental
+            // Proficiency takes T3 12 -> 15 and the class total 41 -> 44. Entry counts 5/4/4 -> 5/4/5.
+            (ClassAbilityClass.Archmage,   17, 12, 15, 44),   // entries 5/4/5
             // Void/Summon is UNCHANGED by the Archmage pass: Nether Rush became Mana Rush (display name, every
             // school, +50% cap) at the same T1 price, so no column moves.
             (ClassAbilityClass.VoidSummon, 14, 18, 15, 47),   // entries 4/5/4

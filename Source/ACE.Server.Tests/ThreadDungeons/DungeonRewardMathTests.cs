@@ -145,7 +145,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         /// <summary>
-        /// The owner's headline requirement: a dungeon kill pays 2.0x what killing that creature outside the
+        /// The owner's headline requirement: a dungeon kill pays 2.7x what killing that creature outside the
         /// dungeon pays. Asserted against the SHIPPED default rather than a literal, so retuning the dial
         /// retunes this test with it, and against a base value handed in directly - the anchor is the drawn
         /// creature's own retail worth, not a ladder rung at the gem's level.
@@ -156,7 +156,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             const long baseXp = 800000;
             var scale = DungeonPopulationLimits.DefaultXpScale;
 
-            Assert.AreEqual(2.0, scale, 1e-9, "guard: the shipped scale this test's expectations are written against");
+            Assert.AreEqual(2.7, scale, 1e-9, "guard: the shipped scale this test's expectations are written against");
 
             Assert.AreEqual((long)Math.Round(baseXp * scale),
                 DungeonRewardMath.XpForKill(baseXp, DungeonRole.Trash, scale, 1.0, 1.0));

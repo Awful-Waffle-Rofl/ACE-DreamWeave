@@ -477,7 +477,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.IsTrue(held >= 0 && queue > held, "the hold is decided, then gates the idle unload");
 
             var realm = PooledLootSourceText.ExpressionBody(PooledLootSourceText.Read("Source/ACE.Server/Realms/EphemeralRealm.cs"), "public bool HoldsFootprintMembers");
-            StringAssert.Contains(realm, "=> Run != null && Run.State != ACE.Server.ThreadDungeons.ThreadDungeonRunState.Ended;");
+            StringAssert.Contains(realm, "=> Run != null && Run.State != ACE.Server.ThreadDungeons.ThreadDungeonRunState.Ended || Hold is IFootprintHold { HoldsMembers: true };");
         }
     }
 }

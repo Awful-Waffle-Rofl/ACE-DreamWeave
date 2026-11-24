@@ -4,8 +4,8 @@ using System.Text.Json.Serialization;
 namespace ACE.Server.WorldEvents.Defs
 {
     /// <summary>
-    /// One entry from Content/events/axes/anchors.json (TECH-DESIGN 5.4). P2 - v1 ships an empty list;
-    /// "--here" is the P0/P1 anchor path.
+    /// One entry from Content/events/axes/anchors.json (TECH-DESIGN 5.4). Holds the owner-walked city anchors the
+    /// daily scheduler picks from (mirrors the market admin tool list); "--here" is the in-game anchor path.
     /// </summary>
     public class AnchorDef
     {
@@ -44,5 +44,18 @@ namespace ACE.Server.WorldEvents.Defs
 
         [JsonPropertyName("cooldownSeconds")]
         public int CooldownSeconds { get; set; }
+
+        /// <summary>
+        /// The realm the anchor lives in (0 = retail). Read by the scheduler, which builds a web-style location from it.
+        /// </summary>
+        [JsonPropertyName("realmId")]
+        public ushort RealmId { get; set; }
+
+        /// <summary>
+        /// The largest source ClearanceRadius (metres) this city can host; 0 means it hosts nothing. Same rule as the
+        /// market admin World Event tool: a source is offered only when its clearance is at most this and this is above 0.
+        /// </summary>
+        [JsonPropertyName("maxRadius")]
+        public float MaxRadius { get; set; }
     }
 }

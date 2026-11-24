@@ -1,4 +1,6 @@
 using System;
+using System.IO;
+using System.Text.RegularExpressions;
 
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
@@ -14,7 +16,7 @@ namespace ACE.Server.Tests
     /// Custom Summons Task 7: the Duo Summon Gem's absorb, binding and summon sources, through the real
     /// DuoSummonGem.Absorb on real PetDevice objects and a logging fake pack. The Player shell
     /// (DuoSummonGem.UseOnTarget, PetDevice.ActOnUse's Summon 2x gate) needs a Session and is an owner in-game check;
-    /// the source scans at the bottom pin its wiring order.
+    /// the source scans at the bottom pin its wiring order and the Summon 2x gate on the second summon.
     /// </summary>
     [TestClass]
     public class DuoGemTests
@@ -31,6 +33,91 @@ namespace ACE.Server.Tests
         [ClassCleanup]
         public static void Cleanup() => DuoSummonGem.PetWeenieTypeLookup = previousPetTypes;
 
+        // ---- icon: gem underlay, first absorbed summon as the foreground ------------------------------------
+
+        [TestMethod]
+        public void FirstAbsorb_TakesTheAbsorbedDevicesIcon()
+        {
+            var pack = new FakeDuoGemInventory();
+            var gem = DuoGemTestKit.BlankGem();
+            var alpha = DuoGemTestKit.Summon("Alpha", 5001);
+            alpha.SetProperty(PropertyDataId.Icon, 0x060016C4u);
+            pack.Put(gem, alpha);
+
+            Assert.AreEqual(DuoAbsorbResult.Absorbed, DuoSummonGem.Absorb(pack, gem, alpha, out _));
+            Assert.AreEqual(0x060016C4u, gem.GetProperty(PropertyDataId.Icon));
+        }
+
+        [TestMethod]
+        public void SecondAbsorb_LeavesTheIconUnchanged()
+        {
+            var pack = new FakeDuoGemInventory();
+            var gem = DuoGemTestKit.BlankGem();
+            var alpha = DuoGemTestKit.Summon("Alpha", 5001);
+            var beta = DuoGemTestKit.Summon("Beta", 5002);
+            alpha.SetProperty(PropertyDataId.Icon, 0x060016C4u);
+            beta.SetProperty(PropertyDataId.Icon, 0x06001226u);
+            pack.Put(gem, alpha, beta);
+
+            Assert.AreEqual(DuoAbsorbResult.Absorbed, DuoSummonGem.Absorb(pack, gem, alpha, out _));
+            Assert.AreEqual(DuoAbsorbResult.Bound, DuoSummonGem.Absorb(pack, gem, beta, out _));
+            Assert.AreEqual(0x060016C4u, gem.GetProperty(PropertyDataId.Icon), "the first summon's icon stays");
+        }
+
+        [TestMethod]
+        public void FailedFirstAbsorb_RestoresTheIcon()
+        {
+            var pack = new FakeDuoGemInventory();
+            var gem = DuoGemTestKit.BlankGem();
+            gem.SetProperty(PropertyDataId.Icon, DuoSummonGem.GemIcon);
+            var alpha = DuoGemTestKit.Summon("Alpha", 5001);
+            alpha.SetProperty(PropertyDataId.Icon, 0x060016C4u);
+            pack.Put(gem, alpha);
+            pack.FailConsumeOf = alpha;
+
+            Assert.AreEqual(DuoAbsorbResult.ConsumeFailed, DuoSummonGem.Absorb(pack, gem, alpha, out _));
+            Assert.AreEqual(DuoSummonGem.GemIcon, gem.GetProperty(PropertyDataId.Icon));
+        }
+
+        [TestMethod]
+        public void ResetIcon_RestoresTheBareGem()
+        {
+            var gem = DuoGemTestKit.BlankGem();
+            gem.SetProperty(PropertyDataId.Icon, 0x060016C4u);
+
+            DuoSummonGem.ResetIcon(gem);
+
+            Assert.AreEqual(DuoSummonGem.GemIcon, gem.GetProperty(PropertyDataId.Icon));
+        }
+
+        [TestMethod]
+        public void ContentRow_UsesTheGemAsIconUnderlay_AndAsTheEmptyIcon()
+        {
+            var sql = File.ReadAllText(FindFile("Content", "sql", "weenies", "1007741 Duo Summon Gem.sql"));
+
+            // literal on purpose: the row and the constant must agree, and the owner may change both together
+            Assert.AreEqual(0x06002B9Bu, DuoSummonGem.GemIcon);
+            StringAssert.Matches(sql, new Regex(@"\(1007741,\s+52,\s+0x06002B9B\)\s+/\* IconUnderlay"));
+            StringAssert.Matches(sql, new Regex(@"\(1007741,\s+8,\s+0x06002B9B\)\s+/\* Icon"));
+        }
+
+        private static string FindFile(params string[] parts)
+        {
+            var dir = new DirectoryInfo(AppContext.BaseDirectory);
+
+            while (dir != null)
+            {
+                var candidate = Path.Combine(dir.FullName, Path.Combine(parts));
+
+                if (File.Exists(candidate))
+                    return candidate;
+
+                dir = dir.Parent;
+            }
+
+            Assert.Fail($"Could not find {Path.Combine(parts)} by walking up from {AppContext.BaseDirectory}.");
+            return null;
+        }
         // ---- refusals ---------------------------------------------------------------------------------------
 
         [TestMethod]
@@ -497,6 +584,93 @@ namespace ACE.Server.Tests
             Assert.IsTrue(body.IndexOf("SendUseDoneEvent", duo, StringComparison.Ordinal) > duo);
         }
 
+        private const string ClassAbilityBuffsFile = "Source/ACE.Server/WorldObjects/Player_ClassAbilityBuffs.cs";
+
+        /// <summary>
+        /// The owner's guarantee: a Duo Gem never summons two creatures without Summon 2x. Returns every way the
+        /// two source texts break it (empty when sound). Every use of sources[1] in ActOnUse must be the statement
+        /// directly under an if whose condition calls CanSummonAdditionalCombatPet(), and that method must still
+        /// require the Summon 2x ability learned, joined by && only.
+        /// </summary>
+        internal static System.Collections.Generic.List<string> Summon2xGateViolations(string petDeviceSource, string buffsSource)
+        {
+            var problems = new System.Collections.Generic.List<string>();
+
+            // a commented-out gate or requirement must not satisfy the scan
+            petDeviceSource = Regex.Replace(petDeviceSource, @"//[^\n]*", "");
+            buffsSource = Regex.Replace(buffsSource, @"//[^\n]*", "");
+
+            var act = PooledLootSourceText.MethodBody(petDeviceSource, "public override void ActOnUse(WorldObject activator)");
+            var uses = Regex.Matches(act, @"sources\[1\]").Count;
+            var gated = Regex.Matches(act, @"if \((?<cond>[^\n]*)\)\s*\n\s*SummonCreature\(player, sources\[1\]");
+
+            if (uses == 0)
+                problems.Add("ActOnUse no longer references sources[1]; the guard cannot see the second summon");
+            if (gated.Count != uses)
+                problems.Add($"{uses} use(s) of sources[1] in ActOnUse but only {gated.Count} directly under an if");
+            foreach (Match m in gated)
+                if (!m.Groups["cond"].Value.Contains("player.CanSummonAdditionalCombatPet()"))
+                    problems.Add("the second summon's if does not call player.CanSummonAdditionalCombatPet()");
+                else if (m.Groups["cond"].Value.Contains("!player.CanSummonAdditionalCombatPet()"))
+                    problems.Add("the second summon's if negates player.CanSummonAdditionalCombatPet()");
+                else if (m.Groups["cond"].Value.Contains("||"))
+                    problems.Add("the second summon's if has an || that can bypass the gate");
+
+            var can = PooledLootSourceText.MethodBody(buffsSource, "public bool CanSummonAdditionalCombatPet()");
+            if (!can.Contains("TryGetClassAbility(ClassAbilityId.Summon2x"))
+                problems.Add("CanSummonAdditionalCombatPet no longer requires ClassAbilityId.Summon2x");
+            if (can.Contains("!TryGetClassAbility(ClassAbilityId.Summon2x"))
+                problems.Add("CanSummonAdditionalCombatPet negates the Summon 2x requirement");
+            if (can.Contains("||"))
+                problems.Add("CanSummonAdditionalCombatPet has an || that can bypass the Summon 2x requirement");
+
+            return problems;
+        }
+
+        [TestMethod]
+        public void SecondSummon_IsGatedOnSummon2x_InTheRealSource()
+        {
+            var problems = Summon2xGateViolations(PooledLootSourceText.Read(PetDeviceFile), PooledLootSourceText.Read(ClassAbilityBuffsFile));
+
+            Assert.AreEqual(0, problems.Count, string.Join("; ", problems));
+        }
+
+        [TestMethod]
+        public void Summon2xGuard_Discriminates_AgainstBrokenCopiesOfTheSource()
+        {
+            var pet = PooledLootSourceText.Read(PetDeviceFile);
+            var buffs = PooledLootSourceText.Read(ClassAbilityBuffsFile);
+
+            const string gate = "if (result == true && player.CanSummonAdditionalCombatPet())";
+            const string gateless = "if (result == true)";
+            StringAssert.Contains(pet, gate, "fixture assumption: the real gate text");
+            var noGate = pet.Replace(gate, gateless);
+            Assert.IsTrue(Summon2xGateViolations(noGate, buffs).Count > 0, "removing the gate must be reported");
+
+            var swapped = pet.Replace(gate, "if (result == true && player.CanSummonAdditionalCombatPet() || true)");
+            Assert.IsTrue(Summon2xGateViolations(swapped, buffs).Count > 0, "an || that bypasses the gate must be reported");
+
+            var ungatedSecond = pet.Replace("SummonCreature(player, sources[1], out _, true);", "SummonCreature(player, sources[1], out _, true);\n            SummonCreature(player, sources[1], out _, true);");
+            Assert.IsTrue(Summon2xGateViolations(ungatedSecond, buffs).Count > 0, "an extra ungated second summon must be reported");
+
+            var negatedGate = pet.Replace(gate, "if (result == true && !player.CanSummonAdditionalCombatPet())");
+            Assert.IsTrue(Summon2xGateViolations(negatedGate, buffs).Count > 0, "a negated gate must be reported");
+
+            var commentedGate = pet.Replace(gate, "if (result == true) // player.CanSummonAdditionalCombatPet()");
+            Assert.IsTrue(Summon2xGateViolations(commentedGate, buffs).Count > 0, "a gate that survives only in a comment must be reported");
+
+            const string ability = "TryGetClassAbility(ClassAbilityId.Summon2x, out _)";
+            StringAssert.Contains(buffs, ability, "fixture assumption: the real ability requirement");
+            var noAbility = buffs.Replace(" && " + ability, "");
+            Assert.AreNotEqual(buffs, noAbility, "the replace must have hit");
+            Assert.IsTrue(Summon2xGateViolations(pet, noAbility).Count > 0, "dropping the Summon 2x requirement must be reported");
+
+            var negatedAbility = buffs.Replace(ability, "!" + ability);
+            Assert.IsTrue(Summon2xGateViolations(pet, negatedAbility).Count > 0, "a negated Summon 2x requirement must be reported");
+
+            var orAbility = buffs.Replace(" && " + ability, " || " + ability);
+            Assert.IsTrue(Summon2xGateViolations(pet, orAbility).Count > 0, "an || on the ability must be reported");
+        }
         [TestMethod]
         public void GetSummonSources_ReadsTheGemSlots()
         {

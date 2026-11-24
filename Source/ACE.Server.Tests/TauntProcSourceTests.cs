@@ -23,7 +23,7 @@ namespace ACE.Server.Tests
     ///
     /// The filter is the whole safety story for routing cloak procs through the existing IItemProcAbility hook:
     /// Cloak.TryProcSpell now calls Player.OnClassAbilityItemProc(cloak), which fans out to every learned
-    /// IItemProcAbility handler. Taunt is the only implementor today - asserted below rather than assumed - but
+    /// IItemProcAbility handler. Taunt and Hunter's Echo are the only implementors - asserted below rather than assumed - and
     /// TriggersOn is a positive ALLOWLIST so that a weapon's cast-on-strike, or any third proc source wired
     /// into the hook later, is excluded by default rather than included by accident.
     /// </summary>
@@ -118,18 +118,20 @@ namespace ACE.Server.Tests
 
         /// <summary>
         /// THE PRECONDITION THE WHOLE APPROACH RESTS ON. Cloak.TryProcSpell dispatches the shared
-        /// IItemProcAbility hook, so anything else implementing that interface would silently acquire a cloak
-        /// trigger it never asked for. Asserted against the live registry, and separately as a source scan over
+        /// IItemProcAbility hook, so anything implementing that interface acquires a cloak trigger. Since
+        /// 2026-11-10 there are exactly two implementors, Taunt and Hunter's Echo, in that order (the Echo takes
+        /// Taunt's fresh holds over), and Hunter's Echo asked for the cloak trigger: it filters through
+        /// TauntAbility.TriggersOn itself. Asserted against the live registry, and separately as a source scan over
         /// the handler directory so an unregistered-but-present handler is caught too.
         /// </summary>
         [TestMethod]
-        public void TauntIsTheOnlyItemProcAbility()
+        public void ItemProcAbilities_AreExactlyTauntThenHuntersEcho()
         {
             CollectionAssert.AreEqual(
-                new[] { typeof(TauntAbility) },
+                new[] { typeof(TauntAbility), typeof(HuntersEchoAbility) },
                 ClassAbilityRegistry.ItemProcAbilities.Select(h => h.GetType()).ToArray(),
-                "another handler implements IItemProcAbility, so it now also fires on a cloak spell proc. " +
-                "Either give it its own filter or give cloak procs a hook of their own.");
+                "the IItemProcAbility handlers changed, so a new one now also fires on a cloak spell proc, or Taunt " +
+                "no longer runs ahead of Hunter's Echo. Either give a new one its own filter or give cloak procs a hook of their own.");
 
             var abilities = Path.Combine(
                 ClassAbilityAffinityDeclarationTests.RepoRoot(),
@@ -144,9 +146,28 @@ namespace ACE.Server.Tests
                 .OrderBy(f => f, StringComparer.Ordinal)
                 .ToArray();
 
-            CollectionAssert.AreEqual(new[] { "TauntAbility.cs" }, declaring,
-                "a handler file under ClassAbilities/Abilities mentions IItemProcAbility other than TauntAbility. " +
-                "See the assertion above for why that matters.");
+            CollectionAssert.AreEqual(new[] { "HuntersEchoAbility.cs", "TauntAbility.cs" }, declaring,
+                "a handler file under ClassAbilities/Abilities mentions IItemProcAbility other than TauntAbility and " +
+                "HuntersEchoAbility. See the assertion above for why that matters.");
+
+            // Hunter's Echo rides EXACTLY Taunt's two sources: its filter is a call to Taunt's, never a copy
+            var echo = File.ReadAllText(Path.Combine(abilities, "HuntersEchoAbility.cs"));
+
+            StringAssert.Contains(echo, "public static bool TriggersOn(WorldObject procSource) => TauntAbility.TriggersOn(procSource);",
+                "HuntersEchoAbility.TriggersOn must delegate to TauntAbility.TriggersOn.");
+            Assert.IsTrue(System.Text.RegularExpressions.Regex.IsMatch(echo,
+                    @"public void OnItemProc\(Player wielder, int rank, WorldObject procSource\)\s*\{\s*(//[^\n]*\s*)*if \(!TriggersOn\(procSource\)\)\s*return;"),
+                "HuntersEchoAbility.OnItemProc must open with the TriggersOn filter.");
+        }
+
+        /// <summary>The Echo's allowlist is Taunt's: same answers for an aetheria, a cloak, a weapon and null.</summary>
+        [TestMethod]
+        public void HuntersEcho_TriggersOnMatchesTaunt()
+        {
+            Assert.IsTrue(HuntersEchoAbility.TriggersOn(MakeItem(990204, EquipMask.Cloak)));
+            Assert.IsTrue(HuntersEchoAbility.TriggersOn(MakeItem(AnAetheriaWcid(), EquipMask.TrinketOne)));
+            Assert.IsFalse(HuntersEchoAbility.TriggersOn(MakeItem(990205, EquipMask.MissileWeapon)));
+            Assert.IsFalse(HuntersEchoAbility.TriggersOn(null));
         }
     }
 }

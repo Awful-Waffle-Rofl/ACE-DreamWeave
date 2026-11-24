@@ -30,6 +30,18 @@ namespace ACE.Server.WorldObjects
         {
             XpOverride = 0;
             LuminanceAward = null;
+            StripLootRewards();
+        }
+
+        /// <summary>
+        /// The loot half of <see cref="StripDeathRewards"/>: the treasure roll, the salvage affinities and the rare gate, with
+        /// the XP and luminance left exactly as they are (a Balance Trials creature: shaped with Rewards = true so it pays the
+        /// live XP and luminance through the ordinary death path, then stripped of its loot by TrialSpawner.Prepare). The
+        /// per-field trace is the one on StripDeathRewards above. NOT covered, as there: the KillQuest strings (the caller
+        /// strips those) and the killer's on-kill hooks.
+        /// </summary>
+        public void StripLootRewards()
+        {
             DeathTreasureOverride = null;
             DeathTreasureType = null;
             P_DungeonSalvageAffinities = null;
@@ -46,7 +58,8 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// Whether a death feeds the killer's kill-fill vessel charges and mule-form token progress (OnDeath). False for a
-        /// speed-course creature: a speed course is not a kill farm. Deliberately NOT IsRewardlessDeath: that predicate
+        /// speed-course creature and for a Balance Trials creature (OnDeath passes P_SpeedCourseCreature || P_TrialRep != null):
+        /// neither is a kill farm. Deliberately NOT IsRewardlessDeath: that predicate
         /// closes every on-kill hook and the corpse, while a speed kill keeps the class-ability and weapon-mod hooks,
         /// which are combat effects rather than progress, and its corpse.
         /// </summary>

@@ -805,15 +805,24 @@ namespace ACE.Server.WorldObjects
             // send createobject for all objects in this container's inventory to player
             var itemsToSend = new List<GameMessage>();
 
+            // Each create below rebuilds an item this client may already have recorded as sent (a weapon
+            // the player wore, then dragged in here: storing by drag sends no delete, and FinishClose sends
+            // none either, so nothing forgot it), and a rebuild drops the item's emitters. Forget the record so the equip that follows a loot move
+            // (which sends no create of its own) re-sends the script. Nothing is sent here: the item is
+            // inside a container, where a script attaches to nothing and would spend the equip's one send.
             foreach (var item in Inventory.Values)
             {
                 // FIXME: only send messages for unknown objects
                 itemsToSend.Add(new GameMessageCreateObject(item));
+                ACE.Server.Entity.VisualEffectManager.Forget(player.Session, item);
 
                 if (item is Container container)
                 {
                     foreach (var containerItem in container.Inventory.Values)
+                    {
                         itemsToSend.Add(new GameMessageCreateObject(containerItem));
+                        ACE.Server.Entity.VisualEffectManager.Forget(player.Session, containerItem);
+                    }
                 }
             }
 

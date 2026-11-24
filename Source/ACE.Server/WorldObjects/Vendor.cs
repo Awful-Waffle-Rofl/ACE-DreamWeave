@@ -241,6 +241,32 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public virtual int ItemsForSaleCount => DefaultItemsForSale.Count + UniqueItemsForSale.Count;
 
+        /// <summary>
+        /// The viewer seam (Salvage Roller shared station): what <paramref name="viewer"/> is shown. A vendor that
+        /// serves every viewer the same stock (every retail vendor, PersonalVendor) inherits this default, which is
+        /// exactly <see cref="ItemsForSaleCount"/>. GameEventApproachVendor reads this, never the viewer-less count,
+        /// and it must agree with <see cref="ForEachItemFor"/> for the same viewer.
+        /// </summary>
+        public virtual int GetItemsForSaleCount(Player viewer) => ItemsForSaleCount;
+
+        /// <summary>The viewer seam: the items <paramref name="viewer"/> is shown. Defaults to <see cref="forEachItem"/>.</summary>
+        public virtual void ForEachItemFor(Player viewer, Action<WorldObject> action) => forEachItem(action);
+
+        /// <summary>
+        /// The viewer seam: an item <paramref name="viewer"/> may resolve from this vendor (Player.FindObject's
+        /// LastUsedContainer arm). Defaults to the viewer-less <see cref="TryGetItemForSale(ObjectGuid, out WorldObject)"/>.
+        /// </summary>
+        public virtual bool TryGetItemForSale(Player viewer, ObjectGuid itemGuid, out WorldObject itemForSale) => TryGetItemForSale(itemGuid, out itemForSale);
+
+        /// <summary>
+        /// The viewer seam: the alternate-currency balance (wcid <paramref name="wcid"/>) <paramref name="viewer"/> is
+        /// shown in the approach message. The default is what every vendor showed before the seam existed: the items of
+        /// that wcid in the viewer's inventory PLUS any banked balance backing the currency
+        /// (Player.GetBankedAlternateCurrency). GameEventApproachVendor reads this, adds the altCurrencySpent term
+        /// and casts to uint exactly as before. A subclass that shows a virtual per-player balance overrides it.
+        /// </summary>
+        public virtual long AlternateCurrencyBalanceFor(Player viewer, uint wcid) => viewer.GetNumInventoryItemsOfWCID(wcid) + viewer.GetBankedAlternateCurrency(wcid);
+
         public List<WorldObject> GetDefaultItemsByWcid(uint wcid)
         {
             return DefaultItemsForSale.Values.Where(i => i.WeenieClassId == wcid).ToList();
@@ -253,6 +279,16 @@ namespace ACE.Server.WorldObjects
         {
             return DefaultItemsForSale.TryGetValue(itemGuid, out itemForSale) || UniqueItemsForSale.TryGetValue(itemGuid, out itemForSale);
         }
+
+        /// <summary>
+        /// The guid a vendor-panel row for <paramref name="obj"/> is written under in
+        /// GameEventApproachVendor - the guid the client will send back to buy or appraise it, and so the
+        /// key <see cref="TryGetItemForSale(ObjectGuid, out WorldObject)"/> must resolve. The object's own
+        /// guid for every vendor that lists real objects, which is all of them except PersonalVendor: a
+        /// mule lists a stored item under a display alias, so the client never sees the stored item's real
+        /// guid until the CreateObject at withdraw (see AccountVaultStore_DisplayAliases.cs).
+        /// </summary>
+        public virtual uint GetWireGuid(WorldObject obj) => obj.Guid.Full;
 
         /// <summary>
         /// This is raised by Player.HandleActionUseItem.<para />
@@ -937,6 +973,40 @@ namespace ACE.Server.WorldObjects
         {
             return CanAccept(wo, player, out reason);
         }
+
+        /// <summary>
+        /// Whole-basket validation, called by Player_Commerce.HandleActionSellItem AFTER VerifySellItems has
+        /// filtered the basket and BEFORE anything is detached from the player. Returning false refuses the
+        /// entire sale: nothing is removed from the pack, nothing is saved, and <paramref name="reason"/> is
+        /// shown to the player. Base is a permissive no-op so every existing vendor is unaffected.
+        ///
+        /// <paramref name="requested"/> has one entry per item profile the client sent, in request order,
+        /// with null where the profile named nothing the player owns - so its Count is the number of lines
+        /// the player asked to sell, and comparing it with <paramref name="accepted"/>.Count detects any line
+        /// VerifySellItems dropped. <paramref name="accepted"/> is the filtered basket that would be detached.
+        /// </summary>
+        public virtual bool TryValidateSellBasket(Player player, IReadOnlyList<WorldObject> requested, IReadOnlyList<WorldObject> accepted, out string reason)
+        {
+            reason = null;
+            return true;
+        }
+
+        /// <summary>
+        /// True for a vendor that pays nothing, so the sell path's PRICE gates mean nothing at it: the
+        /// IsSellable and Value &lt; 1 refusals in Player.IsAcceptableToSell and the payout leg of
+        /// HandleActionSellItem. Also drives the Retained bypass, which today has exactly the same members
+        /// (the mule vendor and the Salvage Roller station). False for every retail vendor.
+        /// </summary>
+        public virtual bool SellBypassesPriceGates => false;
+
+        /// <summary>
+        /// True for a vendor whose sale can never move an attuned item to another account, so the
+        /// unconditional Attuned refusal in Player.IsAcceptableToSell does not apply. Only the Salvage
+        /// Roller station: an item sold to it returns only to the character that sold it
+        /// (Docs/SalvageRoller/DESIGN.md 5.3). False for every other vendor, including the mule vendor,
+        /// whose vault is exactly the cross-account path the refusal exists to close.
+        /// </summary>
+        public virtual bool SellBypassesAttunedRefusal => false;
 
         /// <summary>
         /// This will either add the item to the vendors temporary sellables, or destroy it.<para />

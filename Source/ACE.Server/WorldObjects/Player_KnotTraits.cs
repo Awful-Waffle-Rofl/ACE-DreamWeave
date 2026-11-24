@@ -1,3 +1,5 @@
+using System;
+
 using ACE.Server.KnotLoot;
 
 namespace ACE.Server.WorldObjects
@@ -22,7 +24,7 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// Overpowering Intent: the resist-check skill fraction X (0.05 = the War/Void skill counts as 1.05x) on the
+        /// Overpowering Intent: the resist-check skill fraction X (0.05 = the War/Void/Life skill counts as 1.05x) on the
         /// equipped WAND. 0 when no wand is held, it lacks the trait, the mechanic is off, or Weapon-kind traits are
         /// suppressed. Read-only.
         /// </summary>
@@ -30,6 +32,56 @@ namespace ACE.Server.WorldObjects
         {
             return KnotTraitValue.ResolveOn(GetEquippedWand(), KnotTraitId.OverpoweringIntent, this).Primary;
         }
+
+        /// <summary>
+        /// Harbinger's Guard on one carrier: the shield armor level it adds at the Defensive Weapon read. 0 when the
+        /// item lacks the trait, the mechanic is off, or Weapon-kind traits are suppressed. Read-only.
+        /// </summary>
+        public double GetKnotHarbingerGuardLevel(WorldObject carrier)
+        {
+            return KnotTraitValue.ResolveOn(carrier, KnotTraitId.HarbingerGuard, this).Primary;
+        }
+
+        /// <summary>
+        /// Harbinger Celerity: the attack-speed fraction (0.05 = +5%), summed over every WIELDED item that carries the
+        /// trait. 0 when none does, the mechanic is off, or Equipment-kind traits are suppressed. Read-only.
+        /// </summary>
+        public double GetKnotCelerityAttackFraction()
+        {
+            var equipped = EquippedObjects;
+
+            if (equipped == null)
+                return 0.0;
+
+            var total = 0.0;
+
+            foreach (var item in equipped.Values)
+                total += KnotTraitValue.ResolveOn(item, KnotTraitId.HarbingerCelerity, this).Primary;
+
+            return total;
+        }
+
+        /// <summary>Harbinger Celerity: the cast-speed fraction for every spell, summed like <see cref="GetKnotCelerityAttackFraction"/>. Read-only.</summary>
+        public double GetKnotCelerityCastFraction()
+        {
+            var equipped = EquippedObjects;
+
+            if (equipped == null)
+                return 0.0;
+
+            var total = 0.0;
+
+            foreach (var item in equipped.Values)
+                total += KnotTraitValue.ResolveOn(item, KnotTraitId.HarbingerCelerity, this).Secondary;
+
+            return total;
+        }
+
+        /// <summary>The attack-speed multiplier term (1.0 = none) that joins the shared attack-speed product under its one ceiling.</summary>
+        public float GetKnotCelerityAttackSpeedMod() => 1.0f + (float)Math.Max(0.0, GetKnotCelerityAttackFraction());
+
+        /// <summary>The cast-speed multiplier term (1.0 = none) applied to every spell's cast animation speed.</summary>
+        public float GetKnotCelerityCastSpeedMod() => 1.0f + (float)Math.Max(0.0, GetKnotCelerityCastFraction());
 
         /// <summary>
         /// Frugal Hand: the stamina and mana cost-reduction fraction (0.10 = -10%), summed over every equipped item

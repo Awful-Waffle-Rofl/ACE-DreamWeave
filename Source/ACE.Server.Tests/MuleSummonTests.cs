@@ -808,6 +808,38 @@ namespace ACE.Server.Tests
             Assert.IsTrue(threw, "expected to reach landblock construction; a clean return means the denylist check or the placement ladder short-circuited before this test exercised anything past that point");
         }
 
+        /// <summary>
+        /// The Allegiance Avatar's per-rung rule (denylist only, outdoors) must be the one the rung loop asks, not the mule's
+        /// IsSummonPermitted. Same fixture shape as the radius test above. The injected rule refuses every rung, so the ladder
+        /// is walked to the end without EnterWorld: four rungs asked, a clean false. Were the loop to call IsSummonPermitted
+        /// instead (fully open in this fixture), the rule would never be asked and the first rung would reach EnterWorld.
+        /// </summary>
+        [TestMethod]
+        public void TryPlaceVendor_InjectedRungRule_IsWhatTheRungLoopAsks()
+        {
+            var summoner = (Player)FormatterServices.GetUninitializedObject(typeof(Player));
+            var summonerLocation = MakeLocation(x: 50f, y: 50f);
+            SeedBiota(summoner);
+            SeedPositionCaches(summoner);
+            SeedPhysicsObj(summoner, summonerLocation);
+            summoner.PhysicsObj.State |= PhysicsState.HasPhysicsBSP;
+            summoner.Location = summonerLocation;
+
+            var vendor = MakeVendor();
+            var asked = new List<Position>();
+
+            var placed = MuleSummonHandler.TryPlaceVendor(vendor, summoner, location =>
+            {
+                asked.Add(new Position(location));
+                return false;
+            });
+
+            Assert.IsFalse(placed, "every rung refused: nothing is placed");
+            Assert.AreEqual(4, asked.Count, "the injected rule is asked once per rung of the ladder");
+            Assert.AreEqual(summonerLocation.PositionX, asked[3].PositionX, "the last rung is the summoner's own spot");
+            Assert.AreEqual(summonerLocation.PositionY, asked[3].PositionY);
+        }
+
         #endregion
 
         #region Lifetime (DESIGN 11.4)
@@ -2169,6 +2201,8 @@ namespace ACE.Server.Tests
                 wcid => wcid == MuleFormStandIn.DarkSarcophagusWcid ? donor : null, FormSetupHeight, FormAccount);
 
             Assert.AreEqual(0x020000CEu, resolved.PropertiesDID[PropertyDataId.Setup]);
+            Assert.AreEqual(3, resolved.PropertiesTextureMap.Count);
+            Assert.IsTrue(System.Linq.Enumerable.All(resolved.PropertiesTextureMap, r => r.NewTexture == MuleFormStandIn.DarkSarcophagusStoneTexture));
             Assert.AreEqual(MuleFormStandIn.CoffinDefaultScale, resolved.PropertiesFloat[PropertyFloat.DefaultScale], 0.0001);
             Assert.IsTrue(resolved.PropertiesBool[PropertyBool.PersonalVendor]);
         }

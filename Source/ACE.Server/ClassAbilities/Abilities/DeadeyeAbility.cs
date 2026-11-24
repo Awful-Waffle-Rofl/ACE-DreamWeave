@@ -20,7 +20,10 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "deadeye",
             DisplayName = "Deadeye",
-            Description = "Increases your missile damage by 9.5% per rank (+28.5% at rank 3). Higher Fletching multiplies the bonus.",
+            // Live text: rank * class_ability_deadeye_percent_per_rank (ModifyOutgoingDamage / GetReadout). The
+            // "(+28.5% at rank 3)" is the top rank's total: the @max selector renders that one rank's value.
+            DescriptionTemplate = "Raises your missile damage.",
+            RankTailTemplate = "+{per:class_ability_deadeye_percent_per_rank|pct}% missile damage",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,

@@ -100,6 +100,12 @@ namespace ACE.Server.Entity
         /// <param name="amount">The amount of damage hit for</param>
         public void Add(WorldObject attacker, DamageType damageType, uint amount)
         {
+            // Balance Trials recorder (TrialHooks.OnDamageRecorded): hit out on a trial creature, hit in on a trial player. Here,
+            // in the one method both Add overloads pass through, and before the zero return, so a hit a ward absorbed to 0 still
+            // counts as landed. One field read and a type test for every hit outside a trial.
+            if (Creature.P_TrialRep != null || Creature is Player { TrialSession: not null })
+                ACE.Server.BalanceTrials.TrialHooks.OnDamageRecorded(Creature, attacker, damageType, amount);
+
             //Console.WriteLine($"{Creature.Name}.DamageHistory.Add({attacker.Name}, {damageType}, {amount})");
 
             if (amount == 0)
@@ -120,6 +126,12 @@ namespace ACE.Server.Entity
             Log.Add(entry);
 
             AddInternal(attacker, amount);
+
+            // Pet engagement for a creature that never attacks (PetEngagement.RecordDamage): the owner's side damaging
+            // it is what lets a never-initiates pet (Archer, casters) join in. Here for the same reason as the hooks
+            // below - every damaging health write records through this method. A hit by a monster or an ownerless pet costs
+            // two type tests; a player's or pet's hit also reads the victim's Tolerance (a biota property read under its lock).
+            PetEngagement.RecordDamage(Creature, attacker);
 
             // World Events reward credit (owner ruling 2026-10-04): any damage dealt to, or taken from, a
             // run creature earns a participation record. Hooked here because every damaging health write
@@ -148,7 +160,10 @@ namespace ACE.Server.Entity
         /// that have that figure. A separate overload so the three-argument Add above stays exactly as it was.
         /// </summary>
         /// <param name="thrown">The hit after every mitigation, before the clamp to remaining health</param>
-        public void Add(WorldObject attacker, DamageType damageType, uint amount, uint thrown)
+        /// <param name="kind">What kind of attack this was (player_death_event.attack_kind); recording only</param>
+        /// <param name="isCritical">Whether the hit was a critical, when the sink knows</param>
+        /// <param name="spellId">The spell that dealt the hit, for a magic sink</param>
+        public void Add(WorldObject attacker, DamageType damageType, uint amount, uint thrown, DamageAttackKind? kind = null, bool? isCritical = null, uint? spellId = null)
         {
             var before = Log.Count;
 
@@ -156,7 +171,19 @@ namespace ACE.Server.Entity
 
             // a zero amount logs nothing, so there is no entry to stamp
             if (Log.Count > before)
-                Log[^1].Thrown = thrown;
+            {
+                var entry = Log[^1];
+
+                entry.Thrown = thrown;
+                entry.AttackKind = kind;
+                entry.IsCritical = isCritical;
+                entry.SpellId = spellId;
+
+                // A hit that left a PLAYER at 0 health: snapshot the attacker and the victim's defensive state now, before
+                // the death handler runs. One compare for every other hit. Never throws (DeathTelemetry swallows).
+                if (entry.CurrentHealth == 0 && Creature is Player victim)
+                    ACE.Server.Managers.Analytics.DeathTelemetry.CaptureKillingHit(entry, victim, attacker);
+            }
         }
 
         /// <summary>

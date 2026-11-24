@@ -20,7 +20,8 @@ namespace ACE.Server.Tests.ThreadDungeons
     ///
     /// Most cases use a synthetic maxLevel, so the curve's shape is pinned independently of where the fork's
     /// level ceiling happens to sit (owner ruling R6). The exceptions are the calibration anchors, which read
-    /// DungeonGemSpec.MaxGemLevel on purpose so that a moved ceiling fails loudly here and gets a design look.
+    /// DungeonGemSpec.SurveyReferenceLevelDefault (375, decoupled from the gem ceiling by owner ruling
+    /// 2026-11-16) on purpose so that a moved reference level fails loudly here and gets a design look.
     /// </summary>
     [TestClass]
     public class SurveyRewardMathTests
@@ -254,8 +255,8 @@ namespace ACE.Server.Tests.ThreadDungeons
         /// <summary>
         /// The calibration anchor for the shipped ceiling: a run at the survey floor level
         /// (the lowest Raw Fragment rung, 185) at the default k of 2. Deliberately expressed
-        /// against DungeonGemSpec.MaxGemLevel rather than a literal, so this test FAILS LOUDLY if the level
-        /// ceiling moves - at which point the numbers below want a fresh design look.
+        /// against DungeonGemSpec.SurveyReferenceLevelDefault rather than a literal, so this test FAILS LOUDLY if the
+        /// reference level moves - at which point the numbers below want a fresh design look.
         ///
         ///   ratio = (185 / 375)^2 = (37/75)^2 = 1369/5625 = 0.243377...
         ///   lum   = round(500,000 * 1369/5625) = 121,689
@@ -266,7 +267,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         [TestMethod]
         public void A_run_at_the_survey_floor_level_pays_about_24_percent_luminance_at_the_default_exponent()
         {
-            var limits = Limits(maxLevel: DungeonGemSpec.MaxGemLevel);
+            var limits = Limits(maxLevel: DungeonGemSpec.SurveyReferenceLevelDefault);
             var ring = SurveyLevelRing.FromLevels(new[] { 185 });
 
             var award = Compute(Tier(10), ring, limits, playerLevel: 375);
@@ -280,7 +281,7 @@ namespace ACE.Server.Tests.ThreadDungeons
 
         /// <summary>
         /// The reference level is a TUNABLE (dynamic_dungeons_survey_reference_level) whose default is
-        /// DungeonGemSpec.MaxGemLevel, so pinning it back at the OLD ceiling of 275 must restore the pre-raise
+        /// DungeonGemSpec.SurveyReferenceLevelDefault (375), so pinning it back at the OLD ceiling of 275 must restore the pre-raise
         /// luminance curve exactly - that is the whole point of it being a dial rather than a direct MaxLevel
         /// read. A full ring at 275 is the discriminating input: it reads ratio 1.0 against a 275 reference
         /// and (275/375)^2 = 121/225 against the 375 one.
@@ -298,9 +299,30 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreEqual(500000L, Compute(Tier(10), ring, atOldCeiling).Luminance);
 
             // The same ring at the shipped default reference level is worth (275/375)^2 of that.
-            var atNewCeiling = Limits(maxLevel: DungeonGemSpec.MaxGemLevel);
+            var atNewCeiling = Limits(maxLevel: DungeonGemSpec.SurveyReferenceLevelDefault);
 
             Assert.AreEqual(121.0 / 225.0, Compute(Tier(10), ring, atNewCeiling).Ratio, 1e-9, "(275 / 375)^2");
+        }
+
+        /// <summary>
+        /// Owner ruling 2026-11-16: the gem ceiling rose to 500 but the survey reference level stayed 375, so a
+        /// ring above 375 clamps to ratio 1.0 (full pay) rather than paying a bonus, while a ring at 375 is
+        /// exactly 1.0 and one below it is still scaled down. The discriminating control is the 300 ring.
+        /// </summary>
+        [TestMethod]
+        public void Rings_above_the_375_reference_level_clamp_to_the_full_rate()
+        {
+            var limits = Limits(maxLevel: DungeonGemSpec.SurveyReferenceLevelDefault);
+
+            foreach (var level in new[] { 375, 400, 500 })
+            {
+                var ring = SurveyLevelRing.FromLevels(Enumerable.Repeat(level, SurveyLevelRing.Depth));
+                Assert.AreEqual(1.0, Compute(Tier(10), ring, limits).Ratio, 0.0, $"ring at {level}");
+                Assert.AreEqual(500000L, Compute(Tier(10), ring, limits).Luminance, $"ring at {level}");
+            }
+
+            var below = SurveyLevelRing.FromLevels(Enumerable.Repeat(300, SurveyLevelRing.Depth));
+            Assert.IsTrue(Compute(Tier(10), below, limits).Ratio < 1.0, "positive control: a ring below the reference is still scaled");
         }
 
         [TestMethod]

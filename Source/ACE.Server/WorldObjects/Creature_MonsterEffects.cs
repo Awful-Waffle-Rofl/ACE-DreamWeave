@@ -816,11 +816,30 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// The magic-delay gate (AiUseMagicDelay, Weakened Blood slow included) divided by the cast-axis
+        /// multiplier, capped by monster_effect_speed_cap like every other cast-axis read. CALLED ONLY BY THE
+        /// CASTER-PET GATE (CombatPet.CasterCastReady): an ordinary monster's NextMagicAttackTime keeps the
+        /// unscaled delay, so the live castspeed ramps on monsters (Aun Shaman and friends) shorten their
+        /// animations only, exactly as before. An exact no-op for a creature carrying no effects.
+        /// </summary>
+        internal double ScaleMonsterEffectCastDelayForPet()
+        {
+            var delay = GetWeakenedBloodScaledMagicDelay();
+
+            return MonsterEffects == null ? delay : delay / GetMonsterEffectSpeedMultiplier(MonsterSpeedAxis.Cast);
+        }
+
+        /// <summary>
         /// IMonsterCastHook dispatch - called from Creature.MagicAttack once the spell has been cast. Bounded
         /// by the recast guard above: see <see cref="CanChainMonsterEffectCast"/> for the half a chaining
         /// handler must read, and the entry check here for the backstop that bounds one which does not.
+        ///
+        /// <paramref name="allowChaining"/> FALSE (the caster-pet cast path, TryStartExplicitCast) skips every
+        /// handler whose <see cref="IMonsterCastHook.StartsCasts"/> is set: a recast re-casts at AttackTarget,
+        /// which for a pet's heal or buff would be the enemy. The depth claim and the backstop run exactly as
+        /// they do with chaining on, so the recast guard's accounting is the same on both paths.
         /// </summary>
-        public void OnMonsterEffectCastComplete(Spell spell)
+        public void OnMonsterEffectCastComplete(Spell spell, bool allowChaining = true)
         {
             var effects = MonsterEffects;
 
@@ -847,8 +866,12 @@ namespace ACE.Server.WorldObjects
                 {
                     var index = indexes[i];
                     var entry = effects[index];
+                    var hook = (IMonsterCastHook)entry.Handler;
 
-                    ((IMonsterCastHook)entry.Handler).OnCastComplete(this, spell, entry.Spec, ref state[index]);
+                    if (!allowChaining && hook.StartsCasts)
+                        continue;
+
+                    hook.OnCastComplete(this, spell, entry.Spec, ref state[index]);
                 }
             }
             finally

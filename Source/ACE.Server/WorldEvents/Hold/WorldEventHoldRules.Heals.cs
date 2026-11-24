@@ -140,6 +140,47 @@ namespace ACE.Server.WorldEvents
             return (int)Math.Floor(TakeFromBucket(wanted, windowAllowance / 10.0, windowAllowance, ref tokens, ref lastAt, now));
         }
 
+        /// <summary>The most raw heal points one Transfusion share may ask for on a single knight.</summary>
+        public const double KnightTransfusionDemandMax = 250.0;
+
+        /// <summary>
+        /// What a hurt knight asks of a Drain Health surplus (pure), in raw player-heal points: the points whose
+        /// <see cref="ConvertPlayerHeal"/> conversion (<see cref="TypicalPlayerHeal"/> points = <see cref="HealShareOfTypicalHeal"/>
+        /// of max health, scaled by <paramref name="playerHealMult"/>) equals min(<paramref name="missingShare"/>,
+        /// <paramref name="playerHealCap"/>) of max health, capped at <see cref="KnightTransfusionDemandMax"/>. Rounded up so a
+        /// sliver of missing health still asks for a point. 0 for anything unusable, or a mult of 0 (heals refused).
+        /// </summary>
+        public static uint KnightTransfusionDemand(double missingShare, double playerHealCap, double playerHealMult)
+        {
+            if (!(missingShare > 0) || !double.IsFinite(missingShare) || !(playerHealCap > 0) || !double.IsFinite(playerHealCap)
+                || !(playerHealMult > 0) || !double.IsFinite(playerHealMult))
+                return 0;
+
+            var share = Math.Min(Math.Min(1.0, missingShare), playerHealCap);
+            var raw = Math.Ceiling(share / HealShareOfTypicalHeal * TypicalPlayerHeal / playerHealMult);
+
+            return (uint)Math.Min(KnightTransfusionDemandMax, raw);
+        }
+
+        /// <summary>
+        /// The most raw player-heal points whose conversion (see <see cref="ConvertPlayerHeal"/>, after
+        /// <paramref name="afterHitFactor"/> and <paramref name="playerHealMult"/>) stays within <paramref name="health"/> (pure).
+        /// Rounded down, so a bid made from it never exceeds the room. 0 for anything unusable.
+        /// </summary>
+        public static uint RawPointsForHealth(int health, uint maxHealth, double playerHealMult, double afterHitFactor)
+        {
+            if (health <= 0 || maxHealth == 0 || !(playerHealMult > 0) || !double.IsFinite(playerHealMult) || !(afterHitFactor > 0) || !double.IsFinite(afterHitFactor))
+                return 0;
+
+            var raw = Math.Floor(health / (maxHealth * HealShareOfTypicalHeal) * TypicalPlayerHeal / (playerHealMult * afterHitFactor));
+
+            return (uint)Math.Min(KnightTransfusionDemandMax, raw);
+        }
+
+        /// <summary>Whether a knight is a Transfusion recipient (pure): accepts player heals, alive, on the caster's landblock and within reach.</summary>
+        public static bool TransfusionKnightQualifies(bool acceptsPlayerHeal, bool alive, double? distanceOnSameLandblock, double reach)
+            => acceptsPlayerHeal && alive && distanceOnSameLandblock.HasValue && distanceOnSameLandblock.Value <= reach;
+
         /// <summary>The health a share-based heal asks for (pure): floor(min(1, share) x max x factor), 0 for anything unusable.</summary>
         public static int ShareHeal(double share, uint maxHealth, double factor)
         {

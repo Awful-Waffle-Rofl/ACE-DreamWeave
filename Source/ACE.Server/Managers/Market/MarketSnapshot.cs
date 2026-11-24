@@ -40,6 +40,8 @@ namespace ACE.Server.Managers.Market
         /// computed differently, a token set extended. The server then repairs legacy listings on
         /// the next world start, and nothing else has to be remembered.
         ///
+        /// A BUMP ALSO NEEDS ITS ENTRY in the snapshot_version history in Docs/Market/market-api-v1.yaml.
+        ///
         /// FORGETTING TO BUMP IT IS THE ONE FAILURE THIS SCHEME CANNOT DETECT. Nothing derives the
         /// version from the shape of the code, so a projection change shipped without a bump leaves
         /// every stored snapshot claiming to be current and version-gated selection will skip all of
@@ -78,8 +80,22 @@ namespace ACE.Server.Managers.Market
         /// item, so the web suit builder can offer other players' listings as candidates. Bumped so the
         /// automatic sweep re-projects every Active listing on the first world start after the deploy. A
         /// CLOSED listing keeps null forever.
+        ///
+        /// 6 (2026-11-10) - cloak Mantle rows (Rear Guard, Proc Amplifier; kind "armor") and Jewelry Aspect rows
+        /// (kind "jewelry", one per aspect type, with its count) added to mods (MarketItemMods). Bumped so
+        /// the automatic sweep re-projects every Active listing on the first world start after the deploy. A
+        /// CLOSED listing keeps its old mods forever.
+        ///
+        /// 7 (2026-11-16) - Paragon weapon mods: Paragon-only mods appear as weapon rows, a mod held from both
+        /// sources carries the combined magnitude, and the Paragon summary line ("Paragon 53/55: ...") is
+        /// appended to long_desc (MarketItemMods.ParagonSummary). Bumped so the automatic sweep re-projects
+        /// already-listed Paragon weapons. A CLOSED listing keeps its old mods forever.
+        ///
+        /// 8 (2026-11-23) - equipment mod rows carry `requirement` (EquipmentModDisplay.AbilityRequirement), so the
+        /// web can show "Works without the ability" / "Requires &lt;Ability&gt; trained". Weapon, cloak and jewelry rows
+        /// omit it. A CLOSED listing keeps its old mods forever.
         /// </summary>
-        public const int CurrentVersion = 5;
+        public const int CurrentVersion = 8;
 
         /// <summary>snake_case per Docs/Market/market-api-v1.yaml; the web app reads snapshot_json verbatim, so this policy is contract.</summary>
         public static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
@@ -222,6 +238,10 @@ namespace ACE.Server.Managers.Market
             // Mods, capacity and quality tier (projection version 4). Null - never empty - when there is
             // nothing to show, which FromWeenie's all-null mirror depends on.
             MarketItemMods.Apply(item, snapshot);
+
+            // The Paragon level and gem summary rides on the existing description field (no wire change).
+            // WeaponModParagonDisplay is the one formatter; empty for every non-Paragon item.
+            AppendParagonSummary(item, snapshot);
 
             // The suit projection (version 5) is for LISTING snapshots only: a vault view or a character
             // sheet would mislabel it (source "vault" on a worn item) and pay for it twice. It carries the
@@ -420,6 +440,28 @@ namespace ACE.Server.Managers.Market
             {
                 log.Error($"[MARKET] could not project the suit data of weenie {weenie.WeenieClassId}; projecting it without: {ex.GetFullMessage()}");
                 return null;
+            }
+        }
+
+        /// <summary>
+        /// Appends the Paragon summary ("Paragon 53/55: Devastation x2, Ambush x1") to LongDesc, on its own line.
+        /// A no-op for every item that is not a Paragon carrier, so non-Paragon snapshots are unchanged. Never
+        /// throws: a failure leaves LongDesc as projected.
+        /// </summary>
+        private static void AppendParagonSummary(WorldObject item, ListingSnapshot snapshot)
+        {
+            try
+            {
+                var summary = MarketItemMods.ParagonSummary(item);
+
+                if (string.IsNullOrEmpty(summary))
+                    return;
+
+                snapshot.LongDesc = string.IsNullOrEmpty(snapshot.LongDesc) ? summary : snapshot.LongDesc + "\n" + summary;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[MARKET] could not project the Paragon summary of 0x{item.Guid.Full:X8}; listing it without: {ex.GetFullMessage()}");
             }
         }
 

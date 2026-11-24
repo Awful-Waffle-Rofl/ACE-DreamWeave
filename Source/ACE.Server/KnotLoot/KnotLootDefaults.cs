@@ -46,6 +46,7 @@ namespace ACE.Server.KnotLoot
         public const long MatronWeightTorc = 1;
         public const long MatronWeightHiveStingerBaton = 1;
         public const long MatronWeightHiveNetherBaton = 1;
+        public const long MatronWeightHiveIchorBaton = 1;
 
         /// <summary>Chance the independent Spines group drops (knot_loot_matron_chance_spines).</summary>
         public const double MatronChanceSpines = 1.0;
@@ -103,10 +104,57 @@ namespace ACE.Server.KnotLoot
         public const double WristTradeCostMin = 10.0;
         public const double WristTradeCostMax = 20.0;
 
-        // Overpowering Intent: fraction X; the caster's War/Void skill counts as (1 + X) times its value for the
+        // Overpowering Intent: fraction X; the caster's War/Void/Life skill counts as (1 + X) times its value for the
         // target's magic resist check only, against non-player targets.
         public const bool OverpoweringIntentEnabled = true;
         public const double OverpoweringIntentMin = 0.05;
         public const double OverpoweringIntentMax = 0.10;
+
+        // Harbinger's Guard: shield armor level added at the Defensive Weapon read (Player.GetDefensiveWeaponModValue),
+        // scaled by Knot level like every trait.
+        public const bool HarbingerGuardEnabled = true;
+        public const double HarbingerGuardMin = 50.0;
+        public const double HarbingerGuardMax = 100.0;
+
+        // Harbinger's Celerity (Arm Guard): fractions, 0.05 = +5%. Primary is attack speed, Secondary is cast speed
+        // (all spells). Min equal to max makes the value flat at every Knot level.
+        public const bool HarbingerCelerityEnabled = true;
+        public const double HarbingerCelerityAttackMin = 0.05;
+        public const double HarbingerCelerityAttackMax = 0.05;
+        public const double HarbingerCelerityCastMin = 0.05;
+        public const double HarbingerCelerityCastMax = 0.05;
+
+        // ---- Harbinger table ----
+
+        public const bool HarbingerEnabled = true;
+
+        public const long HarbingerWeightElementalInfusion = 1;
+        public const long HarbingerWeightArmorInfusion = 1;
+        public const long HarbingerWeightCripplingInfusion = 1;
+
+        public const long HarbingerWeightArmGuard = 4;
+        public const long HarbingerWeightCausticWings = 1;
+        public const long HarbingerWeightStormEye = 1;
+        public const long HarbingerWeightFroreCrystal = 1;
+        public const long HarbingerWeightBurningLimb = 1;
+        public const long HarbingerWeightCorrodingScythe = 1;
+        public const long HarbingerWeightThunderingScythe = 1;
+        public const long HarbingerWeightFreezingScythe = 1;
+        public const long HarbingerWeightBurningScythe = 1;
+        public const long HarbingerWeightCausticEye = 1;
+        public const long HarbingerWeightJoltingEye = 1;
+        public const long HarbingerWeightFrozenEye = 1;
+        public const long HarbingerWeightBurningEye = 1;
+
+        public const long HarbingerMmdMin = 25;
+        public const long HarbingerMmdMax = 50;
+        public const long HarbingerNoteMin = 25;
+        public const long HarbingerNoteMax = 50;
+
+        public const long HarbingerWindowLowLevel = 200;
+        public const long HarbingerWindowHighLevel = 400;
+        public const double HarbingerWindowLowStart = 0.0;
+        public const double HarbingerWindowHighStart = 0.70;
+        public const double HarbingerWindowWidth = 0.30;
     }
 }

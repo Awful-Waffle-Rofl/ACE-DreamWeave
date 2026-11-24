@@ -39,14 +39,35 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "frenzy",
             DisplayName = "Frenzy",
-            Description = "Each landed melee hit against a monster (any melee style, unarmed included) " +
-                          "increases your attack speed by 2.5%, stacking up to 6 / 12 / 20 times by rank. " +
-                          "Stacks reset after 15 seconds without landing a hit. " +
-                          "Higher Recklessness increases the per-stack bonus.",
+            DescriptionTemplate = "Each melee hit you land (any melee style) raises your attack speed by " +
+                          "{v:class_ability_frenzy_percent_per_stack|pct}%. The stacks reset after " +
+                          "{v:class_ability_frenzy_expire_seconds|num} seconds without a hit.",
+            // Live text: per-stack rate is GetFrenzyPerStackTerms (Player_ClassAbilityBuffs.cs:266), the reset window is
+            // FrenzyExpireSeconds (Player_ClassAbilityBuffs.cs:188). The 6 / 12 / 20 stack caps are the StackCap switch
+            // below, a code constant with no tunable.
+            TunableSourceFiles = new[] { "WorldObjects/Player_ClassAbilityBuffs.cs" },
+            // The token tail is a per-rank array: each rank's cap is the same StackCap switch constant, so there is no tunable to bind.
+            RankTailTemplate = new[]
+            {
+                "up to 6 stacks",
+                "up to 12 stacks",
+                "up to 20 stacks",
+            },
+            AllowedLiterals = new[]
+            {
+                ("up to 6 stacks", "rank 1 stack cap: the FrenzyAbility.StackCap switch, a code constant with no tunable"),
+                ("up to 12 stacks", "rank 2 stack cap: the FrenzyAbility.StackCap switch, a code constant with no tunable"),
+                ("up to 20 stacks", "rank 3 stack cap: the FrenzyAbility.StackCap switch, a code constant with no tunable"),
+            },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },   // flat 1/rank (class ability overhaul repricing, 2026-09-12)
             Implemented = true,
             AffinitySkill = Skill.Recklessness, // rider computed in Player_ClassAbilityBuffs.GetFrenzyPerStackTerms, not in this file
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "stacks", Bounds = CeilingBounds.Stacks, Source = CeilingSource.Constant, ConstantValue = rank => StackCap(rank), ConstantRef = "FrenzyAbility.StackCap", Label = "max stacks", Format = "int" },
+                new ClassAbilityCeiling { Id = "attackspeed", Bounds = CeilingBounds.Total, Source = CeilingSource.Tunable, Key = "class_ability_attack_speed_ceiling", Label = "max attack speed", Format = "x", ZeroIsLimit = true },
+            },
         };
 
         // Trigger only: bumps the attacker's transient Frenzy stack. Damage is deliberately untouched.
@@ -121,7 +142,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             // getters and the real ApplyClassAbilityAttackSpeed, then compares the real clamped result
             // against the naive uncapped product to see whether the ceiling actually bit.
             var referenceBaseAnimSpeed = (float)Creature.MaxAttackSpeed;
-            var composedMod = player.GetFrenzyAttackSpeedMod() * player.GetAttackSpeedSkillMod() * player.GetWeaponModAttackSpeedMod();
+            var composedMod = player.GetFrenzyAttackSpeedMod() * player.GetAttackSpeedSkillMod() * player.GetWeaponModAttackSpeedMod() * player.GetKnotCelerityAttackSpeedMod();
             var uncappedSpeed = referenceBaseAnimSpeed * composedMod;
             var appliedSpeed = player.ApplyClassAbilityAttackSpeed(referenceBaseAnimSpeed);
             var ceilingBit = appliedSpeed < uncappedSpeed - 0.0001f;
@@ -137,6 +158,11 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "atk speed",
                 Per = "/stack",
                 CapNote = ceilingBit ? "anim ceiling" : null,
+                Ceilings = new[]
+                {
+                    ClassAbilityCeilings.Read(Definition, "stacks", player.GetFrenzyStacks(), rank, ClassAbilityText.Live),
+                    ClassAbilityCeilings.Read(Definition, "attackspeed", uncappedSpeed, rank, ClassAbilityText.Live),
+                },
             };
         }
     }

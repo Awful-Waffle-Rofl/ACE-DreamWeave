@@ -16,10 +16,12 @@ namespace ACE.Server.Tests
     /// branch), and a re-clear after the cooldown window pays the ladder currency again at the same
     /// amount - retail/fork kill-task counters that are not the ladder must be completely unaffected.
     ///
-    /// Exercised directly against QuestManager.ApplyKillStamp and BluespireLadderRewards.ShouldPayOnKillStamp
+    /// Exercised directly against QuestManager.ApplyKillStamp and QuestManager.BluespirePayoutObserver
     /// - both internal, both reachable via the ACE.Server -> ACE.Server.Tests InternalsVisibleTo
     /// (ACE.Server.csproj:15) - so none of this needs a live Player, a database, or a real currency
-    /// weenie. Quests are stamped on a bare Creature, exactly as QuestManagerTests does.
+    /// weenie. Quests are stamped on a bare Creature, exactly as QuestManagerTests does. The repeat payout
+    /// itself is owned by QuestManager.Update and pinned across every clearing path in
+    /// BluespireLadderRepeatPayoutTests.
     /// </summary>
     [TestClass]
     public class BluespireLadderKillCooldownTests
@@ -145,7 +147,7 @@ namespace ACE.Server.Tests
         /// Player), so this drives the IDENTICAL silent-return shape through IsMaxSolves instead - a row
         /// already at its cap, restamped again. Before the fix this returned Restamped (existence-only
         /// classification saw a row before and a row after, and called that a restamp); after the fix it
-        /// must return Refused, and ShouldPayOnKillStamp must therefore route no payout for it.
+        /// must return Refused.
         /// </summary>
         [TestMethod]
         public void ApplyKillStamp_BlockedExistingRowUpdate_ReturnsRefused_NotRestamped()
@@ -165,9 +167,6 @@ namespace ACE.Server.Tests
             Assert.AreEqual(1, qm.GetCurrentSolves(BlockedRestampQuest), "a blocked restamp must not increment the count");
             Assert.AreEqual(lastTimeBefore, qm.GetQuest(BlockedRestampQuest).LastTimeCompleted,
                 "a blocked restamp must not touch LastTimeCompleted");
-
-            Assert.IsFalse(BluespireLadderRewards.ShouldPayOnKillStamp(outcome),
-                "a blocked restamp must never route the ladder's repeat payout");
         }
 
         [TestMethod]
@@ -189,26 +188,16 @@ namespace ACE.Server.Tests
             }
         }
 
-        [TestMethod]
-        public void ShouldPayOnKillStamp_TruthTable()
-        {
-            Assert.IsFalse(BluespireLadderRewards.ShouldPayOnKillStamp(QuestManager.KillStampOutcome.NotHeld));
-            Assert.IsFalse(BluespireLadderRewards.ShouldPayOnKillStamp(QuestManager.KillStampOutcome.OnCooldown));
-            Assert.IsFalse(BluespireLadderRewards.ShouldPayOnKillStamp(QuestManager.KillStampOutcome.Created),
-                "Created already paid inside Update's created-row branch; paying again here would double-pay the first clear");
-            Assert.IsTrue(BluespireLadderRewards.ShouldPayOnKillStamp(QuestManager.KillStampOutcome.Restamped));
-            Assert.IsFalse(BluespireLadderRewards.ShouldPayOnKillStamp(QuestManager.KillStampOutcome.Refused));
-        }
-
         /// <summary>
         /// A source-text pin, not a behavioural test: HandleKillTask must decide everything from
-        /// ApplyKillStamp's returned outcome, and the repeat-payout check must physically sit AFTER that
-        /// call in source order, never before it (which would mean deciding to pay before the cooldown/
-        /// creation outcome for this kill is even known). Modelled on AccountCapacityUpgradeDaoShapeTests'
-        /// source-text pins.
+        /// ApplyKillStamp's returned outcome, and it must pay NO ladder reward itself. Both payouts are
+        /// owned by QuestManager.Update, which ApplyKillStamp's Stamp already ran, so a payout call here
+        /// would double-pay every kill re-clear (the shape this method had before the D1/D2 repeat-payout
+        /// fix). HandleKillTask returns at once for a non-Player, so this harness cannot drive it end to
+        /// end - hence a source pin. Modelled on AccountCapacityUpgradeDaoShapeTests' source-text pins.
         /// </summary>
         [TestMethod]
-        public void HandleKillTask_CallsApplyKillStamp_AndGatesRepeatPayoutBehindOutcome()
+        public void HandleKillTask_CallsApplyKillStamp_AndPaysNothingItself()
         {
             var src = QuestManagerSource();
 
@@ -223,11 +212,12 @@ namespace ACE.Server.Tests
             var applyIdx = body.IndexOf("ApplyKillStamp(questName, bootstrapRow)", StringComparison.Ordinal);
             Assert.IsTrue(applyIdx >= 0, "HandleKillTask must call ApplyKillStamp");
 
-            var payoutIdx = body.IndexOf("ShouldPayOnKillStamp(outcome)", StringComparison.Ordinal);
-            Assert.IsTrue(payoutIdx >= 0, "HandleKillTask must gate the repeat payout on ShouldPayOnKillStamp");
-
-            Assert.IsTrue(payoutIdx > applyIdx,
-                "the repeat payout must be decided from ApplyKillStamp's outcome, not before it runs");
+            Assert.AreEqual(-1, body.IndexOf("TryPayBluespireLadderReward(", StringComparison.Ordinal),
+                "HandleKillTask must not pay the ladder reward itself - Update already did, so this would double-pay");
+            Assert.AreEqual(-1, body.IndexOf("PayBluespireLadderReward(", StringComparison.Ordinal),
+                "HandleKillTask must not route a ladder payout itself - Update already did, so this would double-pay");
+            Assert.AreEqual(-1, body.IndexOf("BluespireLadderRewards.Pay(", StringComparison.Ordinal),
+                "HandleKillTask must not call the payout directly either");
         }
 
         /// <summary>

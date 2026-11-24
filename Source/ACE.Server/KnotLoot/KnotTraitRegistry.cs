@@ -12,6 +12,8 @@ namespace ACE.Server.KnotLoot
         FrugalHand = 3,
         WristTrade = 4,
         OverpoweringIntent = 5,
+        HarbingerGuard = 6,
+        HarbingerCelerity = 7,
     }
 
     /// <summary>Which existing PvP mod predicate a trait follows: Weapon follows Player.WeaponModSuppressed, Equipment follows Player.EquipmentModSuppressed.</summary>
@@ -111,6 +113,30 @@ namespace ACE.Server.KnotLoot
                     KnotLootDefaults.OverpoweringIntentEnabled,
                     new KnotTraitRange(KnotLootDefaults.OverpoweringIntentMin, KnotLootDefaults.OverpoweringIntentMax),
                     Unused),
+            },
+            new KnotTraitDefinition
+            {
+                Id = KnotTraitId.HarbingerGuard,
+                Property = PropertyFloat.KnotTraitHarbingerGuard,
+                DisplayName = "Harbinger's Guard",
+                SettingPrefix = "harbinger_guard",
+                Suppression = KnotTraitSuppressionKind.Weapon,
+                Defaults = new KnotTraitSettings(
+                    KnotLootDefaults.HarbingerGuardEnabled,
+                    new KnotTraitRange(KnotLootDefaults.HarbingerGuardMin, KnotLootDefaults.HarbingerGuardMax),
+                    Unused),
+            },
+            new KnotTraitDefinition
+            {
+                Id = KnotTraitId.HarbingerCelerity,
+                Property = PropertyFloat.KnotTraitHarbingerCelerity,
+                DisplayName = "Harbinger's Celerity",
+                SettingPrefix = "harbinger_celerity",
+                Suppression = KnotTraitSuppressionKind.Equipment,
+                Defaults = new KnotTraitSettings(
+                    KnotLootDefaults.HarbingerCelerityEnabled,
+                    new KnotTraitRange(KnotLootDefaults.HarbingerCelerityAttackMin, KnotLootDefaults.HarbingerCelerityAttackMax),
+                    new KnotTraitRange(KnotLootDefaults.HarbingerCelerityCastMin, KnotLootDefaults.HarbingerCelerityCastMax)),
             },
         };
 

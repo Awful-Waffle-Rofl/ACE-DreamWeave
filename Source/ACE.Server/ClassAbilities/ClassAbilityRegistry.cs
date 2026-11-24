@@ -35,11 +35,18 @@ namespace ACE.Server.ClassAbilities
             new MultishotAbility(),
             new ThornsAbility(),
             new TauntAbility(),
+            // Archer T3, 2026-11-10: Hunter's Echo, the second IItemProcAbility. Listed AFTER Taunt so a shared
+            // trigger taunts onto the player first and the Echo then takes those holds over.
+            new HuntersEchoAbility(),
             new PoisonWeaponAbility(),
             new AcidProcAbility(),
             new SpellAoeAbility(),
             new EchoCastAbility(),
             new ElementalRendAbility(),
+            // Archmage T3, 2026-11-03: the returned Elemental Rend (vulnerability proc), beside Elemental Proficiency.
+            // ElementalRendAbility above is Proficiency (internal id 42); this is the separate ElementalRendVuln (97).
+            // An ISpellHitAbility joining no other hook bucket.
+            new ElementalRendVulnAbility(),
             new BattleHardenedAbility(),
             new FrenzyAbility(),
             new NetherRushAbility(),
@@ -94,9 +101,9 @@ namespace ACE.Server.ClassAbilities
             // token catalog slot stays reserved, and RetiredClassAbilities["surefooted"] refunds held ranks.
             // Its stack pool, the Player.OnEvade trigger, the melee-hit reset in Player.TakeDamage and the
             // parry-term read in Player.RollClassAbilityAvoidance are all removed with it. Killer Instinct
-            // replaces it in the class and has now landed (see Phase 14 below), but at Rogue T3 - NOT the
-            // T2 this comment claimed until 2026-09-12. T3 is the signed-off placement and the only one
-            // that reproduces Rogue's 44 CAP total, which ClassAbilityCapTotalsTests pins.
+            // replaces it in the class and has now landed (see Phase 14 below): Rogue T2 since 2026-11-06
+            // (T3 before, via the Acid Proc swap, reprice wave 8). Rogue CAP is T1 14 / T2 18 / T3 18 = 50,
+            // which ClassAbilityCapTotalsTests pins.
             new PocketSandAbility(),
 
             // Phase 6 - spell-damage skills
@@ -164,8 +171,8 @@ namespace ACE.Server.ClassAbilities
             // Phase 14 - class ability overhaul NEW-ABILITY WAVE, 2026-09-12. Fifteen entries: one 5-rank
             // Tier 1 "splash" ability per class, plus seven others filling the slots this overhaul's three
             // retirements vacated (Pinning Shot for Heavy Draw at Archer T2, Kinetic Charge for Shield Check
-            // at Vanguard T2, Killer Instinct for Surefooted - though at Rogue T3, not the T2 the retirement
-            // comments anticipated) and the tier gaps its reprice opened.
+            // at Vanguard T2, Killer Instinct for Surefooted - at Rogue T3 until 2026-11-06, Rogue T2 since,
+            // matching what the retirement comments anticipated) and the tier gaps its reprice opened.
             //
             // ALL FIFTEEN ARE NOW IMPLEMENTED. They landed REGISTRATION ONLY in Phase 0 - correct
             // class/tier/rank/cost so each class's CAP total and tier gate counted the entry, with
@@ -276,10 +283,12 @@ namespace ACE.Server.ClassAbilities
             OutgoingDamageAbilities = Handlers.OfType<IOutgoingDamageAbility>().OrderBy(h => h.DispatchOrder).ToArray();
             IncomingDamageAbilities = Handlers.OfType<IIncomingDamageAbility>().ToArray();
             // Berserk Rage's immunity window is a SECOND pre-write handler sharing BerserkRageAbility's Definition (it
-            // must sit in the Immunity band while the trigger sits after Soul Jump). It joins this bucket only: it is
-            // not in Handlers, whose id-keyed maps would reject a duplicate id.
+            // must sit in the Immunity band while the trigger sits after Soul Jump). Soul Jump's post-save immunity is
+            // the same shape (DeathSave band for the save, Immunity band for the window). Both join this bucket only:
+            // they are not in Handlers, whose id-keyed maps would reject a duplicate id.
             PreWriteDamageAbilities = Handlers.OfType<IPreWriteDamageAbility>()
                 .Append(BerserkRageAbility.Immunity)
+                .Append(SoulJumpAbility.Immunity)
                 .OrderBy(h => h.MitigationOrder).ToArray();
             MissileVolleyAbilities  = Handlers.OfType<IMissileVolleyAbility>().ToArray();
             ItemProcAbilities       = Handlers.OfType<IItemProcAbility>().ToArray();

@@ -43,10 +43,15 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "blood_price",
             DisplayName = "Blood Price",
-            Description = "Your damaging spells of any school also cost health: each cast spends 3/4/5% of " +
-                          "your current health by rank and deals +10/20/30% damage. Below 20% health the cast " +
-                          "lands normally, with no bonus and no health cost. Against monsters only. Higher " +
-                          "Life Magic multiplies the damage bonus, never the health cost.",
+            // Live text. Damage bonus per rank: BloodPriceAbility.cs ~79-81; health cost per rank and the health floor:
+            // Player_ClassAbilityBuffs.cs ~1849-1862.
+            DescriptionTemplate = "Your damaging spells from any school also cost health: each cast spends a share of your current " +
+                          "health for extra damage. Below {v:class_ability_bloodprice_min_health_fraction|pct}% health the cast " +
+                          "lands normally, with no bonus and no cost. " +
+                          "Its affinity never raises the health cost.",
+            RankTailTemplate = "costs {ranks:class_ability_bloodprice_health_cost_r|pct}% health, " +
+                          "+{ranks:class_ability_bloodprice_damage_r|pct}% damage",
+            TunableSourceFiles = new[] { "WorldObjects/Player_ClassAbilityBuffs.cs" },
             MaxRank = 3,
             // Blood Mage buff pass: 2/rank -> 1/rank (the 2026-09-13 premium reprice reversed). Existing
             // owners are refunded the difference by ClassAbilityRepricing wave 1.

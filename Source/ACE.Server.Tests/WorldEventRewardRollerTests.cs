@@ -28,7 +28,7 @@ namespace ACE.Server.Tests
         private static List<RewardPoolEntryDef> LivePool() => new List<RewardPoolEntryDef>
         {
             Bags(1001910, 1001755, 6), Bags(1001911, 1001756, 6), Bags(1001912, 1001752, 6),
-            Bags(1001916, 1001759, 6), Bags(1001918, 1001751, 6),
+            Bags(1008001, 1008002, 6),
             Chance(6331, 1, 18), Stack(7299, 10, 15), Stack(43901, 25, 14), Stack(20630, 25, 15),
             Chance(29295, 1, 4), Chance(46423, 1, 4),
         };
@@ -71,7 +71,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void LivePool_FullRolls_GiveWholeHammersOrFullQty()
         {
-            var hammers = new HashSet<uint> { 1001910, 1001911, 1001912, 1001916, 1001918 };
+            var hammers = new HashSet<uint> { 1001910, 1001911, 1001912, 1008001 };
 
             for (var seed = 0; seed < 500; seed++)
             {

@@ -29,8 +29,8 @@ namespace ACE.Server.ThreadDungeons
         {
             if (rng == null) throw new ArgumentNullException(nameof(rng));
 
-            // The GEM ceiling, not the run one (owner ruling 2026-10-08): nothing rolls above 375; only the
-            // Fragment Press lifts an existing spec past it, toward DungeonGemSpec.MaxRunLevel.
+            // The GEM ceiling (500 since the 2026-11-16 raise; the run ceiling, DungeonGemSpec.MaxRunLevel, is the
+            // same number today): nothing rolls above it.
             level = Math.Clamp(level, 1, DungeonGemSpec.MaxGemLevel);
             tier = Math.Clamp(tier, 1, DungeonGemSpec.MaxTier);
 

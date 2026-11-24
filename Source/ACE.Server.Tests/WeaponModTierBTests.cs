@@ -91,7 +91,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void TierB_HoldsExactlyTheseSurvivingV2RowsPlusTheV3AndV4Expansions()
         {
-            // 2026-08-06: the v3 expansion (Heft, Tension, Leverage, Attunement, Focus, Execution) added six
+            // 2026-08-06: the v3 expansion (Heft, Tension, Leverage, Attunement, Precision, Execution) added six
             // more Tier B rows, covered in detail in WeaponModCatalogV3Tests.cs. Folded into this scope guard
             // as a fixed count rather than dropped, so it still catches an accidental Tier B add/remove.
             const int rowsAddedByTheV3Expansion = 6;

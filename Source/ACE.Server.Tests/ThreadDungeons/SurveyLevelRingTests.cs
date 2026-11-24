@@ -11,13 +11,23 @@ namespace ACE.Server.Tests.ThreadDungeons
     /// Covers the SurveyLevelRing codec: the rolling depth-10 ring of gem levels that scales the daily-survey
     /// reward. Pure - nothing here touches a Player or PropertyManager (whose reads throw under the harness).
     ///
-    /// The reference level everywhere is DungeonGemSpec.MaxGemLevel, never a literal, so raising the level
+    /// The ring ceiling everywhere is DungeonGemSpec.MaxGemLevel (500), never a literal, so moving the level
     /// ceiling does not silently invalidate these cases.
     /// </summary>
     [TestClass]
     public class SurveyLevelRingTests
     {
         private const int MaxLevel = DungeonGemSpec.MaxGemLevel;
+
+        [TestMethod]
+        public void The_ring_accepts_levels_up_to_500_and_refuses_501()
+        {
+            Assert.IsTrue(SurveyLevelRing.TryParse("v1|lv=500,400,375", out var ring, out var error), error);
+            CollectionAssert.AreEqual(new[] { 500, 400, 375 }, ring.Levels.ToArray());
+            Assert.IsFalse(SurveyLevelRing.TryParse("v1|lv=501", out _, out _));
+            Assert.AreEqual(500, SurveyLevelRing.Empty.Push(500).Levels[0]);
+        }
+
 
         [TestMethod]
         public void Depth_is_ten()

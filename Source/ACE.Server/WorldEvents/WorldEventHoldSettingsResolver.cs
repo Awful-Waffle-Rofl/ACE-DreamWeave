@@ -229,6 +229,8 @@ namespace ACE.Server.WorldEvents
             [K.UndefendedSecondsPerParticipant] = g => N(g.Protect?.UndefendedSecondsPerParticipant),
             [K.UndefendedSecondsFloor] = g => N(g.Protect?.UndefendedSecondsFloor),
             [K.MinDeathSeconds] = g => N(g.Protect?.MinDeathSeconds),
+            [K.KnightDurabilityPerParticipant] = g => N(g.Protect?.DurabilityPerParticipant),
+            [K.KnightDurabilityCap] = g => N(g.Protect?.DurabilityCap),
             [K.MinSurvivors] = g => N(g.Protect?.MinSurvivors),
             [K.DefendPose] = g => g.Protect == null ? null : B(g.Protect.DefendPose != null),
             // As the contributor's defs: a pose forced on with no goals.json block uses a default DefendPoseDef's numbers.

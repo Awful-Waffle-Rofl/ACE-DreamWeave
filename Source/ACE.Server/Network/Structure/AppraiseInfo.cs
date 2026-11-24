@@ -76,6 +76,12 @@ namespace ACE.Server.Network.Structure
             BuildProperties(wo);
             BuildSpells(wo);
 
+            // Class ability tokens: show the number text rendered from the CURRENT tunables instead of the
+            // snapshot committed in the weenie's LongDesc. Appraisal-only; the token's biota is not touched.
+            var classAbilityTokenId = wo.GetProperty(PropertyInt.ClassAbilityTokenId) ?? 0;
+            if (classAbilityTokenId > 0)
+                ClassAbilities.ClassAbilityTokenAppraisal.Apply(PropertiesString, classAbilityTokenId, wo.GetProperty(PropertyInt.ClassAbilityTokenTier) ?? 0, ClassAbilities.ClassAbilityText.Live);
+
             // Help us make sure the item identify properly
             NPCLooksLikeObject = wo.GetProperty(PropertyBool.NpcLooksLikeObject) ?? false;
 
@@ -279,7 +285,11 @@ namespace ACE.Server.Network.Structure
 
                     if (!string.IsNullOrWhiteSpace(hookedItem.LongDesc))
                     {
-                        containsString += hookedItem.LongDesc;
+                        // a hooked class ability token shows its live text too, not the committed snapshot
+                        containsString += ClassAbilities.ClassAbilityTokenAppraisal.LongDesc(hookedItem.LongDesc,
+                            hookedItem.GetProperty(PropertyInt.ClassAbilityTokenId) ?? 0,
+                            hookedItem.GetProperty(PropertyInt.ClassAbilityTokenTier) ?? 0,
+                            ClassAbilities.ClassAbilityText.Live);
                     }
                     //else if (PropertiesString.ContainsKey(PropertyString.ShortDesc) && PropertiesString[PropertyString.ShortDesc] != null)
                     //{
@@ -355,6 +365,8 @@ namespace ACE.Server.Network.Structure
             // DamageType.Health, so its own versions are suppressed just below and re-rendered here.
             propertyDetails.AddRange(LifeCasterDisplay.GetAppraisalLines(wo));
             LifeCasterDisplay.SuppressUnlabelledClientLines(wo, PropertiesInt, PropertiesFloat);
+            propertyDetails.AddRange(SummonerFocusDisplay.GetAppraisalLines(wo));
+            SummonerFocusDisplay.SuppressClientDamageBonusLine(wo, PropertiesFloat);
 
             if (wo.IsMultiShot)
             {
@@ -382,6 +394,18 @@ namespace ACE.Server.Network.Structure
             // Knot loot traits (WaffleACE). Ungated here: each line is gated by its own mechanic switch inside
             // KnotTraitValue.ResolveOn, so a disabled trait contributes no line.
             propertyDetails.AddRange(KnotTraitDisplay.GetAppraisalLines(wo));
+
+            // Cloak Mantle / Proc Amplifier (WaffleACE). UNGATED, shown to every examiner: these stamps are the
+            // cloak's own state, and the properties carry no [AssessmentProperty], so this is the only place a
+            // player sees them.
+            foreach (var cloakLine in CloakMantleDisplay.GetAppraisalLines(wo))
+                propertyDetails.Add("- " + cloakLine);
+
+            // Jewelry Aspects (WaffleACE). UNGATED, shown to every examiner: the three counts are the piece's own state
+            // and carry no [AssessmentProperty], so this is the only place a player sees them. The layer lines are
+            // computed live from the per-slot settings and are this piece's share, not a worn total.
+            foreach (var aspectLine in JewelryAspectDisplay.GetAppraisalLines(wo))
+                propertyDetails.Add("- " + aspectLine);
 
             // Multi-charge salvage tools (WaffleACE) - the Hammer items. UNGATED on purpose: unlike the two
             // blocks above, the remaining charge count is the item's OWN state rather than a rendering of a

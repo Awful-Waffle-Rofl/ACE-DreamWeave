@@ -107,6 +107,12 @@ namespace ACE.Server.ThreadDungeons
             public Action<uint> MoveFor;
 
             /// <summary>
+            /// The Wandering Peddler's presentation to one member (ThreadPeddlerShop.Present): run only for a member inside whose
+            /// pile is complete. Null skips the shop for that member.
+            /// </summary>
+            public Func<uint, PeddlerPresentResult> PresentPeddler;
+
+            /// <summary>
             /// The Summon's move for one member: quiet (no chat) and without the exit relocation, recording what it did into the
             /// result it is given as it goes (so a throw partway keeps the count).
             /// Null skips the move.
@@ -158,6 +164,11 @@ namespace ACE.Server.ThreadDungeons
             return new DeliveryWorld
             {
                 IsInside = guid => ThreadRunPresence.IsMemberInside(run, PlayerManager.GetOnlinePlayer(guid)),
+                PresentPeddler = guid =>
+                {
+                    var member = PlayerManager.GetOnlinePlayer(guid);
+                    return ThreadRunPresence.IsMemberInside(run, member) ? ThreadPeddlerShop.PresentLive(run, landblock, member) : PeddlerPresentResult.NotNow;
+                },
                 FormAt = (guid, hasMore) =>
                 {
                     var member = PlayerManager.GetOnlinePlayer(guid);
@@ -304,6 +315,34 @@ namespace ACE.Server.ThreadDungeons
 
             try
             {
+                // The Wandering Peddler's hold (ThreadPeddlerShop.Gate, clear only), FIRST. WaitPile: this member's clear-time
+                // pile is still being dealt, so the pile is left exactly as it is and no cache forms (Run keeps the run-level
+                // placement flag set while undealt loot remains). Held: the member's shop is open; their delivery-wanted flag
+                // is CLEARED and nothing re-arms it, because the release (ThreadPeddlerShop.Release) requests the placement.
+                // WaitArrival: the member would be presented but is not inside, so they wait for their arrival like any pile.
+                switch (ThreadPeddlerShop.Gate(run, memberGuid, () => world.IsInside(memberGuid), world.PresentPeddler == null ? null : () => world.PresentPeddler(memberGuid)))
+                {
+                    case PeddlerHold.WaitPile:
+                        return null;
+
+                    case PeddlerHold.Held:
+                        run.TryClaimMemberDeliveryWanted(memberGuid);
+
+                        // A release that landed (Busy) between the Gate and the claim above re-flagged this member, and the
+                        // claim just cleared it: put it back, or the member's delivery would never be retried.
+                        if (!run.IsPeddlerShopOpen(memberGuid))
+                            run.MarkMemberDeliveryWanted(memberGuid);
+
+                        return null;
+
+                    case PeddlerHold.WaitArrival:
+                        run.MarkMemberDeliveryWanted(memberGuid);
+                        TellShareWaits(run, memberGuid, world);
+                        return null;
+                }
+
+                // Nothing peddler-side runs past the hold: each purchase was paid from the pile and put in the member's
+                // pack at the buy (ThreadPeddlerVendor.TryBuy), so the pile delivered below is already net of payment.
                 run.TryClaimMemberDeliveryWanted(memberGuid);
 
                 if (!run.HasHeldPile(memberGuid))
@@ -510,7 +549,9 @@ namespace ACE.Server.ThreadDungeons
 
             try
             {
-                var ledgerDue = run.DealBufferRolls >= floor || (run.LedgerCount == 0 && run.PrebuiltCount == 0) || hitDealCap;
+                // PeddlerDebtorWaiting: the clear-time rolls are all claimed and only the floor holds them in the buffer while
+                // a seated member waits to be presented; hand them out now so the shop is not deferred by kills after the clear.
+                var ledgerDue = run.DealBufferRolls >= floor || (run.LedgerCount == 0 && run.PrebuiltCount == 0) || hitDealCap || run.PeddlerDebtorWaiting;
                 var pooledDue = run.PooledBonusRollsPending == 0 && !run.IsLootBonusPending;
 
                 due = run.TakeDealBuffer(ledgerDue, pooledDue);

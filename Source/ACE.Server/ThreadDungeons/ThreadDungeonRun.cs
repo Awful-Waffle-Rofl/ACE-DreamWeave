@@ -896,6 +896,9 @@ namespace ACE.Server.ThreadDungeons
 
                 // The contribution ledger closes with the transition, so post-clear fights add nothing.
                 CloseContributionLocked();
+
+                // The peddler's shop waits for exactly the rolls banked by now, and serves only a buyer seated now.
+                StampPeddlerClearLocked();
             }
         }
 

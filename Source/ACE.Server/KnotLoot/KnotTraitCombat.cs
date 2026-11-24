@@ -110,13 +110,13 @@ namespace ACE.Server.KnotLoot
 
         /// <summary>
         /// Overpowering Intent (Matron hive batons): whether the trait reaches a spell's resist check. True only for a
-        /// harmful War or Void Magic spell that does damage (a projectile, or a damage-over-time) cast at a target that
+        /// harmful War, Void or Life Magic spell that does damage (a projectile, or a damage-over-time) cast at a target that
         /// is not a player. A non-damaging Void debuff, a beneficial spell, any other school, and every player target
         /// are excluded. Pure.
         /// </summary>
         public static bool OverpoweringIntentApplies(MagicSchool school, bool isHarmful, bool isProjectile, bool isDot, bool targetIsPlayer)
         {
-            if (school != MagicSchool.WarMagic && school != MagicSchool.VoidMagic)
+            if (school != MagicSchool.WarMagic && school != MagicSchool.VoidMagic && school != MagicSchool.LifeMagic)
                 return false;
 
             return isHarmful && (isProjectile || isDot) && !targetIsPlayer;

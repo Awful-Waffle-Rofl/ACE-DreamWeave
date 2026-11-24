@@ -117,13 +117,13 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0, WorldEventRosterSelector.EliteBand(-50).High, "a negative estimate clamps to 0");
         }
 
-        // ---- (a2) WP-24: the 275 level cap ----------------------------------------------------------------
+        // ---- (a2) WP-24: the level cap (400) ----------------------------------------------------------------
 
         [TestMethod]
         public void EstimateFromLevels_ClampsMedianAndP90AtMaxConsideredLevel()
         {
-            // n=10, all above 275: median (index 4) and p90 (index ceil(9)-1=8) both clamp to 275.
-            var levels = new List<int> { 280, 290, 300, 310, 320, 330, 340, 350, 360, 370 };
+            // n=10, all above 400: median (index 4) and p90 (index ceil(9)-1=8) both clamp to 400.
+            var levels = new List<int> { 410, 420, 430, 440, 450, 460, 470, 480, 490, 500 };
 
             var estimate = WorldEventRosterSelector.EstimateFromLevels(levels);
 
@@ -132,33 +132,34 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void TrashBand_AtTheCap_HighEdgeClampsTo275()
+        public void TrashBand_AtTheCap_HighEdgeClampsToMaxConsideredLevel()
         {
-            var band = WorldEventRosterSelector.TrashBand(275);
+            var band = WorldEventRosterSelector.TrashBand(WorldEventRosterSelector.MaxConsideredLevel);
 
-            Assert.AreEqual(275, band.High, "a level-275 audience must never draw a level-300+ trash member");
+            Assert.AreEqual(WorldEventRosterSelector.MaxConsideredLevel, band.High, "a cap-level audience must never draw a trash member above the cap");
         }
 
         [TestMethod]
         public void EliteBand_AtTheCap_FallsBackToTheTrashBand()
         {
-            // p90=275: low=floor(275*1.25)=343, high=min(275, ceil(275*1.75))=275; high<low so high is
-            // pulled up to 343, leaving width 0 < 10 -> falls back to TrashBand(275) = [275, 275].
-            var elite = WorldEventRosterSelector.EliteBand(275);
-            var trash = WorldEventRosterSelector.TrashBand(275);
+            // p90=400: low=floor(400*1.25)=500, high=min(400, ceil(400*1.75))=400; high<low so high is
+            // pulled up to 500, leaving width 0 < 10 -> falls back to TrashBand(400) = [400, 400].
+            var cap = WorldEventRosterSelector.MaxConsideredLevel;
+            var elite = WorldEventRosterSelector.EliteBand(cap);
+            var trash = WorldEventRosterSelector.TrashBand(cap);
 
             Assert.AreEqual(trash.Low, elite.Low);
             Assert.AreEqual(trash.High, elite.High);
         }
 
         [TestMethod]
-        public void EliteBand_AtTwoHundred_ClampsTheHighEdgeWithoutFallingBack()
+        public void EliteBand_AtThreeHundred_ClampsTheHighEdgeWithoutFallingBack()
         {
-            // low=floor(200*1.25)=250, high=min(275, ceil(200*1.75)=350)=275, width 25 >= 10 -> no fallback.
-            var band = WorldEventRosterSelector.EliteBand(200);
+            // low=floor(300*1.25)=375, high=min(400, ceil(300*1.75)=525)=400, width 25 >= 10 -> no fallback.
+            var band = WorldEventRosterSelector.EliteBand(300);
 
-            Assert.AreEqual(250, band.Low);
-            Assert.AreEqual(275, band.High);
+            Assert.AreEqual(375, band.Low);
+            Assert.AreEqual(WorldEventRosterSelector.MaxConsideredLevel, band.High);
         }
 
         // ---- (b) PickWave band membership ---------------------------------------------------------------
@@ -780,16 +781,16 @@ namespace ACE.Server.Tests
 
             try
             {
-                WorldEventRosterSelector.DialSource = () => new BandDials(2.0, 3.0, 2.0, 3.0);
+                WorldEventRosterSelector.DialSource = () => new BandDials(2.0, 5.0, 2.0, 5.0);
 
-                // 100 * 2.0 = 200; 100 * 3.0 = 300, clamped to MaxConsideredLevel 275.
+                // 100 * 2.0 = 200; 100 * 5.0 = 500, clamped to MaxConsideredLevel 400.
                 var trash = WorldEventRosterSelector.TrashBand(100);
                 Assert.AreEqual(200, trash.Low);
-                Assert.AreEqual(275, trash.High);
+                Assert.AreEqual(WorldEventRosterSelector.MaxConsideredLevel, trash.High);
 
                 var elite = WorldEventRosterSelector.EliteBand(100);
                 Assert.AreEqual(200, elite.Low);
-                Assert.AreEqual(275, elite.High);
+                Assert.AreEqual(WorldEventRosterSelector.MaxConsideredLevel, elite.High);
             }
             finally
             {

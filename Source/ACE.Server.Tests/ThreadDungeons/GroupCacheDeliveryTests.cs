@@ -351,6 +351,30 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         [TestMethod]
+        public void Deal_piles_a_foolproof_bag_with_its_fixed_index_and_never_as_peddler_payment()
+        {
+            var run = ClearedGroupRun(Member, Member2);
+            Assert.IsTrue(run.TryMarkLootBonusPending());
+
+            ThreadGroupCacheDelivery.Deal(run, _ => throw new AssertFailedException("no ledger entry"), (r, b) =>
+            {
+                // The shape BuildBossBonusPerSeatItems returns when the Foolproof roll hits: note, key, bag, salvage.
+                return new List<WorldObject> { StackedValued(20630, 2), Item(51954), Item(36619), Valued(3) };
+            });
+
+            foreach (var guid in new[] { Owner, Member, Member2 })
+            {
+                var pile = PileHeld(run, guid);
+                Assert.AreEqual(4, pile.Count);
+                CollectionAssert.AreEqual(new int?[] { 0, 1, 2, 3 }, pile.Select(h => h.FixedOrder).ToArray());
+
+                var bag = pile.Single(h => h.Item.WeenieClassId == 36619u);
+                Assert.AreEqual(2, bag.FixedOrder, "the bag sits after the key, in the fixed block");
+                Assert.IsFalse(ThreadPeddlerPayment.ItemEligibleForPayment(bag), "a fixed boss bonus item is never payment");
+            }
+        }
+
+        [TestMethod]
         public void Deal_sends_a_rare_to_its_recipient_and_deals_one_without_a_roster_recipient()
         {
             var run = ClearedGroupRun(Member, Member2);

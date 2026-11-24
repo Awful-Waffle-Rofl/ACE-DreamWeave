@@ -2,6 +2,7 @@ using System;
 using System.Numerics;
 
 using ACE.Entity.Enum;
+using ACE.Server.ClassAbilities;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Network.GameMessages.Messages;
@@ -122,6 +123,21 @@ namespace ACE.Server.WorldObjects
                 if (this is CombatPet shooter && !shooter.MayLooseAt(target))
                     return;
 
+                // Hunter's Echo (Archer T3): its volley is its OWNER's - the owner's launcher and ammo, the owner's
+                // Multishot arrows, one Pinning Shot roll, every arrow resolved through the owner's DamageTarget
+                // (CombatPet.FireHuntersEchoVolley). Taken BEFORE the self-procs below and returning: an Echo shot
+                // rolls no item proc and spends no ammo.
+                if (this is CombatPet echoShooter && echoShooter.IsHuntersEcho)
+                {
+                    if (target is Creature echoPrimary)
+                    {
+                        EnqueueBroadcast(new GameMessageSound(Guid, GetLaunchMissileSound(weapon), 1.0f));
+                        echoShooter.FireHuntersEchoVolley(echoPrimary, projectileSpeed);
+                    }
+
+                    return;
+                }
+
                 // handle self-procs
                 TryProcEquippedItems(this, this, true, weapon);
 
@@ -152,13 +168,17 @@ namespace ACE.Server.WorldObjects
                 return;
             }*/
 
+            // Hunter's Echo: it reloads and cycles at its OWNER's shot (CombatPet.HuntersEchoShotStamp), not at its own
+            // Quickness and the monster post-shot delay. Null for every other creature, which keeps both below.
+            var echoShot = (this as CombatPet)?.HuntersEchoShotStamp;
+
             // reload animation
-            var animSpeed = GetAnimSpeed();
+            var animSpeed = echoShot != null ? echoShot.AnimSpeed : GetAnimSpeed();
             var reloadTime = EnqueueMotion(actionChain, MotionCommand.Reload, animSpeed);
             //Console.WriteLine("ReloadTime: " + reloadTime);
 
             // reset for next projectile
-            EnqueueMotion(actionChain, MotionCommand.Ready);
+            var readyTime = EnqueueMotion(actionChain, MotionCommand.Ready);
 
             var linkAnim = reloadTime > 0 ? MotionCommand.Reload : aimLevel;
 
@@ -183,6 +203,13 @@ namespace ACE.Server.WorldObjects
             actionChain.EnqueueChain();
 
             PrevAttackTime = Timers.RunningTime;
+
+            // Hunter's Echo: the player's repeat-attack cycle at the owner's bar (HuntersEchoMath.ShotCycleSeconds)
+            if (echoShot != null)
+            {
+                NextMoveTime = NextAttackTime = PrevAttackTime + HuntersEchoMath.ShotCycleSeconds(launchTime, reloadTime, readyTime, linkTime, echoShot.AccuracyLevel);
+                return;
+            }
 
             var timeOffset = launchTime + reloadTime + linkTime;
 

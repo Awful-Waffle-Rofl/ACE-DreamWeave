@@ -189,6 +189,7 @@ namespace ACE.Server.Pinnacles
         {
             Register("grael", () => new Grael.GraelScript(PinnacleTunables.Grael()));
             Register("matron", () => new Matron.MatronScript(PinnacleTunables.Matron()));
+            Register("harbinger", () => new Harbinger.HarbingerScript(PinnacleTunables.Harbinger()));
         }
 
         /// <summary>The registered, unended fight whose copy has this realm instance (the /pinnacle admin lookup), or false.</summary>
@@ -243,6 +244,45 @@ namespace ACE.Server.Pinnacles
 
             foreach (var f in fights)
                 if (f != null && f.Instance == instance && !f.IsEnded)
+                    return true;
+
+            return false;
+        }
+
+        /// <summary>
+        /// Player.TakeDamage_Falling's waiver: true when the player stands in the copy of a registered, unended fight whose
+        /// script waives fall damage (PinnacleScriptData.WaiveFallDamage; only the Harbinger copy). Any thread (a registry
+        /// snapshot read); never throws, a fault reads as false (the normal fall damage).
+        /// </summary>
+        public static bool WaivesFallDamage(Player player)
+        {
+            try
+            {
+                var instance = player?.Location?.Instance ?? 0;
+
+                if (instance == 0)
+                    return false;
+
+                return WaivesFall(instance, System.Linq.Enumerable.Select(byOwner.Values, lf => lf.Fight));
+            }
+            catch (Exception ex)
+            {
+                log.Error("[PINNACLE] WaivesFallDamage threw", ex);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// The pure half of <see cref="WaivesFallDamage"/>: some unended fight in <paramref name="fights"/> has
+        /// <paramref name="instance"/> as its copy and a script that waives fall damage. Instance 0 is always false.
+        /// </summary>
+        internal static bool WaivesFall(uint instance, System.Collections.Generic.IEnumerable<PinnacleFight> fights)
+        {
+            if (instance == 0 || fights == null)
+                return false;
+
+            foreach (var f in fights)
+                if (f != null && f.Instance == instance && !f.IsEnded && f.Script?.Data?.WaiveFallDamage == true)
                     return true;
 
             return false;

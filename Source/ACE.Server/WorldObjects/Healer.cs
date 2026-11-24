@@ -69,6 +69,14 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // Allegiance Gauntlet: the Avatar's fighter is healed by its own kit path (health kits only, while its copy is live).
+            // One type test for every other target.
+            if (ACE.Server.Avatars.Gauntlet.GauntletAvatarFighter.IsFighterHealTarget(target))
+            {
+                HealGauntletFighter(healer, (ACE.Server.Avatars.Gauntlet.GauntletAvatarFighter)target);
+                return;
+            }
+
             if (!(target is Player targetPlayer) || targetPlayer.Teleporting)
             {
                 healer.SendUseDoneEvent(WeenieError.YouCantHealThat);
@@ -217,6 +225,13 @@ namespace ACE.Server.WorldObjects
         {
             if (target.IsDead || target.Teleporting) return;
 
+            // Balance Trials recorder: a healing kit use during a rep (a failed heal spends a use too). One field read otherwise.
+            if (healer.TrialActive)
+                ACE.Server.BalanceTrials.TrialHooks.OnConsume(healer, WeenieClassId);
+
+            // Allegiance Gauntlet: a kit on another member counts toward the healer's crate.
+            ACE.Server.Avatars.Gauntlet.GauntletHooks.OnBeneficialAct(healer, target, true);
+
             var remainingMsg = "";
 
             if (!UnlimitedUse)
@@ -346,6 +361,116 @@ namespace ACE.Server.WorldObjects
             actionChain.EnqueueChain();
 
             healer.NextUseTime = DateTime.UtcNow.AddSeconds(animLength);
+        }
+
+        /// <summary>
+        /// Allegiance Gauntlet: a health kit used on the Avatar's fighter. The same animation, movement rule and use count as
+        /// the knight path and no skill check; the raw heal goes to the fighter's landblock (GauntletAvatarFighter.QueueKitHeal),
+        /// which converts, caps and writes it and sends the result line. Stamina and mana kits, and any kit outside a live copy,
+        /// are refused.
+        /// </summary>
+        private void HealGauntletFighter(Player healer, ACE.Server.Avatars.Gauntlet.GauntletAvatarFighter fighter)
+        {
+            if (!fighter.AcceptsHealthKit(BoosterEnum))
+            {
+                healer.SendUseDoneEvent(WeenieError.YouCantHealThat);
+                return;
+            }
+
+            if (fighter.Health.Current >= fighter.Health.MaxValue)
+            {
+                healer.Session.Network.EnqueueSend(new GameEventWeenieErrorWithString(healer.Session, WeenieErrorWithString._IsAtFullHealth, fighter.Name));
+                healer.SendUseDoneEvent();
+                return;
+            }
+
+            if (healer.IsJumping)
+            {
+                healer.SendUseDoneEvent(WeenieError.YouCantDoThatWhileInTheAir);
+                return;
+            }
+
+            healer.IsBusy = true;
+
+            var motionCommand = MotionCommand.SkillHealOther;
+            var currentStance = healer.CurrentMotionState.Stance;
+            var animLength = MotionTable.GetAnimationLength(healer.MotionTableId, currentStance, motionCommand);
+
+            var startPos = new Physics.Common.Position(healer.PhysicsObj.Position);
+
+            var actionChain = new ActionChain();
+            actionChain.AddAction(healer, () => healer.SendMotionAsCommands(motionCommand, currentStance));
+            actionChain.AddDelaySeconds(animLength);
+            actionChain.AddAction(healer, () =>
+            {
+                var moved = startPos.Distance(new Physics.Common.Position(healer.PhysicsObj.Position));
+
+                if (moved < Healing_MaxMove || healer.PlayerKillerStatus == PlayerKillerStatus.NPK)
+                    DoHealingGauntletFighter(healer, fighter);
+                else
+                    healer.Session.Network.EnqueueSend(new GameMessageSystemChat("Your movement disrupted healing!", ChatMessageType.Broadcast));
+
+                healer.IsBusy = false;
+                healer.SendUseDoneEvent();
+            });
+
+            healer.EnqueueMotion(actionChain, MotionCommand.Ready);
+
+            actionChain.EnqueueChain();
+
+            healer.NextUseTime = DateTime.UtcNow.AddSeconds(animLength);
+        }
+
+        private void DoHealingGauntletFighter(Player healer, ACE.Server.Avatars.Gauntlet.GauntletAvatarFighter fighter)
+        {
+            if (fighter.IsDead || fighter.IsDestroyed)
+                return;
+
+            // A kit on the fighter counts toward the healer's crate.
+            ACE.Server.Avatars.Gauntlet.GauntletHooks.OnBeneficialAct(healer, fighter, true);
+
+            var remainingMsg = "";
+
+            if (!UnlimitedUse)
+            {
+                UsesLeft--;
+                var s = UsesLeft == 1 ? "" : "s";
+                remainingMsg = UsesLeft > 0 ? $" Your {Name} has {UsesLeft} use{s} left." : $" Your {Name} is used up.";
+
+                Value -= StructureUnitValue;
+
+                if (Value < 0)
+                    Value = 0;
+            }
+
+            healer.Session.Network.EnqueueSend(new GameMessagePublicUpdatePropertyInt(this, PropertyInt.Structure, UsesLeft.Value));
+
+            var healingSkill = healer.GetCreatureSkill(Skill.Healing).Current;
+            var healBase = healingSkill * (float)(HealkitMod ?? 1.0);
+            var raw = ThreadSafeRandom.Next(healBase * 0.2f, healBase * 0.5f);
+            var critical = ThreadSafeRandom.Next(0.0f, 1.0f) < 0.1f;
+
+            if (critical)
+                raw *= 2;
+
+            var staminaCost = (uint)Math.Min(healer.Stamina.Current, Math.Round(raw / 5.0f));
+            healer.UpdateVitalDelta(healer.Stamina, (int)-staminaCost);
+
+            var fighterName = fighter.Name;
+
+            var queued = fighter.QueueKitHeal(raw, (healed, outcome) =>
+            {
+                var text = ACE.Server.WorldEvents.WorldEventHooks.PlayerHealLine(fighterName, healed, outcome, critical, remainingMsg);
+
+                if (!string.IsNullOrEmpty(text))
+                    healer.Session?.Network.EnqueueSend(new GameMessageSystemChat(text, ChatMessageType.Broadcast));
+            });
+
+            if (!queued)
+                healer.Session.Network.EnqueueSend(new GameMessageSystemChat($"{fighterName} cannot be healed right now.{remainingMsg}", ChatMessageType.Broadcast));
+
+            if (UsesLeft <= 0 && !UnlimitedUse)
+                healer.TryConsumeFromInventoryWithNetworking(this, 1);
         }
 
         private void DoHealingHoldKnight(Player healer, Creature knight)

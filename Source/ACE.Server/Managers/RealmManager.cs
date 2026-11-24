@@ -223,6 +223,69 @@ namespace ACE.Server.Managers
         }
 
         /// <summary>
+        /// Allegiance Gauntlet: the arena's one exit, the Thread's click-only summoned exit (1003604). Its use routes to the
+        /// player's EphemeralRealmExitTo stamp (PortalExitInstance), exactly as in an outdoor Thread copy.
+        /// </summary>
+        public const uint GauntletExitPortalWcid = ACE.Server.ThreadDungeons.ThreadDungeonRewardSpawner.SummonedExitWcid;
+
+        /// <summary>
+        /// Allegiance Gauntlet: the realm a Gauntlet arena copy is built on, or null when <paramref name="site"/> is not a
+        /// loaded outdoor row. It has NO Owner and NO Thread run (as puzzlegate-sweep's copy, <see cref="GetNewThreadSweepLandblock"/>);
+        /// <see cref="EphemeralRealm.RunlessThreadCopyExitPortalWcid"/> makes it Thread-shaped (outdoor allow-list, no shard
+        /// statics, no encounters) and <see cref="EphemeralRealm.OutdoorEntry"/> names the site the allow-list and the one
+        /// exit come from. The hold is attached here, before the primary is constructed, so admission
+        /// (<see cref="IEphemeralAdmission"/>), keep-alive (<see cref="IEphemeralHold.UnloadIntervalOverride"/>) and the member
+        /// hold (<see cref="IFootprintHold"/>) are in force from the first heartbeat. Pure: separated so the realm a copy
+        /// receives is testable without a Landblock.
+        /// </summary>
+        internal static EphemeralRealm NewGauntletOutdoorRealm(ACE.Server.ThreadDungeons.Defs.DungeonEntryDef site, IEphemeralHold hold)
+        {
+            if (site == null || !site.IsOutdoor || site.Outdoor == null || hold == null)
+                return null;
+
+            return new EphemeralRealm(null)
+            {
+                OpenToFellowship = false,
+                RunlessThreadCopyExitPortalWcid = GauntletExitPortalWcid,
+                OutdoorEntry = site,
+                Hold = hold,
+                Footprint = EphemeralFootprint.Create(site.Outdoor.Primary, site.Outdoor.Footprint),
+            };
+        }
+
+        /// <summary>
+        /// Allegiance Gauntlet: a private realm-0 copy of an outdoor Threads site with no Thread run behind it. The footprint
+        /// group is built exactly like <see cref="GetNewThreadOutdoorLandblock"/>'s (the primary with its adjacents, then every
+        /// other member, through <see cref="LoadOutdoorGroup"/>); the realm is <see cref="NewGauntletOutdoorRealm"/>'s. The
+        /// instance id is allocated by the caller (LandblockManager.RequestNewEphemeralInstanceIDv1(0)). There is no lazy
+        /// buffer ring: that is recorded only on a Thread run (EphemeralInstanceGroup.UsesLazyBufferRing), so the ring loads
+        /// up front as bare terrain.
+        ///
+        /// Returns the primary, or null when <paramref name="site"/> is not an outdoor row, or any load threw (logged). A primary
+        /// that did not register this realm (an id collision) is returned as is with no member loaded: the caller compares
+        /// its InnerRealmInfo and refuses, as ThreadDungeonManager.TryStart does.
+        /// </summary>
+        public static Entity.Landblock GetNewGauntletOutdoorLandblock(ACE.Server.ThreadDungeons.Defs.DungeonEntryDef site, IEphemeralHold hold, uint instance)
+        {
+            var ephemeralRealm = NewGauntletOutdoorRealm(site, hold);
+
+            if (ephemeralRealm == null)
+            {
+                log.Error($"RealmManager: Gauntlet arena {site?.Id ?? "(null)"} is not a loaded outdoor site (or has no hold); not opening instance {instance:X8}");
+                return null;
+            }
+
+            var primaryId = site.Outdoor.Primary;
+
+            return LoadOutdoorGroup(
+                () => LandblockManager.GetLandblock(new ACE.Entity.LandblockId((uint)primaryId << 16), instance, loadAdjacents: true, permaload: false, ephemeralRealm: ephemeralRealm),
+                primary => ReferenceEquals(primary.InnerRealmInfo, ephemeralRealm),
+                ephemeralRealm.Footprint.Landblocks, primaryId,
+                member => LandblockManager.GetLandblock(new ACE.Entity.LandblockId((uint)member << 16), instance, loadAdjacents: true),
+                (what, ex) => log.Error($"RealmManager: loading {what} of Gauntlet arena {site.Id} instance {instance:X8} threw; refusing the arena", ex));
+        }
+
+        /// <summary>
         /// The load sequence of <see cref="GetNewThreadOutdoorLandblock"/>, over delegates so its failure paths are testable
         /// without a Landblock. Loads the primary; a throw there is reported through <paramref name="onError"/> and returns null.
         /// A null primary, or one that is not this run's (<paramref name="isThisRunsPrimary"/> false: an id collision), is

@@ -15,7 +15,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 namespace ACE.Server.Tests
 {
     /// <summary>
-    /// The World Events Hold composer gate (H6): the random roll never lands on a Hold goal (one constant decides that), and a
+    /// The World Events Hold composer gate (H6): the random roll lands on a Hold goal only while the switch is on (and rolls no boss for it), and a
     /// pinned Hold goal is refused with a line naming world_events_hold_enabled while the switch is off. Pure: the switch goes
     /// through WorldEventComposer.HoldEnabledReader, restored in a finally.
     /// </summary>
@@ -87,19 +87,19 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void RandomRoll_ShipsPinnedOnly()
+        public void RandomRoll_IncludesHoldGoals()
         {
-            Assert.IsFalse(WorldEventComposer.RandomRollIncludesHoldGoals,
-                "the owner has not ruled that a random roll may land on a Hold goal; H6 ships pinned-only");
+            Assert.IsTrue(WorldEventComposer.RandomRollIncludesHoldGoals,
+                "the owner ruled 2026-11-16 that a random roll may land on a Hold goal (still only while world_events_hold_enabled is on)");
         }
 
         [TestMethod]
-        public void RandomRollMayPick_NeverHold_WhateverTheSwitch_AndAlwaysOtherGoals()
+        public void RandomRollMayPick_HoldOnlyWithTheSwitch_AndAlwaysOtherGoals()
         {
             var hold = new GoalDef { Id = GoalId, TypeKind = GoalType.Hold };
             var kill = new GoalDef { Id = "kill_count", TypeKind = GoalType.KillCount };
 
-            Assert.AreEqual(WorldEventComposer.RandomRollIncludesHoldGoals, WorldEventComposer.RandomRollMayPick(hold, holdEnabled: true));
+            Assert.IsTrue(WorldEventComposer.RandomRollMayPick(hold, holdEnabled: true));
             Assert.IsFalse(WorldEventComposer.RandomRollMayPick(hold, holdEnabled: false));
             Assert.IsTrue(WorldEventComposer.RandomRollMayPick(kill, holdEnabled: false));
             Assert.IsTrue(WorldEventComposer.RandomRollMayPick(kill, holdEnabled: true));

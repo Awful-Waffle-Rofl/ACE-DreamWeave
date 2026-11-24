@@ -50,7 +50,7 @@ namespace ACE.Server.ThreadDungeons
     /// EarnLuminance into the delayed chain: the chain carries TEXT ONLY.
     ///
     /// This file holds every impure read the feature makes - PropertyManager (including the reference level,
-    /// whose default is DungeonGemSpec.MaxGemLevel), EnlightenmentXpCurve (which touches DatManager) and the
+    /// whose default is DungeonGemSpec.SurveyReferenceLevelDefault), EnlightenmentXpCurve (which touches DatManager) and the
     /// player's own ring property - exactly the way
     /// FragmentPressStation.BuildLimits holds the attunement feature's four tunables. SurveyLevelRing,
     /// SurveyRewardMath and DungeonSurveyRules.Plan stay pure so they can be unit tested; the Player-driven
@@ -347,14 +347,13 @@ namespace ACE.Server.ThreadDungeons
         /// <summary>
         /// The reference level the survey reward curve measures a run against: the denominator of
         /// (avgGemLevel / reference)^k, which scales luminance only (XP is measured at min(player level, avgGemLevel), not at this level). Defaults to
-        /// <see cref="DungeonGemSpec.MaxGemLevel"/>, which is what ruling R6 asks for - a raised gem ceiling
-        /// rescales the payout curve with it, rather than paying the endgame rate for what is now mid-tier
-        /// content.
+        /// <see cref="DungeonGemSpec.SurveyReferenceLevelDefault"/> (375), NOT the gem ceiling: owner ruling
+        /// 2026-11-16 kept it at 375 when the ceiling rose to 500, so the payout was not repriced. The ratio
+        /// clamps to 1.0, so a ring above 375 pays the full rate.
         ///
         /// It is a TUNABLE rather than a direct MaxGemLevel read because the two answer different questions.
-        /// MaxGemLevel is how high a gem may go; this is what "the endgame rate" means to the payout. Pinning
-        /// this below the ceiling is the one-command way to raise the ceiling WITHOUT repricing the surveys
-        /// players have already been filing - the rescale is the default, not the only option.
+        /// MaxGemLevel is how high a gem may go; this is what "the endgame rate" means to the payout. Raising
+        /// this above 375 rescales luminance down for the same rings; lowering it pays more.
         ///
         /// Sanitized into the XP chart's own index range (a chart too short to index collapses the range to 1).
         /// The value only feeds the luminance ratio now; the clamp is kept so the tunable stays bounded.

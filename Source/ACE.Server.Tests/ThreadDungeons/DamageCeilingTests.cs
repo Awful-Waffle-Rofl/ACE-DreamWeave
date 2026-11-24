@@ -22,7 +22,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         /// <summary>The stamp curve these pins were written against: the shipped defense rates and damage at the full slope (1.0).</summary>
         private static double PreDialCurve(DungeonStatAxis axis, int fromLevel, int toLevel)
             => DungeonStatCurve.Ratio(axis, fromLevel, toLevel, DungeonStatCurve.DefaultDefenseRateAbove375,
-                DungeonStatCurve.DefaultMagicDefenseRateAbove300, 1.0, 326);
+                DungeonStatCurve.DefaultMagicDefenseRateAbove300, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400);
 
         private const double Cap = DamageCeiling.DefaultCap;
 
@@ -214,9 +214,9 @@ namespace ACE.Server.Tests.ThreadDungeons
             var up = raw.ProjectedTo(410, PreDialCurve);
 
             Assert.AreEqual(410, up.Level);
-            Assert.AreEqual(1000 * DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 330, 410, DungeonStatCurve.DefaultDefenseRateAbove375, DungeonStatCurve.DefaultMagicDefenseRateAbove300, 1.0, 326), up.Melee.BaseDamage, 1e-9);
-            Assert.AreEqual(DungeonStatCurve.Scale(400, DungeonStatCurve.Ratio(DungeonStatAxis.Strength, 330, 410, 0.5, 0.5, 1.0, 326)), up.Melee.AttributeValue);
-            Assert.AreEqual(DungeonStatCurve.Scale(420, DungeonStatCurve.Ratio(DungeonStatAxis.Coordination, 330, 410, 0.5, 0.5, 1.0, 326)), up.Missile.AttributeValue);
+            Assert.AreEqual(1000 * DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 330, 410, DungeonStatCurve.DefaultDefenseRateAbove375, DungeonStatCurve.DefaultMagicDefenseRateAbove300, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400), up.Melee.BaseDamage, 1e-9);
+            Assert.AreEqual(DungeonStatCurve.Scale(400, DungeonStatCurve.Ratio(DungeonStatAxis.Strength, 330, 410, 0.5, 0.5, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400)), up.Melee.AttributeValue);
+            Assert.AreEqual(DungeonStatCurve.Scale(420, DungeonStatCurve.Ratio(DungeonStatAxis.Coordination, 330, 410, 0.5, 0.5, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400)), up.Missile.AttributeValue);
             Assert.IsTrue(up.Missile.IsBow);
             Assert.AreSame(raw, raw.ProjectedTo(300, PreDialCurve), "never projects downward");
             Assert.AreSame(raw, raw.ProjectedTo(330, PreDialCurve));
@@ -310,6 +310,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         /// baseline's pool (the pool is the union over every eligible family, so it must contain any single run's draw).
         /// </summary>
         [TestMethod]
+        [TestCategory("Slow")]
         public void Every_creature_a_plan_draws_is_in_the_pool()
         {
             foreach (var level in Levels)
@@ -333,6 +334,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         [TestMethod]
+        [TestCategory("Slow")]
         public void Pool_members_carry_the_tag_the_builder_gives_a_pick()
         {
             foreach (var level in Levels)
@@ -366,7 +368,7 @@ namespace ACE.Server.Tests.ThreadDungeons
 
                 Assert.IsTrue(stamped.Count > 0, $"damage {damageRate}: positive control, the pool holds stamped members");
 
-                double Live(DungeonStatAxis axis, int from, int to) => DungeonStatCurve.Ratio(axis, from, to, 0.25, 0.5, damageRate, 326);
+                double Live(DungeonStatAxis axis, int from, int to) => DungeonStatCurve.Ratio(axis, from, to, 0.25, 0.5, damageRate, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400);
 
                 foreach (var m in stamped)
                 {
@@ -378,7 +380,7 @@ namespace ACE.Server.Tests.ThreadDungeons
                 if (damageRate < 1.0)
                 {
                     var m = stamped.First(x => x.ProjectedLevel > 326 && x.Predicted.MeleePerHit > 0);
-                    var full = SyntheticPerHit(m.Wcid).WithLevel(m.AuthoredLevel).ProjectedTo(m.ProjectedLevel, (a, f, t) => DungeonStatCurve.Ratio(a, f, t, 0.25, 0.5, 1.0, 326));
+                    var full = SyntheticPerHit(m.Wcid).WithLevel(m.AuthoredLevel).ProjectedTo(m.ProjectedLevel, (a, f, t) => DungeonStatCurve.Ratio(a, f, t, 0.25, 0.5, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400));
                     Assert.IsTrue(m.Predicted.MeleePerHit < full.MeleePerHit, "discriminating: 0.75 predicts less than the full slope");
                 }
             }
@@ -429,9 +431,9 @@ namespace ACE.Server.Tests.ThreadDungeons
                 var measured = DungeonBandStandard.Compute(ShippedRosterFixture.Tables, 326, profileOf,
                     new DungeonRosterBand(DungeonRosterSelector.BandLow, DungeonRosterSelector.BandHigh), DungeonRosterSelector.BandLowFloor);
                 var standard = new DungeonStatCurve.Anchored(measured, 326, DungeonStatCurve.DefaultDefenseRateAbove375,
-                    DungeonStatCurve.DefaultMagicDefenseRateAbove300, damageRate).StandardAt(410);
+                    DungeonStatCurve.DefaultMagicDefenseRateAbove300, damageRate, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400).StandardAt(410);
 
-                Assert.AreEqual(DungeonStatCurve.Scale(100, DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 326, 410, 0.5, 0.0, damageRate, 326)), standard.MaxBodyDamage,
+                Assert.AreEqual(DungeonStatCurve.Scale(100, DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 326, 410, 0.5, 0.0, damageRate, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400)), standard.MaxBodyDamage,
                     $"damage {damageRate}: the standard's body damage is the pivot's 100 carried on the softened curve");
 
                 foreach (var m in uplifted)

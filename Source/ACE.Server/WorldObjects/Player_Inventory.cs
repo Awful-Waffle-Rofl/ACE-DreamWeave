@@ -165,6 +165,14 @@ namespace ACE.Server.WorldObjects
 
             Session.Network.EnqueueSend(new GameMessageCreateObject(item));
 
+            // This create can REBUILD an object the client already holds (a vault withdraw, a trade, a
+            // vendor or mule hand-back, the PvP arena and PvE-only dequips in Player_PvpArena and
+            // Player_PveOnly), and a rebuild drops the object's
+            // emitters. So this client's "already sent" record for the guid is no longer true and is
+            // forgotten here, or the next equip's SendTo would skip and the item would stay bare for the
+            // rest of the session. For a guid this client never recorded, Forget is a no-op.
+            VisualEffectManager.Forget(Session, item);
+
             // Deliberately NO VisualEffectManager.SendTo here. An item in a pack is known to the client
             // but not drawn, so a script sent now has nothing to attach to - and because SendTo is
             // once-per-lifetime, that wasted send would then suppress the real one at equip time.
@@ -176,7 +184,10 @@ namespace ACE.Server.WorldObjects
                 Session.Network.EnqueueSend(new GameEventViewContents(Session, itemAsContainer));
 
                 foreach (var obj in itemAsContainer.Inventory.Values)
+                {
                     Session.Network.EnqueueSend(new GameMessageCreateObject(obj, Adminvision, false));
+                    VisualEffectManager.Forget(Session, obj);   // the same rebuild, for each item inside
+                }
             }
 
             Session.Network.EnqueueSend(
@@ -748,7 +759,7 @@ namespace ACE.Server.WorldObjects
                 {
                     if (lastOpenedContainer is Vendor lastUsedVendor)
                     {
-                        if (lastUsedVendor.TryGetItemForSale(objectGuid, out result))
+                        if (lastUsedVendor.TryGetItemForSale(this, objectGuid, out result))
                         {
                             rootOwner = lastUsedVendor;
                             return result;
@@ -1308,7 +1319,12 @@ namespace ACE.Server.WorldObjects
                                     Session.Network.EnqueueSend(new GameEventViewContents(Session, itemAsContainer));
 
                                     foreach (var packItem in itemAsContainer.Inventory)
+                                    {
                                         Session.Network.EnqueueSend(new GameMessageCreateObject(packItem.Value));
+
+                                        // that create rebuilds the item if the client held it; see TryCreateInInventoryWithNetworking
+                                        VisualEffectManager.Forget(Session, packItem.Value);
+                                    }
                                 }
 
                                 EnqueueBroadcast(new GameMessageSound(Guid, Sound.PickUpItem));
@@ -4033,6 +4049,15 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // Salvage Roller station (wcid 1007800): it takes nothing by hand. The ServerSaveFailed bounces the item
+            // back to the pack and the tell sends the player to Use the station, where the sale happens in its vendor panel.
+            if (target.GetProperty(PropertyBool.SalvageRollerStation) == true)
+            {
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, item.Guid.Full));
+                ACE.Server.SalvageRoller.SalvageRollerStation.HandleGive(this, target, item);
+                return;
+            }
+
             // Threads Fragment Press (wcid 1003614): give it a Thread Gem and it takes the gem apart
             // into a Raw Fragment. An unbound gem goes back for free and unconfirmed; the giver's OWN bound
             // gem is taken too, and if the run it opened is still live the press ENDS that run after a
@@ -4046,6 +4071,18 @@ namespace ACE.Server.WorldObjects
             {
                 Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, item.Guid.Full));
                 ThreadDungeons.FragmentPressStation.HandleGive(this, target, item);
+                return;
+            }
+
+            // Pattern Exchanger (wcid 1007006): give it a bare Pattern while holding a second bare Pattern for the same
+            // pinnacle and it takes both and hands back ONE Pattern for a different pinnacle. Same shape as the Fragment
+            // Press above - the ServerSaveFailed bounces the given Pattern back into the pack, and
+            // PatternExchangeStation.HandleGive then consumes both from inventory. A data-only Give emote cannot express
+            // a swap that depends on what ELSE the player holds.
+            if (target.GetProperty(PropertyBool.PatternExchanger) == true)
+            {
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, item.Guid.Full));
+                ACE.Server.Knots.PatternExchangeStation.HandleGive(this, target, item);
                 return;
             }
 

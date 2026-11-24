@@ -82,7 +82,7 @@ namespace ACE.Server.ThreadDungeons
     ///   * every other carried skill (Run, Deception, ...) - floored to the source's InitLevel median (BandUplift's rule);
     ///   * level - floored at the uplift level.
     ///
-    /// BandUplift.Apply is untouched (World Events). The pure cores below decide every number; the creature glue is thin.
+    /// BandUplift.Apply is untouched (World Events share it; WE never uses the archetype uplift). The pure cores below decide every number; the creature glue is thin.
     /// </summary>
     internal static class ArchetypeUplift
     {
@@ -478,7 +478,7 @@ namespace ACE.Server.ThreadDungeons
         /// records on the session how much DamageRating the spell top-up added above the rating floor. Call BEFORE the gem
         /// adds its own ratings, and after the AoE strip (the spell output is read off the FINAL book).
         /// </summary>
-        internal static RatingResult FloorRatings(Creature creature, Session session, Func<int, double> projectileMeanOf)
+        internal static RatingResult FloorRatings(Creature creature, Session session, Func<int, double> projectileMeanOf, bool noCritDamage = false)
         {
             var info = session.Info;
             var cap = info.CapRatio;
@@ -493,6 +493,13 @@ namespace ACE.Server.ThreadDungeons
             var drrTo = RatingTarget(drr, info.Run.DamageResistRating, info.Own.DamageResistRating, info.DefenseRatio, info.DefenseCapRatio);
             var crTo = RatingTarget(cr, info.Run.CritRating, info.Own.CritRating, info.OffenseRatio, cap);
             var cdrTo = RatingTarget(cdr, info.Run.CritDamageRating, info.Own.CritDamageRating, info.OffenseRatio, cap);
+
+            // The combat-trait strip (dynamic_dungeons_strip_combat_traits) removed the creature's authored crit damage rating
+            // earlier in the spawn; this floor is a standard measured over OTHER creatures' authored ratings and would put one
+            // back. noCritDamage holds it at 0 here, before the gem adds its own (the player's chosen difficulty). Never
+            // RAISES crit damage: an authored negative rating is kept, not lifted to 0.
+            if (noCritDamage)
+                cdrTo = Math.Min(cdr, 0);
 
             session.DamageRatingAddedForSpells = added;
 

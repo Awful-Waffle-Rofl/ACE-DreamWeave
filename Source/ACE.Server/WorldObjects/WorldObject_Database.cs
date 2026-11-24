@@ -162,6 +162,24 @@ namespace ACE.Server.WorldObjects
             if (this is PersonalVendor)
                 return false;
 
+            // Salvage Roller (Docs/SalvageRoller/DESIGN.md section 4, "Never persisted"): the shared station
+            // is a placed static object and its per-viewer views are memory-only. Should one ever carry a
+            // dynamic guid (an admin @create), it is still never saved, and the check sits above the
+            // already-saved short-circuit for the same reason as the check above.
+            if (this is SalvageRollerVendor)
+                return false;
+
+            // Allegiance Avatar: the summoned and the seated NPC are both re-created from AvatarManager's state (the
+            // summon command, the Seat on landblock activation), never loaded from the shard. Above the already-saved
+            // short-circuit for the same reason as the two checks above.
+            if (this is ACE.Server.Avatars.AvatarVendor)
+                return false;
+
+            // A dressed Avatar's pieces are cosmetic copies built per dress (AvatarLookApplier), re-created from the stored
+            // look every time; they must never reach the shard, wherever they end up.
+            if (GetProperty(PropertyBool.AvatarCosmetic) == true)
+                return false;
+
             if (BiotaOriginatedFromOrHasBeenSavedToDatabase())
                 return true;
 

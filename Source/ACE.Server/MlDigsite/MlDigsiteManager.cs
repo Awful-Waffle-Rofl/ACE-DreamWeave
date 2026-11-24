@@ -82,8 +82,15 @@ namespace ACE.Server.MlDigsite
         private static readonly TimeSpan ReapInterval = TimeSpan.FromSeconds(15);
 
         /// <summary>
-        /// Serialises admission: the cap check, the separation check and the registry insert. Held across
-        /// nothing else - never across a spawn, which reaches the landblock.
+        /// Serialises admission: the cap check, the separation check, the dig's commit and the registry
+        /// insert. The commit (TreasureMapHandler.FinishDig's PayAndConsume: the pack-room check, the map
+        /// consume, the Tally of the Unburied charge - which can stamp its completion quest - and the currency
+        /// move into the pack) runs INSIDE the lock
+        /// on purpose: a check-then-consume with the lock released between them would let a second nearby dig
+        /// register in the gap and eat a map again (Discord "Wave map seems to have gotten eaten",
+        /// 2026-11-16). That work is short and touches only the digger's own inventory, never this lock or
+        /// the registry; the currency object itself is built before TryStart, outside the lock. Never held
+        /// across a spawn, which reaches the landblock.
         /// </summary>
         private static readonly object startLock = new object();
 
@@ -106,12 +113,9 @@ namespace ACE.Server.MlDigsite
         // ---- admission ---------------------------------------------------------------------------------
 
         /// <summary>
-        /// Opens an encounter on a completed ordinary dig.
-        ///
-        /// CALLED AFTER THE DOUBLOON PAYOUT AND AFTER THE MAP HAS BEEN CONSUMED, which is what makes every
-        /// refusal free: there is nothing left to roll back, so a refused encounter costs the player neither
-        /// their map nor their coins. The encounter is strictly additive to the dig payout, never a
-        /// replacement for it.
+        /// Opens an encounter on a completed ordinary dig, with no commit step (see the overload taking a
+        /// commit, which is the one TreasureMapHandler.FinishDig calls so a separation refusal can keep the
+        /// map).
         ///
         /// Returns false with a reason on every refusal, having registered nothing and placed nothing.
         /// </summary>
@@ -143,19 +147,69 @@ namespace ACE.Server.MlDigsite
         /// </param>
         public static bool TryStart(Player digger, MlDigsiteType? forcedType, long forcedMechanicSetId, out string reason,
             MlTreasureZone zone = MlTreasureZone.Unknown)
-        {
-            reason = null;
+            => TryStart(digger, forcedType, forcedMechanicSetId, zone, null, out reason) == MlDigsiteStartOutcome.Started;
 
+        /// <summary>
+        /// The admission sequence with the dig's own payout-and-consume step (<paramref name="commit"/>) run
+        /// INSIDE it, once admission has been decided and before anything is registered. This is what lets a
+        /// separation refusal keep the player's map (Discord bug report "Wave map seems to have gotten eaten",
+        /// 2026-11-16): before it, TreasureMapHandler.FinishDig consumed the map first and only then asked,
+        /// so a map dug within ml_digsite_separation_metres of another player's live encounter was eaten,
+        /// opened nothing, and said nothing. The digger then fought the OTHER player's wave and was paid as
+        /// that encounter's helper, which read as both maps being cleared by one wave.
+        ///
+        /// Running the commit under <see cref="startLock"/> closes the window a check-then-consume would
+        /// leave: no second dig can register inside the radius between the separation check and the consume.
+        ///
+        /// Outcomes (<see cref="MlDigsiteStartOutcome"/>):
+        ///   * a refusal <see cref="MlDigsiteRules.KeepsMapOnRefusal"/> names - the commit never runs;
+        ///   * any other refusal - the commit runs first, then the refusal stands, exactly as before;
+        ///   * admitted, the commit declines (a full pack) - nothing is registered;
+        ///   * admitted and committed - registered, then opened outside the lock.
+        /// A null commit is treated as one that succeeded.
+        /// </summary>
+        public static MlDigsiteStartOutcome TryStart(Player digger, MlDigsiteType? forcedType, long forcedMechanicSetId,
+            MlTreasureZone zone, Func<bool> commit, out string reason)
+        {
             if (digger?.Location == null)
             {
+                // Unreachable from FinishDig (the dig itself read the player's location), so this keeps the
+                // pre-fix shape: the commit runs, then the encounter is refused.
+                commit?.Invoke();
                 reason = "no digger";
-                return false;
+                return MlDigsiteStartOutcome.Refused;
             }
 
-            var anchor = new Position(digger.Location);
-            var now = DateTime.UtcNow;
+            var outcome = TryAdmit(digger.Guid.Full, digger.Name, new Position(digger.Location), forcedType, zone, DateTime.UtcNow,
+                MlDigsiteTunables.Enabled, MlDigsiteTunables.MaxConcurrent, MlDigsiteTunables.SeparationMetres,
+                () => MlDigsiteRules.PickType(MlDigsiteTunables.WeightWaves, MlDigsiteTunables.WeightCorruption,
+                    MlDigsiteTunables.WeightBossRush, ThreadSafeRandom.Next(0.0f, 1.0f)),
+                commit, out var encounter, out reason);
 
-            MlDigsiteEncounter encounter;
+            if (outcome != MlDigsiteStartOutcome.Started)
+            {
+                log.Debug($"[ML_DIGSITE] refused an encounter for {digger.Name} ({outcome}): {reason}");
+                return outcome;
+            }
+
+            log.Info($"[ML_DIGSITE] started {encounter} at {encounter.Anchor.ToLOCString()}");
+
+            OpenEncounter(encounter, forcedMechanicSetId);
+
+            return outcome;
+        }
+
+        /// <summary>
+        /// The Player-free core of <see cref="TryStart(Player, MlDigsiteType?, long, MlTreasureZone, Func{bool}, out string)"/>:
+        /// admission, the commit and the registry insert, all under <see cref="startLock"/>. Places nothing.
+        /// Every tunable arrives as a parameter, so ACE.Server.Tests drives it without a PropertyManager read.
+        /// </summary>
+        internal static MlDigsiteStartOutcome TryAdmit(uint diggerGuid, string diggerName, Position anchor,
+            MlDigsiteType? forcedType, MlTreasureZone zone, DateTime now, bool enabled, long maxConcurrent,
+            double separationMetres, Func<MlDigsiteType> rollType, Func<bool> commit,
+            out MlDigsiteEncounter encounter, out string reason)
+        {
+            encounter = null;
 
             // The whole admission sequence is one critical section: every check below is a read of
             // `encounters` followed by a write to it, and TryStart is not guaranteed to run on the world
@@ -165,36 +219,49 @@ namespace ACE.Server.MlDigsite
             {
                 var live = LiveEncounters;
 
-                var diggerRunning = live.Any(e => e.DiggerGuid == digger.Guid.Full);
-                var tooClose = live.Any(e => WithinSeparation(e.Anchor, anchor));
+                var diggerRunning = live.Any(e => e.DiggerGuid == diggerGuid);
+                var tooClose = live.Any(e => WithinSeparation(e.Anchor, anchor, separationMetres));
+                var ownTooClose = live.Any(e => e.DiggerGuid == diggerGuid && WithinSeparation(e.Anchor, anchor, separationMetres));
 
-                if (!MlDigsiteRules.IsAdmitted(MlDigsiteTunables.Enabled, diggerRunning, tooClose,
-                        live.Count, MlDigsiteTunables.MaxConcurrent, out reason))
+                var admission = MlDigsiteRules.Admit(enabled, diggerRunning, ownTooClose, tooClose, live.Count, maxConcurrent, out reason);
+
+                if (admission != MlDigsiteAdmission.Admitted && MlDigsiteRules.KeepsMapOnRefusal(admission))
+                    return MlDigsiteStartOutcome.RefusedMapKept;
+
+                if (commit != null && !commit())
                 {
-                    log.Debug($"[ML_DIGSITE] refused an encounter for {digger.Name}: {reason}");
-                    return false;
+                    if (admission != MlDigsiteAdmission.Admitted)
+                        return MlDigsiteStartOutcome.Refused;
+
+                    reason = "the dig's payout was declined";
+                    return MlDigsiteStartOutcome.CommitDeclined;
                 }
 
-                var type = forcedType ?? MlDigsiteRules.PickType(MlDigsiteTunables.WeightWaves, MlDigsiteTunables.WeightCorruption,
-                    MlDigsiteTunables.WeightBossRush, ThreadSafeRandom.Next(0.0f, 1.0f));
+                if (admission != MlDigsiteAdmission.Admitted)
+                    return MlDigsiteStartOutcome.Refused;
+
+                var type = forcedType ?? rollType();
 
                 var id = (uint)Interlocked.Increment(ref nextEncounterId);
 
-                encounter = new MlDigsiteEncounter(id, digger.Guid.Full, digger.Name, type, anchor, now, zone);
+                encounter = new MlDigsiteEncounter(id, diggerGuid, diggerName, type, anchor, now, zone);
 
                 if (!encounters.TryAdd(id, encounter))
                 {
+                    encounter = null;
                     reason = "the encounter could not be registered";
-                    return false;
+                    return MlDigsiteStartOutcome.Refused;
                 }
             }
 
-            log.Info($"[ML_DIGSITE] started {encounter} at {anchor.ToLOCString()}");
-
-            OpenEncounter(encounter, forcedMechanicSetId);
-
-            return true;
+            return MlDigsiteStartOutcome.Started;
         }
+
+        /// <summary>
+        /// Test seam (InternalsVisibleTo, ACE.Server.csproj:15): drops an encounter TryAdmit registered,
+        /// without finishing it. Nothing in the server calls this; Finish is the one real way out.
+        /// </summary>
+        internal static bool ForgetEncounterForTest(uint encounterId) => encounters.TryRemove(encounterId, out _);
 
         /// <summary>
         /// Places an encounter's opening set. Outside the admission lock, because every one of these paths
@@ -1897,7 +1964,7 @@ namespace ACE.Server.MlDigsite
         /// </summary>
         private static Random NewRandom() => new Random(ThreadSafeRandom.Next(0, int.MaxValue - 1));
 
-        private static bool WithinSeparation(Position a, Position b)
+        private static bool WithinSeparation(Position a, Position b, double separationMetres)
         {
             if (a == null || b == null)
                 return false;
@@ -1907,7 +1974,7 @@ namespace ACE.Server.MlDigsite
             if (a.Instance != b.Instance)
                 return false;
 
-            return a.DistanceTo(b) < MlDigsiteTunables.SeparationMetres;
+            return a.DistanceTo(b) < separationMetres;
         }
     }
 }

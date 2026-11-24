@@ -34,10 +34,12 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "transfusion",
             DisplayName = "Transfusion",
-            Description = "Your Drain Health surplus cascades to fellowship members and your own summons " +
-                          "within 10 metres who need it, at 40/70/100% by rank, instead of being discarded. " +
-                          "No fellowship required. Higher Healing delivers more than was drained. Drain " +
-                          "damage is identical at every rank. Against monsters only.",
+            // Live text. Share per rank: TransfusionAbility.cs ~72-74 (ShareFraction) and ~105-107 (GetReadout).
+            DescriptionTemplate = "The surplus from your Drain Health goes to fellowship members, your own summons and the envoys of a World Event within 10 " +
+                          "metres who need it, instead of being lost. You do not need a fellowship. Drain damage is the same at " +
+                          "every rank.",
+            RankTailTemplate = "{ranks:class_ability_transfusion_share_r|pct}% of the surplus shared",
+            AllowedLiterals = new[] { ("10 metres", "the cascade reach is a code constant; no class_ability tunable exists for it") },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,

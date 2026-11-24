@@ -122,10 +122,15 @@ namespace ACE.Server.Tests.ThreadDungeons
         {
             // ThreadRunPresence.IsMemberInside needs a Player, which the harness cannot build; its location clause is
             // the helper, pinned here so the presence path cannot fall back to a single-landblock comparison.
-            var presence = PooledLootSourceText.ExpressionBody(PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadRunPresence.cs"),
-                "public static bool IsMemberInside(ThreadDungeonRun run, Player player)");
-            StringAssert.Contains(presence, "player.Location.Instance == run.Instance");
-            StringAssert.Contains(presence, "ThreadRunGeometry.IsOnRunLandblock(run, player.Location)");
+            // Since the Thread Shrine (2026-11-09) the Player overload forwards to a guid + position overload, which holds
+            // the clauses; both are pinned.
+            var source = PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadRunPresence.cs");
+            var forward = PooledLootSourceText.ExpressionBody(source, "public static bool IsMemberInside(ThreadDungeonRun run, Player player)");
+            StringAssert.Contains(forward, "IsMemberInside(run, player.Guid.Full, player.Location)");
+
+            var presence = PooledLootSourceText.ExpressionBody(source, "public static bool IsMemberInside(ThreadDungeonRun run, uint guid, ACE.Entity.Position location)");
+            StringAssert.Contains(presence, "location.Instance == run.Instance");
+            StringAssert.Contains(presence, "ThreadRunGeometry.IsOnRunLandblock(run, location)");
         }
 
         // ---- source-scan tripwire ----

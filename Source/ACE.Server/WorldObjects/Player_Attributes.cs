@@ -59,6 +59,15 @@ namespace ACE.Server.WorldObjects
 
                 Session.Network.EnqueueSend(sound, msg);
 
+                if (attribute == PropertyAttribute.Focus)
+                {
+                    // FORK: tell the player what their BUFFED Focus is worth against monsters (live tunable)
+                    var focusLine = FormatFocusSpellDamageLine(Focus.Current, PropertyManager.GetDouble("magic_damage_per_focus_point").Item);
+
+                    if (focusLine != null)
+                        Session.Network.EnqueueSend(new GameMessageSystemChat(focusLine, ChatMessageType.Advancement));
+                }
+
                 if (attribute == PropertyAttribute.Endurance)
                 {
                     // this packet appears to trigger client to update both health and stamina

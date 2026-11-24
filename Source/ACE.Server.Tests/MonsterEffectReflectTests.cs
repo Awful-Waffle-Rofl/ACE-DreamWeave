@@ -393,14 +393,14 @@ namespace ACE.Server.Tests
             var cascade = BareProjectile(); cascade.ClassAbilityGeneration = 1;
             var aoeChild = BareProjectile(); aoeChild.IsClassAbilityAoeChild = true;
             var spawned = BareProjectile(); spawned.IsClassAbilitySpawned = true;
-            var echo = BareProjectile(); echo.IsEchoCopy = true;
+            var wisp = BareProjectile(); wisp.IsEchoWispCast = true;
 
             Assert.AreEqual(IncomingDamageOrigin.Secondary, proc.IncomingDamageOrigin, "item / cloak proc");
             Assert.AreEqual(IncomingDamageOrigin.Secondary, classProc.IncomingDamageOrigin, "Spellsword proc");
             Assert.AreEqual(IncomingDamageOrigin.Secondary, cascade.IncomingDamageOrigin, "Cascade hop");
             Assert.AreEqual(IncomingDamageOrigin.Secondary, aoeChild.IncomingDamageOrigin, "Spell AOE splash");
             Assert.AreEqual(IncomingDamageOrigin.Secondary, spawned.IncomingDamageOrigin, "class-ability spawned copy");
-            Assert.AreEqual(IncomingDamageOrigin.Secondary, echo.IncomingDamageOrigin, "Echo Cast recast");
+            Assert.AreEqual(IncomingDamageOrigin.DirectHit, wisp.IncomingDamageOrigin, "an Echo Cast wisp cast is the player's own first-hand cast, not a derived emission");
 
             // and Secondary really does stop the reflect at point blank
             var (defender, attacker) = Pair(level: 100, distance: 1.0f);

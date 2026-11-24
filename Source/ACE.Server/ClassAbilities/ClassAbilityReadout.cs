@@ -101,6 +101,9 @@ namespace ACE.Server.ClassAbilities
         /// magnitude legitimately does not apply at the current rank.
         /// </summary>
         public IReadOnlyList<ClassAbilityReadout> Secondary { get; init; }
+
+        /// <summary>Readings of this ability's declared ceilings (raw value vs max, display units). Null/empty = none.</summary>
+        public IReadOnlyList<ClassAbilityCeilingReading> Ceilings { get; init; }
     }
 
     /// <summary>

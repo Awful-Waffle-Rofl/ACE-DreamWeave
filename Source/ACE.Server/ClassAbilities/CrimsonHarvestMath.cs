@@ -76,5 +76,15 @@ namespace ACE.Server.ClassAbilities
 
             return extras > int.MaxValue ? int.MaxValue : (int)extras;
         }
+
+        /// <summary>
+        /// <see cref="SecondaryTargetCap(int, long, long, long)"/> with the three class_ability_crimsonharvest_extra_targets_rN
+        /// tunables read through <paramref name="values"/>. WorldObject_Magic.TryCrimsonHarvest and
+        /// CrimsonHarvestAbility.GetReadout call this with <see cref="ClassAbilityText.Live"/>.
+        /// </summary>
+        public static int SecondaryTargetCap(ITunableValues values, int rank) => SecondaryTargetCap(rank,
+            values.GetLong("class_ability_crimsonharvest_extra_targets_r1"),
+            values.GetLong("class_ability_crimsonharvest_extra_targets_r2"),
+            values.GetLong("class_ability_crimsonharvest_extra_targets_r3"));
     }
 }

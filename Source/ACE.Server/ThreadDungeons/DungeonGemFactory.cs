@@ -32,7 +32,8 @@ namespace ACE.Server.ThreadDungeons
         ///
         /// Written out as a table rather than derived from a base and a step, because the ladder's step is
         /// IRREGULAR: 185 to 275 in tens, then 300, 325, 350 and 375 in twenty-fives (the ceiling raise, owner
-        /// ruling 2026-09-09). The old "RawFragmentBaseWcid + clamp((level - 185) / 10, 0, 9)" arithmetic
+        /// ruling 2026-09-09), then 400, 450 and 500 in fifties (the second ceiling raise, owner ruling
+        /// 2026-11-16; a level between rungs, 425 or 475 say, rounds down to the rung below). The old "RawFragmentBaseWcid + clamp((level - 185) / 10, 0, 9)" arithmetic
         /// described the first ten rungs exactly, and its clamp meant it did not go out of range once the
         /// ceiling moved - it did something quieter and worse. Level 300 computes rung index 11, clamps back
         /// to 9, and comes out 1003624: every one of the four new rungs would answer with the level-275
@@ -43,12 +44,13 @@ namespace ACE.Server.ThreadDungeons
             (1003615u, 185), (1003616u, 195), (1003617u, 205), (1003618u, 215), (1003619u, 225),
             (1003620u, 235), (1003621u, 245), (1003622u, 255), (1003623u, 265), (1003624u, 275),
             (1003626u, 300), (1003627u, 325), (1003628u, 350), (1003629u, 375),
+            (1003630u, 400), (1003631u, 450), (1003632u, 500),
         };
 
         /// <summary>The lowest rung's level, 185. Below it <see cref="RungWcid"/> clamps to the first rung.</summary>
         public static int RungBaseLevel => Rungs[0].Level;
 
-        /// <summary>The highest rung's level, 375. Above it <see cref="RungWcid"/> clamps to the last rung.</summary>
+        /// <summary>The highest rung's level, 500. Above it <see cref="RungWcid"/> clamps to the last rung.</summary>
         public static int RungTopLevel => Rungs[Rungs.Count - 1].Level;
 
         public static int RungCount => Rungs.Count;
@@ -69,8 +71,8 @@ namespace ACE.Server.ThreadDungeons
         public const int BlueTierThreshold = 8;
 
         /// <summary>
-        /// The rung weenie whose shipped level matches <paramref name="level"/>, clamped to the fourteen rungs
-        /// that exist (<see cref="Rungs"/>, levels 185..375). A level between rungs rounds DOWN, which is what
+        /// The rung weenie whose shipped level matches <paramref name="level"/>, clamped to the seventeen rungs
+        /// that exist (<see cref="Rungs"/>, levels 185..500). A level between rungs rounds DOWN, which is what
         /// makes 190 a level-185 rung rather than an error; a level below the first rung reads as the first
         /// rung and a level above the last reads as the last. Identical semantics to the arithmetic form this
         /// replaced - only the ladder it walks changed.
@@ -137,7 +139,7 @@ namespace ACE.Server.ThreadDungeons
 
         /// <summary>
         /// The gem's colour for a given loot tier. Only tiers 7 and 8 are reachable from shipped content
-        /// today (the fourteen rungs of <see cref="Rungs"/> carry tier 7 or 8), so this only needs one cut: tier 8 and
+        /// today (the seventeen rungs of <see cref="Rungs"/> carry tier 7 or 8), so this only needs one cut: tier 8 and
         /// above comes back Blue, anything lower - including a tier this factory has never seen - falls to
         /// Green rather than erroring. Pure and world-database-free so it can be unit tested directly.
         /// </summary>

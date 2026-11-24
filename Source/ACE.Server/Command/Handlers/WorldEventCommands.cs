@@ -76,6 +76,10 @@ namespace ACE.Server.Command.Handlers
 
                     case "status":
                         Reply(session, WorldEventManager.StatusText());
+
+                        foreach (var line in WorldEventScheduler.Live.StatusLines())
+                            Reply(session, line);
+
                         break;
 
                     case "list":
@@ -161,11 +165,21 @@ namespace ACE.Server.Command.Handlers
             else
             {
                 // Mutual exclusivity with --here is already enforced by TryParseStartArgs; reaching here
-                // means parsed.AnchorId is set. Named anchors are a P2 feature (anchors.json ships empty in
-                // v1), so this only succeeds if a later WP or a hand-authored anchors.json populated one.
-                if (!WorldEventManager.Store.Anchors.ContainsKey(parsed.AnchorId))
+                // means parsed.AnchorId is set. The named anchors are the city list in anchors.json.
+                var anchorKey = parsed.AnchorId.Trim().ToLowerInvariant();
+
+                if (!WorldEventManager.Store.Anchors.TryGetValue(anchorKey, out var namedAnchor))
                 {
-                    Reply(session, "named anchors arrive with P2; pass --here instead");
+                    Reply(session, $"unknown anchor '{anchorKey}' (known: {string.Join(", ", WorldEventManager.Store.Anchors.Keys.OrderBy(k => k, StringComparer.Ordinal))})");
+                    return;
+                }
+
+                // A city with maxRadius 0 hosts nothing; a pinned source that is too big for it is refused by the composer.
+                var anchorRefusal = WorldEventAnchorRules.AnchorRefusal(namedAnchor);
+
+                if (anchorRefusal != null)
+                {
+                    Reply(session, $"worldevent start: {anchorRefusal}");
                     return;
                 }
 
@@ -197,7 +211,10 @@ namespace ACE.Server.Command.Handlers
 
             // Checked here as well as in TryStart, because "--dry" returns before TryStart ever runs and a
             // dry run that silently accepted a rejected minimum would be worse than useless.
-            if (!WorldEvent.ValidateDurations(request.MinDurationSeconds, request.MaxDurationSeconds, out var durationError))
+            // The effective maximum depends on the goal, which is only known once composed, so a run with no
+            // explicit maximum is checked against it below, on the dry path and in TryStart.
+            if (request.MaxDurationSeconds != null
+                && !WorldEvent.ValidateDurations(request.MinDurationSeconds, request.MaxDurationSeconds.Value, out var durationError))
             {
                 Reply(session, $"worldevent start: {durationError}");
                 return;
@@ -205,9 +222,19 @@ namespace ACE.Server.Command.Handlers
 
             if (parsed.Dry)
             {
-                if (!WorldEventManager.TryCompose(request, out var composition, out var composeError))
+                // TryComposeForStart, not TryCompose: a random start skips a candidate whose goal cannot fit the requested
+                // minimum, so the dry run has to report the candidate the live start would actually reach.
+                if (!WorldEventManager.TryComposeForStart(request, out var composition, out var composeError))
                 {
                     Reply(session, composeError);
+                    return;
+                }
+
+                if (!WorldEvent.ValidateDurations(request.MinDurationSeconds,
+                        WorldEvent.ResolveMaxDuration(request.MaxDurationSeconds, composition.Goal?.MaxDurationSeconds ?? 0),
+                        out var dryDurationError))
+                {
+                    Reply(session, $"worldevent start: {dryDurationError}");
                     return;
                 }
 
@@ -568,6 +595,37 @@ namespace ACE.Server.Command.Handlers
                       $"elite x{bandDials.EliteLow:F2}-x{bandDials.EliteHigh:F2}, " +
                       $"family floor: {WorldEventFamilyPairing.FloorLevel()}");
 
+            // The stat-uplift dials (world_events_stat_curve / _threads_uplift / _magic_attack_skill_cap) and the
+            // stat-curve pivot over the live species tables: above the pivot an uplifted creature follows the
+            // Threads curve. The pivot is computed directly, NOT through WorldEventBandMemo: a command may run off the
+            // world thread, and the memo's maps are written by the world thread only (see its class remarks).
+            var upliftDials = WorldEventUplift.Current();
+            var curvePivot = ACE.Server.ThreadDungeons.DungeonPopulationBuilder.ReachUpPivot(
+                ACE.Server.ThreadDungeons.DungeonPopulationBuilder.AuthoredTopLevel(WorldEventManager.Store?.SpeciesTables, w => WorldEventSpawner.LiveProfileOf(w)?.Level ?? 0),
+                WorldEventBandMemo.CurveBandHigh);
+            var magicCeiling = ACE.Server.ThreadDungeons.DungeonCombatNormalizer.MagicAttackCeilingFor(upliftDials.MagicAttackSkillCap);
+            lines.Add($"stat uplift: curve {(upliftDials.StatCurve ? "on" : "off")} (pivot {(curvePivot > 0 ? curvePivot.ToString() : "none")}), " +
+                      $"threads uplift {(upliftDials.ThreadsUplift ? "on" : "off")}, " +
+                      $"magic attack ceiling {magicCeiling?.ToString() ?? "off"}");
+
+            // The damage ceiling (world_events_damage_ceiling) at the median participant level, the trash slot level a
+            // live wave samples most: the Threads construction computed directly through WorldEventDamageCeiling, NOT through
+            // WorldEventBandMemo, for the same off-world-thread reason as the pivot above.
+            var ceilingLevel = Math.Min(estimate.MedianLevel, WorldEventRosterSelector.MaxConsideredLevel);
+
+            if (upliftDials.DamageCeiling && ceilingLevel > 0)
+            {
+                // Known (code review R3, not fixed): recomputed uncached on every simulate (100-300 ms); admin-only.
+                var ceilingBaseline = WorldEventDamageCeiling.ComputeLive(WorldEventManager.Store?.SpeciesTables, ceilingLevel);
+                var (ceilingCap, ceilingTop) = WorldEventDamageCeiling.CapAndTop(ceilingBaseline, upliftDials);
+
+                lines.Add(ceilingBaseline.Median > 0
+                    ? $"damage ceiling: level {ceilingLevel} median per-hit {ceilingBaseline.Median:0.#} (n {ceilingBaseline.SampleSize}), cap x{ceilingCap:0.##} = {ceilingCap * ceilingBaseline.Median:0.#}, top x{ceilingTop:0.##}"
+                    : $"damage ceiling: level {ceilingLevel} has no per-hit median; damage would NOT be capped");
+            }
+            else
+                lines.Add($"damage ceiling: off{(upliftDials.DamageCeiling ? " (no participant level)" : "")}");
+
             // TECH-DESIGN 2.15: the CROWD half of the health multiplier only. The pace half is a runtime
             // measurement of how fast this particular group is actually clearing waves, so it has no
             // honest value to preview - a simulate line that showed one would be inventing it.
@@ -786,6 +844,17 @@ namespace ACE.Server.Command.Handlers
             return $"wcid={member.Wcid} name=\"{member.Name}\" level={member.Level} role={roleName}{fallthrough}{familyTag}";
         }
 
+        private static string FormatWeight(double weight) => weight.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+
+        /// <summary>"portal/1 (group 1)" for a grouped source (its own share, then the bucket's weight); a bare weight otherwise.</summary>
+        private static string DescribeSourceRandom(ACE.Server.WorldEvents.WorldEventAxisStore store, ACE.Server.WorldEvents.Defs.SourceThemeDef source)
+        {
+            if (source.RandomGroup != null && store.RandomGroups.TryGetValue(source.RandomGroup, out var groupWeight))
+                return $"{source.RandomGroup}/{FormatWeight(source.RandomWeight)} (group {FormatWeight(groupWeight)})";
+
+            return FormatWeight(source.RandomWeight);
+        }
+
         private static string BuildAxesListing()
         {
             var store = WorldEventManager.Store;
@@ -795,7 +864,8 @@ namespace ACE.Server.Command.Handlers
             {
                 lines.Add($"source {source.Id}: {source.DisplayName}, geometry={source.GeometryKind} " +
                           $"interval={source.EffectiveWaveIntervalSeconds}s maxAlive={source.EffectiveMaxAlive} " +
-                          $"compatibleGoals={JoinOrNone(source.CompatibleGoals)}");
+                          $"compatibleGoals={JoinOrNone(source.CompatibleGoals)} " +
+                          $"random={DescribeSourceRandom(store, source)}");
             }
 
             foreach (var boss in store.Bosses.Values.OrderBy(b => b.Id, StringComparer.Ordinal))
@@ -804,7 +874,7 @@ namespace ACE.Server.Command.Handlers
             foreach (var goal in store.Goals.Values.OrderBy(g => g.Id, StringComparer.Ordinal))
             {
                 lines.Add($"goal {goal.Id}: {goal.DisplayName}, type={goal.TypeKind} " +
-                          $"count={FormatCount(goal.Count)} mvpRule={goal.RuleKind}");
+                          $"count={FormatCount(goal.Count)} mvpRule={goal.RuleKind} random={FormatWeight(goal.RandomWeight)}");
             }
 
             foreach (var reward in store.Rewards.Values.OrderBy(r => r.Id, StringComparer.Ordinal))

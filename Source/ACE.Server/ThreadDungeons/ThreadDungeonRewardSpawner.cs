@@ -84,9 +84,9 @@ namespace ACE.Server.ThreadDungeons
         ///
         /// A straight line through two anchors: (lowLevel, lowMax) and (highLevel, highMax), floored to an
         /// integer. At the shipped anchors - 185 -> 2 and 300 -> 5 - that reads 2 at level 185, 4 at 275,
-        /// 5 at 300 and 6 at 375 (DungeonGemSpec.MaxGemLevel): 2 + 190 * 3/115 = 6.956, floored. Above the gem
-        /// ceiling it keeps climbing with the RUN level (DungeonGemSpec.MaxRunLevel, split 2026-10-08): 7 at a
-        /// pressed 410 run (2 + 225 * 3/115 = 7.87) and 10 at 500 (2 + 315 * 3/115 = 10.2).
+        /// 5 at 300 and 6 at 375: 2 + 190 * 3/115 = 6.956, floored. Above 375 (the old gem ceiling) it keeps climbing
+        /// with the level, up to the gem and run ceiling (DungeonGemSpec.MaxGemLevel = MaxRunLevel = 500): 7 at
+        /// 410 (2 + 225 * 3/115 = 7.87) and 10 at 500 (2 + 315 * 3/115 = 10.2).
         ///
         /// Clamped BELOW at <paramref name="lowMax"/> and deliberately NOT clamped above. The floor is what
         /// keeps a gem below the low anchor from paying zero (a level-100 gem reads 2, not -1); the missing
@@ -254,12 +254,13 @@ namespace ACE.Server.ThreadDungeons
             // call and handed to TryAddToInventory as an explicit PlacementPosition, incremented only on a
             // successful add. Container.TryAddToInventory INCREMENTS every existing item at >= the position
             // it is handed, so adding in strictly increasing order always APPENDS and nothing already placed
-            // is ever shifted. MMD goes first (slot 0), the Durable Legendary Key next, then the targeted
-            // salvage bag(s), and the rolled loot last - the things a player most wants to see land in the
+            // is ever shifted. MMD goes first (slot 0), the Durable Legendary Key next, then the 2% Foolproof
+            // salvage bag when it rolls, then the targeted salvage bag(s), and the rolled loot last - the things a player most wants to see land in the
             // first slots GameEventViewContents renders, ahead of whatever loot happened to roll.
             var nextPlacement = 0;
             var notes = FillMmd(run, chest, ref nextPlacement);
             var key = FillLegendaryKey(run, chest, ref nextPlacement);
+            var foolproof = FillFoolproof(chest, ref nextPlacement);
             var salvage = FillSalvage(run, chest, ref nextPlacement);
             var loot = FillLoot(run, chest, ref nextPlacement);
 
@@ -270,7 +271,7 @@ namespace ACE.Server.ThreadDungeons
                 return;
             }
 
-            log.Info($"[DYNDUNGEON] {run} boss cache 0x{chest.Guid.Full:X8} at {position.ToLOCString()} notes={notes} key={key} salvage={salvage} loot={loot}");
+            log.Info($"[DYNDUNGEON] {run} boss cache 0x{chest.Guid.Full:X8} at {position.ToLOCString()} notes={notes} key={key} foolproof={foolproof} salvage={salvage} loot={loot}");
 
             var owner = PlayerManager.GetOnlinePlayer(run.OwnerGuid);
             owner?.Session?.Network.EnqueueSend(new GameMessageSystemChat("A Thread Cache has formed where the boss fell.", ChatMessageType.Broadcast));
@@ -315,6 +316,9 @@ namespace ACE.Server.ThreadDungeons
                 wo?.Destroy();
                 return null;
             }
+
+            // Selectable and on the radar like every encounter object (owner ruling 2026-11-21); on the instance, before the caller's EnterWorld.
+            ThreadEncounterObjectVisibility.Apply(chest);
 
             // The run stamp. What actually keeps this cache out of the shard is the copy being EPHEMERAL:
             // Landblock.SaveDB returns on `if (IsEphemeral)` (Landblock.cs:1863-1868) before it iterates
@@ -617,6 +621,30 @@ namespace ACE.Server.ThreadDungeons
             return 0;
         }
 
+        /// <summary>The pooled-loot-OFF path's twin of <see cref="AddBonusFoolproof"/>: the same 2% roll, placed right after the key.</summary>
+        /// <returns>1 when a Foolproof bag landed in the cache, else 0.</returns>
+        private static int FillFoolproof(Chest chest, ref int nextPlacement)
+        {
+            var bonus = new List<WorldObject>();
+            AddBonusFoolproof(bonus);
+            var placed = 0;
+
+            foreach (var bag in bonus)
+            {
+                if (chest.TryAddToInventory(bag, nextPlacement))
+                {
+                    nextPlacement++;
+                    placed++;
+                }
+                else
+                {
+                    bag.Destroy();
+                }
+            }
+
+            return placed;
+        }
+
         /// <summary>One Durable Legendary Key, or null (logged) when the wcid does not resolve.</summary>
         internal static WorldObject BuildLegendaryKey(ThreadDungeonRun run)
         {
@@ -820,7 +848,7 @@ namespace ACE.Server.ThreadDungeons
 
         /// <summary>
         /// The boss bonus as loose items, for the pooled model (Docs/Threads/POOLED-LOOT-CACHE-DESIGN.md
-        /// section 3): Trade Notes, the Durable Legendary Key, then the targeted salvage bags, then the Legendary-table loot - the same
+        /// section 3): Trade Notes, the Durable Legendary Key, the 2% Foolproof bag when it rolls, then the targeted salvage bags, then the Legendary-table loot - the same
         /// three builders, in the same order, the boss-death cache fills from. Always added on a pooled boss
         /// death (user ruling 2026-09-14); the boss-chest switch governs only the OFF path, so nothing here
         /// reads it.
@@ -834,6 +862,7 @@ namespace ACE.Server.ThreadDungeons
 
             AddBonusTradeNotes(run, items);
             AddBonusLegendaryKey(run, items);
+            AddBonusFoolproof(items);
             AddBonusSalvageBags(run, items);
 
             // The ruling named Trade Notes and salvage bags; the Legendary-table items are kept pending a
@@ -867,6 +896,7 @@ namespace ACE.Server.ThreadDungeons
 
             AddBonusTradeNotes(run, items, rewardBonus);
             AddBonusLegendaryKey(run, items);
+            AddBonusFoolproof(items);
             AddBonusSalvageBags(run, items);
             AddBonusLegendaryItems(run, items, rewardBonus);
 
@@ -876,7 +906,7 @@ namespace ACE.Server.ThreadDungeons
         /// <summary>
         /// Owner ruling, 2026-09-17 ("each player should get the mmds and salvage. other loot should be split"):
         /// the DUPLICATED half of a group run's boss bonus, built once per deal seat. Trade Notes scaled by B,
-        /// one Durable Legendary Key (not scaled), then the salvage bags. No Legendary-table rolls - those are pooled by
+        /// one Durable Legendary Key (not scaled), the 2% Foolproof bag when it rolls (not scaled), then the salvage bags. No Legendary-table rolls - those are pooled by
         /// <see cref="BuildBossBonusPooledRolls"/> and snake-dealt instead.
         ///
         /// Delegates to the same two step helpers <see cref="BuildBossBonusItems(ThreadDungeonRun, double)"/>
@@ -896,16 +926,17 @@ namespace ACE.Server.ThreadDungeons
                 AddBonusTradeNotes(run, items);
 
             AddBonusLegendaryKey(run, items);
+            AddBonusFoolproof(items);
             AddBonusSalvageBags(run, items);
 
             return items;
         }
 
         /// <summary>
-        /// The FIXED half of a SOLO run's boss bonus: the Trade Notes, the Durable Legendary Key and the targeted salvage
-        /// bags, in that order, with no reward bonus (a solo run has none). Exactly the first three steps of
+        /// The FIXED half of a SOLO run's boss bonus: the Trade Notes, the Durable Legendary Key, the Foolproof bag when it rolls and the targeted salvage
+        /// bags, in that order, with no reward bonus (a solo run has none). Exactly the non-Legendary steps of
         /// <see cref="BuildBossBonusItems(ThreadDungeonRun)"/>, by delegation, so the currency and salvage a solo
-        /// player gets are byte-for-byte what they were; the third step, the Legendary-table rolls, is counted and
+        /// player gets are byte-for-byte what they were; the remaining step, the Legendary-table rolls, is counted and
         /// built a batch at a time by the delivery steps instead (ThreadCacheFiller, 2026-09-19), the way the group
         /// path has built its pooled half since 2026-09-17.
         /// </summary>
@@ -966,6 +997,14 @@ namespace ACE.Server.ThreadDungeons
             if (key != null)
                 items.Add(key);
         }
+
+        /// <summary>
+        /// One independent 2% roll (tunable thread_cache_foolproof_chance) for a random Foolproof salvage bag, per player.
+        /// Never scaled by the group reward bonus, like the key. Sits after the key and before the salvage so it
+        /// sorts to the front with the other fixed bonus items (a FixedOrder tag, which also keeps a Peddler
+        /// payment from taking it: ThreadPeddlerPayment skips any held item with a FixedOrder).
+        /// </summary>
+        internal static void AddBonusFoolproof(List<WorldObject> items) => FoolproofSalvage.AddThreadCacheRoll(items);
 
         private static void AddBonusTradeNotes(ThreadDungeonRun run, List<WorldObject> items, double rewardBonus)
         {
@@ -1180,6 +1219,9 @@ namespace ACE.Server.ThreadDungeons
                 wo?.Destroy();
                 return null;
             }
+
+            // Selectable and on the radar (owner ruling 2026-11-21), before the caller's EnterWorld.
+            ThreadEncounterObjectVisibility.Apply(portal);
 
             // A copy of the owner's own position, re-stamped with the run instance. The instance is already
             // equal by the guard above; re-stamping makes that explicit rather than inherited.

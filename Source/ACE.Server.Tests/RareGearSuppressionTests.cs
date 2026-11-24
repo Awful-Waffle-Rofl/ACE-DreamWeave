@@ -34,9 +34,9 @@ namespace ACE.Server.Tests
             Assert.IsFalse(LootGenerationFactory.IsSuppressedRareGear(type));
         }
 
-        private static Weenie MakeWeenie(ItemType? type)
+        private static Weenie MakeWeenie(ItemType? type, uint wcid = 30352)
         {
-            var w = new Weenie { PropertiesInt = new Dictionary<PropertyInt, int>() };
+            var w = new Weenie { WeenieClassId = wcid, PropertiesInt = new Dictionary<PropertyInt, int>() };
             if (type.HasValue)
                 w.PropertiesInt[PropertyInt.ItemType] = (int)type.Value;
             return w;
@@ -70,6 +70,28 @@ namespace ACE.Server.Tests
         public void ShouldSuppressRare_KillSwitchOn_GemWeenie_ReturnsFalse()
         {
             Assert.IsFalse(LootGenerationFactory.ShouldSuppressRare(true, MakeWeenie(ItemType.Gem)));
+        }
+
+        [TestMethod]
+        [DataRow(1008400u, ItemType.Armor)]
+        [DataRow(1008421u, ItemType.Jewelry)]
+        [DataRow(1000000u, ItemType.Armor)]
+        [DataRow(1007452u, ItemType.Armor)]
+        public void ShouldSuppressRare_KillSwitchOn_ForkWcidGear_ReturnsFalse(uint wcid, ItemType type)
+        {
+            Assert.IsFalse(LootGenerationFactory.ShouldSuppressRare(true, MakeWeenie(type, wcid)));
+        }
+
+        [TestMethod]
+        public void ShouldSuppressRare_KillSwitchOn_RetailWcidJustBelowFloor_ReturnsTrue()
+        {
+            Assert.IsTrue(LootGenerationFactory.ShouldSuppressRare(true, MakeWeenie(ItemType.Armor, 999999)));
+        }
+
+        [TestMethod]
+        public void ShouldSuppressRare_KillSwitchOn_RetailJewelry30352_ReturnsTrue()
+        {
+            Assert.IsTrue(LootGenerationFactory.ShouldSuppressRare(true, MakeWeenie(ItemType.Jewelry, 30352)));
         }
 
         [TestMethod]

@@ -70,11 +70,110 @@ namespace ACE.Server.HazardMechanics
             bandBelow: 0.5f,
             bandAbove: 22.0f);
 
+        public const string HarbingerName = "harbinger";
+
+        /// <summary>
+        /// The Drift Harbinger's lair floor, landblock 0x00BC (the Knot copy): the 30 x 30 m octagon chamber, rect x 5..35,
+        /// y -35..-5, a flat floor at z -36.0 under a ceiling face at z -11.7 (the centre platform's top is -11.2). The band
+        /// runs from 0.5 m under the floor to 20 m over it (-36.5..-16.0), so nobody standing in the chamber is safe and the
+        /// four alcoves (z 0), 36 m up, are never in it. There is no platform region: the platform is blocked space (owner
+        /// ruling 2026-11-15). HarbingerLayoutTests pins every value.
+        /// </summary>
+        public static HazardRegion Harbinger(uint instance) => HazardRegion.Rect(
+            HarbingerName, 0x00BC, instance, false,
+            5f, 35f, -35f, -5f,
+            HazardGroundMode.Plane,
+            groundPlaneZ: -36.0f,
+            hazardPlaneZ: null,
+            hazardOffset: PinnacleWispOffset,
+            ceilingZ: -11.7f,
+            bandBelow: 0.5f,
+            bandAbove: 20.0f);
+
+        // ---- the four Harbinger alcoves (landblock 0x00BC, the Knot copy) ----
+        //
+        // MEASURED 2026-11-18 (`ACE.Content.Tools cells --landblock=0x00BC` --rooms / --room=0xCELL --cells / --openings=0xCELL /
+        // --sample=0.25, plus the ported-physics AdjustCell.GetCell column probe HarbingerAlcoveRegionTests repeats):
+        //   - each alcove is its own two-cell room (W 0x00BC012D+0139, N 0130+013B, S 0134+013E, E 0137+0140), floor z 0.00,
+        //     68.6 m2, centred 20 m out from the chamber centre (20, -20) along its compass axis;
+        //   - every point within 4.25 m of the centre has floor (0.25 m grid); the walls stand 4.5 m out (the doorway plane);
+        //   - the floor cell meets the upper cell at z 6.00 and the cell column ends at z 9.00 everywhere within 4.25 m: the
+        //     ceiling face;
+        //   - one opening each, 3.33 m wide x 3.00 m tall from the sill (z 0), 4.5 m from the centre on the chamber side
+        //     (N: 0x00BC0130 -> 0131 at (20.00, -4.50), normal (0, -1)).
+        //   - the floor is an octagon of apothem 4.5 (vertices about 4.87 m out; the farthest 0.25 m floor sample is 4.80 m),
+        //     and each doorway's sill cell (W 012E, N 0131, S 0135, E 0138) is floor out to 5.0 m, its corners about 5.27 m.
+        // Each preset PLACES hazards in a circle of HarbingerAlcoveRadius (4.0, 0.5 m inside the walls, so a ball or a burst
+        // fits) but counts a PLAYER inside out to HarbingerAlcovePlayerRadius (5.3, HazardRegion.PlayerMargin): every floor
+        // point, the sill included, is in the region, so there is no safe ring along the wall. Ground z 0, ceiling 9.0, and a
+        // band from 0.5 m under the sill to the ceiling. The names sort after "harbinger", so ForLandblock(0x00BC) stays
+        // "harbinger".
+
+        public const string HarbingerAlcoveWestName = "harbinger-alcove-w";
+        public const string HarbingerAlcoveNorthName = "harbinger-alcove-n";
+        public const string HarbingerAlcoveSouthName = "harbinger-alcove-s";
+        public const string HarbingerAlcoveEastName = "harbinger-alcove-e";
+
+        /// <summary>The alcove floor (the sill), measured.</summary>
+        public const float HarbingerAlcoveGroundZ = 0.0f;
+
+        /// <summary>The alcove ceiling face: the top of the alcove's cell column, measured.</summary>
+        public const float HarbingerAlcoveCeilingZ = 9.0f;
+
+        /// <summary>The preset circle's radius: 0.5 m inside the measured walls (4.5 m), every point of it on floor.</summary>
+        public const float HarbingerAlcoveRadius = 4.0f;
+
+        /// <summary>
+        /// The radius a PLAYER counts as inside out to (HazardRegion.PlayerMargin = this - HarbingerAlcoveRadius): past the
+        /// floor's farthest point, the doorway sill's corners at about 5.27 m. HarbingerAlcoveRegionTests proves every floor
+        /// point of every alcove and sill is within it.
+        /// </summary>
+        public const float HarbingerAlcovePlayerRadius = 5.3f;
+
+        /// <summary>The doorway's measured width (`cells --openings`, 3.33 m): the fire alcove's lane exclusion is this wide.</summary>
+        public const float HarbingerAlcoveDoorwayWidth = 3.33f;
+
+        /// <summary>The doorway plane's measured distance from the alcove centre, and the far wall's.</summary>
+        public const float HarbingerAlcoveWallDistance = 4.5f;
+
+        public static HazardRegion HarbingerAlcoveWest(uint instance) => HarbingerAlcove(HarbingerAlcoveWestName, 0f, -20f, instance);
+
+        /// <summary>
+        /// The north alcove: the FIRE alcove (owner mapping 2026-11-15, HarbingerData). Round 4 (owner playtest 2026-11-19): it
+        /// carries no exclusion any more. Rounds 2 and 3 kept a doorway-wide lane clear of ball placement so a player standing
+        /// on the line from the door to the crystal was never touched, which confined Ember roll to north-south lanes; the owner
+        /// asked for balls rolling in every direction, so the safe doorway line is dropped and Ember roll draws axis=any.
+        /// </summary>
+        public static HazardRegion HarbingerAlcoveNorth(uint instance) => HarbingerAlcove(HarbingerAlcoveNorthName, 20f, 0f, instance);
+
+        public static HazardRegion HarbingerAlcoveSouth(uint instance) => HarbingerAlcove(HarbingerAlcoveSouthName, 20f, -40f, instance);
+
+        public static HazardRegion HarbingerAlcoveEast(uint instance) => HarbingerAlcove(HarbingerAlcoveEastName, 40f, -20f, instance);
+
+        private static HazardRegion HarbingerAlcove(string name, float cx, float cy, uint instance, IReadOnlyList<HazardExclusion> exclusions = null)
+            => HazardRegion.Circle(
+                name, 0x00BC, instance, false,
+                cx, cy, HarbingerAlcoveRadius,
+                HazardGroundMode.Plane,
+                groundPlaneZ: HarbingerAlcoveGroundZ,
+                hazardPlaneZ: null,
+                hazardOffset: PinnacleWispOffset,
+                ceilingZ: HarbingerAlcoveCeilingZ,
+                bandBelow: 0.5f,
+                bandAbove: HarbingerAlcoveCeilingZ - HarbingerAlcoveGroundZ,
+                exclusions: exclusions,
+                playerMargin: HarbingerAlcovePlayerRadius - HarbingerAlcoveRadius);
+
         private static readonly Dictionary<string, Func<uint, HazardRegion>> presets =
             new Dictionary<string, Func<uint, HazardRegion>>(StringComparer.OrdinalIgnoreCase)
             {
                 { PinnacleName, Pinnacle },
                 { MatronName, Matron },
+                { HarbingerName, Harbinger },
+                { HarbingerAlcoveWestName, HarbingerAlcoveWest },
+                { HarbingerAlcoveNorthName, HarbingerAlcoveNorth },
+                { HarbingerAlcoveSouthName, HarbingerAlcoveSouth },
+                { HarbingerAlcoveEastName, HarbingerAlcoveEast },
             };
 
         public static IReadOnlyList<string> Names => presets.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();

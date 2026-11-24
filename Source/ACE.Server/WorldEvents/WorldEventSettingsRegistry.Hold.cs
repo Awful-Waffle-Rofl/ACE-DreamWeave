@@ -115,6 +115,9 @@ namespace ACE.Server.WorldEvents
             yield return Neg(GroupKnights, K.UndefendedSecondsPerParticipant, D, 0, 600, When.Live, "protect.undefendedSecondsPerParticipant", "Seconds taken off undefended_seconds per player beyond the first.");
             yield return Neg(GroupKnights, K.UndefendedSecondsFloor, D, 0, 3600, When.Live, "protect.undefendedSecondsFloor", "The lowest undefended_seconds can go with more players.");
             yield return Neg(GroupKnights, K.MinDeathSeconds, D, 0, 600, When.Live, "protect.minDeathSeconds", "However many monsters pile on, a knight lasts at least this long from full health (0 = no floor).");
+            yield return Neg(GroupKnights, K.KnightDurabilityPerParticipant, D, 0, 1, When.Live, "protect.durabilityPerParticipant",
+                "How much more durable the knights get per player beyond the first (0.12 = +12% each). Multiplies undefended_seconds, min_death_seconds and finale_min_kill_seconds, and divides the passive heals (shrine_heal, rescue_heal, rescue_cap_per_wave, regen_per_second, heal_between_waves, corrupted_kill_heal) by the same factor. 0 = no scaling. No effect unless knight_durability_cap is above 1.");
+            yield return Neg(GroupKnights, K.KnightDurabilityCap, D, 1, 10, When.Live, "protect.durabilityCap", "The most the durability multiplier can reach (1 = never above 1). The multiplier also divides the passive heals (see knight_durability_per_participant).");
             yield return Pos(GroupKnights, K.MinSurvivors, L, 1, 3, When.Live, "protect.minSurvivors",
                 "The fail condition: the run fails when fewer knights than this stand. 1 = fails when all are dead; 3 (clamped to the knights placed) = fails at the first death. Also accepts all (1) and any (3).",
                 WorldEventHoldRules.CheckMinSurvivors);
@@ -125,17 +128,17 @@ namespace ACE.Server.WorldEvents
 
             // ---- healing ----
             yield return Pick(GroupHealing, K.Shrine, On, OnOff, When.Live, "protect.shrine", "The Shrines of Restoration. Off: using one does nothing; shrines are placed at the start. Not set: goals.json decides.");
-            yield return Neg(GroupHealing, K.ShrineHeal, D, 0, 1, When.Live, "protect.shrineHeal", "Share of max health a shrine use restores.");
+            yield return Neg(GroupHealing, K.ShrineHeal, D, 0, 1, When.Live, "protect.shrineHeal", "Share of max health a shrine use restores. Divided by the knight durability multiplier (knight_durability_per_participant / knight_durability_cap), so large groups are not healed more strongly.");
             yield return Neg(GroupHealing, K.ShrineCooldownSeconds, D, 0, 600, When.Live, "protect.shrineCooldownSeconds", "Seconds a shrine rests after a use (0 allowed here; goals.json keeps its own 1 to 600).");
             yield return Val(GroupHealing, K.ShrineCount, L, "3", 0, 3, When.NextRun, "How many knights get a shrine (the first N; 3 = every knight).");
             yield return Pos(GroupHealing, K.ShrineUseRadius, D, 1, 10, When.NextRun, "protect.shrine.useRadius", "How far away a player may use a shrine (set on the shrine when it is placed).");
             yield return Flag(GroupHealing, K.ShrineHealsAll, false, When.Live, "A shrine use heals every standing knight instead of only the one beside it.");
             yield return Val(GroupHealing, K.ShrinePlayerCooldownSeconds, D, "0", 0, 600, When.Live, "One player waits this long between any two shrine uses (0 = off).");
             yield return Val(GroupHealing, K.ShrineBindRange, D, "8", 2, 20, When.Live, "A shrine restores the nearest standing knight within this many metres (default ProtectDef.DefaultShrineBindRange).");
-            yield return Neg(GroupHealing, K.CorruptedKillHeal, D, 0, 1, When.Live, "protect.corruptedKillHeal", "Share of max health every standing knight regains when a corrupted monster dies.");
-            yield return Neg(GroupHealing, K.RescueHeal, D, 0, 1, When.Live, "protect.rescueHeal", "Share a knight regains when a monster attacking it is killed by a player or pet.");
-            yield return Neg(GroupHealing, K.RescueCapPerWave, D, 0, 1, When.Live, "protect.rescueCapPerWave", "The most a knight regains from rescues per wave.");
-            yield return Neg(GroupHealing, K.RegenPerSecond, D, 0, 0.1, When.Live, "protect.clearRegenPerSecond", "Share of max health a knight with no monster near regenerates per second (0 = off).");
+            yield return Neg(GroupHealing, K.CorruptedKillHeal, D, 0, 1, When.Live, "protect.corruptedKillHeal", "Share of max health every standing knight regains when a corrupted monster dies. Divided by the knight durability multiplier (knight_durability_per_participant / knight_durability_cap), so large groups are not healed more strongly.");
+            yield return Neg(GroupHealing, K.RescueHeal, D, 0, 1, When.Live, "protect.rescueHeal", "Share a knight regains when a monster attacking it is killed by a player or pet. Divided by the knight durability multiplier (knight_durability_per_participant / knight_durability_cap), so large groups are not healed more strongly.");
+            yield return Neg(GroupHealing, K.RescueCapPerWave, D, 0, 1, When.Live, "protect.rescueCapPerWave", "The most a knight regains from rescues per wave. Divided by the knight durability multiplier (knight_durability_per_participant / knight_durability_cap), so large groups are not healed more strongly.");
+            yield return Neg(GroupHealing, K.RegenPerSecond, D, 0, 0.1, When.Live, "protect.clearRegenPerSecond", "Share of max health a knight with no monster near regenerates per second (0 = off). Divided by the knight durability multiplier (knight_durability_per_participant / knight_durability_cap), so large groups are not healed more strongly.");
             yield return Neg(GroupHealing, K.RegenClearRadius, D, 0, 50, When.Live, "protect.clearRadius", "A knight regenerates only with no wave monster within this many metres.");
             yield return Val(GroupHealing, K.RegenIntervalSeconds, D, "1", 1, 30, When.Live, "Regeneration is applied every this many seconds (the same amount per second overall).");
             yield return Flag(GroupHealing, K.PlayerHeal, true, When.Live, "Players may heal knights with heal spells and kits. Off: their heals restore nothing.");
@@ -144,7 +147,7 @@ namespace ACE.Server.WorldEvents
             yield return Val(GroupHealing, K.PlayerHealMult, D, "1", 0, 5, When.Live, "Scales what one player heal is worth on a knight, before the cap.");
             yield return Neg(GroupHealing, K.HealReductionAfterHit, D, 0, 1, When.Live, "protect.healReductionAfterHit", "How much healing on a just-hit knight is reduced.");
             yield return Neg(GroupHealing, K.HealReductionSeconds, D, 0, 60, When.Live, "protect.healReductionSeconds", "How long after a hit the reduction lasts.");
-            yield return Neg(GroupHealing, K.HealBetweenWaves, D, 0, 1, When.Live, "protect.healBetweenWaves", "Share every standing knight regains when a wave is fully cleared.");
+            yield return Neg(GroupHealing, K.HealBetweenWaves, D, 0, 1, When.Live, "protect.healBetweenWaves", "Share every standing knight regains when a wave is fully cleared. Divided by the knight durability multiplier (knight_durability_per_participant / knight_durability_cap), so large groups are not healed more strongly.");
             yield return Neg(GroupHealing, K.HealBudgetPerWave, D, 0, 1, When.Live, "protect.healBudgetPerWave", "The most a knight regains per wave from every source together (0 = no budget).");
 
             // ---- monsters: the wave mix and the goals.json role values ----

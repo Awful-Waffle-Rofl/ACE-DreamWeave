@@ -16,10 +16,10 @@ namespace ACE.Server.Entity
 {
     /// <summary>
     /// The Hollow Hammer (WaffleACE, wcid 1002650): a tool with no material of its own that is used on a
-    /// FULL salvage bag of one of the five multi-charge-Hammer materials - Tiger Eye, Obsidian, Tourmaline,
-    /// Amethyst, Serpentine - already in the player's pack. It consumes that bag plus a matching number of
+    /// FULL salvage bag of one of the six multi-charge-Hammer materials - Tiger Eye, Obsidian, Tourmaline,
+    /// Amethyst, Serpentine, Green Jade - already in the player's pack. It consumes that bag plus a matching number of
     /// OTHER full bags of the same material, and the Hollow Hammer itself, and creates one full 10-charge
-    /// Hammer of that material (1001918/1001912/1001910/1001911/1001916 - see <see cref="MaterialTable"/>).
+    /// Hammer of that material (1001918/1001912/1001910/1001911/1001916/1008001 - see <see cref="MaterialTable"/>).
     ///
     /// THE PRICE SCALES WITH SKILL. The player's CURRENT (buffed) value in the tinkering skill that material
     /// answers to - <see cref="MaterialInfo.Skill"/> - is read at use time through
@@ -89,8 +89,8 @@ namespace ACE.Server.Entity
         }
 
         /// <summary>
-        /// The five materials, keyed by MaterialType. TigerEye and Obsidian answer to Armor Tinkering,
-        /// Tourmaline and Amethyst to Weapon Tinkering, Serpentine to Magic Item Tinkering - matching the
+        /// The six materials, keyed by MaterialType. TigerEye and Obsidian answer to Armor Tinkering,
+        /// Tourmaline and Amethyst to Weapon Tinkering, Serpentine and Green Jade to Magic Item Tinkering - matching the
         /// existing bag/Hammer pairs (see Content/wcid-registry.tsv's salvage-hammers block, 1001910-1001919).
         /// </summary>
         public static readonly Dictionary<MaterialType, MaterialInfo> MaterialTable = new List<MaterialInfo>
@@ -100,6 +100,7 @@ namespace ACE.Server.Entity
             new MaterialInfo { Material = MaterialType.Tourmaline, Skill = Skill.WeaponTinkering,    HammerWcid = 1001910, DisplayName = "Tourmaline" },
             new MaterialInfo { Material = MaterialType.Amethyst,   Skill = Skill.WeaponTinkering,    HammerWcid = 1001911, DisplayName = "Amethyst" },
             new MaterialInfo { Material = MaterialType.Serpentine, Skill = Skill.MagicItemTinkering, HammerWcid = 1001916, DisplayName = "Serpentine" },
+            new MaterialInfo { Material = MaterialType.GreenJade,  Skill = Skill.MagicItemTinkering, HammerWcid = 1008001, DisplayName = "Green Jade" },
         }.ToDictionary(m => m.Material);
 
         /// <summary>
@@ -347,7 +348,7 @@ namespace ACE.Server.Entity
 
             if (target.ItemType != ItemType.TinkeringMaterial || target.MaterialType == null || !MaterialTable.TryGetValue(target.MaterialType.Value, out info))
             {
-                SendCraftMessage(player, $"The {source.Name} must be used on a full bag of tiger eye, obsidian, tourmaline, amethyst or serpentine salvage.");
+                SendCraftMessage(player, $"The {source.Name} must be used on a full bag of tiger eye, obsidian, tourmaline, amethyst, serpentine or green jade salvage.");
                 return WeenieError.YouDoNotPassCraftingRequirements;
             }
 

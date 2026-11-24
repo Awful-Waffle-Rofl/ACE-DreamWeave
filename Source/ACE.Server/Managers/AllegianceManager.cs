@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using ACE.Database;
 using ACE.Entity;
 using ACE.Entity.Enum.Properties;
+using ACE.Server.Avatars;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Factories;
@@ -414,7 +415,14 @@ namespace ACE.Server.Managers
             }
             var allegiance = GetAllegiance(player);
 
-            if (allegiance == null) return;
+            // Allegiance Avatar: plan on the pre-split tree, before the guard, so a solo monarch's Avatar is retired too.
+            var avatarPlan = AvatarLifecycle.PlanMonarchDelete(playerGuid);
+
+            if (allegiance == null)
+            {
+                AvatarLifecycle.ApplyMonarchDelete(avatarPlan);
+                return;
+            }
 
             allegiance.Members.TryGetValue(player.Guid, out var allegianceNode);
 
@@ -461,6 +469,12 @@ namespace ACE.Server.Managers
 
             foreach (var p in players)
                 LoadPlayer(p);
+
+            // Allegiance Avatar: the tree is split and rebuilt, so the Avatar moves to the Keeper's new allegiance
+            // (or is retired), and every allegiance the delete touched re-resolves its Keeper.
+            AvatarLifecycle.ApplyMonarchDelete(avatarPlan);
+            foreach (var p in players)
+                AvatarLifecycle.RecomputeKeeper(GetMonarch(p).Guid.Full);
 
             foreach (var p in players)
                 HandleNoAllegiance(p);

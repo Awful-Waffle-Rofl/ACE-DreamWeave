@@ -12,7 +12,9 @@ using ACE.Server.Factories;
 using ACE.Server.HazardMechanics;
 using ACE.Server.Knots;
 using ACE.Server.Managers;
+using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
+using ACE.Server.Network.Structure;
 using ACE.Server.WorldObjects;
 
 using log4net;
@@ -49,6 +51,9 @@ namespace ACE.Server.Pinnacles
         private readonly Dictionary<int, WorldObject> objects = new Dictionary<int, WorldObject>();
         private readonly Dictionary<int, Quaternion> baseRotation = new Dictionary<int, Quaternion>();
         private readonly Dictionary<int, HazardRun> runs = new Dictionary<int, HazardRun>();
+
+        /// <summary>Run id -> the on-hit slow its hazard options carried (only runs that carried one). Landblock thread; cleared by StopHazard and OnEnded.</summary>
+        private readonly Dictionary<int, PinnacleHitSlow> hitSlows = new Dictionary<int, PinnacleHitSlow>();
         private readonly Dictionary<int, Tolerance> authoredTolerance = new Dictionary<int, Tolerance>();
 
         /// <summary>Guid -> handle id of every prop spawned through <see cref="SpawnProp"/>. Concurrent: the door-use hook reads it on the user's thread (<see cref="TryGetHandle"/>), the fight thread writes it.</summary>
@@ -158,7 +163,7 @@ namespace ACE.Server.Pinnacles
 
         // ================================================================ objects
 
-        public PinnacleHandle Spawn(uint wcid, PinnaclePoint at, bool withImmuneRecord, PinnacleTier tier, bool leavesCorpse = false)
+        public PinnacleHandle Spawn(uint wcid, PinnaclePoint at, bool withImmuneRecord, PinnacleTier tier, bool leavesCorpse = false, double healthMultiplier = 1.0)
         {
             WorldObject wo = null;
 
@@ -178,7 +183,7 @@ namespace ACE.Server.Pinnacles
                 if (wo is Creature creature)
                 {
                     // Order: scale (band uplift + tier) -> immune overlay -> StripKillRewards LAST -> EnterWorld.
-                    PinnacleScaling.Apply(creature, knotLevel, tier);
+                    PinnacleScaling.Apply(creature, knotLevel, tier, healthMultiplier);
 
                     // BEFORE EnterWorld: ApplyMonsterEffectOverlay allocates a fresh effect-state array.
                     if (withImmuneRecord && !creature.ApplyMonsterEffectOverlay(ImmuneRecord))
@@ -594,6 +599,22 @@ namespace ACE.Server.Pinnacles
 
         // ================================================================ casting, dispel, speech
 
+        /// <summary>
+        /// The owner is standing on a walkable surface and not mid-teleport. IsJumping is the codebase's grounded signal
+        /// (it reads the physics OnWalkable flag; Player.cs IsJumping). Landblock thread.
+        /// </summary>
+        public bool IsOwnerGrounded()
+        {
+            return FindOwnerOnCopy() is Player p && p.PhysicsObj != null && !p.Teleporting && !p.IsJumping;
+        }
+
+        /// <summary>Sets (or, with null, clears) the creature's melee reach (Creature.PinnacleMeleeReach); a non-creature handle is ignored.</summary>
+        public void SetMeleeReach(PinnacleHandle h, float? metres)
+        {
+            if (Get(h) is Creature c)
+                c.PinnacleMeleeReach = metres;
+        }
+
         public void Cast(PinnacleHandle caster, uint spellId)
         {
             var wo = Get(caster);
@@ -640,6 +661,71 @@ namespace ACE.Server.Pinnacles
             return chosen.Count;
         }
 
+        /// <summary>
+        /// The owner gets <paramref name="spellId"/> cast by <paramref name="caster"/> (<see cref="GrantBuff"/>), then the client
+        /// is sent the enchantment update and the owner's spell hooks run (max vitals, run rate), exactly as
+        /// Player_Spells.CreateEnchantmentSilent and the cast path (WorldObject_Magic, the Enchantment branch) do. Fight
+        /// (landblock) thread.
+        /// </summary>
+        public bool GrantOwnerBuff(PinnacleHandle caster, uint spellId, double seconds)
+        {
+            var wo = Get(caster);
+            var owner = FindOwnerOnCopy();
+
+            if (wo == null || wo.IsDestroyed || owner == null)
+                return false;
+
+            var spell = new Spell(spellId);
+
+            if (spell.NotFound)
+            {
+                log.Warn($"[PINNACLE] owner buff spell {spellId} does not exist; nothing granted");
+                return false;
+            }
+
+            var entry = GrantBuff(owner, wo, spell, seconds);
+
+            if (entry == null)
+            {
+                log.Warn($"[PINNACLE] owner buff spell {spellId} ({spell.Name}, {spell.MetaSpellType}) was not granted");
+                return false;
+            }
+
+            owner.Session?.Network.EnqueueSend(new GameEventMagicUpdateEnchantment(owner.Session, new Enchantment(owner, entry)));
+            owner.HandleSpellHooks(spell);
+
+            return true;
+        }
+
+        /// <summary>
+        /// The grant itself, on any target: refused (null, nothing written) unless <paramref name="spell"/> is an
+        /// enchantment (MetaSpellType Enchantment or FellowEnchantment, the cast path's CreateEnchantment branch) and
+        /// <paramref name="seconds"/> is a positive finite number. Otherwise EnchantmentManager.Add(spell, caster, null), which
+        /// keys a refresh by the caster (a second grant from the same caster refreshes its own entry, a different caster's
+        /// entry is a separate layer and is never touched), then the duration override on the written entry: StartTime 0,
+        /// Duration <paramref name="seconds"/> (precedent: NetherBloomAbility.ApplyBloom). Returns the entry.
+        /// </summary>
+        internal static ACE.Entity.Models.PropertiesEnchantmentRegistry GrantBuff(WorldObject owner, WorldObject caster, Spell spell, double seconds)
+        {
+            if (owner == null || caster == null || spell == null || spell.NotFound || !double.IsFinite(seconds) || seconds <= 0)
+                return null;
+
+            if (spell.MetaSpellType != SpellType.Enchantment && spell.MetaSpellType != SpellType.FellowEnchantment)
+                return null;
+
+            var entry = owner.EnchantmentManager.Add(spell, caster, null)?.Enchantment;
+
+            if (entry == null)
+                return null;
+
+            // Add wrote (or refreshed) the entry with the spell's own duration; this grant lasts exactly `seconds` from now.
+            entry.StartTime = 0;
+            entry.Duration = seconds;
+            owner.ChangesDetected = true;
+
+            return entry;
+        }
+
         public void Tell(string line)
         {
             var owner = FindOwnerOnCopy();
@@ -650,13 +736,13 @@ namespace ACE.Server.Pinnacles
 
         // ================================================================ hazards (IHazardHost)
 
-        public int StartHazard(string kind, string pattern, HazardArgs args, out string error)
+        public int StartHazard(string kind, string pattern, HazardArgs args, PinnacleHazardOptions options, out string error)
         {
-            if (!HazardRegionPresets.TryGet(hazardPreset, instance, out var region))
-            {
-                error = $"no hazard region preset '{hazardPreset}'";
+            // options.Area, else options.Region, else the fight's own preset (PinnacleHazardRegions.Resolve)
+            var region = PinnacleHazardRegions.Resolve(options, hazardPreset, instance, out error);
+
+            if (region == null)
                 return 0;
-            }
 
             var run = HazardManager.Start(region, kind, args, this, null, pattern, landblock, out error);
 
@@ -664,6 +750,10 @@ namespace ACE.Server.Pinnacles
                 return 0;
 
             runs[run.Id] = run;
+
+            if (options?.HitSlow != null)
+                hitSlows[run.Id] = options.HitSlow;
+
             return run.Id;
         }
 
@@ -672,6 +762,7 @@ namespace ACE.Server.Pinnacles
             if (runs.TryGetValue(token, out var run))
             {
                 runs.Remove(token);
+                hitSlows.Remove(token);
                 HazardManager.Stop(run, HazardOutcome.Stopped, "pinnacle core");
             }
         }
@@ -691,8 +782,20 @@ namespace ACE.Server.Pinnacles
             landblock.EnqueueAction(new ActionEventDelegate(() =>
             {
                 runs.Remove(id);
+                hitSlows.Remove(id);
                 f?.OnHazardEnded(id, outcome);
             }));
+        }
+
+        /// <summary>
+        /// A player took a hit from one of this fight's hazard runs (landblock thread). Applies the run's recorded hit slow
+        /// (PinnacleHazardOptions.HitSlow); a run with none does nothing. Never touches the damage.
+        /// </summary>
+        void IHazardHost.OnPlayerHit(HazardRun run, Player player, int amount)
+        {
+            if (!hitSlows.TryGetValue(run.Id, out var slow) || player?.Location == null || player.Location.Instance != instance) return;
+
+            player.ApplyPinnacleHitSlow(slow);
         }
 
         // ================================================================ Knot bookkeeping (owner thread)
@@ -751,9 +854,13 @@ namespace ACE.Server.Pinnacles
                 // Dynamic guid, no generator: the heartbeat would rot it. The fight's End (or the copy's unload) ends it.
                 wo.TimeToRot = -1;
 
+                if (prop.Ethereal)
+                    wo.Ethereal = true;
+
                 if (wo is Door door)
                 {
                     door.SealedShut = true;
+                    door.AlwaysEthereal = prop.Ethereal;
 
                     if (prop.DoorOpen == true)
                         door.ForceOpenUnlocked();

@@ -74,6 +74,20 @@ namespace ACE.Server.Tests
 
         private const ItemType AcceptsEverything = unchecked((ItemType)(-1));
 
+        /// <summary>
+        /// The two vendors whose gate sets these tests pin. Uninitialized on purpose: SellBypassesPriceGates and
+        /// SellBypassesAttunedRefusal are constant overrides that read no state, so the real values are read
+        /// without paying for Vendor construction (GameTables, PropertyManager, world cache).
+        /// </summary>
+        private static readonly Vendor Mule = (Vendor)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(PersonalVendor));
+        private static readonly Vendor Retail = (Vendor)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(Vendor));
+
+        /// <summary>The sell gate exactly as VerifySellItems calls it for <paramref name="vendor"/>.</summary>
+        private static bool SellGate(WorldObject wo, ItemType mask, Vendor vendor, out string rejectionMessage)
+        {
+            return Player.IsAcceptableToSell(wo, mask, isVault: vendor is PersonalVendor, vendor.SellBypassesPriceGates, vendor.SellBypassesAttunedRefusal, out rejectionMessage);
+        }
+
         private static Stackable MakeItem(int value = 100, int stackSize = 1)
         {
             var item = FakeVaultWorld.MakeStack(8000, stackSize, 1000);
@@ -88,7 +102,7 @@ namespace ACE.Server.Tests
             var item = MakeItem();
             item.Attuned = AttunedStatus.Attuned;
 
-            var accepted = Player.IsAcceptableToSell(item, AcceptsEverything, isVault: true, out var rejectionMessage);
+            var accepted = SellGate(item, AcceptsEverything, Mule, out var rejectionMessage);
 
             Assert.IsFalse(accepted);
             StringAssert.Contains(rejectionMessage, "attuned to you");
@@ -118,7 +132,7 @@ namespace ACE.Server.Tests
             var item = MakeItem();
             item.Bonded = BondedStatus.Bonded;
 
-            var accepted = Player.IsAcceptableToSell(item, AcceptsEverything, isVault: true, out var rejectionMessage);
+            var accepted = SellGate(item, AcceptsEverything, Mule, out var rejectionMessage);
 
             Assert.IsTrue(accepted, $"bonded must be storable; refused with: {rejectionMessage}");
         }
@@ -133,7 +147,7 @@ namespace ACE.Server.Tests
             var item = MakeItem();
             item.Bonded = BondedStatus.Sticky;
 
-            var accepted = Player.IsAcceptableToSell(item, AcceptsEverything, isVault: true, out var rejectionMessage);
+            var accepted = SellGate(item, AcceptsEverything, Mule, out var rejectionMessage);
 
             Assert.IsTrue(accepted, $"every bonded tier must be storable; refused with: {rejectionMessage}");
         }
@@ -152,7 +166,7 @@ namespace ACE.Server.Tests
             var item = MakeItem();
             item.Attuned = AttunedStatus.Sticky;
 
-            var accepted = Player.IsAcceptableToSell(item, AcceptsEverything, isVault: true, out var rejectionMessage);
+            var accepted = SellGate(item, AcceptsEverything, Mule, out var rejectionMessage);
 
             Assert.IsFalse(accepted, "Sticky is the STRONGER attunement tier and must be rejected same as Attuned");
             StringAssert.Contains(rejectionMessage, "attuned to you");
@@ -166,7 +180,7 @@ namespace ACE.Server.Tests
 
             // isVault: false - retail never had this check at all (Vendor.cs:713 only suppressed
             // reselling), and DESIGN 9.2 makes it unconditional. Must reject at a plain Vendor too.
-            var accepted = Player.IsAcceptableToSell(item, AcceptsEverything, isVault: false, out var rejectionMessage);
+            var accepted = SellGate(item, AcceptsEverything, Retail, out var rejectionMessage);
 
             Assert.IsFalse(accepted);
             StringAssert.Contains(rejectionMessage, "attuned to you");
@@ -177,7 +191,7 @@ namespace ACE.Server.Tests
         {
             var item = MakeItem(value: 0);
 
-            var accepted = Player.IsAcceptableToSell(item, AcceptsEverything, isVault: true, out var rejectionMessage);
+            var accepted = SellGate(item, AcceptsEverything, Mule, out var rejectionMessage);
 
             Assert.IsTrue(accepted, rejectionMessage);
         }
@@ -187,7 +201,7 @@ namespace ACE.Server.Tests
         {
             var item = MakeItem(value: 0);
 
-            var accepted = Player.IsAcceptableToSell(item, AcceptsEverything, isVault: false, out var rejectionMessage);
+            var accepted = SellGate(item, AcceptsEverything, Retail, out var rejectionMessage);
 
             Assert.IsFalse(accepted);
             StringAssert.Contains(rejectionMessage, "no value");
@@ -199,7 +213,7 @@ namespace ACE.Server.Tests
             var item = MakeItem();
             item.Retained = true;
 
-            var accepted = Player.IsAcceptableToSell(item, AcceptsEverything, isVault: true, out var rejectionMessage);
+            var accepted = SellGate(item, AcceptsEverything, Mule, out var rejectionMessage);
 
             Assert.IsTrue(accepted, rejectionMessage);
         }
@@ -210,7 +224,7 @@ namespace ACE.Server.Tests
             var item = MakeItem();
             item.Retained = true;
 
-            var accepted = Player.IsAcceptableToSell(item, AcceptsEverything, isVault: false, out var rejectionMessage);
+            var accepted = SellGate(item, AcceptsEverything, Retail, out var rejectionMessage);
 
             Assert.IsFalse(accepted);
             StringAssert.Contains(rejectionMessage, "unsellable");
@@ -225,7 +239,7 @@ namespace ACE.Server.Tests
             // User ruling 2026-08-29: the vault's rule is "can I hand this to another player?", and
             // IsSellable is a coin-price flag no give or trade path reads. A pyreal nugget (wcid 6354)
             // carries it and was refused with "unsellable" in live test - see IsAcceptableToSell.
-            var accepted = Player.IsAcceptableToSell(item, AcceptsEverything, isVault: true, out var rejectionMessage);
+            var accepted = SellGate(item, AcceptsEverything, Mule, out var rejectionMessage);
 
             Assert.IsTrue(accepted, rejectionMessage);
             Assert.IsNull(rejectionMessage);
@@ -237,7 +251,7 @@ namespace ACE.Server.Tests
             var item = MakeItem();
             item.IsSellable = false;
 
-            var accepted = Player.IsAcceptableToSell(item, AcceptsEverything, isVault: false, out var rejectionMessage);
+            var accepted = SellGate(item, AcceptsEverything, Retail, out var rejectionMessage);
 
             Assert.IsFalse(accepted);
             StringAssert.Contains(rejectionMessage, "unsellable");
@@ -271,7 +285,7 @@ namespace ACE.Server.Tests
             var device = MakePetDevice();
             device.Pet = 0x80000001;
 
-            var accepted = Player.IsAcceptableToSell(device, AcceptsEverything, isVault: true, out var rejectionMessage);
+            var accepted = SellGate(device, AcceptsEverything, Mule, out var rejectionMessage);
 
             Assert.IsFalse(accepted);
             StringAssert.Contains(rejectionMessage, "unsummon your pet");
@@ -282,7 +296,7 @@ namespace ACE.Server.Tests
         {
             var device = MakePetDevice();
 
-            var accepted = Player.IsAcceptableToSell(device, AcceptsEverything, isVault: true, out var rejectionMessage);
+            var accepted = SellGate(device, AcceptsEverything, Mule, out var rejectionMessage);
 
             Assert.IsTrue(accepted, rejectionMessage);
         }
@@ -296,7 +310,7 @@ namespace ACE.Server.Tests
             // table's "keep, and solve it in data" decision is only meaningful if this path stays live.
             var item = MakeItem(); // ItemType.TinkeringMaterial
 
-            var accepted = Player.IsAcceptableToSell(item, ItemType.Gem, isVault: true, out var rejectionMessage);
+            var accepted = SellGate(item, ItemType.Gem, Mule, out var rejectionMessage);
 
             Assert.IsFalse(accepted);
             StringAssert.Contains(rejectionMessage, "unsellable");
@@ -315,7 +329,7 @@ namespace ACE.Server.Tests
             var contents = MakeItem();
             Assert.IsTrue(container.TryAddToInventory(contents), "sanity: the container must actually hold an item");
 
-            var accepted = Player.IsAcceptableToSell(container, AcceptsEverything, isVault: true, out var rejectionMessage);
+            var accepted = SellGate(container, AcceptsEverything, Mule, out var rejectionMessage);
 
             Assert.IsFalse(accepted, "a container holding an item must fail the gate regardless of isVault - that gate is never bypassed");
             StringAssert.Contains(rejectionMessage, "must be empty");

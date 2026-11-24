@@ -3,6 +3,7 @@ using System.Linq;
 
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Entity.Models;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.ThreadDungeons
@@ -125,7 +126,171 @@ namespace ACE.Server.ThreadDungeons
                 }
             }
 
+            StripItemCritAmplifiers(item, changes);
+            StripItemDamageModifiers(item, changes);
+
             return changes;
+        }
+
+        /// <summary>
+        /// The rest of the item's special damage modifiers (owner ruling 2026-11-23: Thread family weapons, launchers, ammo
+        /// and casters are stripped of special modifiers, so every enemy is on the same footing for damage). Every list and
+        /// each property's reader is on DungeonCombatNormalizer: ItemStripInts (slayer type, resistance-cleave type, Paragon
+        /// gem slots), ItemStripGearRatings (offensive gear ratings), ItemStripFloats (slayer bonus, resistance cleave,
+        /// caster elemental mod, proc rate, the Focus and Attunement weapon-mod records), then the proc spell itself.
+        /// Recorded by property name, the same convention as the bypass lists above.
+        ///
+        /// Base Damage, DamageMod and DamageVariance are NOT touched here: that is boss normalization's job
+        /// (NormalizeBossWeapons), and the band standards are measured on them.
+        ///
+        /// A GEAR RATING ON AN EQUIPPED ITEM is cached by the wielder at equip time, so removing it here alone would leave
+        /// the cached sum live; CombatTraitGuard.Apply takes the item out of the creature's cache before this runs and puts
+        /// it back after. A caller stripping an item no creature wields (a projectile) needs no such step.
+        /// </summary>
+        private static void StripItemDamageModifiers(WorldObject item, List<string> changes)
+        {
+            foreach (var p in DungeonCombatNormalizer.ItemStripInts.Concat(DungeonCombatNormalizer.ItemStripGearRatings))
+            {
+                if (item.GetProperty(p).HasValue)
+                {
+                    item.RemoveProperty(p);
+                    changes.Add(p.ToString());
+                }
+            }
+
+            foreach (var p in DungeonCombatNormalizer.ItemStripFloats)
+            {
+                if (item.GetProperty(p).HasValue)
+                {
+                    item.RemoveProperty(p);
+                    changes.Add(p.ToString());
+                }
+            }
+
+            // Weapon procs: WorldObject.TryProcEquippedItems fires the item's own ProcSpell when HasProc (ProcSpell != null),
+            // for a wielded weapon, a wand, and the spawned PROJECTILE itself (ProjectileCollisionHelper). Self-targeted
+            // procs go too - a proc is a special modifier whichever way it points. ProcSpellSelfTargeted is meaningless
+            // once ProcSpell is gone, so it is removed with it and not logged separately.
+            if (item.GetProperty(PropertyDataId.ProcSpell).HasValue)
+            {
+                item.RemoveProperty(PropertyDataId.ProcSpell);
+                item.RemoveProperty(PropertyBool.ProcSpellSelfTargeted);
+                changes.Add(PropertyDataId.ProcSpell.ToString());
+            }
+        }
+
+        /// <summary>
+        /// Removes every DAMAGE-changing spell (DungeonCombatNormalizer.IsDamageSpell) from a weapon-class item's spellbook
+        /// (DungeonCombatNormalizer.DamageSpellItemTypes), and calls <paramref name="removeApplied"/> for each so the caller
+        /// can take back an enchantment the item already cast. Returns one "Spell:&lt;id&gt;" change per removed entry.
+        ///
+        /// Both halves are needed because a non-player creature casts an item's spells when it wields the item
+        /// (Creature_Equipment.TryActivateItemSpells -> Creature_Magic.CreateItemSpell), which happens in the creature's
+        /// constructor, BEFORE the strip: TryWieldObjectWithBroadcasting casts at once, TryWieldObject 0.1 s later. Removing
+        /// the spellbook entry stops the delayed cast and every later re-equip (Monster_Missile / Monster_Tick weapon swaps);
+        /// <paramref name="removeApplied"/> undoes a cast that already landed - on the item's own registry or, for an
+        /// aura, on the wielder's (Creature.RemoveItemSpell picks the registry).
+        ///
+        /// <paramref name="statOf"/> resolves a spell id to its enchantment type and stat key, or null when the spell
+        /// does not exist (left alone). Production passes <see cref="LiveSpellStat"/>; tests pass a table, because a Spell
+        /// needs the dat and the world database.
+        /// </summary>
+        internal static List<string> StripItemDamageSpells(WorldObject item, System.Func<int, (EnchantmentTypeFlags Type, uint Key)?> statOf, System.Action<int> removeApplied)
+        {
+            var changes = new List<string>();
+
+            if (item == null || !DungeonCombatNormalizer.DamageSpellItemTypes.Contains(item.WeenieType))
+                return changes;
+
+            foreach (var spellId in item.Biota.GetKnownSpellsIds(item.BiotaDatabaseLock))
+            {
+                var stat = statOf(spellId);
+
+                if (stat == null || !DungeonCombatNormalizer.IsDamageSpell(stat.Value.Type, stat.Value.Key))
+                    continue;
+
+                removeApplied?.Invoke(spellId);
+                item.Biota.TryRemoveKnownSpell(spellId, item.BiotaDatabaseLock);
+                changes.Add($"Spell:{spellId}");
+            }
+
+            return changes;
+        }
+
+        /// <summary>The live resolver for <see cref="StripItemDamageSpells"/>: the spell's StatModType and StatModKey, or null when it is not found.</summary>
+        internal static (EnchantmentTypeFlags Type, uint Key)? LiveSpellStat(int spellId)
+        {
+            var spell = new ACE.Server.Entity.Spell(spellId);
+
+            if (spell.NotFound)
+                return null;
+
+            return (spell.StatModType, spell.StatModKey);
+        }
+
+        /// <summary>
+        /// The crit-damage amplifiers a run creature's item can carry (owner ruling 2026-11-21: crippling-blow style
+        /// abilities or weapons with similar are stripped from every enemy). Read by DamageEvent through
+        /// <c>Weapon = damageSource.ProjectileLauncher ?? damageSource.ProjectileAmmo</c> for a missile hit, and the
+        /// equipped melee weapon for a melee hit, so the item must be the instance the creature holds (see
+        /// <see cref="CombatTraitGuard.Apply"/> for the per-instance proof). Each change is recorded by name:
+        ///   - every damage imbue bit (DungeonCombatNormalizer.StrippedImbues: the crit pair, rends, ArmorRending,
+        ///     IgnoreAllArmor and the rest, owner ruling 2026-11-23), every ImbuedEffect slot; the defense/spellbook bits in
+        ///     DungeonCombatNormalizer.KeptImbues stay, and the property is removed at 0.
+        ///   - CriticalMultiplier above the 1.0 default (removed, falls back to 1.0).
+        ///   - CriticalFrequency above the default (0.1, or 0.05 on a caster); a value at or below it is NOT touched.
+        ///   - the Execution weapon-mod record (multiplies the crit damage in DamageEvent).
+        /// </summary>
+        private static void StripItemCritAmplifiers(WorldObject item, List<string> changes)
+        {
+            foreach (var slot in DungeonCombatNormalizer.ImbuedEffectSlots)
+            {
+                var stored = item.GetProperty(slot);
+
+                if (!stored.HasValue)
+                    continue;
+
+                var current = (ImbuedEffectType)stored.Value;
+                var hit = current & DungeonCombatNormalizer.StrippedImbues;
+
+                if (hit == 0)
+                    continue;
+
+                var remaining = current & ~DungeonCombatNormalizer.StrippedImbues;
+
+                if (remaining == 0)
+                    item.RemoveProperty(slot);
+                else
+                    item.SetProperty(slot, unchecked((int)remaining));
+
+                foreach (var bit in DungeonCombatNormalizer.StrippedImbueBits)
+                {
+                    if (hit.HasFlag(bit))
+                        changes.Add(bit.ToString());
+                }
+            }
+
+            var multiplier = item.GetProperty(PropertyFloat.CriticalMultiplier);
+
+            if (multiplier.HasValue && DungeonCombatNormalizer.CritMultiplierAboveDefault(multiplier.Value))
+            {
+                item.RemoveProperty(PropertyFloat.CriticalMultiplier);
+                changes.Add(PropertyFloat.CriticalMultiplier.ToString());
+            }
+
+            var frequency = item.GetProperty(PropertyFloat.CriticalFrequency);
+
+            if (frequency.HasValue && DungeonCombatNormalizer.CritFrequencyAboveDefault(frequency.Value, item.WeenieType == WeenieType.Caster))
+            {
+                item.RemoveProperty(PropertyFloat.CriticalFrequency);
+                changes.Add(PropertyFloat.CriticalFrequency.ToString());
+            }
+
+            if (item.GetProperty(PropertyFloat.WeaponModExecution).HasValue)
+            {
+                item.RemoveProperty(PropertyFloat.WeaponModExecution);
+                changes.Add("Execution");
+            }
         }
 
         /// <summary>

@@ -88,12 +88,38 @@ namespace ACE.Server.Pinnacles
     /// platform, an effect host): not phase-scoped, never reported dead, destroyed only by the fight's End or by the
     /// script. <paramref name="Translucency"/> and <paramref name="Script"/> (a visual effect script id) are stamped
     /// only when set; <paramref name="DoorOpen"/> applies to a door only (null = leave it as authored).
+    /// <paramref name="Ethereal"/> makes the prop walk-through; on a door it holds through every close (Door.AlwaysEthereal).
     /// </summary>
-    public sealed record PinnacleProp(uint Wcid, PinnaclePoint At, float Scale = 1f, float? Translucency = null, uint Script = 0, bool? DoorOpen = null);
+    public sealed record PinnacleProp(uint Wcid, PinnaclePoint At, float Scale = 1f, float? Translucency = null, uint Script = 0, bool? DoorOpen = null, bool Ethereal = false);
+
+    /// <summary>What a hit by a hazard does to the victim's movement: run speed cut by a fraction, attack speed scaled, for a time.</summary>
+    public sealed record PinnacleHitSlow(double RunSlowFraction, double AttackSpeedFactor, double Seconds);
+
+    /// <summary>
+    /// Per-run options a script hands StartHazard. Null options = none. The run's region is, in order: <paramref name="Area"/>
+    /// (an ad-hoc rectangle, see <see cref="PinnacleHazardArea"/>), else the preset named <paramref name="Region"/>
+    /// (HazardRegionPresets), else the fight's own preset (PinnacleScriptData.HazardRegionPreset). Setting both Region and
+    /// Area is refused (PinnacleHazardRegions.Resolve).
+    /// </summary>
+    public sealed record PinnacleHazardOptions(PinnacleHitSlow HitSlow = null, string Region = null, PinnacleHazardArea Area = null);
+
+    /// <summary>
+    /// An ad-hoc rectangular hazard region for one run, landblock-local in the fight's own landblock (the landblock of the
+    /// fight's preset): x [<paramref name="MinX"/>, <paramref name="MaxX"/>], y [<paramref name="MinY"/>, <paramref name="MaxY"/>],
+    /// a flat ground plane at <paramref name="GroundZ"/>, an optional ceiling, and the "in the region" band from
+    /// GroundZ - <paramref name="BandBelow"/> to GroundZ + <paramref name="BandAbove"/> (defaults: the /hazard ad-hoc band,
+    /// HazardDefaults). Moving hazards fly at the fight preset's hazard offset. The run still has to pass the mechanic's own
+    /// validation (HazardManager.Start).
+    /// </summary>
+    public sealed record PinnacleHazardArea(float MinX, float MaxX, float MinY, float MaxY, float GroundZ, float? CeilingZ = null,
+        float BandBelow = HazardDefaults.BandBelow, float BandAbove = HazardDefaults.BandAbove);
 
     /// <summary>A boss script's static data: where things are and what the core spawns for it.</summary>
     public sealed class PinnacleScriptData
     {
+        /// <summary>True when the fight's floor is a long drop the script wants no fall damage from (the live world waives it).</summary>
+        public bool WaiveFallDamage { get; init; }
+
         public ushort Landblock { get; init; }
 
         public PinnaclePoint ArrivalPoint { get; init; }
@@ -113,6 +139,18 @@ namespace ACE.Server.Pinnacles
         public IReadOnlyList<uint> RequiredWcids { get; init; } = System.Array.Empty<uint>();
 
         public PinnaclePoint HeadPoint { get; init; }
+
+        /// <summary>
+        /// Max-health multipliers by wcid, on top of the spawn's tier (PinnacleScaling.TierHealth): the core passes
+        /// <see cref="HealthMultiplierFor"/> to IPinnacleWorld.Spawn for every spawn it makes: the head, every add and every
+        /// seal (a seal that is not a creature ignores it, as it ignores its tier). A wcid not listed spawns at 1.0. Default
+        /// empty (Grael, Matron).
+        /// </summary>
+        public IReadOnlyDictionary<uint, double> HealthMultipliers { get; init; } = new Dictionary<uint, double>();
+
+        /// <summary>The multiplier <see cref="HealthMultipliers"/> lists for <paramref name="wcid"/>, else 1.0.</summary>
+        public double HealthMultiplierFor(uint wcid)
+            => HealthMultipliers != null && HealthMultipliers.TryGetValue(wcid, out var m) ? m : 1.0;
 
         /// <summary>
         /// The tier the core spawns the head at (PinnacleScaling.Apply). Boss unless a script says otherwise; a boss
@@ -141,8 +179,10 @@ namespace ACE.Server.Pinnacles
 
         /// <summary>
         /// Where the won fight's cache forms, or null to form it beside the owner. An arena whose walkable floor is
-        /// object geometry (Ward Planes over a pit) must set one over REAL geometry: the cache is ethereal and has
-        /// gravity, so it passes through those planes and falls.
+        /// object geometry whose physics bodies are NOT Static must set one over REAL geometry: the cache is ethereal and
+        /// has gravity, so it passes through a non-Static object and falls. A weenie's PhysicsState Static bit does not
+        /// survive InitPhysicsObj; only PropertyBool.ForcePhysicsStatic keeps it. (Grael's floor Ward Planes carry that bool
+        /// since 2026-11-06, so its point is belt and braces there.)
         /// </summary>
         public PinnaclePoint? CachePoint { get; init; }
 

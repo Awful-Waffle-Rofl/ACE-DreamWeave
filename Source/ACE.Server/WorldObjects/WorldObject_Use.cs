@@ -162,6 +162,13 @@ namespace ACE.Server.WorldObjects
             if (P_PuzzleGate != null)
                 ACE.Server.PuzzleGates.PuzzleGateManager.OnActivated(this, player);
 
+            // Thread encounters (WaffleACE, Docs/Threads/ENCOUNTERS.md): an object a run encounter placed carries a
+            // runtime back-reference to its instance (WorldObject_ThreadEncounter.cs). Same placement rules as the
+            // puzzle-gate hook above: AFTER CheckUseRequirements, independent of the ActivationResponse dispatch below.
+            // One field read for every other object.
+            if (P_ThreadEncounter != null)
+                ACE.Server.ThreadDungeons.ThreadEncounterPass.OnActivated(this, player);
+
             // wave encounters (WaffleACE): an object flagged PropertyBool.WaveEncounterAnchor starts an
             // object-anchored wave encounter (ACE.Server.WaveEncounters) - the D6 Sounding Drum. Same
             // placement rules as the two hooks above: AFTER CheckUseRequirements, and independent of the

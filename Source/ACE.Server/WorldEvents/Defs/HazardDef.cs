@@ -14,6 +14,14 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("kind")]
         public string Kind { get; set; }
 
+        /// <summary>
+        /// Optional list of kinds (wisps | balls | rain): each run picks one uniformly. Overrides <see cref="Kind"/> when the
+        /// caller names no hazard; absent or empty = <see cref="Kind"/> alone. A picked balls keeps its balls/rain alternation, so
+        /// ["wisps","balls"] emits wisps 50%, rolling balls 25%, rain 25% of runs. Ignored (with a load diagnostic) when <see cref="Kind"/> is none.
+        /// </summary>
+        [JsonPropertyName("kinds")]
+        public List<string> Kinds { get; set; }
+
         /// <summary>Optional fixed element (fire | acid | frost | lightning | earth). Absent: from <see cref="StyleElements"/>, else random.</summary>
         [JsonPropertyName("element")]
         public string Element { get; set; }

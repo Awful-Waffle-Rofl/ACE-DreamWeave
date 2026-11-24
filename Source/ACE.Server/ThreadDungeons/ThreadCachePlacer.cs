@@ -381,6 +381,15 @@ namespace ACE.Server.ThreadDungeons
                     return;
                 }
 
+                // The Wandering Peddler's hold (ThreadPeddlerShop.Gate, clear only): the owner's clear-time pile is whole
+                // here, so the peddler is presented now, and while the owner's shop is open nothing below runs. Held returns
+                // WITHOUT MarkPlacementWanted: the release (ThreadPeddlerShop.Release) requests the placement, so the Tick
+                // retry is never re-armed by a held owner. An owner not inside waits for their arrival, as an undelivered pile does.
+                if (SoloPeddlerHoldsDelivery(run, ownerInside, () => PeddlerPresent(run, landblock, owner)))
+                    return;
+
+                // Nothing peddler-side runs past the hold: each purchase was paid from the pile and put in the owner's
+                // pack at the buy (ThreadPeddlerVendor.TryBuy), so the pile delivered below is already net of payment.
                 if (!run.HasHeldPile(run.OwnerGuid))
                     return;
 
@@ -489,6 +498,76 @@ namespace ACE.Server.ThreadDungeons
                 log.Error($"[DYNDUNGEON] {run} finishing a Summon threw", ex);
             }
         }
+
+        /// <summary>
+        /// The solo seam's peddler step (ThreadPeddlerShop.Gate for the owner). True when Execute must stop here: Held stops
+        /// WITHOUT MarkPlacementWanted (the release requests the placement, so a held owner never re-arms the Tick retry);
+        /// WaitPile and WaitArrival stop WITH it (the pile is still building, or the owner is outside), exactly as the
+        /// snapshot gate and the not-inside path do. False: deliver.
+        /// </summary>
+        internal static bool SoloPeddlerHoldsDelivery(ThreadDungeonRun run, bool ownerInside, Func<PeddlerPresentResult> present)
+        {
+            switch (ThreadPeddlerShop.Gate(run, run.OwnerGuid, () => ownerInside, present))
+            {
+                case PeddlerHold.Held:
+                    return true;
+
+                case PeddlerHold.WaitPile:
+                case PeddlerHold.WaitArrival:
+                    run.MarkPlacementWanted();
+                    return true;
+
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>Test seam: the solo seam's Present. Production: ThreadPeddlerShop.PresentLive at the owner.</summary>
+        internal static Func<ThreadDungeonRun, Landblock, Player, PeddlerPresentResult> PeddlerPresent = ThreadPeddlerShop.PresentLive;
+
+        /// <summary>
+        /// The run's one Wandering Peddler, at <paramref name="member"/>'s cache spot (owner ruling 2026-11-19): the section 5
+        /// candidates and exclusions a Thread Cache forming at the member would use, each re-checked as TryPlaceEmpty checks a
+        /// cache (on the run's landblocks, in the member's sight), then the member's own spot as the last resort (the peddler is
+        /// ethereal). <paramref name="createAt"/> builds and enters a FRESH NPC per attempt (a failed AddPhysicsObj leaves a used
+        /// PhysicsObj behind) and returns null on failure; at most <see cref="MaxPeddlerAttempts"/> attempts. Null when none
+        /// entered. Runs on the delivery chain.
+        /// </summary>
+        internal static ThreadPeddlerVendor PlacePeddlerAtMember(ThreadDungeonRun run, Landblock landblock, Player member, Func<Position, ThreadPeddlerVendor> createAt)
+        {
+            if (run == null || member?.Location == null || createAt == null)
+                return null;
+
+            var scan = new ExclusionScan(run, landblock);
+            var candidates = BuildCandidatesAt(run, scan, member, out _);
+            var attempts = 0;
+
+            foreach (var candidate in candidates)
+            {
+                if (attempts >= MaxPeddlerAttempts - 1)
+                    break;
+
+                var position = new Position(candidate.Cell, candidate.X, candidate.Y, candidate.Z, 0f, 0f, candidate.QZ, candidate.QW, run.Instance);
+
+                if (candidate.RecomputeCell)
+                    position.LandblockId = new LandblockId(position.GetCell());
+
+                if (!ThreadRunGeometry.IsOnRunLandblock(run, position) || !member.IsDirectVisible(position))
+                    continue;
+
+                attempts++;
+
+                var placed = createAt(position);
+
+                if (placed != null)
+                    return placed;
+            }
+
+            return createAt(new Position(member.Location));
+        }
+
+        /// <summary>How many fresh NPCs <see cref="PlacePeddlerAtMember"/> may build before it gives up (the last is at the member).</summary>
+        internal const int MaxPeddlerAttempts = 4;
 
         /// <summary>
         /// Does this request move the requester's already-placed caches to them? Move always (when inside); Summon too,
@@ -891,7 +970,13 @@ namespace ACE.Server.ThreadDungeons
                     viewer.Session.Network.EnqueueSend(new GameEventViewContents(viewer.Session, cache));
 
                     foreach (var item in result.Added)
+                    {
                         viewer.Session.Network.EnqueueSend(new GameMessageCreateObject(item));
+
+                        // As Container.SendInventory. The items are freshly rolled, so this is a no-op unless a
+                        // guid was recycled from an object this client still has recorded (DuoSummonGem.CommitAdd).
+                        VisualEffectManager.Forget(viewer.Session, item);
+                    }
                 }
             }
 

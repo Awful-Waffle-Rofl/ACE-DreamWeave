@@ -131,9 +131,11 @@ namespace ACE.Server.WorldObjects
 
                 // Long Draw: the ability's own distance ramp, with the mod value as the peak
                 var longDraw = GetStandaloneEquipmentModValue(EquipmentModId.LongDraw);
-                if (longDraw > 0.0 && Location != null && target.Location != null)
+                var longDrawOrigin = LongDrawAbility.ShotOrigin(this, damageEvent);
+
+                if (longDraw > 0.0 && longDrawOrigin != null && target.Location != null)
                 {
-                    var bonus = LongDrawAbility.DistanceBonus(Location.DistanceTo(target.Location), 1, longDraw,
+                    var bonus = LongDrawAbility.DistanceBonus(longDrawOrigin.DistanceTo(target.Location), 1, longDraw,
                         PropertyManager.GetDouble("class_ability_longdraw_min_distance").Item,
                         PropertyManager.GetDouble("class_ability_longdraw_max_distance").Item);
 

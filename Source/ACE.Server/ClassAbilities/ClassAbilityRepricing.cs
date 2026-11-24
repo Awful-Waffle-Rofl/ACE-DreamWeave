@@ -62,6 +62,16 @@ namespace ACE.Server.ClassAbilities
     /// tokens were bought at a changed price and what a token was paid. <see cref="NewCosts"/> are the
     /// prices the wave moves to; the newest wave naming an ability must match its live
     /// ClassAbilityDefinition.CostPerRank (ClassAbilityRepricingTests pins that).
+    ///
+    /// THIS IS THE WAY TO ANNOUNCE ANY AUTOMATIC ABILITY CHANGE. From wave
+    /// <see cref="ClassAbilityRepricing.FirstWaveWithChangeNotice"/> on, every character that held a rank in
+    /// the ability (or had it in a stored facet build) before the migration gets one login chat line per row,
+    /// built by <see cref="ClassAbilityRepricing.BuildChangeNoticeLine"/>: the cost part (only when
+    /// OldCosts and NewCosts differ) and <see cref="Summary"/>, the functional change in plain words (for
+    /// example "cooldown 90/60/30s -> 135/90/45s"; null when the price is the whole change). A change that
+    /// does not move price still rides this: a Keep row with OldCosts == NewCosts and a Summary moves no
+    /// points and no tokens but produces the notice. Such a NOTICE-ONLY row (ClassAbilityRepricing.IsNoticeOnly)
+    /// also triggers no recompute and no pending lock. Summary must be ASCII.
     /// </summary>
     public sealed class RepriceRow
     {
@@ -70,12 +80,16 @@ namespace ACE.Server.ClassAbilities
         public IReadOnlyList<int> NewCosts { get; }
         public RepriceAction Action { get; }
 
-        public RepriceRow(ClassAbilityId ability, int[] oldCosts, int[] newCosts, RepriceAction action)
+        /// <summary>The functional change in plain words, or null. See the class comment.</summary>
+        public string Summary { get; }
+
+        public RepriceRow(ClassAbilityId ability, int[] oldCosts, int[] newCosts, RepriceAction action, string summary = null)
         {
             Ability = ability;
             OldCosts = oldCosts;
             NewCosts = newCosts;
             Action = action;
+            Summary = summary;
         }
     }
 
@@ -260,6 +274,38 @@ namespace ACE.Server.ClassAbilities
                 new RepriceRow(ClassAbilityId.Overchannel, new[] { 2, 2, 2 }, new[] { 1, 1, 1 }, RepriceAction.Keep),
                 new RepriceRow(ClassAbilityId.EchoCast,    new[] { 2, 2, 2 }, new[] { 1, 1, 1 }, RepriceAction.Keep),
                 new RepriceRow(ClassAbilityId.ManaBarrier, new[] { 1, 2, 3 }, new[] { 1, 1, 1 }, RepriceAction.Keep)),
+
+            // Wave 7 - Vanguard pass (2026-11-06). Old costs are the CostPerRank values on master before this
+            // pass (d462d3ae7). Cloaked in Power gains ranks 2-3 (a longer Critical Thorns window) at 1/1/1, Crit
+            // Resist Rating and Enhanced Health drop 2/2/2 -> 1/1/1: owners keep their ranks and the recompute
+            // returns the difference. Battle Hardened was one rank at 3 and is now three ranks at 1/1/1 whose rank
+            // buys the Strength-scaled reduction (0.025/0.05/0.075% per point): like Taunt in wave 2, an owner paid
+            // 3 and so ends at rank 3 with no net point change (PromoteToPaid). Damage Resist Rating's price is
+            // unchanged (1/1/1) while its function grew, so it has no row.
+            new RepriceWave(7, "Vanguard pass", "Vanguard abilities", "the Vanguard trainer",
+                new RepriceRow(ClassAbilityId.CloakedInPower,   new[] { 1 },       new[] { 1, 1, 1 }, RepriceAction.Keep),
+                new RepriceRow(ClassAbilityId.CritResistRating, new[] { 2, 2, 2 }, new[] { 1, 1, 1 }, RepriceAction.Keep),
+                new RepriceRow(ClassAbilityId.BattleHardened,   new[] { 3 },       new[] { 1, 1, 1 }, RepriceAction.PromoteToPaid),
+                new RepriceRow(ACE.Server.ClassAbilities.Abilities.EnhancedStatAbility.ClassIdForVital(ACE.Entity.Enum.Properties.PropertyAttribute2nd.MaxHealth),
+                                                                new[] { 2, 2, 2 }, new[] { 1, 1, 1 }, RepriceAction.Keep)),
+
+            // Wave 8 - Rogue tier swap (2026-11-06, owner ruling "B"). Acid Proc moves Rogue T2 -> T3 and Killer
+            // Instinct moves Rogue T3 -> T2; ability mechanics and the 2/2/2 prices do not change. Both get a
+            // row so owners hear about the move at login (a Summary notice). Both are Keep with equal costs.
+            // Acid Proc's gate TIGHTENS (T3 needs more CAP spent in the class than T2), so an owner who bought it
+            // at T2 may no longer meet the gate it now sits behind. Owner ruling: they are GRANDFATHERED and keep
+            // their ranks. That is safe because the tier gate is checked at learn time for rank 0 only (plus an
+            // unlearn-time newly-stranded check), never at login, and with equal prices nothing is refunded or
+            // taken back: a later respec returns exactly what was spent. Killer Instinct's gate only LOOSENS, so
+            // every owner keeps their ranks there too. Both rows are NOTICE-ONLY (IsNoticeOnly: equal-price
+            // Keep): they trigger no points recompute and no pending lock, because a full recompute would credit
+            // back tokens the sweep cannot see and reverse admin docks, and a reprice must never gain CAP. The
+            // notice and the wave stamp still go out.
+            new RepriceWave(8, "Rogue tier swap", "Rogue abilities", "the Rogue trainer",
+                new RepriceRow(ClassAbilityId.AcidProc, new[] { 2, 2, 2 }, new[] { 2, 2, 2 }, RepriceAction.Keep,
+                    "moved from Rogue tier 2 to tier 3"),
+                new RepriceRow(ClassAbilityId.KillerInstinct, new[] { 2, 2, 2 }, new[] { 2, 2, 2 }, RepriceAction.Keep,
+                    "moved from Rogue tier 3 to tier 2")),
         };
 
         /// <summary>The highest wave number shipped (0 when there are none). A character stamped at this
@@ -295,7 +341,8 @@ namespace ACE.Server.ClassAbilities
 
         /// <summary>
         /// The player-facing refusal for a learn, voucher purchase, voucher apply or voucher refund of an
-        /// ability a pending wave names (<see cref="IsAbilityRepricePending(int, ClassAbilityId)"/>).
+        /// ability a pending wave names (other than a notice-only row, see <see cref="IsNoticeOnly"/>)
+        /// (<see cref="IsAbilityRepricePending(int, ClassAbilityId)"/>).
         /// </summary>
         public const string PendingRefusal = "Your class ability price update is still being applied - try again in a moment, or log in again if this persists.";
 
@@ -315,7 +362,27 @@ namespace ACE.Server.ClassAbilities
 
         /// <summary><see cref="IsAbilityRepricePending(int, ClassAbilityId)"/> over an explicit wave list, for tests.</summary>
         public static bool IsAbilityRepricePending(IReadOnlyList<RepriceWave> waves, int appliedWave, ClassAbilityId ability) =>
-            PendingWaves(waves, appliedWave).Any(w => w.Rows.Any(r => r.Ability == ability));
+            PendingWaves(waves, appliedWave).Any(w => w.Rows.Any(r => r.Ability == ability && !IsNoticeOnly(w, r)));
+
+        /// <summary>
+        /// TRUE for a NOTICE-ONLY row: a Keep row, in a wave at or above <see cref="FirstWaveWithChangeNotice"/>,
+        /// whose OldCosts equal its NewCosts. It exists only to carry its Summary to the login chat, so it moves
+        /// nothing: it does NOT make a character "touched" (<see cref="OwnsAnyPendingAbility(IReadOnlyList{RepriceWave}, int, Func{ClassAbilityId, int})"/>),
+        /// so it triggers no points recompute (which would credit back the value of tokens the sweep cannot see
+        /// and reverse admin docks - a reprice must never be a way to gain CAP), and it does not lock the ability
+        /// as pending. Its notice line and the wave stamp still go out
+        /// (<see cref="OwnsAnyNoticeOnlyAbility"/>). Waves below the notice contract keep their original behaviour.
+        /// </summary>
+        public static bool IsNoticeOnly(RepriceWave wave, RepriceRow row) =>
+            wave != null && row != null && wave.Number >= FirstWaveWithChangeNotice
+            && row.Action == RepriceAction.Keep && row.OldCosts.SequenceEqual(row.NewCosts);
+
+        /// <summary>
+        /// TRUE when the character holds a live rank in an ability a pending NOTICE-ONLY row names, so the
+        /// login must still send the notice and stamp the wave even though nothing else is touched.
+        /// </summary>
+        public static bool OwnsAnyNoticeOnlyAbility(IReadOnlyList<RepriceWave> waves, int appliedWave, Func<ClassAbilityId, int> rankOf) =>
+            rankOf != null && PendingWaves(waves, appliedWave).Any(w => w.Rows.Any(r => IsNoticeOnly(w, r) && rankOf(r.Ability) > 0));
 
         // ---- unlearns -------------------------------------------------------------------------------
 
@@ -352,12 +419,16 @@ namespace ACE.Server.ClassAbilities
 
                     done.Add(row.Ability);
 
+                    // Priced from the FIRST pending row naming this ability (the prices the character actually paid
+                    // at, before any pending wave moved them), the same pairing ExpectedDelta uses.
+                    var first = PendingWaves(waves, appliedWave).SelectMany(w => w.Rows).First(r => r.Ability == row.Ability);
+
                     steps.Add(new UnlearnStep
                     {
                         Wave = wave.Number,
                         Ability = row.Ability,
                         OldRank = rank,
-                        OldPaid = Cumulative(row.OldCosts, rank),
+                        OldPaid = Cumulative(first.OldCosts, rank),
                     });
                 }
             }
@@ -548,12 +619,14 @@ namespace ACE.Server.ClassAbilities
         }
 
         /// <summary>
-        /// TRUE when the character owns (raw rank above 0) any ability a pending wave names, Keep or Unlearn.
-        /// Only such a character - or one whose token sweep took a token back - gets the points recompute;
-        /// everyone else is simply stamped, so a wave never re-prices an unrelated character's balance.
+        /// TRUE when the character owns (raw rank above 0) any ability a pending wave names with a row that
+        /// moves something (Keep with a price change, Unlearn, PromoteToPaid). NOTICE-ONLY rows
+        /// (<see cref="IsNoticeOnly"/>) do not count. Only such a character - or one whose token sweep took a
+        /// token back - gets the points recompute; everyone else is simply stamped, so a wave never re-prices
+        /// an unrelated character's balance.
         /// </summary>
         public static bool OwnsAnyPendingAbility(IReadOnlyList<RepriceWave> waves, int appliedWave, Func<ClassAbilityId, int> rankOf) =>
-            rankOf != null && PendingWaves(waves, appliedWave).SelectMany(w => w.Rows).Any(r => rankOf(r.Ability) > 0);
+            rankOf != null && PendingWaves(waves, appliedWave).Any(w => w.Rows.Any(r => !IsNoticeOnly(w, r) && rankOf(r.Ability) > 0));
 
         // ---- the pending-refund marker ----------------------------------------------------------------
 
@@ -914,8 +987,186 @@ namespace ACE.Server.ClassAbilities
             return true;
         }
 
-        // ---- the login chat line --------------------------------------------------------------------
+        // ---- the per-row change notice ---------------------------------------------------------------
 
+        /// <summary>The first wave with a notice contract: every row of it and later must produce a non-empty
+        /// notice (ClassAbilityRepricingTests pins this). Waves 1-7 predate it and are not retro-announced.</summary>
+        public const int FirstWaveWithChangeNotice = 8;
+
+        /// <summary>The client's chat line limit; a notice line is truncated to fit it.</summary>
+        public const int MaxChatLineLength = 255;
+
+        /// <summary>
+        /// The parts of one row's notice: the cost part "cost per rank {old} -> {new}" (old and new joined with
+        /// "/", only when they differ), then the Summary if non-empty. Empty when the row announces nothing.
+        /// </summary>
+        public static List<string> ChangeNoticeParts(RepriceRow row)
+        {
+            var parts = new List<string>();
+
+            if (row == null)
+                return parts;
+
+            if (!row.OldCosts.SequenceEqual(row.NewCosts))
+                parts.Add($"cost per rank {string.Join("/", row.OldCosts)} -> {string.Join("/", row.NewCosts)}");
+
+            if (!string.IsNullOrWhiteSpace(row.Summary))
+                parts.Add(row.Summary.Trim());
+
+            return parts;
+        }
+
+        /// <summary>
+        /// One row's login line: "Ability change - {displayName}: {parts}." with the parts joined by "; ".
+        /// Null when the row announces nothing. Truncated defensively to <see cref="MaxChatLineLength"/>.
+        /// </summary>
+        public static string BuildChangeNoticeLine(string displayName, RepriceRow row)
+        {
+            var parts = ChangeNoticeParts(row);
+
+            if (parts.Count == 0)
+                return null;
+
+            var line = $"Ability change - {displayName}: {string.Join("; ", parts)}.";
+
+            // Over the limit: cut the text and keep the closing "." so the line still reads as a sentence.
+            return line.Length <= MaxChatLineLength ? line : line.Substring(0, MaxChatLineLength - 1) + ".";
+        }
+
+        /// <summary>
+        /// WHO GETS A CHANGE NOTICE LINE for one pending row's ability: it held a live rank before the migration,
+        /// had it erased by an earlier interrupted run (the pending-refund marker), had it stripped from a stored
+        /// facet build by the Unlearn sweep, or holds it only in a stored facet build (the notice read). Pure, so
+        /// each disjunct is pinned by behaviour rather than by a source match.
+        /// </summary>
+        public static bool ChangeNoticeAffected(ClassAbilityId id, Func<ClassAbilityId, int> rankBefore,
+            IReadOnlyCollection<ClassAbilityId> erasedIds, IReadOnlyCollection<string> strippedNames, IReadOnlyCollection<string> noticeFacetNames)
+        {
+            if (rankBefore != null && rankBefore(id) > 0)
+                return true;
+
+            if (erasedIds != null && erasedIds.Contains(id))
+                return true;
+
+            if (!ClassAbilityRegistry.Abilities.TryGetValue(id, out var def))
+                return false;
+
+            return (strippedNames != null && strippedNames.Contains(def.Name))
+                || (noticeFacetNames != null && noticeFacetNames.Contains(def.Name));
+        }
+
+        /// <summary>
+        /// The def.Name of every ability a pending notice row (wave >= <see cref="FirstWaveWithChangeNotice"/>)
+        /// names that the character does NOT already qualify for through a live rank, i.e. the abilities a stored
+        /// facet build could still make it eligible for. Empty means no facet read is needed for the notice.
+        /// </summary>
+        public static HashSet<string> NoticeFacetProbeNames(IReadOnlyList<RepriceWave> waves, int appliedWave, Func<ClassAbilityId, bool> hasLiveRank)
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (var row in PendingWaves(waves, appliedWave).Where(w => w.Number >= FirstWaveWithChangeNotice).SelectMany(w => w.Rows))
+            {
+                if (hasLiveRank != null && hasLiveRank(row.Ability))
+                    continue;
+
+                if (ClassAbilityRegistry.Abilities.TryGetValue(row.Ability, out var def))
+                    names.Add(def.Name);
+            }
+
+            return names;
+        }
+
+        /// <summary>The subset of <paramref name="names"/> held by any stored facet build (abilities_Json is keyed by def.Name).</summary>
+        public static HashSet<string> NamesStoredInFacets(IReadOnlyList<CharacterFacet> rows, IReadOnlyCollection<string> names)
+        {
+            var found = new HashSet<string>(StringComparer.Ordinal);
+
+            if (rows == null || names == null || names.Count == 0)
+                return found;
+
+            foreach (var row in rows)
+            {
+                if (row == null || string.IsNullOrWhiteSpace(row.AbilitiesJson))
+                    continue;
+
+                var abilities = FacetSnapshot.DeserializeAbilities(row.AbilitiesJson);
+
+                foreach (var name in names)
+                    if (abilities.ContainsKey(name))
+                        found.Add(name);
+            }
+
+            return found;
+        }
+
+        /// <summary>
+        /// The facet-only part of the change notice: the abilities a pending notice row names that the character
+        /// holds in a stored facet build but not as a live rank. Reads the facet rows ONLY when needed: never when
+        /// every row is already covered by a live rank (<see cref="NoticeFacetProbeNames"/> empty), and never twice
+        /// - <paramref name="alreadyRead"/> is the rows the Unlearn sweep fetched, reused when present. A failed
+        /// fetch (null) skips the facet-only notices and returns empty; it never throws and never blocks anything
+        /// else, which is why the caller treats it as a warning, not a refusal.
+        /// </summary>
+        public static HashSet<string> FacetOnlyNoticeNames(IReadOnlyList<RepriceWave> waves, int appliedWave,
+            Func<ClassAbilityId, bool> hasLiveRank, IReadOnlyList<CharacterFacet> alreadyRead,
+            Func<IReadOnlyList<CharacterFacet>> fetchRows, out bool readFailed)
+        {
+            readFailed = false;
+
+            var probe = NoticeFacetProbeNames(waves, appliedWave, hasLiveRank);
+
+            if (probe.Count == 0)
+                return new HashSet<string>(StringComparer.Ordinal);
+
+            var rows = alreadyRead;
+
+            if (rows == null)
+            {
+                rows = fetchRows?.Invoke();
+
+                if (rows == null)
+                {
+                    readFailed = true;
+                    return new HashSet<string>(StringComparer.Ordinal);
+                }
+            }
+
+            return NamesStoredInFacets(rows, probe);
+        }
+
+        /// <summary>
+        /// The change notice lines for a login: for each pending wave at or above
+        /// <see cref="FirstWaveWithChangeNotice"/>, in wave order, one line per row whose ability the character
+        /// held a rank in or had in a stored facet build BEFORE the migration (<paramref name="affected"/>).
+        /// Several waves naming one ability each send their own line. A character with no pending wave, or
+        /// affected by none of the rows, gets nothing.
+        /// </summary>
+        public static List<string> BuildChangeNoticeLines(IReadOnlyList<RepriceWave> waves, int appliedWave,
+            Func<ClassAbilityId, bool> affected, Func<ClassAbilityId, string> displayNameOf)
+        {
+            var lines = new List<string>();
+
+            if (affected == null)
+                return lines;
+
+            foreach (var wave in PendingWaves(waves, appliedWave).Where(w => w.Number >= FirstWaveWithChangeNotice))
+            {
+                foreach (var row in wave.Rows)
+                {
+                    if (!affected(row.Ability))
+                        continue;
+
+                    var line = BuildChangeNoticeLine(displayNameOf != null ? displayNameOf(row.Ability) : row.Ability.ToString(), row);
+
+                    if (line != null)
+                        lines.Add(line);
+                }
+            }
+
+            return lines;
+        }
+
+        // ---- the login chat line --------------------------------------------------------------------
         /// <summary>
         /// The login chat lines. The first is the owner-specified line: the subject, the UNLEARNED abilities
         /// the character actually owned (display names, "A, B and C"), N points returned, and where to

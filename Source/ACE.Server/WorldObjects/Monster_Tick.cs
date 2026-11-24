@@ -44,6 +44,32 @@ namespace ACE.Server.WorldObjects
             if (ClassAbilityMoveSlowUntil != 0.0)
                 TickClassAbilityMoveSlow();
 
+            // Hunter's Echo (Archer T3, CombatPet_HuntersEcho): its whole think is its own, and it is taken BEFORE the
+            // !IsAwake return so the Echo's end-of-life and owner checks run whatever its awake state. It never reaches
+            // HandleFindTarget, the pet follow/assist branches or the movement below: it stands where it was placed,
+            // turns to face its target and shoots. One type test for every other creature.
+            if (this is CombatPet huntersEcho && huntersEcho.IsHuntersEcho)
+            {
+                if (IsDead) return;
+
+                if (firstUpdate)
+                {
+                    if (CurrentMotionState.Stance == MotionStance.NonCombat)
+                        DoAttackStance();
+
+                    if (IsAnimating)
+                    {
+                        PhysicsObj.update_object(Location.Instance);
+                        return;
+                    }
+
+                    firstUpdate = false;
+                }
+
+                huntersEcho.TickHuntersEcho();
+                return;
+            }
+
             if (!IsAwake)
             {
                 if (MonsterState == State.Return)
@@ -94,8 +120,9 @@ namespace ACE.Server.WorldObjects
 
             // Custom Summons caster pet: its own branch, taken whether or not it holds a target (it heals and buffs
             // its owner with no enemy in sight). It never reaches the attack branch below, so it never melees and
-            // never takes GetNextAttackType's melee fallback, and it skips PetCombatTick (casters wake nothing and
-            // have no taunt pulse).
+            // never takes GetNextAttackType's melee fallback, and it skips PetCombatTick (by design,
+            // unless the owner has /summonaggro on, casters start fights only by casting; they do not wake monsters,
+            // and they have no taunt pulse).
             if (this is CombatPet casterPet && casterPet.IsCasterPet && MonsterState != State.Return)
             {
                 if (firstUpdate)

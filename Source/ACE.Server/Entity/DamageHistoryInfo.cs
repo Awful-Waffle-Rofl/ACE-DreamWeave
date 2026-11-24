@@ -42,8 +42,16 @@ namespace ACE.Server.Entity
             return attacker;
         }
 
+        /// <summary>
+        /// The owning Player of a combat-pet attacker, or null: PetOwner is set only for a CombatPet attacker, so it is null
+        /// for every other attacker (a player, a monster) and for a pet with no owner. Null-safe on purpose; the Hold death
+        /// reactions called this on every kill and threw on all but pet kills.
+        /// </summary>
         public Player TryGetPetOwner()
         {
+            if (PetOwner == null)
+                return null;
+
             PetOwner.TryGetTarget(out var petOwner);
 
             return petOwner;

@@ -67,6 +67,22 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// </summary>
     public class ExsanguinateAbility : IClassAbility, IPassiveStatAbility, IAbilityReadout
     {
+        /// <summary>
+        /// The Blood Charge pool is Sanguine Reserve's, so the static ceiling is the cap at Reserve's top rank (its MaxRank, 3); the live
+        /// reading is rank-exact through <see cref="StacksReading"/>.
+        /// </summary>
+        private const int ReserveTopRank = 3;
+
+        /// <summary>
+        /// The Blood Charge reading at the player's actual Sanguine Reserve rank (the rank the burst gate uses): Max is that rank's cap, 0 with no
+        /// Reserve (no pool), and it only binds when there is a pool to fill.
+        /// </summary>
+        public static ClassAbilityCeilingReading StacksReading(int reserveRank, double held, ITunableValues values)
+        {
+            var max = BloodChargeMath.StackCap(values, reserveRank);
+            return new ClassAbilityCeilingReading { Id = "stacks", Current = held, Max = max, Binding = max > 0 && held >= max };
+        }
+
         public ClassAbilityDefinition Definition { get; } = new ClassAbilityDefinition
         {
             Id = ClassAbilityId.Exsanguinate,
@@ -74,17 +90,64 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "exsanguinate",
             DisplayName = "Exsanguinate",
-            Description = "Casting Martyr's Hecatomb or Curse of Raven Fury with a FULL Blood Charge pool " +
-                          "spends the whole pool at three times its normal per-charge value (a full pool of " +
-                          "5 becomes +105% instead of +35%). Afterwards the pool keeps 2/3/4 charges by rank " +
-                          "(always at least one short of full) instead of emptying. Against a target under " +
-                          "Weakened Blood it also ignores 25% of that target's health-drain resistance for " +
-                          "the strike. On Curse of Raven Fury every projectile of the ring carries it. An " +
-                          "exsanguinating cast gains no Blood Charge; any other life cast builds one " +
-                          "instead. Harm still builds charges but never spends them.",
+            // Live text. Charges kept per rank: ExsanguinateAbility.cs ~167-169 (Player_ClassAbilityBuffs.cs ~1481-1483); resistance
+            // ignore: Player_ClassAbilityBuffs.cs ~1514. The burst multiplier reads as "3x" ({v:...exsanguinate_multiplier|x}); the worked
+            // "5 -> +105% vs +35%" example is the top rank's cap (the @max of the cap ranks) with the burst_bonus and full_pool formulas.
+            DescriptionTemplate = "Casting Martyr's Hecatomb or Curse of Raven Fury with a full Blood Charge pool spends the whole " +
+                          "pool at {fn:burst_multiplier@max|x} its normal value: a full pool of " +
+                          "{ranks:class_ability_bloodmage_charge_stack_cap_r@max|int} gives +{fn:burst_bonus@max|pct}% instead of " +
+                          "+{fn:full_pool@max|pct}%. Afterwards the pool keeps some charges instead of emptying, always at least " +
+                          "one short of full. Against a target with Weakened Blood, the strike also ignores " +
+                          "{v:class_ability_exsanguinate_resist_ignore|pct}% of its health-drain resistance. Every projectile of a " +
+                          "Curse of Raven Fury ring carries it. An exsanguinating cast gains no Blood Charge, while other life " +
+                          "casts build one. Harm builds charges but never spends them.",
+            RankTailTemplate = "keeps {fn:charges_kept|int} charges after the burst",
+            // charges_kept is ExsanguinateMath.ChargesKept (the method the burst calls in ApplyBloodChargeDamage and GetReadout), read
+            // through the same ITunableValues. The text is per RANK, not per player: it assumes the Sanguine Reserve rank EQUALS the
+            // Exsanguinate rank (BloodChargeMath.StackCap(values, rank)), so it is exact for that pairing and applies the cap - 1 clamp
+            // there. The mechanic uses the player's ACTUAL Reserve rank (Player_ClassAbilityBuffs.cs ApplyBloodChargeDamage), so for a
+            // lower Reserve rank the text overstates the charges kept by up to 2 (rank 3 Exsanguinate with a rank 1 Reserve: text 4, mechanic 2).
+            TextFormulas = new Dictionary<string, TextFormula>
+            {
+                ["charges_kept"] = new TextFormula(
+                    (values, rank) => ExsanguinateMath.ChargesKept(values, rank, BloodChargeMath.StackCap(values, rank)),
+                    "class_ability_exsanguinate_charges_kept_r1",
+                    "class_ability_exsanguinate_charges_kept_r2",
+                    "class_ability_exsanguinate_charges_kept_r3",
+                    "class_ability_bloodmage_charge_stack_cap_r1",
+                    "class_ability_bloodmage_charge_stack_cap_r2",
+                    "class_ability_bloodmage_charge_stack_cap_r3"),
+                // burst_bonus is the full-pool burst: ExsanguinateMath.BurstMultiplier (the method ApplyBloodChargeDamage and GetReadout
+                // call) over the rank's Sanguine Reserve cap and the neutral-affinity per-charge value, minus the 1.0 base. Like
+                // charges_kept it is per Reserve rank, with no gear and the neutral affinity.
+                ["burst_bonus"] = new TextFormula(
+                    (values, rank) => ExsanguinateMath.BurstMultiplier(BloodChargeMath.StackCap(values, rank),
+                        BloodChargeMath.PerChargeValue(values, 1.0), ExsanguinateMath.BurstMultiplierTunable(values)) - 1.0,
+                    "class_ability_exsanguinate_multiplier",
+                    "class_ability_bloodmage_charge_per_stack",
+                    "class_ability_bloodmage_charge_stack_cap_r1",
+                    "class_ability_bloodmage_charge_stack_cap_r2",
+                    "class_ability_bloodmage_charge_stack_cap_r3"),
+                // burst_multiplier is ExsanguinateMath.EffectiveBurstMultiplier, the floor at 1.0 BurstMultiplier applies to the tunable.
+                ["burst_multiplier"] = new TextFormula(
+                    (values, rank) => ExsanguinateMath.EffectiveBurstMultiplier(ExsanguinateMath.BurstMultiplierTunable(values)),
+                    "class_ability_exsanguinate_multiplier"),
+                // full_pool is the plain Sanguine Reserve ramp at a full pool (the "instead of +35%" half of the example).
+                ["full_pool"] = new TextFormula(
+                    (values, rank) => BloodChargeMath.FullPoolBonus(values, rank),
+                    "class_ability_bloodmage_charge_per_stack",
+                    "class_ability_bloodmage_charge_stack_cap_r1",
+                    "class_ability_bloodmage_charge_stack_cap_r2",
+                    "class_ability_bloodmage_charge_stack_cap_r3"),
+            },
+            TunableSourceFiles = new[] { "WorldObjects/Player_ClassAbilityBuffs.cs", "ClassAbilities/ExsanguinateMath.cs", "ClassAbilities/BloodChargeMath.cs" },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "stacks", Bounds = CeilingBounds.Stacks, Source = CeilingSource.Constant, ConstantValueFor = (v, rank) => BloodChargeMath.StackCap(v, ReserveTopRank), ConstantRef = "BloodChargeMath.StackCap at the Sanguine Reserve top rank", Label = "max blood charges", Format = "int", ZeroIsLimit = true, TopRankOnly = true },
+            },
         };
 
         /// <summary>
@@ -138,20 +201,18 @@ namespace ACE.Server.ClassAbilities.Abilities
                     Label = "burst dmg",
                     Per = null,
                     CapNote = null,
+                    Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "stacks", 0.0, rank, ClassAbilityText.Live) },
                 };
             }
 
             var reserveRank = player.ClassAbilitySuppressed ? 0 : player.GetClassAbilityRank(ClassAbilityId.SanguineReserve);
 
-            var stackCap = BloodChargeMath.StackCap(reserveRank,
-                PropertyManager.GetLong("class_ability_bloodmage_charge_stack_cap_r1").Item,
-                PropertyManager.GetLong("class_ability_bloodmage_charge_stack_cap_r2").Item,
-                PropertyManager.GetLong("class_ability_bloodmage_charge_stack_cap_r3").Item);
+            var stackCap = BloodChargeMath.StackCap(ClassAbilityText.Live, reserveRank);
 
             // Sanguine Reserve's AFFINITY-SCALED per-charge value, through the Player helper - the value the
             // burst actually multiplies (ApplyBloodChargeDamage reads the same BloodChargePerStack)
             var perStack = player.GetBloodChargePerStackValue();
-            var burstMultiplierTunable = PropertyManager.GetDouble("class_ability_exsanguinate_multiplier").Item;
+            var burstMultiplierTunable = ExsanguinateMath.BurstMultiplierTunable(ClassAbilityText.Live);
 
             var gearBurst = player.GetEquippedModValue(EquipmentModId.Sanguinate);
 
@@ -163,11 +224,7 @@ namespace ACE.Server.ClassAbilities.Abilities
 
             // the charges the pool is SET to after a burst at this Exsanguinate rank - the same helper and
             // tunables ApplyBloodChargeDamage passes, against the same cap
-            var kept = ExsanguinateMath.ChargesKept(rank,
-                PropertyManager.GetLong("class_ability_exsanguinate_charges_kept_r1").Item,
-                PropertyManager.GetLong("class_ability_exsanguinate_charges_kept_r2").Item,
-                PropertyManager.GetLong("class_ability_exsanguinate_charges_kept_r3").Item,
-                stackCap);
+            var kept = ExsanguinateMath.ChargesKept(ClassAbilityText.Live, rank, stackCap);
 
             var keptSecondary = new ClassAbilityReadout
             {
@@ -193,6 +250,8 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "burst dmg",
                 Per = null,
                 CapNote = null,
+                // the pool is Sanguine Reserve's, so its cap is read at the Reserve rank (the rank the burst gate uses)
+                Ceilings = new[] { StacksReading(reserveRank, player.GetBloodChargeStacks(), ClassAbilityText.Live) },
                 // omitted, not padded with a zero, when there is no pool to keep anything from (no Sanguine
                 // Reserve rank) - the Secondary contract in ClassAbilityReadout
                 Secondary = stackCap > 0 ? new List<ClassAbilityReadout> { keptSecondary } : null,

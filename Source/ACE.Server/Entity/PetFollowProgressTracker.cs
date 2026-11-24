@@ -40,6 +40,96 @@ namespace ACE.Server.Entity
         public const double TeleportRetryIntervalSeconds = 1.0;
 
         /// <summary>
+        /// Minimum seconds between two "could not be teleported" warnings for one pet. A pet whose teleport keeps
+        /// failing retries every <see cref="TeleportRetryIntervalSeconds"/>; this keeps it visible in the prod log
+        /// without one line per second.
+        /// </summary>
+        public const double TeleportFailureLogIntervalSeconds = 30.0;
+
+        /// <summary>
+        /// Applies the outcome of one follow-teleport attempt (CombatPet.TryTeleportToOwner) and returns the time
+        /// before which the next attempt may not run. Only a placement that SUCCEEDED restarts the stuck window
+        /// (<paramref name="progress"/>) and the max-time clock (<paramref name="followStartTime"/>). A refused or
+        /// failed attempt leaves both armed, so whichever trigger fired keeps firing and the teleport is retried
+        /// every <see cref="TeleportRetryIntervalSeconds"/> rather than after a fresh stuck window - before
+        /// 2026-11-07 every attempt reset both, and a pet whose teleport kept failing waited a full
+        /// pet_follow_stuck_seconds (or pet_follow_max_seconds) between tries.
+        /// </summary>
+        public static double AfterTeleportAttempt(bool placed, double now, PetFollowProgressTracker progress, ref double followStartTime)
+        {
+            if (placed)
+            {
+                progress?.Reset();
+                followStartTime = now;
+            }
+
+            return now + TeleportRetryIntervalSeconds;
+        }
+
+        /// <summary>
+        /// Whether a pet moved back after a rejected lifted owner-spot landing is back where it stood: the same
+        /// cell, a live physics cell, within <see cref="OwnerSpotPlacementTolerance"/> of the original origin
+        /// (which covers the OwnerSpotBumpHeight lift of the second try).
+        /// </summary>
+        public static bool AcceptMoveBack(uint beforeCell, Vector3 beforeOrigin, uint landedCell, Vector3 landedOrigin, bool landedHasCurCell)
+        {
+            return AcceptPlacement(beforeCell, beforeOrigin, landedCell, landedOrigin, landedHasCurCell,
+                OwnerSpotPlacementTolerance, OwnerSpotPlacementTolerance);
+        }
+
+        /// <summary>
+        /// Whether Pet.PlaceBesideOwner still has a move to sync and broadcast after its lifted attempt was
+        /// rejected. Put back where it stood, the pet has moved only if an earlier attempt moved it; left parked
+        /// elsewhere, it has moved. Without this every 1 s retry of a pet that cannot be placed broadcast a
+        /// teleport in place.
+        /// </summary>
+        public static bool MovedAfterRejectedLift(bool movedBeforeLift, bool restored)
+        {
+            return restored ? movedBeforeLift : true;
+        }
+
+        /// <summary>
+        /// Whether /telesummon adds the target it drops to the unreachable ignore list. Not when the target is
+        /// engaging the owner or the pet (its AttackTarget is one of them, or it holds either as a retaliate
+        /// target): the pet should be free to pick a monster that is fighting its side straight back up.
+        /// Otherwise yes, so the stuck chase the player just pulled the pet out of is not handed straight back.
+        /// </summary>
+        public static bool ShouldIgnoreTeleSummonDroppedTarget(bool targetAttackingOwner, bool targetAttackingPet,
+            bool targetRetaliatingOwner, bool targetRetaliatingPet)
+        {
+            return !(targetAttackingOwner || targetAttackingPet || targetRetaliatingOwner || targetRetaliatingPet);
+        }
+
+        /// <summary>
+        /// Whether the idle follow resets its stuck window after trying to issue the follow MoveTo. TRUE when the
+        /// MoveTo could not go out (the pet is not MoveReady: attack recovery, a pin or a stun), because a pet
+        /// that is not allowed to move is not stuck - and the 3 s stuck default is shorter than a 5 s pin. The
+        /// max-time trigger is left armed, so a pet that never becomes MoveReady is still teleported.
+        /// </summary>
+        public static bool ShouldResetStuckWindow(bool followMoveIssued)
+        {
+            return !followMoveIssued;
+        }
+
+        /// <summary>Whether a failed teleport may log its warning now, given when this pet last logged one (null: never).</summary>
+        public static bool ShouldLogTeleportFailure(double? lastLoggedAt, double now)
+        {
+            return lastLoggedAt == null || now - lastLoggedAt.Value >= TeleportFailureLogIntervalSeconds;
+        }
+
+        /// <summary>
+        /// The /telesummon cooldown: seconds left before <paramref name="owner"/> may use it again, given when they
+        /// last used it (null: never) and the cooldown length. Zero means ready; a non-positive cooldown is off.
+        /// </summary>
+        public static double TeleSummonCooldownRemaining(double? lastUsedAt, double now, double cooldownSeconds)
+        {
+            if (lastUsedAt == null || cooldownSeconds <= 0.0 || double.IsNaN(cooldownSeconds))
+                return 0.0;
+
+            return Math.Max(0.0, lastUsedAt.Value + cooldownSeconds - now);
+        }
+
+        /// <summary>
         /// How far (horizontally, metres) a teleported or summoned pet may end up from the point it was placed
         /// at before the placement counts as failed. SetPosition with the Slide flag accepts whatever spot the
         /// transition resolves to, which can be the far side of a wall.
@@ -256,9 +346,15 @@ namespace ACE.Server.Entity
     {
         public const double DefaultTeleportDistance = 40.0;
         public const double DefaultMaxFollowSeconds = 15.0;
-        public const double DefaultStuckSeconds = 5.0;
+        public const double DefaultStuckSeconds = 3.0;
         public const double DefaultUnreachableSeconds = 8.0;
         public const double DefaultUnreachableIgnoreSeconds = 10.0;
+        public const double DefaultTeleSummonCooldownSeconds = 10.0;
+
+        public const string TeleSummonCooldownSecondsKey = "pet_telesummon_cooldown_seconds";
+
+        /// <summary>The /telesummon cooldown, read when the command runs; the compiled default when the read fails.</summary>
+        public static double ReadTeleSummonCooldownSeconds() => ReadDouble(TeleSummonCooldownSecondsKey, DefaultTeleSummonCooldownSeconds);
 
         public const string TeleportDistanceKey = "pet_follow_teleport_distance";
         public const string MaxFollowSecondsKey = "pet_follow_max_seconds";
@@ -335,7 +431,8 @@ namespace ACE.Server.Entity
     /// Once the running sum reaches <see cref="ProgressEpsilon"/> that is progress: the clock and the sum
     /// both restart. No progress for the caller's timeout reports stuck.
     ///
-    /// The caller resets the tracker on arrival, on acquiring or losing a target, and after every teleport attempt.
+    /// The caller resets the tracker on arrival, on acquiring or losing a target, and after every SUCCESSFUL
+    /// teleport (PetFollowRules.AfterTeleportAttempt) - a failed one leaves it armed so the retry is not delayed.
     /// </summary>
     public sealed class PetFollowProgressTracker
     {

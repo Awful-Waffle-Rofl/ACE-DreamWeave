@@ -54,6 +54,10 @@ namespace ACE.Database.Models.Shard
 
             ConfigureRewardClaim(modelBuilder);
 
+            ConfigureAllegianceAvatar(modelBuilder);
+
+            ConfigureAllegianceGauntlet(modelBuilder);
+
             ConfigureCharacterPvpRating(modelBuilder);
             ConfigurePvpMatch(modelBuilder);
             ConfigurePvpMatchParticipant(modelBuilder);
@@ -62,6 +66,10 @@ namespace ACE.Database.Models.Shard
             ConfigurePvpTemplateHistory(modelBuilder);
 
             ConfigureThreadPuzzleIpLedger(modelBuilder);
+
+            ConfigureCharacterSalvageBatch(modelBuilder);
+            ConfigureCharacterSalvageBatchItem(modelBuilder);
+            ConfigureSalvageRollerAudit(modelBuilder);
         }
     }
 }

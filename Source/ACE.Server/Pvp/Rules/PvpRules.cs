@@ -436,6 +436,22 @@ namespace ACE.Server.Pvp.Rules
         /// </summary>
         public static List<PropertiesEnchantmentRegistry> ApplyDispelVulnLock(WorldObject target, List<PropertiesEnchantmentRegistry> candidates, PvpChokePoint point)
         {
+            var filtered = ExcludeLockedVulnerabilities(target, candidates);
+
+            if (candidates != null && filtered.Count != candidates.Count)
+                Report(point, candidates.Count, filtered.Count);
+
+            return filtered;
+        }
+
+        /// <summary>
+        /// The filter of <see cref="ApplyDispelVulnLock"/> without its <see cref="Report"/>: returns
+        /// <paramref name="candidates"/> itself when nothing is excluded, else a new list without the locked
+        /// vulnerabilities. For a reader that only asks "could a dispel remove this" (a caster pet judging whether a
+        /// cleanse is worth casting) and so must not bump the per-point applied count every time it looks.
+        /// </summary>
+        public static List<PropertiesEnchantmentRegistry> ExcludeLockedVulnerabilities(WorldObject target, List<PropertiesEnchantmentRegistry> candidates)
+        {
             if (candidates == null || candidates.Count == 0)
                 return candidates;
 
@@ -456,16 +472,9 @@ namespace ACE.Server.Pvp.Rules
             if (Time.GetUnixTime() - targetPlayer.LastPkAttackTimestamp >= dials.DispelVulnLockSeconds)
                 return candidates;
 
-            var before = candidates.Count;
-
-            var filtered = candidates
+            return candidates
                 .Where(e => !(IsPlayerCastVulnerability(e.SpellCategory, e.CasterObjectId) && e.CasterObjectId != targetGuid))
                 .ToList();
-
-            if (filtered.Count != before)
-                Report(point, before, filtered.Count);
-
-            return filtered;
         }
 
         // ================= cloak damage reduction (L5): CLK1 =================

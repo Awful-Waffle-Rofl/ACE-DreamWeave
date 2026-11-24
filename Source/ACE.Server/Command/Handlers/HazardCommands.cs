@@ -37,19 +37,22 @@ namespace ACE.Server.Command.Handlers
             "      args+: distinct_dirs=1|0 (row dir=random max_in_flight<=3, cross dirs=random max_in_flight<=2, with wave_every; default 0: waves in flight never share a wall, a wave waits for a free one)\n" +
             "      args+: hit_lag=<s> (default 0.15, 0..0.5; latency compensation: a hit lands s after the server's ball, where the player sees it; 0 is off)\n" +
             "      args+: occupancy=<fraction> (random only, default 0.75, 0.25..2: the share of the narrowest side balls in flight may block; a higher one allows a denser stream)\n" +
+            "      args+: axis=any|ns|ew (random only, default any; ns/ew: lanes from that axis's two sides only, whose ball body never touches an exclusion)\n" +
             "      ring-out starburst from the centre | ring-in converge on it | row sweeps one gap across | random staggered launches (count over window) | cross two rows, safe where the gaps meet | fan count balls (3) aimed at a player, spread degrees (30);\n" +
             "      ring-alt one ring series whose waves alternate ring-out and ring-in, each with a new random rotation;\n" +
             "      defaults: ring-out, speed=3 lead=2 gap=6 waves=4 wave_gap=3 window=20 escape_speed=3, count 8 (rings) or 6 (random); lead is raised to the fair-lead floor for a player fleeing at escape_speed m/s (1..12); at=me/cx/cy set the ring centre\n" +
             "  /hazard wisps [scatter|row|column|diagonal|ring|sweep|mixed]\n" +
             "      args: n=<wisps> scale=<x> move=<s> hold=<s> burst=<s> rest=<s> cycles=<n> pillar_radius=<m> escape_speed=<m/s> fire=unison|random|sequence\n" +
-            "      args+: seq_gap=<s> dir=n|s|e|w|random sweep_move=<s> steps=<n> ring_radius=<m> scatter_cover=<fraction> wisp_clear=<m> cx=<m> cy=<m>\n" +
+            "      args+: seq_gap=<s> dir=n|s|e|w|random sweep_move=<s> steps=<n> ring_radius=<m> scatter_cover=<fraction> mixed_pool=<comma list of patterns mixed may pick> wisp_clear=<m> cx=<m> cy=<m>\n" +
             "      args+: move_end=<s> hold_end=<s> rest_end=<s> (ramp the start key to this over the cycles) hold_floor=1|0 (0 lifts the hold floor)\n" +
-            "      args+: follow=1|0 (one extra wisp trails the first player and bursts a pillar on the crew's beat) follow_lag=<s>\n" +
+            "      args+: follow=1|0 (one extra wisp trails the first player and bursts a pillar on the crew's beat) follow_lag=<s> follow_target=first|random (random: a new player each cycle)\n" +
             "      args+: mark_dest=1|0 (mark each wisp's destination on the ground from its glide until its burst) strike_delay=<s> (a pillar shows this long before it can hit, default 0.2)\n" +
             "      args+: ceiling_beam=<seconds 0..5, default 0 = off> (a narrow beam falls from the ceiling onto each wisp's pillar spot for this long before it bursts; visual only)\n" +
             "      args+: beam_script=<script id, decimal or 0x hex> (the look of the ceiling beam; default the beam script)\n" +
+            "      args+: beam_height=<metres 0..30, default 0 = off> (hang the ceiling beam this far over the pillar's ground instead of under the ceiling; its mesh is 5 m long)\n" +
             "      args+: mark_script=<script id, decimal or 0x hex> (the look of the mark_dest ground mark; default the beam mark)\n" +
             "      args+: damage_type=fire|acid|cold|electric|bludgeon (default fire; any other word is refused)\n" +
+            "      args+: pct=<fraction of max health per hit> edge_inset=<m> (formations stay this far inside the region edge, default 2) player_radius=<m>\n" +
             "      row runs west-east (dir n|s), column north-south (dir e|w), sweep takes any dir; hold = the telegraph (seconds the wisps sit still before bursting, at least 0.5 + (pillar_radius + 0.5) / escape_speed);\n" +
             "      defaults: scatter, n=8 move=2.5 hold=1.5 burst=1.5 rest=1 cycles=8 pillar_radius=2 escape_speed=3 fire=unison; pillar_radius is the DAMAGE radius, not the flames' size (the effect script fixes that); cx/cy = landblock-local centre of ring and diagonal\n" +
             "  /hazard memory   (no patterns)\n" +
@@ -61,13 +64,14 @@ namespace ACE.Server.Command.Handlers
             "      a fire pillar at each region corner; a player within radius of any pillar takes pct of max health on entering and every tick s after, rising to pct_end over ramp s of standing there; reset s outside starts the clock over;\n" +
             "      defaults: corners, radius=3 tick=1 pct=0.05 pct_end=0.35 ramp=5 reset=1; runs until /hazard stop\n" +
             "  /hazard rain   (no patterns; outdoor regions)\n" +
-            "      args: speed=<m/s> lead=<s> burst_radius=<m> duration=<s> drop_z=<absolute z> max_falling=<n> marker_script=<id> burst_script=<id> ball_wcid=<wcid> damage_type=fire|acid|cold|electric|bludgeon hit_verb=<word> pct=<fraction> escape_speed=<m/s> player_radius=<m> edge_inset=<m> target_share=<0..1> target_spread=<m>\n" +
+            "      args: speed=<m/s> lead=<s> burst_radius=<m> duration=<s> drop_z=<absolute z> max_falling=<n> ball_radius=<m> marker_script=<id> burst_script=<id> ball_wcid=<wcid> damage_type=fire|acid|cold|electric|bludgeon hit_verb=<word> pct=<fraction> escape_speed=<m/s> player_radius=<m> edge_inset=<m> target_share=<0..1> target_spread=<m>\n" +
             "      balls fall out of the sky onto ground markers at random moments (about max_falling at once), burst on impact and vanish; target_share of the drops are aimed at a random player (landing within target_spread of them), the rest fall anywhere; the marker stands for the whole fall, lead is a short spawn-in raised so lead + fall >= 0.5 + (burst_radius + player_radius) / escape_speed;\n" +
             "      defaults: speed=10 lead=0.6 burst_radius=4 duration=60 drop_z=ground+30 max_falling=8 target_share=0.6 target_spread=5 escape_speed=3 pct=0.60 damage_type=fire\n" +
             "  /hazard fill   (no patterns; a rect room on a plane ground)\n" +
             "      args: element=acid|lava color=acid|lava|smoke|poison damage_type=fire|acid|cold|electric|bludgeon floor_z=<z> ground_z=<z> max_z=<z> start_z=<z> rate=<m/s> tick=<s> damage=<n> damage_per_m=<n> damage_max=<n> damage_scale=<x>\n" +
             "      args+: head_height=<m> panel_size=<m> opacity=<0..1> doubled=1|0 wisps=<n> wisp_scale=<x> resnap=<s> duration=<s> (0 = forever) sheet_margin=<m> under_margin=<m>\n" +
             "      args+: submerged_damage=<n> submerged_per_m=<n> submerged_max=<n> (optional tier at depth >= head_height; damage 0 = off; max 0 = damage_max)\n" +
+            "      args+: quiet=1|0 (default 0; 1 starts the run without its rising line)\n" +
             "      doubled=1 pairs every surface panel with a down-facing partner so the surface shows from below; at most 64 surface panels in all (doubled counts two per tile);\n" +
             "      a sheet of acid or lava rises from start_z at rate m/s (negative falls) to max_z; everyone below the surface takes damage + damage_per_m x depth (capped at damage_max, x damage_scale) every tick s, cut by their resistance;\n" +
             "      defaults: acid, rate=0.05 tick=2 damage=40 damage_per_m=25 damage_max=400 damage_scale=1 head_height=2 panel_size=10.4 opacity=0.5 doubled=1 wisps=16 wisp_scale=0.5 resnap=10 duration=0;\n" +

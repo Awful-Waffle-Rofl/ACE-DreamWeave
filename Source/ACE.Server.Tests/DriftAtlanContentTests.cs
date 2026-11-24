@@ -9,17 +9,19 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 namespace ACE.Server.Tests
 {
     /// <summary>
-    /// Content pins for the Drift Atlan infusion arc: the 26 Drift weapons (1007403-1007428) carry
-    /// the OD+18 damage/defense stats, exact spellbooks, no imbue/underlay/tinker rows and the
-    /// DriftAtlanWeapon bool (9080); the recipe unit has 78 recipes and 142 cook_book rows with the
-    /// owner-ruled eligibility. Pure file + regex parsing of the committed SQL, same idiom as
+    /// Content pins for the Drift Atlan infusion arc: the 30 Drift weapons (1007403-1007432, the last
+    /// four being the Isparian crossbows) carry the OD+18 damage/defense stats, exact spellbooks, no
+    /// imbue/underlay/tinker rows and the DriftAtlanWeapon bool (9080); the recipe unit has 90 recipes
+    /// and 166 cook_book rows with the owner-ruled eligibility. Pure file + regex parsing of the committed SQL, same idiom as
     /// BluespireTinkerLockContentTests.
     /// </summary>
     [TestClass]
     public class DriftAtlanContentTests
     {
         private const int FirstWeapon = 1007403;
-        private const int LastWeapon = 1007428;
+        private const int LastWeapon = 1007432;
+        private const int LastWandWcid = 1007428;
+        private const int FirstCrossbow = 1007429;
         private const int ElementalInfusion = 1007400;
         private const int ArmorInfusion = 1007401;
         private const int LifeWand = 1007427;
@@ -34,6 +36,7 @@ namespace ACE.Server.Tests
             46101, 46102, 46103, 46104, 46084, 46085, 46086, 46087, 71265, 71266, 71267, 71268,
             46118, 71262, 46120, 46121, 46067, 46068, 46069, 46070, 46135, 46136, 46137, 46138,
             46395, 46397,
+            46218, 71212, 71211, 71210,
         };
 
         private static readonly int[] WandWcids =
@@ -48,11 +51,14 @@ namespace ACE.Server.Tests
             public int Last;
             public int Damage;           // int 44 (melee), 0 if not applicable
             public double Defense;       // float 29
+            public double DamageMod;     // float 63 (Bow and Crossbow), 0 if not applicable
             public int[] ClassSpells;    // per-class pair for melee/bow
         }
 
         private const int BowElementalDamageBonus = 30;      // int 204
         private const double WandElementalDamageMod = 1.29;   // float 152
+        private const double BowDamageMod = 2.4;              // retail 2.3 + 0.1
+        private const double CrossbowDamageMod = 2.6;         // retail Enhanced Isparian crossbow 2.5 + 0.1 (the Bow offset)
 
         private static readonly Group[] Groups =
         {
@@ -60,17 +66,20 @@ namespace ACE.Server.Tests
             new Group { Name = "Mace", First = 1007407, Last = 1007410, Damage = 64, Defense = 1.20, ClassSpells = new[] { 6043, 4518 } },
             new Group { Name = "Axe", First = 1007411, Last = 1007414, Damage = 69, Defense = 1.16, ClassSpells = new[] { 6047, 4538 } },
             new Group { Name = "Two Handed", First = 1007415, Last = 1007418, Damage = 53, Defense = 1.16, ClassSpells = new[] { 6073, 5032 } },
-            new Group { Name = "Bow", First = 1007419, Last = 1007422, Damage = 0, Defense = 1.18, ClassSpells = new[] { 6044, 4522 } },
-            new Group { Name = "Wand", First = 1007423, Last = 1007428, Damage = 0, Defense = 1.18, ClassSpells = null },
+            new Group { Name = "Bow", First = 1007419, Last = 1007422, Damage = 0, Defense = 1.18, DamageMod = BowDamageMod, ClassSpells = new[] { 6044, 4522 } },
+            new Group { Name = "Wand", First = 1007423, Last = LastWandWcid, Damage = 0, Defense = 1.18, ClassSpells = null },
+            new Group { Name = "Crossbow", First = FirstCrossbow, Last = LastWeapon, Damage = 0, Defense = 1.18, DamageMod = CrossbowDamageMod, ClassSpells = new[] { 6044, 4522 } },
         };
 
         private static readonly Dictionary<string, int> ElementDamageTypes = new Dictionary<string, int>
         {
             { "Shivering", 8 }, { "Smoldering", 16 }, { "Sparking", 64 }, { "Stinging", 32 },
+            // The crossbows' retail Enhanced Isparian element words.
+            { "Chilling", 8 }, { "Flaming", 16 }, { "Coruscating", 64 }, { "Dissolving", 32 },
         };
 
         [TestMethod]
-        public void DriftWeapons_AllTwentySixFilesExist()
+        public void DriftWeapons_AllThirtyFilesExist()
         {
             var dir = GetWeeniesDir();
 
@@ -95,10 +104,10 @@ namespace ACE.Server.Tests
                     var floats = ParseNumeric(file, wcid, "weenie_properties_float");
                     var tag = $"{wcid} ({g.Name})";
 
-                    if (g.Name == "Bow")
+                    if (g.Name == "Bow" || g.Name == "Crossbow")
                     {
                         Expect(problems, tag, "int 204", ints, 204, BowElementalDamageBonus);
-                        Expect(problems, tag, "float 63", floats, 63, 2.4);
+                        Expect(problems, tag, "float 63", floats, 63, g.DamageMod);
                     }
                     else if (g.Name == "Wand")
                     {
@@ -165,7 +174,7 @@ namespace ACE.Server.Tests
 
         private static string StripSqlComments(string s) => Regex.Replace(s, @"/\*.*?\*/", " ", RegexOptions.Singleline);
 
-        private static string FindMigration()
+        private static string FindMigration(string pattern = "*Drift-Weapons-OD18-Existing-Items.sql")
         {
             var dir = new DirectoryInfo(AppContext.BaseDirectory);
 
@@ -175,8 +184,8 @@ namespace ACE.Server.Tests
 
                 if (Directory.Exists(updates))
                 {
-                    var file = Directory.EnumerateFiles(updates, "*Drift-Weapons-OD18-Existing-Items.sql").FirstOrDefault();
-                    Assert.IsNotNull(file, $"Drift OD18 shard migration not found in {updates}.");
+                    var file = Directory.EnumerateFiles(updates, pattern).FirstOrDefault();
+                    Assert.IsNotNull(file, $"shard migration {pattern} not found in {updates}.");
                     return file;
                 }
 
@@ -239,6 +248,40 @@ namespace ACE.Server.Tests
             }
 
             Assert.AreEqual(0, problems.Count, string.Join(Environment.NewLine, problems));
+        }
+
+        /// <summary>
+        /// ResistMagic 9999 makes a weapon unenchantable (WorldObject.IsEnchantable), which drops the
+        /// wielder's Defender / Spirit Drinker / Hermetic Link auras from its combat math. The Life and
+        /// Nether wands inherited it from retail 46395/46397 and lost their own auras until it was removed.
+        /// </summary>
+        [TestMethod]
+        public void DriftWeapons_CarryNoResistMagic()
+        {
+            var dir = GetWeeniesDir();
+            var problems = new List<string>();
+
+            for (var wcid = FirstWeapon; wcid <= LastWeapon; wcid++)
+            {
+                var file = FindWeenieFile(dir, wcid);
+                if (file == null) { problems.Add($"{wcid}: file missing."); continue; }
+
+                if (ParseNumeric(file, wcid, "weenie_properties_int").ContainsKey(36))
+                    problems.Add($"{wcid}: PropertyInt 36 (ResistMagic) present.");
+            }
+
+            Assert.AreEqual(0, problems.Count, string.Join(Environment.NewLine, problems));
+        }
+
+        [TestMethod]
+        public void IsparianWandsMigration_DeletesOnlyResistMagicOnTheTwoWands()
+        {
+            var sql = StripSqlComments(File.ReadAllText(FindMigration("*Drift-Isparian-Wands-Enchantable.sql")));
+
+            Assert.IsTrue(Regex.IsMatch(sql,
+                @"DELETE\s+bi\s+FROM\s+`biota_properties_int`\s+bi\s+INNER\s+JOIN\s+`biota`\s+b\s+ON\s+b\.`id`\s*=\s*bi\.`object_Id`\s+WHERE\s+bi\.`type`\s*=\s*36\s+AND\s+bi\.`value`\s*=\s*9999\s+AND\s+b\.`weenie_Class_Id`\s+IN\s*\(\s*1007427\s*,\s*1007428\s*\)\s*;"),
+                "migration must delete only PropertyInt 36 = 9999 on wcids 1007427/1007428.");
+            Assert.AreEqual(1, Regex.Matches(sql, @"\b(DELETE|UPDATE|INSERT)\b", RegexOptions.IgnoreCase).Count, "migration must hold exactly one statement.");
         }
 
         [TestMethod]
@@ -332,8 +375,8 @@ namespace ACE.Server.Tests
         {
             var (recipes, cookbook) = LoadRecipeUnit();
 
-            Assert.AreEqual(142, cookbook.Count, "cook_book row count");
-            Assert.AreEqual(78, recipes.Count, "recipe count");
+            Assert.AreEqual(166, cookbook.Count, "cook_book row count");
+            Assert.AreEqual(90, recipes.Count, "recipe count");
         }
 
         [TestMethod]
@@ -414,6 +457,13 @@ namespace ACE.Server.Tests
 
             map[46395] = (1007427, "Health");
             map[RetailVoidWand] = (NetherWand, "Nether");
+
+            // Retail Enhanced Isparian crossbows by element (Chilling, Flaming, Coruscating, Dissolving).
+            // 46204 Shimmering is Pierce with no element and is deliberately not a source.
+            map[46218] = (1007429, "Cold");
+            map[71212] = (1007430, "Fire");
+            map[71211] = (1007431, "Electric");
+            map[71210] = (1007432, "Acid");
             return map;
         }
 
@@ -547,12 +597,12 @@ namespace ACE.Server.Tests
         {
             var (_, cookbook) = LoadRecipeUnit();
             // Each eligible pair exists twice (conversion + re-imbue), so retail-target rows count the pairs.
-            Assert.AreEqual(25, cookbook.Count(c => c.Source == ElementalInfusion && RetailMap.ContainsKey(c.Target)), "Elemental");
-            Assert.AreEqual(20, cookbook.Count(c => c.Source == ArmorInfusion && RetailMap.ContainsKey(c.Target)), "Armor");
-            Assert.AreEqual(26, cookbook.Count(c => c.Source == 1007402 && RetailMap.ContainsKey(c.Target)), "Crippling");
-            Assert.AreEqual(25, cookbook.Count(c => c.Source == ElementalInfusion && !RetailMap.ContainsKey(c.Target)), "Elemental re-imbue");
-            Assert.AreEqual(20, cookbook.Count(c => c.Source == ArmorInfusion && !RetailMap.ContainsKey(c.Target)), "Armor re-imbue");
-            Assert.AreEqual(26, cookbook.Count(c => c.Source == 1007402 && !RetailMap.ContainsKey(c.Target)), "Crippling re-imbue");
+            Assert.AreEqual(29, cookbook.Count(c => c.Source == ElementalInfusion && RetailMap.ContainsKey(c.Target)), "Elemental");
+            Assert.AreEqual(24, cookbook.Count(c => c.Source == ArmorInfusion && RetailMap.ContainsKey(c.Target)), "Armor");
+            Assert.AreEqual(30, cookbook.Count(c => c.Source == 1007402 && RetailMap.ContainsKey(c.Target)), "Crippling");
+            Assert.AreEqual(29, cookbook.Count(c => c.Source == ElementalInfusion && !RetailMap.ContainsKey(c.Target)), "Elemental re-imbue");
+            Assert.AreEqual(24, cookbook.Count(c => c.Source == ArmorInfusion && !RetailMap.ContainsKey(c.Target)), "Armor re-imbue");
+            Assert.AreEqual(30, cookbook.Count(c => c.Source == 1007402 && !RetailMap.ContainsKey(c.Target)), "Crippling re-imbue");
         }
 
         [TestMethod]
@@ -603,6 +653,58 @@ namespace ACE.Server.Tests
                     foreach (var body in Blocks(file, table))
                         if (body.Contains("'"))
                             problems.Add($"{wcid}: quoted string literal inside a {table} INSERT.");
+            }
+
+            Assert.AreEqual(0, problems.Count, string.Join(Environment.NewLine, problems));
+        }
+
+        /// <summary>
+        /// The four Drift crossbows must fire bolts from a crossbow stance, not inherit the Bow template's
+        /// Bow/Arrow rows, and each must carry the retail base's own damage type, model and icon.
+        /// </summary>
+        [TestMethod]
+        public void DriftCrossbows_AreCrossbowsWithTheirRetailBaseVisuals()
+        {
+            var dir = GetWeeniesDir();
+            var problems = new List<string>();
+            // wcid, damage type, retail Setup, Icon, PaletteTemplate and ClothingBase (ace_world 46218 / 71212 / 71211 / 71210).
+            var expected = new[]
+            {
+                (Wcid: 1007429, Type: 8, Setup: "0x02000D07", Icon: "0x060025FB", Palette: 2, Clothing: "0x100003AC"),
+                (Wcid: 1007430, Type: 16, Setup: "0x02000D0E", Icon: "0x06002602", Palette: 14, Clothing: "0x100003AC"),
+                (Wcid: 1007431, Type: 64, Setup: "0x02000D0C", Icon: "0x060025FE", Palette: 82, Clothing: "0x100003AC"),
+                (Wcid: 1007432, Type: 32, Setup: "0x02000D09", Icon: "0x06002601", Palette: 8, Clothing: "0x100003AC"),
+            };
+
+            foreach (var e in expected)
+            {
+                var file = FindWeenieFile(dir, e.Wcid);
+                if (file == null) { problems.Add($"{e.Wcid}: file missing."); continue; }
+
+                var ints = ParseNumeric(file, e.Wcid, "weenie_properties_int");
+                var dids = ParseHex(file, e.Wcid, "weenie_properties_d_i_d");
+
+                Expect(problems, e.Wcid.ToString(), "int 46 DefaultCombatStyle (Crossbow)", ints, 46, 32);
+                Expect(problems, e.Wcid.ToString(), "int 50 AmmoType (Bolt)", ints, 50, 2);
+                Expect(problems, e.Wcid.ToString(), "int 45 DamageType", ints, 45, e.Type);
+                Expect(problems, e.Wcid.ToString(), "int 48 WeaponSkill (MissileWeapons)", ints, 48, 47);
+
+                if (!dids.TryGetValue(1, out var setup) || !string.Equals(setup, e.Setup, StringComparison.OrdinalIgnoreCase))
+                    problems.Add($"{e.Wcid}: Setup {(dids.TryGetValue(1, out var s) ? s : "none")}, expected {e.Setup}.");
+
+                if (!dids.TryGetValue(8, out var icon) || !string.Equals(icon, e.Icon, StringComparison.OrdinalIgnoreCase))
+                    problems.Add($"{e.Wcid}: Icon {(dids.TryGetValue(8, out var i2) ? i2 : "none")}, expected {e.Icon}.");
+
+                Expect(problems, e.Wcid.ToString(), "int 3 PaletteTemplate", ints, 3, e.Palette);
+
+                if (!dids.TryGetValue(7, out var clothing) || !string.Equals(clothing, e.Clothing, StringComparison.OrdinalIgnoreCase))
+                    problems.Add($"{e.Wcid}: ClothingBase {(dids.TryGetValue(7, out var c2) ? c2 : "none")}, expected {e.Clothing}.");
+
+                // Parity with the Drift Bows: no slayer, no ignore-shield.
+                if (ints.ContainsKey(166)) problems.Add($"{e.Wcid}: SlayerCreatureType (int 166) present.");
+                var floats = ParseNumeric(FindWeenieFile(dir, e.Wcid), e.Wcid, "weenie_properties_float");
+                if (floats.ContainsKey(138)) problems.Add($"{e.Wcid}: SlayerDamageBonus (float 138) present.");
+                if (floats.ContainsKey(155)) problems.Add($"{e.Wcid}: IgnoreShield (float 155) present.");
             }
 
             Assert.AreEqual(0, problems.Count, string.Join(Environment.NewLine, problems));

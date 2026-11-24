@@ -96,8 +96,9 @@ namespace ACE.Server.HazardMechanics
     /// one tick before the current one ends, so the wisp flows from leg to leg instead of stopping between them.
     ///
     /// THE BEAT. The follower has no clock of its own (2026-10-19 playtest: on its own 3 s cadence it read as a different
-    /// tempo from the crew): it bursts at each step's FIRST crew burst, ramping with the crew's move and hold. At the
-    /// crew's hold start it settles on <see cref="BeatPoint"/> and sits still there for the hold, as the crew does.
+    /// tempo from the crew): it bursts at each step's FIRST crew burst, ramping with the crew's move and hold. Its settle
+    /// move onto <see cref="BeatPoint"/> starts one leg before the crew's hold start, so it ARRIVES there when the hold
+    /// starts and sits still for the whole hold, as the crew does.
     /// </summary>
     public static class WispFollowRules
     {

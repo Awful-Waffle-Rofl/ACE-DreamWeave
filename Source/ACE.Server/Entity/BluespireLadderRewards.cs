@@ -13,14 +13,21 @@ using log4net;
 namespace ACE.Server.Entity
 {
     /// <summary>
-    /// The one-time-per-character currency payout for clearing a Bluespire ladder rung.
+    /// The currency payout for clearing a Bluespire ladder rung: once for the first-ever clear, and again
+    /// for every re-clear landed after the rung's MinDelta cooldown (14 days, max_Solves -1, per
+    /// Content/sql/quests/BluespireLadderD{1-6}Cleared.sql), at the same amount.
     ///
-    /// WHY IT HANGS OFF THE CREATED-ROW BRANCH. QuestManager.Update and QuestManager.SetQuestCompletions
-    /// each have a branch that runs exactly once per character per quest name - the instant the registry row
-    /// is created. That is the only event on this server that means "this character has done this for the
-    /// FIRST time, ever", and it is exactly the requirement: clearing a rung pays once, re-running the
-    /// dungeon is allowed and pays nothing. No ledger of our own is needed, because the quest row IS the
-    /// ledger.
+    /// WHERE IT HANGS. Both payouts are decided inside QuestManager, which is the single owner - no clearing
+    /// path pays on its own:
+    /// - FIRST CLEAR: the created-row branch of QuestManager.Update and of QuestManager.SetQuestCompletions.
+    ///   Each runs exactly once per character per quest name, the instant the registry row is created, so
+    ///   the quest row IS the first-clear ledger and none of our own is needed.
+    /// - RE-CLEAR: the existing-row branch of QuestManager.Update, and only when the rung's cooldown had
+    ///   elapsed before that stamp (CanSolve read before LastTimeCompleted moves). Every clearing path
+    ///   funnels into Update: the D1/D2 turn-in NPCs' emote StampQuest, and the D3-D6 kill path
+    ///   (HandleKillTask -> ApplyKillStamp -> Stamp -> Update). Update's mule, PvP template and IsMaxSolves
+    ///   guards all return before this branch pays, so a silent no-op never pays. SetQuestCompletions'
+    ///   existing-row branch is an absolute set (admin repair, SetQuestBits), not a clear, and never pays.
     ///
     /// It is called as a SIBLING of player.HandleQuestStampRowCreated, never from inside it. That method is
     /// gated on the quest_stamps_enabled feature flag, and the ladder's reward must not silently stop paying
@@ -110,24 +117,6 @@ namespace ACE.Server.Entity
         }
 
         /// <summary>
-        /// True when a kill-task stamp attempt should trigger the ladder's daily repeat payout - only for
-        /// <see cref="QuestManager.KillStampOutcome.Restamped"/>, the outcome for a bootstrap row that
-        /// already existed and was just incremented again after its cooldown elapsed. Pure, so the rule is
-        /// unit testable on its own.
-        ///
-        /// NEVER Created: that outcome is a first-ever clear, already paid inside QuestManager.Update's
-        /// created-row branch (TryPayBluespireLadderReward). Paying again here on Created would double-pay
-        /// the very first clear. The caller (QuestManager.HandleKillTask) additionally gates this on
-        /// bootstrapRow, so this method is only ever asked about the ladder's own six rung names in
-        /// practice; it stays a plain outcome test rather than re-checking RungForQuestName itself, because
-        /// that check already ran once to decide bootstrapRow.
-        /// </summary>
-        internal static bool ShouldPayOnKillStamp(QuestManager.KillStampOutcome outcome)
-        {
-            return outcome == QuestManager.KillStampOutcome.Restamped;
-        }
-
-        /// <summary>
         /// What one payout stack actually delivered, read back from the object AFTER
         /// <see cref="WorldObject.SetStackSize"/> was called on it - never the size that was requested.
         ///
@@ -172,10 +161,9 @@ namespace ACE.Server.Entity
         /// </summary>
         /// <param name="firstClear">
         /// True for the character's first-ever clear of this rung (Update/SetQuestCompletions' created-row
-        /// branch, the only callers that pass the default). False for the ladder's daily repeat payout
-        /// (QuestManager.HandleKillTask on a post-cooldown Restamped outcome) - same amount, different
-        /// player-facing wording and log line, so a re-clear reads as a re-clear rather than a duplicate
-        /// first clear.
+        /// branch). False for the ladder's repeat payout (Update's existing-row branch, on a re-clear landed
+        /// after the rung's cooldown, whichever path stamped it) - same amount, different player-facing
+        /// wording and log line, so a re-clear reads as a re-clear rather than a duplicate first clear.
         /// </param>
         public static void Pay(Player player, string questName, bool firstClear = true)
         {
@@ -269,7 +257,7 @@ namespace ACE.Server.Entity
             if (delivered > 0)
             {
                 var tributeLine = firstClear
-                    ? "This tribute is paid only once."
+                    ? "Clear this depth again after its fourteen-day rest for another tribute."
                     : "The trial ground pays its tribute again.";
 
                 var deliveredName = ResolveDisplayName(delivered, itemName, itemPluralName);

@@ -50,8 +50,8 @@ namespace ACE.Server.ThreadDungeons
         public readonly int MaxEntries;
 
         /// <summary>
-        /// DungeonGemSpec.MaxRunLevel, 500 - the RUN ceiling, not the gem one (split 2026-10-08), which is what
-        /// lets the scarab's set_difficulty offset carry a 375 fragment past 375. Nothing in the press ROLLS a
+        /// DungeonGemSpec.MaxRunLevel, 500 - the RUN ceiling (split from the gem one 2026-10-08, equal to it again
+        /// since 2026-11-16), which is what lets the scarab's set_difficulty offset carry a 375 fragment past 375. Nothing in the press ROLLS a
         /// level; it only offsets the one the fragment already carries.
         /// </summary>
         public readonly int MaxLevel;
@@ -82,7 +82,7 @@ namespace ACE.Server.ThreadDungeons
         ///     aim of a component drawn into an empty slot, are unchanged;
         ///   - an op with no aim is unaffected because there is no aim to guarantee: a Scarab (set_difficulty)
         ///     and a Potion (reroll_weakest) already behave deterministically, and the random powders (Agate,
-        ///     Bloodstone, Carnelian, Moonstone), the Turquoise Taper (add_random) and the unnamed talismans
+        ///     Carnelian, Moonstone), the Turquoise Taper (add_random) and the unnamed talismans
         ///     (Oak, Hemlock) pick at random exactly as before;
         ///   - a named talisman whose modifier is not on the board still falls back to sharpen's random
         ///     in-scope pick: the guarantee makes it reach for its own modifier, not conjure one.
@@ -1006,7 +1006,7 @@ namespace ACE.Server.ThreadDungeons
         /// THE FALLBACK POOL IS DERIVED FROM THE NAMED MODIFIER'S OWN BUDGET, never from a list: a powder
         /// aimed at an affinity misses into the other affinities (Budget.Salvage), a taper aimed at stalwart
         /// misses into the other monster/boss modifiers (Budget.Monster), and a herb misses into the other
-        /// bonuses. A ninth affinity row in modifiers.json is therefore in the pool the moment it is added,
+        /// bonuses. A further affinity row in modifiers.json is therefore in the pool the moment it is added,
         /// exactly as it already is for the wildcard powders (see InScope).
         ///
         /// TWO THINGS THIS DELIBERATELY DOES NOT DO. It does not consider what is already ON the board -

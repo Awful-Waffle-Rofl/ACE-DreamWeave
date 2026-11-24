@@ -55,6 +55,16 @@ namespace ACE.Server.HazardMechanics
         /// <summary>Markers are re-checked (and any lost one respawned) at most this often.</summary>
         private const double RepairEverySeconds = 1.0;
 
+        /// <summary>
+        /// How far above the ground point each pad marker is spawned. The Hill Marker setup's lower sphere reaches a hair
+        /// under its origin at scale 0.35, so a marker AT the ground point cuts into a floor that is a solid body, such as
+        /// the Pinnacle's Static floor Ward Planes (top -47.75, the ground plane). The server keeps it there anyway
+        /// (SpawnAtExactPosition), but the client runs the normal placement and refuses it, so the ring never draws.
+        /// 0.05 m matches GraelData.SpawnZ (-47.70, 0.05 above the plate top), the arena's proven spawn height. A
+        /// player cannot tell 5 cm, and pad detection is planar (MemoryMarkers.Planar), so nothing else moves.
+        /// </summary>
+        public const float MarkerLift = 0.05f;
+
         private sealed class Marker
         {
             public int Pad;
@@ -211,7 +221,7 @@ namespace ACE.Server.HazardMechanics
             for (var pad = 0; pad < pads.Count; pad++)
             {
                 foreach (var p in MemoryLayout.RingPoints(pads[pad], settings.PadRadius, count))
-                    markers.Add(new Marker { Pad = pad, Position = w.GroundPoint(p.X, p.Y) });
+                    markers.Add(new Marker { Pad = pad, Position = w.GroundPoint(p.X, p.Y) + new Vector3(0f, 0f, MarkerLift) });
             }
 
             foreach (var m in markers)
@@ -245,7 +255,7 @@ namespace ACE.Server.HazardMechanics
             reveal = MemoryRules.Format(game.Sequence);
             lastRepair = w.Now;
 
-            w.Log($"memory start layout={(settings.RandomLayout ? "random" : "quadrant")} pads={FormatPads()} markers={markers.Count} per-pad={count} marker-z-offset=0 (PointFor Ground) beams={BeamsPerPulseText()} round-1 sequence=[{reveal}]");
+            w.Log($"memory start layout={(settings.RandomLayout ? "random" : "quadrant")} pads={FormatPads()} markers={markers.Count} per-pad={count} marker-z-offset={MarkerLift:0.###} (PointFor Ground + MarkerLift) beams={BeamsPerPulseText()} round-1 sequence=[{reveal}]");
 
             game.BeginRound(w.Now);
             status = $"playback round {game.Round}";

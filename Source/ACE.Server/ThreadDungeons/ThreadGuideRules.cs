@@ -11,7 +11,7 @@ namespace ACE.Server.ThreadDungeons
         /// <summary>The player is below <see cref="ThreadGuideRules.MinPlayerLevel"/>.</summary>
         BelowMinimumLevel,
 
-        /// <summary>The player has already won the last rung (375).</summary>
+        /// <summary>The player has already won the last rung (500).</summary>
         LadderComplete,
 
         /// <summary>The player still holds a current guide item.</summary>

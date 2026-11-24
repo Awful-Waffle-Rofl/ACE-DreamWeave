@@ -167,8 +167,8 @@ namespace ACE.Server.Tests
 
             int Find(string code) => Array.FindIndex(lines, l => l.Trim() == code);
 
-            var uplift = Find("ApplyBandUplift(evt, creature, entry.UpliftLevel, kind);");
-            var guard = Find("ApplyCombatGuard(evt, creature, entry.SlotLevel, kind);");
+            var uplift = Find("ApplyBandUplift(evt, creature, entry.UpliftLevel, kind, slotStandard, upliftDials);");
+            var guard = Find("ApplyCombatGuard(evt, creature, entry.SlotLevel, kind, slotStandard);");
             var multiplier = Find("ApplyHealthMultiplier(evt, creature, healthMult);");
 
             Assert.IsTrue(uplift > 0 && guard > 0 && multiplier > 0, "anchor lines must exist exactly once");

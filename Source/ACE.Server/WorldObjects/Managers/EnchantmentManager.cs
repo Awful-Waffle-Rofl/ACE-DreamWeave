@@ -242,7 +242,7 @@ namespace ACE.Server.WorldObjects.Managers
                 // Upgraded Knot cloak: a cloak proc refresh keys on the wearer, whichever cloak built the entry, so a
                 // Cloaked in Skill proc refresh takes the magnitude of the cloak casting now (Cloak.RefreshedProcStatModValue).
                 // Every other refresh, including every other cloak proc, keeps its original StatModValue, as before.
-                refreshSpell.StatModValue = Cloak.RefreshedProcStatModValue(weapon, spell.Id, refreshSpell.StatModValue, spell.StatModVal);
+                refreshSpell.StatModValue = Cloak.RefreshedProcStatModValue(weapon, spell.Id, refreshSpell.StatModValue, spell.StatModVal, PvpClassifier.IsPvp(caster, WorldObject), spell.StatModType);
 
                 var timeRemaining = refreshSpell.Duration + refreshSpell.StartTime;
 
@@ -322,7 +322,7 @@ namespace ACE.Server.WorldObjects.Managers
             // Upgraded Knot cloak: a cloak casting its own ProcSpell may carry its own magnitude
             // (PropertyFloat.CloakProcStatModValue). Unstamped cloaks and every other caster keep the spell's value.
             // The refresh branch in Add() applies the same rule (Cloak.RefreshedProcStatModValue).
-            entry.StatModValue = Cloak.ProcStatModValue(weapon, spell.Id, entry.StatModValue);
+            entry.StatModValue = Cloak.ProcStatModValue(weapon, spell.Id, entry.StatModValue, PvpClassifier.IsPvp(caster, WorldObject), spell.StatModType);
 
             if (spell.IsBeneficial) // should "server" data be fixed or is this the better way to do this?
                 entry.StatModType |= EnchantmentTypeFlags.Beneficial;
@@ -546,6 +546,8 @@ namespace ACE.Server.WorldObjects.Managers
 
                 if (sound && entry.SpellCategory != (SpellCategory)SpellCategory_Cooldown)
                     Player.Session.Network.EnqueueSend(new GameMessageSound(Player.Guid, Sound.SpellExpire, 1.0f));
+
+                ResendTimedSurvivor(entry);
             }
             else
             {
@@ -578,6 +580,16 @@ namespace ACE.Server.WorldObjects.Managers
             var spellsToExclude = WorldObject.Biota.PropertiesEnchantmentRegistry.Clone(WorldObject.BiotaDatabaseLock).Where(i => i.Duration == -1 || i.SpellId > short.MaxValue).Select(i => i.SpellId);
 
             WorldObject.Biota.PropertiesEnchantmentRegistry.RemoveAllEnchantments(spellsToExclude, WorldObject.BiotaDatabaseLock);
+            WorldObject.ChangesDetected = true;
+        }
+
+        /// <summary>
+        /// Allegiance Gauntlet (the Avatar fighter's restamp): removes every enchantment whose spell id is not in
+        /// <paramref name="spellsToKeep"/>. The caller decides what stays.
+        /// </summary>
+        public virtual void RemoveAllEnchantmentsExcept(IEnumerable<int> spellsToKeep)
+        {
+            WorldObject.Biota.PropertiesEnchantmentRegistry.RemoveAllEnchantments(spellsToKeep, WorldObject.BiotaDatabaseLock);
             WorldObject.ChangesDetected = true;
         }
 
@@ -715,7 +727,11 @@ namespace ACE.Server.WorldObjects.Managers
                 WorldObject.ChangesDetected = true;
 
             if (Player != null)
+            {
                 Player.Session.Network.EnqueueSend(new GameEventMagicDispelEnchantment(Player.Session, (ushort)entry.SpellId, entry.LayerId));
+
+                ResendTimedSurvivor(entry);
+            }
         }
 
         /// <summary>
@@ -732,7 +748,61 @@ namespace ACE.Server.WorldObjects.Managers
                     WorldObject.ChangesDetected = true;
             }
             if (Player != null)
+            {
                 Player.Session.Network.EnqueueSend(new GameEventMagicDispelMultipleEnchantments(Player.Session, entries));
+
+                // the survivor depends only on the spell id, so one re-send per spell covers every removed layer of it
+                var resent = new HashSet<int>();
+
+                foreach (var entry in entries)
+                {
+                    if (!resent.Contains(entry.SpellId) && ResendTimedSurvivor(entry))
+                        resent.Add(entry.SpellId);
+                }
+            }
+        }
+
+        /// <summary>
+        /// The timed entry the client must be re-sent after <paramref name="removed"/> left the registry, or null
+        /// when nothing needs re-sending. Called AFTER the removal; the selection is
+        /// <see cref="PropertiesEnchantmentRegistryExtensions.GetTopTimedEntryForSpell"/>, whose remarks explain
+        /// the client behavior this compensates for.
+        ///
+        /// Only a timed entry can have displaced another one on the client, so removing an untimed entry (an
+        /// item spell, Duration -1) or a cooldown never needs a re-send.
+        ///
+        /// Real case (Discord report 2026-10-29, "Tinkerer's Inspiration Removes Self-Buffs"): the pedestal lays
+        /// a 60 s entry for the player's own Incantation of ... Tinkering Expertise Self spell ids at a second
+        /// layer. The client overwrote the player's 2-hour layer with it, then dropped the spell entirely when the
+        /// 60 s layer expired, although the server still held the player's own cast.
+        /// </summary>
+        public PropertiesEnchantmentRegistry GetTimedSurvivorToResend(PropertiesEnchantmentRegistry removed)
+        {
+            if (removed == null || removed.Duration <= 0 || removed.SpellCategory == (SpellCategory)SpellCategory_Cooldown)
+                return null;
+
+            return WorldObject.Biota.PropertiesEnchantmentRegistry.GetTopTimedEntryForSpell(removed.SpellId, WorldObject.BiotaDatabaseLock);
+        }
+
+        /// <summary>
+        /// Re-sends <see cref="GetTimedSurvivorToResend"/> to the player, so a layer the client lost when another
+        /// timed layer of the same spell overwrote it is shown again. Re-sending an entry the client still holds
+        /// is harmless: the client replaces it in place by its exact (spell id, layer). Returns true when an entry
+        /// was sent.
+        /// </summary>
+        private bool ResendTimedSurvivor(PropertiesEnchantmentRegistry removed)
+        {
+            if (Player == null)
+                return false;
+
+            var survivor = GetTimedSurvivorToResend(removed);
+
+            if (survivor == null)
+                return false;
+
+            Player.Session.Network.EnqueueSend(new GameEventMagicUpdateEnchantment(Player.Session, new Enchantment(Player, survivor)));
+
+            return true;
         }
 
         /// <summary>
@@ -1534,6 +1604,8 @@ namespace ACE.Server.WorldObjects.Managers
 
             var expired = WorldObject.Biota.PropertiesEnchantmentRegistry.HeartBeatEnchantmentsAndReturnExpired(heartbeatInterval, WorldObject.BiotaDatabaseLock);
 
+            // Remove re-sends a surviving timed layer of the same spell; if that layer also expires in this same tick,
+            // the client briefly gets an update for it just before its own remove, which is harmless.
             foreach (var enchantment in expired)
                 Remove(enchantment);
         }
@@ -1815,6 +1887,12 @@ namespace ACE.Server.WorldObjects.Managers
                     if (ShouldApplyFocusDotMod(true, false, aetheria, ProcDotMarks.IsProcSourced(enchantment)))
                         tickAmount *= sourcePlayer.GetFocusSpellDamageMod();
                 }
+                // FORK: a caster summon's DoT earns the same from the pet's own buffed Focus at tick time
+                else if (damager is CombatPet { IsCasterPet: true } focusPet && targetPlayer == null
+                    && ShouldApplyFocusDotMod(true, false, aetheria, ProcDotMarks.IsProcSourced(enchantment)))
+                {
+                    tickAmount *= focusPet.GetFocusSpellDamageMod();
+                }
 
                 if (PvpClassifier.IsPlayerPairIncludingSelf(damager, WorldObject))
                 {
@@ -1913,8 +1991,14 @@ namespace ACE.Server.WorldObjects.Managers
                     contributions.Select(c => (ClassAbilityAttackerFilter.EnemyCreature(c.Key, targetPlayer) != null, c.Value)),
                     beforeAbsorb);
 
+                // Jewelry Aspect Fortitude has the same no-single-source problem: its eligible share excludes
+                // contributions from PvP-pair sources and from the target itself, so a mixed tick reduces only the PvE part.
+                var fortitudeShare = ClassAbilityAttackerFilter.EnemyCreatureShareOfTick(
+                    contributions.Select(c => (!PvpClassifier.IsPvp(c.Key, targetPlayer) && c.Key != targetPlayer, c.Value)),
+                    beforeAbsorb);
+
                 damageTotal = targetPlayer.ApplyPreWriteDamageClassAbilities(null, damageType, beforeAbsorb, isDamageOverTime: true,
-                    isSpell: true, enemyCreatureSpellDamage: enemyCreatureShare);
+                    isSpell: true, enemyCreatureSpellDamage: enemyCreatureShare, fortitudeEligibleDamage: fortitudeShare);
             }
 
             // CREDIT ACCOUNTING IS CLAMPED, THE VITAL WRITE IS NOT. UpdateVitalDelta floors Health at zero

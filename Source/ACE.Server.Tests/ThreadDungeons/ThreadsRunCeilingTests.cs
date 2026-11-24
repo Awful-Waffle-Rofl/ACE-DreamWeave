@@ -14,7 +14,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 namespace ACE.Server.Tests.ThreadDungeons
 {
     /// <summary>
-    /// The 2026-10-08 run ceiling raise (owner rulings, final): the gem ceiling stays 375, the run level can
+    /// The 2026-10-08 run ceiling raise (owner rulings, final): the gem ceiling was 375 then (raised to 500 on 2026-11-16), the run level can
     /// reach 500 (a 375 fragment plus a Mana Scarab presses to 410), reach-up applies from the pivot upward,
     /// every monster stat follows its natural curve past the authored data, and effective defense above monster
     /// level 300 (lowered from 375 by the 2026-10-22 ruling) grows at half its fitted rate. Monster magic defense
@@ -22,9 +22,9 @@ namespace ACE.Server.Tests.ThreadDungeons
     ///
     /// The plan-level tests run against the SHIPPED roster (ShippedRosterFixture), because the pivot is derived
     /// from the roster it is handed - a toy fixture would put its pivot wherever its own top happened to be.
-    /// "Switch off reproduces today" is pinned against plan hashes captured from the unmodified builder
-    /// (origin/master 2a56f4c31) with the same inputs, so it compares against the real pre-change behaviour
-    /// rather than against this branch's idea of it.
+    /// "Switch off reproduces today" is pinned against plan hashes of the builder with every switch off and the same
+    /// inputs. They were re-captured 2026-11-04, when the family draw moved to its own salted stream (the family a seed
+    /// draws changed); they are no longer the origin/master 2a56f4c31 captures.
     /// </summary>
     [TestClass]
     public class ThreadsRunCeilingTests
@@ -39,10 +39,13 @@ namespace ACE.Server.Tests.ThreadDungeons
             bool statCurve = DungeonPopulationLimits.DefaultStatCurve,
             double defenseRate = DungeonPopulationLimits.DefaultDefenseCurveRateAbove375,
             double magicRate = DungeonPopulationLimits.DefaultMagicDefenseCurveRateAbove300,
-            double damageRate = DungeonPopulationLimits.DefaultDamageCurveRateAbovePivot)
+            double damageRate = DungeonPopulationLimits.DefaultDamageCurveRateAbovePivot,
+            double weaponAttackRate400 = 1.0, // the pre-knee rates, so the name holds: the master hashes were captured without the 400 knee
+            double meleeDefenseRate400 = DungeonPopulationLimits.DefaultDefenseCurveRateAbove375)
             => new DungeonPopulationLimits(60, 3.0, 3.0, 8, 0.5,
                 healthCurveTopLevel: healthCurveTopLevel, reachUp: reachUp, statCurve: statCurve, defenseCurveRateAbove375: defenseRate,
-                magicDefenseCurveRateAbove300: magicRate, damageCurveRateAbovePivot: damageRate);
+                magicDefenseCurveRateAbove300: magicRate, damageCurveRateAbovePivot: damageRate,
+                weaponAttackCurveRateAbove400: weaponAttackRate400, meleeDefenseCurveRateAbove400: meleeDefenseRate400);
 
         private static DungeonSpawnPlan Build(int level, int seed, DungeonPopulationLimits limits, Func<uint, DungeonStatProfile> profileOf = null,
             ThreadPlanMemo memo = null)
@@ -65,18 +68,18 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         /// <summary>
-        /// Plan hashes from the UNMODIFIED builder (origin/master 2a56f4c31, captured 2026-10-08 by a temporary
-        /// test over exactly these inputs: MasterLimits() defaults, the shipped store and roster, Dungeon(30),
+        /// Plan hashes re-captured 2026-11-04 with the family draw on its salted stream (originally captured 2026-10-08 from the
+        /// unmodified builder, origin/master 2a56f4c31, by a temporary test over exactly these inputs: MasterLimits() defaults, the shipped store and roster, Dungeon(30),
         /// Spec(level, seed), new Random(seed), no profileOf).
         /// </summary>
+        // Re-pinned when the family draw moved to its own salted stream (DungeonRosterSelector.FamilyRngFor): the family a seed draws changed,
+        // so every seed whose family changed has a new plan hash. The master-equivalence these pins express still holds relative to that draw.
         private static readonly Dictionary<(int Level, int Seed), string> MasterHashes = new Dictionary<(int, int), string>
         {
-            [(300, 1)] = "7d9158731abe35504c5951a0", [(300, 2)] = "456c789634fb6d3954f2b00d",
-            [(326, 1)] = "ccbe0013a55bb94772ec6e5f", [(326, 2)] = "7382db302a12058a05342dee",
-            [(350, 1)] = "352fce95505a58fa9c97e79d", [(350, 2)] = "3c3f5d3ff6e2c5f82aaa40f6",
-            [(375, 1)] = "90ab5a37f25723f9bfb89132", [(375, 2)] = "e0128eb233fe7803b1de322c",
-            [(410, 1)] = "c1afa51065c099d00df60fb1", [(410, 2)] = "24f5e1939549bf3708a06b59",
-            [(500, 1)] = "b58c25e646ee5265abcad726", [(500, 2)] = "204ed27ccadd70e0e0dd701c",
+            [(300, 1)] = "7d9158731abe35504c5951a0", [(300, 2)] = "33c079e08ef1d47f09392055",
+            [(326, 1)] = "46e6ac14eeb05f047b41b0e4", [(326, 2)] = "a75bbf7b474e3fcac01f2558",
+            [(375, 1)] = "eecbc9b9337d8a59a97bd871", [(375, 2)] = "2fe218e503c1d03d6dae7eaa",
+            [(410, 1)] = "377cd75ba133694c3a5487c6", [(410, 2)] = "aad0442c1b10aa046bb3c6bf",
         };
 
         /// <summary>
@@ -116,11 +119,14 @@ namespace ACE.Server.Tests.ThreadDungeons
         // ---- the ceiling split and the codec -------------------------------------------------------------
 
         [TestMethod]
-        public void The_gem_ceiling_stays_375_and_the_run_ceiling_is_500()
+        public void The_gem_ceiling_and_the_run_ceiling_are_both_500_and_the_survey_reference_stays_375()
         {
             // Reflective, not direct: a direct AreEqual on a const constant-folds (MSTEST0032) and can never fail.
-            Assert.AreEqual(375, typeof(DungeonGemSpec).GetField(nameof(DungeonGemSpec.MaxGemLevel)).GetRawConstantValue());
+            Assert.AreEqual(500, typeof(DungeonGemSpec).GetField(nameof(DungeonGemSpec.MaxGemLevel)).GetRawConstantValue());
             Assert.AreEqual(500, typeof(DungeonGemSpec).GetField(nameof(DungeonGemSpec.MaxRunLevel)).GetRawConstantValue());
+
+            // Owner ruling 2026-11-16: the survey reference level is decoupled from the gem ceiling and stays 375.
+            Assert.AreEqual(375, typeof(DungeonGemSpec).GetField(nameof(DungeonGemSpec.SurveyReferenceLevelDefault)).GetRawConstantValue());
         }
 
         [TestMethod]
@@ -134,17 +140,46 @@ namespace ACE.Server.Tests.ThreadDungeons
             var store = ThreadDungeonStoreTests.LoadShipped();
             Assert.IsTrue(store.Attunement.TryGet(37155, out var mana), "the shipped roster carries the Mana Scarab (37155)");
 
-            var fragment = new DungeonGemSpec("any", DungeonGemSpec.MaxGemLevel, 3, "any", 1, null, 0, 0);
+            var fragment = new DungeonGemSpec("any", 375, 3, "any", 1, null, 0, 0);
             var loaded = RawFragmentRules.Load(fragment, mana);
             var pressed = RawFragmentRules.Resolve(new PressState(loaded, 0), store.Attunement, store.Modifiers, limits, new Random(1), out _);
 
             Assert.AreEqual(410, pressed.Spec.Level, "375 + 35, no longer clamped back to the gem ceiling");
 
-            // Discriminating control: the same press under the pre-split ceiling (375) discards the +35.
-            var oldLimits = new PressLimits(limits.MaxMonsterMods, limits.MaxLocks, limits.MaxEntries, DungeonGemSpec.MaxGemLevel,
+            // Discriminating control: the same press under a 375 ceiling (the pre-split one) discards the +35.
+            var oldLimits = new PressLimits(limits.MaxMonsterMods, limits.MaxLocks, limits.MaxEntries, 375,
                 limits.MaxBonusMods, limits.MaxSalvageMods, limits.AimChance);
             var old = RawFragmentRules.Resolve(new PressState(RawFragmentRules.Load(fragment, mana), 0), store.Attunement, store.Modifiers, oldLimits, new Random(1), out _);
             Assert.AreEqual(375, old.Spec.Level);
+        }
+
+        [TestMethod]
+        public void A_500_fragment_plus_a_Mana_Scarab_presses_to_500_and_the_entries_still_land()
+        {
+            // Owner ruling 2026-11-16: MaxRunLevel stays 500, so the scarab's +35 clamps back to 500 on a
+            // top-rung fragment, while its set_difficulty entries (6, attunement.json) still apply.
+            var limits = FragmentPressStation.ComposeLimits(4, 1.0);
+
+            var store = ThreadDungeonStoreTests.LoadShipped();
+            Assert.IsTrue(store.Attunement.TryGet(37155, out var mana), "the shipped roster carries the Mana Scarab (37155)");
+
+            var fragment = new DungeonGemSpec("any", DungeonGemSpec.MaxGemLevel, 3, "any", 1, null, 0, 0);
+            Assert.AreEqual(500, fragment.Level);
+
+            var pressed = RawFragmentRules.Resolve(new PressState(RawFragmentRules.Load(fragment, mana), 3), store.Attunement, store.Modifiers, limits, new Random(1), out _);
+
+            Assert.AreEqual(500, pressed.Spec.Level, "500 + 35 clamps to the run ceiling");
+            Assert.AreEqual(RawFragmentRules.MaxEntries, pressed.Entries, "the Mana Scarab's entries still land");
+            Assert.AreEqual(6, pressed.Entries);
+
+            // Discriminating control: a 465 fragment takes the full +35 to exactly 500, so the clamp above is
+            // the ceiling at work and not a scarab that does nothing.
+            var at465 = new DungeonGemSpec("any", 465, 3, "any", 1, null, 0, 0);
+            var control = RawFragmentRules.Resolve(new PressState(RawFragmentRules.Load(at465, mana), 3), store.Attunement, store.Modifiers, limits, new Random(1), out _);
+            Assert.AreEqual(500, control.Spec.Level);
+            var at470 = new DungeonGemSpec("any", 470, 3, "any", 1, null, 0, 0);
+            var overshoot = RawFragmentRules.Resolve(new PressState(RawFragmentRules.Load(at470, mana), 3), store.Attunement, store.Modifiers, limits, new Random(1), out _);
+            Assert.AreEqual(500, overshoot.Spec.Level, "470 + 35 = 505 clamps to 500");
         }
 
         [TestMethod]
@@ -155,7 +190,7 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             Assert.IsFalse(DungeonGemSpec.TryParse("v2|dg=any|lvl=501|tier=3|fam=any|seed=1|mods=", out _, out _), "501 is above the run ceiling");
 
-            // Discriminating: 410 (the real player maximum today) round-trips, and so does the gem ceiling.
+            // Discriminating: 410 (a 375 fragment plus a Mana Scarab) round-trips, and so does the gem ceiling.
             Assert.IsTrue(DungeonGemSpec.TryParse("v2|dg=any|lvl=410|tier=3|fam=any|seed=1|mods=", out var at410, out error), error);
             Assert.AreEqual(410, at410.Level);
         }
@@ -260,6 +295,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         [TestMethod]
+        [TestCategory("Slow")]
         public void Every_run_level_from_185_to_500_opens_with_trash_and_no_stamp_exceeds_the_band()
         {
             var failures = new List<string>();
@@ -350,7 +386,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         private static DungeonBandStandard CurveAt(int level, double rate = DungeonStatCurve.DefaultDefenseRateAbove375)
-            => DungeonStatCurve.Extrapolate(AnalysisAnchor(), 326, level, rate, rate, 1.0, AnalysisFormulaOf); // magic at the same rate: the pinned pre-split numbers
+            => DungeonStatCurve.Extrapolate(AnalysisAnchor(), 326, level, rate, rate, 1.0, 1.0, rate, AnalysisFormulaOf); // magic at the same rate: the pinned pre-split numbers; the 400 knee off (pre-2026-11-17 curve), it has its own tests
 
         private static uint Landed(DungeonBandStandard s, Skill skill)
             => AttributeFormula.Compute(AnalysisFormulaOf(skill), a => s.AttributeMedianFor(a)) + s.MedianFor(skill);
@@ -415,24 +451,24 @@ namespace ACE.Server.Tests.ThreadDungeons
             {
                 var b = DungeonStatCurve.Slope(axis);
 
-                Assert.AreEqual(Math.Exp(b), DungeonStatCurve.Ratio(axis, 299, 300, 0.5, 0.5, 1.0, 326), 1e-12, $"{axis}: full slope just below 300");
-                Assert.AreEqual(Math.Exp(0.5 * b), DungeonStatCurve.Ratio(axis, 300, 301, 0.5, 0.5, 1.0, 326), 1e-12, $"{axis}: half slope just above");
-                Assert.AreEqual(Math.Exp(b * 4 + 0.5 * b * 26), DungeonStatCurve.Ratio(axis, 296, 326, 0.5, 0.5, 1.0, 326), 1e-12, $"{axis}: split at 300");
-                Assert.AreEqual(Math.Exp(0.5 * b * 84), DungeonStatCurve.Ratio(axis, 326, 410, 0.5, 0.5, 1.0, 326), 1e-12, $"{axis}: the whole pivot-up path is softened");
-                Assert.AreEqual(DungeonStatCurve.Ratio(axis, 326, 375, 0.5, 0.5, 1.0, 326) * DungeonStatCurve.Ratio(axis, 375, 500, 0.5, 0.5, 1.0, 326),
-                    DungeonStatCurve.Ratio(axis, 326, 500, 0.5, 0.5, 1.0, 326), 1e-12, $"{axis}: composes through 375");
-                Assert.AreEqual(DungeonStatCurve.Ratio(axis, 250, 300, 0.5, 0.5, 1.0, 326) * DungeonStatCurve.Ratio(axis, 300, 500, 0.5, 0.5, 1.0, 326),
-                    DungeonStatCurve.Ratio(axis, 250, 500, 0.5, 0.5, 1.0, 326), 1e-12, $"{axis}: continuous (composes) through 300");
+                Assert.AreEqual(Math.Exp(b), DungeonStatCurve.Ratio(axis, 299, 300, 0.5, 0.5, 1.0, 326, 1.0, 0.5), 1e-12, $"{axis}: full slope just below 300");
+                Assert.AreEqual(Math.Exp(0.5 * b), DungeonStatCurve.Ratio(axis, 300, 301, 0.5, 0.5, 1.0, 326, 1.0, 0.5), 1e-12, $"{axis}: half slope just above");
+                Assert.AreEqual(Math.Exp(b * 4 + 0.5 * b * 26), DungeonStatCurve.Ratio(axis, 296, 326, 0.5, 0.5, 1.0, 326, 1.0, 0.5), 1e-12, $"{axis}: split at 300");
+                Assert.AreEqual(Math.Exp(0.5 * b * 84), DungeonStatCurve.Ratio(axis, 326, 410, 0.5, 0.5, 1.0, 326, 1.0, 0.5), 1e-12, $"{axis}: the whole pivot-up path is softened");
+                Assert.AreEqual(DungeonStatCurve.Ratio(axis, 326, 375, 0.5, 0.5, 1.0, 326, 1.0, 0.5) * DungeonStatCurve.Ratio(axis, 375, 500, 0.5, 0.5, 1.0, 326, 1.0, 0.5),
+                    DungeonStatCurve.Ratio(axis, 326, 500, 0.5, 0.5, 1.0, 326, 1.0, 0.5), 1e-12, $"{axis}: composes through 375");
+                Assert.AreEqual(DungeonStatCurve.Ratio(axis, 250, 300, 0.5, 0.5, 1.0, 326, 1.0, 0.5) * DungeonStatCurve.Ratio(axis, 300, 500, 0.5, 0.5, 1.0, 326, 1.0, 0.5),
+                    DungeonStatCurve.Ratio(axis, 250, 500, 0.5, 0.5, 1.0, 326, 1.0, 0.5), 1e-12, $"{axis}: continuous (composes) through 300");
 
                 // Discriminating: the unsoftened rate differs above 300 and is identical below it.
-                Assert.AreNotEqual(DungeonStatCurve.Ratio(axis, 326, 410, 1.0, 1.0, 1.0, 326), DungeonStatCurve.Ratio(axis, 326, 410, 0.5, 0.5, 1.0, 326));
-                Assert.AreEqual(DungeonStatCurve.Ratio(axis, 250, 300, 1.0, 1.0, 1.0, 326), DungeonStatCurve.Ratio(axis, 250, 300, 0.5, 0.5, 1.0, 326), 1e-15);
+                Assert.AreNotEqual(DungeonStatCurve.Ratio(axis, 326, 410, 1.0, 1.0, 1.0, 326, 1.0, 1.0), DungeonStatCurve.Ratio(axis, 326, 410, 0.5, 0.5, 1.0, 326, 1.0, 0.5));
+                Assert.AreEqual(DungeonStatCurve.Ratio(axis, 250, 300, 1.0, 1.0, 1.0, 326, 1.0, 1.0), DungeonStatCurve.Ratio(axis, 250, 300, 0.5, 0.5, 1.0, 326, 1.0, 0.5), 1e-15);
             }
 
-            Assert.AreEqual(Math.Exp(0.5 * 0.00094 * 49), DungeonStatCurve.Ratio(DungeonStatAxis.MeleeDefense, 326, 375, 0.5, 0.5, 1.0, 326), 1e-12);
+            Assert.AreEqual(Math.Exp(0.5 * 0.00094 * 49), DungeonStatCurve.Ratio(DungeonStatAxis.MeleeDefense, 326, 375, 0.5, 0.5, 1.0, 326, 1.0, 0.5), 1e-12);
 
             // Non-defense axes ignore the rate entirely.
-            Assert.AreEqual(DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 326, 500, 1.0, 1.0, 1.0, 326), DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 326, 500, 0.0, 0.0, 1.0, 326), 1e-15);
+            Assert.AreEqual(DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 326, 500, 1.0, 1.0, 1.0, 326, 1.0, 1.0), DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 326, 500, 0.0, 0.0, 1.0, 326, 1.0, 0.0), 1e-15);
 
             // And the standards: melee D at 410 is 853 softened against 887 unsoftened (PowerShell cross-check).
             Assert.AreEqual(853u, CurveAt(410, 0.5).EffectiveSkillMedianFor(Skill.MeleeDefense));
@@ -468,13 +504,13 @@ namespace ACE.Server.Tests.ThreadDungeons
             const DungeonStatAxis axis = DungeonStatAxis.MagicDefense;
 
             Assert.AreEqual(DungeonStatCurve.RetailMagicDefense(410, 0.5) / DungeonStatCurve.RetailMagicDefense(326, 0.5),
-                DungeonStatCurve.Ratio(axis, 326, 410, 0.5, 0.5, 1.0, 326), 1e-12);
-            Assert.AreEqual(DungeonStatCurve.Ratio(axis, 200, 326, 0.5, 0.5, 1.0, 326) * DungeonStatCurve.Ratio(axis, 326, 450, 0.5, 0.5, 1.0, 326),
-                DungeonStatCurve.Ratio(axis, 200, 450, 0.5, 0.5, 1.0, 326), 1e-12);
-            Assert.AreEqual(1.0 / DungeonStatCurve.Ratio(axis, 326, 450, 0.5, 0.5, 1.0, 326), DungeonStatCurve.Ratio(axis, 450, 326, 0.5, 0.5, 1.0, 326), 1e-12);
-            Assert.AreEqual(1.0, DungeonStatCurve.Ratio(axis, 410, 410, 0.5, 0.5, 1.0, 326));
-            Assert.AreEqual(1.0, DungeonStatCurve.Ratio(axis, 326, 0, 0.5, 0.5, 1.0, 326), "non-positive target level: neutral, never zero");
-            Assert.AreEqual(1.0, DungeonStatCurve.Ratio(axis, 0, 326, 0.5, 0.5, 1.0, 326), "non-positive source level: neutral");
+                DungeonStatCurve.Ratio(axis, 326, 410, 0.5, 0.5, 1.0, 326, 1.0, 0.5), 1e-12);
+            Assert.AreEqual(DungeonStatCurve.Ratio(axis, 200, 326, 0.5, 0.5, 1.0, 326, 1.0, 0.5) * DungeonStatCurve.Ratio(axis, 326, 450, 0.5, 0.5, 1.0, 326, 1.0, 0.5),
+                DungeonStatCurve.Ratio(axis, 200, 450, 0.5, 0.5, 1.0, 326, 1.0, 0.5), 1e-12);
+            Assert.AreEqual(1.0 / DungeonStatCurve.Ratio(axis, 326, 450, 0.5, 0.5, 1.0, 326, 1.0, 0.5), DungeonStatCurve.Ratio(axis, 450, 326, 0.5, 0.5, 1.0, 326, 1.0, 0.5), 1e-12);
+            Assert.AreEqual(1.0, DungeonStatCurve.Ratio(axis, 410, 410, 0.5, 0.5, 1.0, 326, 1.0, 0.5));
+            Assert.AreEqual(1.0, DungeonStatCurve.Ratio(axis, 326, 0, 0.5, 0.5, 1.0, 326, 1.0, 0.5), "non-positive target level: neutral, never zero");
+            Assert.AreEqual(1.0, DungeonStatCurve.Ratio(axis, 0, 326, 0.5, 0.5, 1.0, 326, 1.0, 0.5), "non-positive source level: neutral");
         }
 
         private static DungeonBandStandard RichAnchor()
@@ -553,7 +589,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreSame(DungeonBandStandard.Empty, DungeonStatCurve.WithRetailMagicDefense(null, 400, 0.5));
 
             // Extrapolate keeps "0 = no data" too: an anchor with no magic defense median gets none.
-            var extrapolated = DungeonStatCurve.Extrapolate(none, 326, 410, 0.5, 0.5, 1.0, AnalysisFormulaOf);
+            var extrapolated = DungeonStatCurve.Extrapolate(none, 326, 410, 0.5, 0.5, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400, AnalysisFormulaOf);
             Assert.AreEqual(0u, extrapolated.MedianFor(Skill.MagicDefense));
             Assert.AreEqual(0u, extrapolated.EffectiveSkillMedianFor(Skill.MagicDefense));
         }
@@ -562,7 +598,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         public void Extrapolate_sets_magic_defense_absolutely_and_never_from_the_anchor()
         {
             var anchor = RichAnchor();
-            var s = DungeonStatCurve.Extrapolate(anchor, 326, 410, 0.5, 0.5, 1.0, AnalysisFormulaOf);
+            var s = DungeonStatCurve.Extrapolate(anchor, 326, 410, 0.5, 0.5, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400, AnalysisFormulaOf);
 
             Assert.AreEqual(569u, s.EffectiveSkillMedianFor(Skill.MagicDefense), "retail 410 at rate 0.5, whatever the anchor held");
             Assert.AreEqual(569u, Landed(s, Skill.MagicDefense), "InitLevel + term over the raised attributes lands on it");
@@ -570,13 +606,13 @@ namespace ACE.Server.Tests.ThreadDungeons
             // Absolute: a different anchor magic D gives the same result.
             var other = DungeonBandStandard.ForTest(new Dictionary<Skill, uint> { [Skill.MagicDefense] = 50 }, 844, 540,
                 sampleCount: 20, attributeMedians: anchor.AttributeMedians, effectiveSkillMedians: new Dictionary<Skill, uint> { [Skill.MagicDefense] = 900 });
-            Assert.AreEqual(569u, DungeonStatCurve.Extrapolate(other, 326, 410, 0.5, 0.5, 1.0, AnalysisFormulaOf).EffectiveSkillMedianFor(Skill.MagicDefense));
+            Assert.AreEqual(569u, DungeonStatCurve.Extrapolate(other, 326, 410, 0.5, 0.5, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400, AnalysisFormulaOf).EffectiveSkillMedianFor(Skill.MagicDefense));
         }
 
         [TestMethod]
         public void Anchored_StandardAt_gives_retail_magic_defense_at_and_below_the_pivot_above_300()
         {
-            var curve = new DungeonStatCurve.Anchored(RichAnchor(), 326, 0.5, 0.5, 1.0, AnalysisFormulaOf);
+            var curve = new DungeonStatCurve.Anchored(RichAnchor(), 326, 0.5, 0.5, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400, AnalysisFormulaOf);
 
             Assert.AreEqual(525u, curve.StandardAt(310).EffectiveSkillMedianFor(Skill.MagicDefense), "310 is below the pivot but above 300");
             Assert.AreEqual(630u, curve.StandardAt(290).EffectiveSkillMedianFor(Skill.MagicDefense), "290: the raw anchor");
@@ -658,6 +694,30 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         [TestMethod]
+        public void A_plan_above_400_reads_the_two_400_dials_into_its_curve_and_its_band_standard()
+        {
+            // Owner ruling 2026-11-17: the limits' two 400 rates reach the run's Anchored curve (the consumer), and through it the
+            // plan's standard. Each rate moves only its own axis.
+            var shipped = Build(500, 1, MasterLimits(weaponAttackRate400: DungeonPopulationLimits.DefaultWeaponAttackCurveRateAbove400,
+                meleeDefenseRate400: DungeonPopulationLimits.DefaultMeleeDefenseCurveRateAbove400), LevelProfile);
+            var open = Build(500, 1, MasterLimits(weaponAttackRate400: 1.0, meleeDefenseRate400: 1.0), LevelProfile);
+            var flat = Build(500, 1, MasterLimits(weaponAttackRate400: 0.0, meleeDefenseRate400: 0.0), LevelProfile);
+
+            Assert.AreEqual(DungeonStatCurve.DefaultWeaponAttackRateAbove400, shipped.StatCurve.WeaponAttackRateAbove400);
+            Assert.AreEqual(DungeonStatCurve.DefaultMeleeDefenseRateAbove400, shipped.StatCurve.MeleeDefenseRateAbove400);
+            Assert.AreEqual(1.0, open.StatCurve.WeaponAttackRateAbove400);
+            Assert.AreEqual(0.0, flat.StatCurve.MeleeDefenseRateAbove400);
+
+            var attack = Skill.HeavyWeapons;
+            Assert.IsTrue(flat.BandStandard.MedianFor(attack) < shipped.BandStandard.MedianFor(attack), "flat < shipped attack");
+            Assert.IsTrue(shipped.BandStandard.MedianFor(attack) < open.BandStandard.MedianFor(attack), "shipped < open attack");
+            Assert.IsTrue(flat.BandStandard.MedianFor(Skill.MeleeDefense) < shipped.BandStandard.MedianFor(Skill.MeleeDefense), "flat < shipped melee D");
+            Assert.IsTrue(shipped.BandStandard.MedianFor(Skill.MeleeDefense) < open.BandStandard.MedianFor(Skill.MeleeDefense), "shipped < open melee D");
+            Assert.AreEqual(open.BandStandard.MedianFor(Skill.MissileDefense), flat.BandStandard.MedianFor(Skill.MissileDefense), "missile defense is untouched");
+            Assert.AreEqual(open.BandStandard.MedianFor(Skill.MagicDefense), flat.BandStandard.MedianFor(Skill.MagicDefense), "magic defense is untouched");
+        }
+
+        [TestMethod]
         public void A_plan_above_the_pivot_freezes_magic_defense_and_leaves_melee_and_missile_on_their_own_dial()
         {
             // Owner ruling 2026-10-28: dynamic_dungeons_magic_defense_curve_rate_above_300 defaults to 0.
@@ -688,7 +748,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreEqual(0.0, DungeonStatCurve.SanitizeDefenseRate(-1));
             Assert.AreEqual(1.0, DungeonStatCurve.SanitizeDefenseRate(7));
             Assert.AreEqual(0.25, DungeonStatCurve.SanitizeDefenseRate(0.25));
-            Assert.AreEqual(1.0, DungeonStatCurve.Ratio(DungeonStatAxis.MeleeDefense, 300, 500, 0.0, 0.0, 1.0, 326), "0 freezes defense at its 300 value");
+            Assert.AreEqual(1.0, DungeonStatCurve.Ratio(DungeonStatAxis.MeleeDefense, 300, 500, 0.0, 0.0, 1.0, 326, 1.0, 0.0), "0 freezes defense at its 300 value");
         }
 
         [TestMethod]
@@ -733,7 +793,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         public void Stamp_scaling_preserves_authored_order()
         {
             // Three creatures at the same authored level, stamped to the same level: one ratio for all of them.
-            var ratio = DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 375, 431, 0.5, 0.5, 1.0, 326);
+            var ratio = DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 375, 431, 0.5, 0.5, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400);
             var scaled = new[] { 300, 450, 600 }.Select(v => ReachUpStamp.ScaleInt(v, ratio)).ToArray();
             CollectionAssert.AreEqual(scaled.OrderBy(v => v).ToArray(), scaled, "same raw, same stamp: order kept");
 
@@ -753,10 +813,10 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             foreach (var axis in Enum.GetValues(typeof(DungeonStatAxis)).Cast<DungeonStatAxis>())
             {
-                int OnCurve(int level) => (int)Math.Round(10000 * DungeonStatCurve.Ratio(axis, 326, level, 0.5, 0.5, 1.0, 326));
+                int OnCurve(int level) => (int)Math.Round(10000 * DungeonStatCurve.Ratio(axis, 326, level, 0.5, 0.5, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400));
 
-                var lowScaled = ReachUpStamp.ScaleInt(OnCurve(lowRaw), DungeonStatCurve.Ratio(axis, lowRaw, lowStamp, 0.5, 0.5, 1.0, 326));
-                var highScaled = ReachUpStamp.ScaleInt(OnCurve(highRaw), DungeonStatCurve.Ratio(axis, highRaw, highStamp, 0.5, 0.5, 1.0, 326));
+                var lowScaled = ReachUpStamp.ScaleInt(OnCurve(lowRaw), DungeonStatCurve.Ratio(axis, lowRaw, lowStamp, 0.5, 0.5, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400));
+                var highScaled = ReachUpStamp.ScaleInt(OnCurve(highRaw), DungeonStatCurve.Ratio(axis, highRaw, highStamp, 0.5, 0.5, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400));
 
                 Assert.AreEqual(OnCurve(lowStamp), lowScaled, 1, $"{axis}: on the curve at {lowRaw} -> on the curve at {lowStamp}");
                 Assert.AreEqual(OnCurve(highStamp), highScaled, 1, $"{axis}: on the curve at {highRaw} -> on the curve at {highStamp}");
@@ -764,7 +824,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             }
 
             // Skills: the re-derived InitLevel lands effective on value x ratio for each creature.
-            var meleeRatio = DungeonStatCurve.Ratio(DungeonStatAxis.MeleeDefense, 375, 431, 0.5, 0.5, 1.0, 326);
+            var meleeRatio = DungeonStatCurve.Ratio(DungeonStatAxis.MeleeDefense, 375, 431, 0.5, 0.5, 1.0, 326, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400);
             Assert.AreEqual(DungeonStatCurve.Scale(800, meleeRatio) - 300u, ReachUpStamp.SkillInitTarget(800, 300, meleeRatio));
             Assert.AreEqual(0u, ReachUpStamp.SkillInitTarget(100, 5000, meleeRatio), "floored at 0, never wraps");
 
@@ -838,11 +898,15 @@ namespace ACE.Server.Tests.ThreadDungeons
         /// can be priced at XpCap squared (9x at the shipped 3.0) - not XpCap once, as this test first assumed.
         /// The modifier reward scale (default 1.0) leaves both caps whole.
         ///
-        /// The pin that matters: saturation starts strictly ABOVE 410, the highest run level a player can press
-        /// today (a 375 fragment plus a Mana Scarab), so only admin-made gems ever reach the clamp.
+        /// The pin that matters (REWRITTEN 2026-11-16, owner ruling): the gem ceiling rose to 500, so a player
+        /// can now press a run to 500 and the worst case (both caps maxed) first saturates at run level 454,
+        /// which is AT OR BELOW the player maximum. That is ACCEPTED: the clamp stands, XpOverride stays an int,
+        /// and a worst-case boss from run level 454 up pays int.MaxValue rather than overflowing. This test pins
+        /// the accepted behaviour (saturation lands at or below the player maximum, and the stored value is
+        /// clamped to int.MaxValue, never wrapped negative).
         /// </summary>
         [TestMethod]
-        public void Boss_xp_saturates_the_int_clamp_only_above_the_player_maximum()
+        public void Boss_xp_worst_case_saturation_is_accepted_and_clamps_to_int_max()
         {
             var store = ThreadDungeonStoreTests.LoadShipped();
             var limits = new DungeonPopulationLimits(120, 3.0, 3.0, 8, 0.5);
@@ -861,7 +925,7 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             var firstSaturating = 0;
 
-            for (var level = DungeonGemSpec.MaxGemLevel; level <= DungeonGemSpec.MaxRunLevel; level++)
+            for (var level = 375; level <= DungeonGemSpec.MaxRunLevel; level++)
             {
                 if (PriceAt(level).Worst >= int.MaxValue)
                 {
@@ -877,9 +941,17 @@ namespace ACE.Server.Tests.ThreadDungeons
                               $"500: boss {at500.BossLevel} plain {at500.Plain} worst {at500.Worst}; first saturating run level {firstSaturating}");
 
             Assert.IsTrue(at500.Plain < int.MaxValue, $"a plain level-500 boss stays under the clamp ({at500.Plain})");
-            Assert.IsTrue(at410.Worst < int.MaxValue, $"the player maximum never saturates, even with both caps ({at410.Worst})");
+            Assert.IsTrue(at410.Worst < int.MaxValue, $"a level-410 run does not saturate, even with both caps ({at410.Worst})");
             Assert.IsTrue(at500.Worst >= int.MaxValue, $"positive control: both caps at 500 DO reach the clamp ({at500.Worst})");
-            Assert.IsTrue(firstSaturating > 410, $"saturation starts at run level {firstSaturating}, which must be above 410");
+            // Derivation: worst(L) = ladder(bossLevel(L)) x 2.0 (boss rate) x 3.0 x 3.0 (both caps) x (1 + (L/300)^2 x 1.7)
+            // (xp scale 2.7, exponent 2). Using the plan's boss level per run level (L=453 stamps boss 522, L=454 stamps 523) and
+            // the shipped ladder's log-interpolation, L=453 gives about 2,124,417,000 (< int.MaxValue 2,147,483,647) and L=454 gives about 2,149,236,000 (>= it).
+            Assert.AreEqual(454, firstSaturating, "the worst case first saturates at run level 454 (the comment at the clamp in ThreadDungeonSpawner quotes this)");
+            Assert.IsTrue(firstSaturating <= DungeonGemSpec.MaxGemLevel, $"accepted: saturation ({firstSaturating}) is within what a player can now press ({DungeonGemSpec.MaxGemLevel})");
+
+            // The clamp itself, exactly as ThreadDungeonSpawner applies it: the stored int is int.MaxValue, not a wrapped value.
+            Assert.IsTrue(at500.Worst > int.MaxValue, "the unclamped worst case really exceeds an int");
+            Assert.AreEqual(int.MaxValue, (int)Math.Clamp(at500.Worst, 0, int.MaxValue));
         }
 
         // ---- the stamp glue's pure seams (code review 2026-10-08) -------------------------------------

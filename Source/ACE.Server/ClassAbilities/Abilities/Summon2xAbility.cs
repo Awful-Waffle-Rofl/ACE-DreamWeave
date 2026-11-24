@@ -19,7 +19,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "summon2x",
             DisplayName = "Summon 2x",
-            Description = "Your summoning essence calls up two combat pets at once, for a single charge.",
+            DescriptionTemplate = "Your summoning essence calls two combat pets for one charge.",
             MaxRank = 1,
             CostPerRank = new[] { 3 },
             Implemented = true,

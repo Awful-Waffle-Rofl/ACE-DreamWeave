@@ -136,6 +136,13 @@ namespace ACE.Server.MonsterEffects.Effects
             if (!trigger.HasFlag(MonsterEffectTrigger.Avoid))
                 return;
 
+            // Hunter's Echo: a debuff answering an avoided Echo arrow lands on the Echo that fired it, never its owner;
+            // dropped when that Echo is gone (the same rule as Reflect and Riposte, orchestrator ruling 2026-11-11)
+            attacker = Creature.ResolveHuntersEchoRetaliationTarget(attacker, defender);
+
+            if (attacker == null)
+                return;
+
             // no landed-hit damage type is available here - vuln has no element to match, so a record
             // authored what=vuln on=avoid is accepted but applies nothing (ApplyVuln below returns early
             // for DamageType.Undef, same as a damage type with no single-element vuln).

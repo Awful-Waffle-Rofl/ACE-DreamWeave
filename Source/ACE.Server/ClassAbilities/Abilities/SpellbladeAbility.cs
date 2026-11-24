@@ -41,18 +41,27 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "spellblade",
             DisplayName = "Spellblade",
-            Description = "Your landed light weapon hits have a 25% chance to cast a Streak war spell at the " +
-                          "target, matching the damage type of the swing. Rank raises the spell level cap " +
-                          "(III / V / the Incantation), not the chance; the level you actually throw is also " +
-                          "limited by your Item Enchantment, which also sets how hard the spell is to resist " +
-                          "and its skill damage bonus. A Nether weapon casts a Void streak instead. " +
-                          "Higher Item Enchantment increases the chance. " +
-                          "A swing at full power casts a Bolt instead, and every proc hits harder the more " +
-                          "power you put into the swing.",
+            // Live text. Chance is the flat class_ability_spellblade_chance at every rank (SpellbladeAbility.cs ~143, ~225). The
+            // per-rank tails quote only the spell-level cap (SpellswordSpellTables.MaxLevelForRank, no tunable), so they hold no placeholder.
+            DescriptionTemplate = "Your light weapon hits have a {v:class_ability_spellblade_chance|pct}% chance to cast a Streak " +
+                          "war spell at the target, matching the swing's damage type. A Nether weapon casts a Void streak. A " +
+                          "full-power swing casts a Bolt instead, and every proc hits harder the more power you put into the swing. " +
+                          "Your Item Enchantment caps the spell level, and sets how hard it is to resist and its damage bonus.",
+            RankTailTemplate = new[]
+            {
+                "casts up to level III",
+                "casts up to level V",
+                "casts up to the Incantation",
+            },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
             AffinitySkill = Skill.ItemEnchantment,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "affinity", Bounds = CeilingBounds.Affinity, Source = CeilingSource.Tunable, Key = "class_ability_affinity_chance_cap", Label = "max chance from affinity", Format = "pct" },
+                new ClassAbilityCeiling { Id = "gear", Bounds = CeilingBounds.Gear, Source = CeilingSource.GearStackCap, GearMod = EquipmentModId.Spellblade, Label = "max from gear", Format = "pct" },
+            },
         };
 
         /// <summary>
@@ -200,12 +209,16 @@ namespace ACE.Server.ClassAbilities.Abilities
             // SpellProjectile.IsClassAbilityProc on every projectile this cast launches
             // (WorldObject_Magic.LaunchSpellProjectiles), which is the ONLY signal that tells a Spellsword
             // proc apart from an ordinary war cast - fromProc is also true for item cast-on-strike, cloak
-            // procs and Echo Cast recasts. Cascade FAILS CLOSED without this: an unwrapped cast simply
+            // procs. Cascade FAILS CLOSED without this: an unwrapped cast simply
             // never cascades, with no error and no log line.
             attacker.CastClassAbilityProc(() =>
                 attacker.CreateSpellProjectiles(spell, target, damageEvent.Weapon, false, fromProc: true, suppressPetAssist: true),
                 procDamageScale,
                 damageEvent.OriginalDamageType);   // Volatile Elements: the re-typed hit's original type, for the proc's rend max
+
+            // Echo Cast (Archmage T3): a class-ability proc is a qualifying cast (the 2026-09 firework ruling); its wisp
+            // casts with the proc's caster skill, damage scale, rend source and weapon. Triggered by a landed MELEE hit, so a wisp cast can never reach here.
+            attacker.TryTriggerEchoWisp(spell, target, 0, inheritsProcCasterSkill: true, procDamageScale: procDamageScale, rendSourceDamageType: damageEvent.OriginalDamageType, procWeapon: damageEvent.Weapon);
 
             // A landed war proc feeds Spellsurge (design section 5e). Sundermark deliberately does not.
             attacker.AddSpellsurgeStack();
@@ -222,12 +235,19 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
+            return BuildReadout(rank, player.GetClassAbilityAffinityMultiplier(Skill.ItemEnchantment), player?.GetEquippedModValue(EquipmentModId.Spellblade) ?? 0.0);
+        }
+
+        /// <summary>
+        /// The pure core of <see cref="GetReadout"/>: every live input is a parameter, so a test can pin the readout (and its ceiling readings) without a Player.
+        /// </summary>
+        public ClassAbilityReadout BuildReadout(int rank, double affinityMultiplier, double gearModValue)
+        {
             var chanceBase = PropertyManager.GetDouble("class_ability_spellblade_chance").Item;
             var affinityCap = PropertyManager.GetDouble("class_ability_affinity_chance_cap").Item;
 
             var skillChance = rank <= 0 ? 0.0 : chanceBase;
 
-            var affinityMultiplier = player.GetClassAbilityAffinityMultiplier(Skill.ItemEnchantment);
             var rawAdded = skillChance * affinityMultiplier - skillChance;
 
             var clampedAdded = affinityCap > 0.0 ? Math.Min(rawAdded, affinityCap) : rawAdded;
@@ -239,7 +259,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             // it is here so the panel cannot contradict the machinery contract if that ever changes.
             var gearChance = rank <= 0
                 ? 0.0
-                : Math.Max(0.0, player?.GetEquippedModValue(EquipmentModId.Spellblade) ?? 0.0);
+                : Math.Max(0.0, gearModValue);
 
             var skill = skillChance * 100.0;
             var affinity = clampedAdded * 100.0;
@@ -257,6 +277,11 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "proc",
                 Per = null,
                 CapNote = capBit ? "affinity cap" : null,
+                Ceilings = new[]
+                {
+                    ClassAbilityCeilings.Read(Definition, "affinity", rawAdded * 100.0, rank, ClassAbilityText.Live),
+                    ClassAbilityCeilings.Read(Definition, "gear", gear, rank, ClassAbilityText.Live),
+                },
             };
         }
     }

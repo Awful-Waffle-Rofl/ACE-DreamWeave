@@ -53,7 +53,7 @@ namespace ACE.Server.Tests.Knots
             Assert.IsNotNull(path, "Content/dungeons/dynamic/pinnacles.json not found by walking up from the test assembly");
 
             var s = Parse(System.IO.File.ReadAllText(path));
-            Assert.AreEqual(2, s.Pinnacles.Count, "the shipped file ships the grael row and the matron row");
+            Assert.AreEqual(3, s.Pinnacles.Count, "the shipped file ships the grael, matron and harbinger rows");
             var g = s.GetPinnacle("grael");
             Assert.IsNotNull(g);
             Assert.AreEqual("Grael", g.Name);
@@ -69,6 +69,14 @@ namespace ACE.Server.Tests.Knots
             Assert.IsTrue(m.Enabled, "the matron row ships enabled");
             Assert.AreEqual("matron", m.Destination.Kind);
             Assert.AreEqual("matron", m.RewardTable);
+
+            var h = s.GetPinnacle("harbinger");
+            Assert.IsNotNull(h);
+            Assert.IsTrue(h.Enabled, "the harbinger row ships enabled");
+            Assert.AreEqual("harbinger", h.Destination.Kind);
+            Assert.AreEqual("harbinger", h.RewardTable);
+            Assert.AreEqual(3, h.Entries);
+            CollectionAssert.AreEqual(new[] { 1.0 }, h.Phases);
             Assert.AreEqual(0, PinDiags(s).Length, Diag(s));
         }
 

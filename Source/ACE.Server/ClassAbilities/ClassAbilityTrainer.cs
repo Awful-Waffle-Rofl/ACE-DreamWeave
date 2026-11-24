@@ -9,6 +9,7 @@ using ACE.Server.Entity;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Pvp;
+using ACE.Server.Pvp.Templates;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.ClassAbilities
@@ -111,6 +112,9 @@ namespace ACE.Server.ClassAbilities
             return result;
         }
 
+        /// <summary>The trainer's answer to a Yes whose quoted rank is no longer the next one.</summary>
+        internal const string QuoteChangedRefusal = "That ability changed since I quoted it. Speak to me again.";
+
         private static void Send(Player player, string message) =>
             player.Session.Network.EnqueueSend(new GameMessageSystemChat(message, ChatMessageType.Broadcast));
 
@@ -178,10 +182,14 @@ namespace ACE.Server.ClassAbilities
                     $"Train {def.DisplayName} rank {nextTier} for {cost:N0} class ability point{(cost == 1 ? "" : "s")}?",
                     () =>
                     {
-                        if (!player.LearnClassAbility(capturedDef, out var error))
+                        // Yes buys the QUOTED rank only: a rank changed elsewhere (the web panel) since the prompt
+                        // would otherwise buy the next one at its own price.
+                        if (player.GetClassAbilityRank(capturedDef.Id) != nextTier - 1)
+                            Send(player, QuoteChangedRefusal);
+                        else if (!player.LearnClassAbility(capturedDef, out var error))
                             Send(player, error);
                         else
-                            Send(player, $"You learn {capturedDef.DisplayName} rank {nextTier}. ({player.AvailableClassAbilityPoints:N0} class ability point{(player.AvailableClassAbilityPoints == 1 ? "" : "s")} left.)");
+                            Send(player, ClassAbilityChangeMessages.Learned(capturedDef.DisplayName, nextTier, player.AvailableClassAbilityPoints));
                     }));
             }
 
@@ -422,6 +430,15 @@ namespace ACE.Server.ClassAbilities
                     return;
                 }
 
+                // PvP template, for the same reason: UnlearnClassAbility's shared removal core refuses a templated
+                // player, and the fee below is charged before that loop, so refuse before the fee.
+                var tpl = player.PvpTemplateBlocked(PvpTemplateAction.ClassAbilityPoints);
+                if (tpl != null)
+                {
+                    Send(player, tpl);
+                    return;
+                }
+
                 // Same reason as the PvP check: UnlearnClassAbility refuses an ability whose reprice wave is
                 // still pending, and the fee below is charged before that loop, so refuse the whole respec here
                 // rather than take the fee for a partial one.
@@ -491,7 +508,15 @@ namespace ACE.Server.ClassAbilities
             return PropertyManager.GetLong("class_ability_full_respec_lum_cost").Item;
         }
 
-        private static bool HoldsVoucherFor(Player player, ClassAbilityId skillId) =>
+        /// <summary>
+        /// The web class ability panel's form of the trainer's "already holding an unused voucher" refusal
+        /// (HandleTrainer's list line keeps its own wording). Player.CanRaiseClassAbility applies it with
+        /// <see cref="HoldsVoucherFor"/>, so a panel raise refuses exactly when the trainer would.
+        /// </summary>
+        internal static string VoucherHeldRefusal(ClassAbilityDefinition def) =>
+            $"You already hold a training token for {def.DisplayName} - use it first.";
+
+        internal static bool HoldsVoucherFor(Player player, ClassAbilityId skillId) =>
             player.GetAllPossessions().Any(wo =>
                 (wo.GetProperty(PropertyInt.ClassAbilityTokenId) ?? 0) == (int)skillId);
 

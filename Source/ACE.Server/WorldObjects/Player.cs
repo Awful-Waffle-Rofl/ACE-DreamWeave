@@ -404,6 +404,10 @@ namespace ACE.Server.WorldObjects
             // World Events Hold: assessing a knight also says its health in chat (throttled). Nothing for any other target.
             ACE.Server.WorldEvents.WorldEventHooks.SendHoldKnightHealthLine(this, wo);
 
+            // The response and the appraisal-target bookkeeping below carry the guid the client ASKED
+            // about. That is wo's own guid for everything except a mule panel row's display alias.
+            var answerGuid = AppraisalAnswerGuid(objectGuid, wo);
+
             var currentTime = Time.GetUnixTime();
 
             // compare with previously requested appraisal target
@@ -412,7 +416,7 @@ namespace ACE.Server.WorldObjects
                 if (objectGuid == CurrentAppraisalTarget)
                 {
                     // continued success, rng roll no longer needed
-                    Session.Network.EnqueueSend(new GameEventIdentifyObjectResponse(Session, wo, true));
+                    Session.Network.EnqueueSend(new GameEventIdentifyObjectResponse(Session, wo, true, answerGuid));
                     OnAppraisal(wo, true);
                     return;
                 }
@@ -420,7 +424,7 @@ namespace ACE.Server.WorldObjects
                 if (currentTime < AppraisalRequestedTimestamp + 5.0f)
                 {
                     // rate limit for unsuccessful appraisal spam
-                    Session.Network.EnqueueSend(new GameEventIdentifyObjectResponse(Session, wo, false));
+                    Session.Network.EnqueueSend(new GameEventIdentifyObjectResponse(Session, wo, false, answerGuid));
                     OnAppraisal(wo, false);
                     return;
                 }
@@ -429,10 +433,26 @@ namespace ACE.Server.WorldObjects
             RequestedAppraisalTarget = objectGuid;
             AppraisalRequestedTimestamp = currentTime;
 
-            Examine(wo);
+            Examine(wo, answerGuid);
         }
 
-        public void Examine(WorldObject obj)
+        /// <summary>
+        /// The guid an appraisal of <paramref name="obj"/> is answered and tracked under: the guid the
+        /// client requested. Every FindObject arm resolves an object by its own guid, so this equals
+        /// obj.Guid.Full for everything but a mule panel row, whose stored item is listed (and so asked
+        /// about) under a display alias - see AccountVaultStore_DisplayAliases.cs. Answering such a row
+        /// under the real guid would file the appraisal under a guid the client never saw on the panel,
+        /// and leak exactly the guid the alias exists to keep from it.
+        /// </summary>
+        internal static uint AppraisalAnswerGuid(uint requestedGuid, WorldObject obj)
+        {
+            return requestedGuid != 0 ? requestedGuid : obj.Guid.Full;
+        }
+
+        public void Examine(WorldObject obj) => Examine(obj, obj.Guid.Full);
+
+        /// <param name="answerGuid">The guid the response and CurrentAppraisalTarget carry - see <see cref="AppraisalAnswerGuid"/>.</param>
+        public void Examine(WorldObject obj, uint answerGuid)
         {
             //Console.WriteLine($"{Name}.Examine({obj.Name})");
 
@@ -470,9 +490,9 @@ namespace ACE.Server.WorldObjects
                 success = true;
 
             if (success)
-                CurrentAppraisalTarget = obj.Guid.Full;
+                CurrentAppraisalTarget = answerGuid;
 
-            Session.Network.EnqueueSend(new GameEventIdentifyObjectResponse(Session, obj, success));
+            Session.Network.EnqueueSend(new GameEventIdentifyObjectResponse(Session, obj, success, answerGuid));
 
             OnAppraisal(obj, success);
         }
@@ -630,7 +650,7 @@ namespace ACE.Server.WorldObjects
         /// through the Loom: the popup tells them to go and speak to the Society Greeter, who is in
         /// the training hall, so it is replayed when the DreamWeave sets them down there.
         /// Session-scoped on purpose - if they log out inside the Loom they are resumed into it, and
-        /// the popup fires again on that login anyway (TotalLogins is still 1).
+        /// WorldManager sets this again on that login (keyed on the Loom route, not TotalLogins).
         /// </summary>
         public bool DeferredWelcomePopup;
 
@@ -738,14 +758,30 @@ namespace ACE.Server.WorldObjects
             }
 
             if (CurrentActivePet != null)
+            {
+                CurrentActivePet.RemovalReason = "ownerlogout";
                 CurrentActivePet.Destroy();
+            }
 
             if (SecondaryActivePet != null)   // Summon 2x second slot
+            {
+                SecondaryActivePet.RemovalReason = "ownerlogout";
                 SecondaryActivePet.Destroy();
+            }
+
+            // Hunter's Echo (Archer T3): holds no pet slot, so it is not covered above
+            EndHuntersEcho("ownerlogout");
+
+            // Echo Cast wisps (Archmage T3): plain bodies, no pet slot
+            EndAllEchoWisps("ownerlogout");
 
             // Mule Vendor (DESIGN 11.4): destroyed on logout, as pets are above.
             if (CurrentSummonedVendor != null)
                 CurrentSummonedVendor.Destroy();
+
+            // Salvage Roller: the player's view on the shared station goes with them (its display rows are destroyed);
+            // the station itself stays.
+            CurrentSalvageRollerStation?.DropView(this);
 
             // If we're in the dying animation process, we cannot logout until that animation completes..
             if (IsInDeathProcess)

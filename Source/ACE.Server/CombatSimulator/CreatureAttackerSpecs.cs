@@ -76,7 +76,7 @@ namespace ACE.Server.CombatSimulator
 
             // the same CreatureSkill object the engine hands to every weapon-derived modifier. GetCreatureSkill
             // writes on read (it inserts a missing PropertiesSkill row), which lands only on this throwaway
-            var attackSkill = creature.GetCreatureSkill(creature.GetCurrentWeaponSkill());
+            var attackSkill = creature.GetCreatureSkill(creature.GetWeaponSkillForHit(CombatType.Melee));
 
             float baseDamageMin;
             float baseDamageMax;
@@ -140,7 +140,8 @@ namespace ACE.Server.CombatSimulator
                 DamageType = damageType,
                 AttackHeight = creature.AttackHeight ?? AttackHeight.Medium,
 
-                AttackSkill = creature.GetEffectiveAttackSkill(),
+                // the melee skill even for a launcher wielder, as DamageEvent.GetEvadeChance rolls it
+                AttackSkill = creature.GetEffectiveAttackSkillForHit(CombatType.Melee),
 
                 BaseDamageMin = baseDamageMin,
                 BaseDamageMax = baseDamageMax,
@@ -154,13 +155,13 @@ namespace ACE.Server.CombatSimulator
                     WorldObject.GetWeaponCreatureSlayerModifier(weapon, creature, defender),
                     AttackerTerms.PhysicalDamageRatingMod(creature, weapon)),
 
-                ArmorRendingMod = AttackerTerms.ArmorIgnoreMod(weapon, creature, attackSkill),
+                ArmorRendingMod = AttackerTerms.ArmorIgnoreMod(weapon, creature, attackSkill, defender),
                 IgnoreShieldMod = creature.GetIgnoreShieldMod(weapon),
 
                 IgnoreMagicArmor = HollowMath.Resolve(weapon, creature, PropertyBool.IgnoreMagicArmor) > 0.0,
                 IgnoreMagicResist = HollowMath.Resolve(weapon, creature, PropertyBool.IgnoreMagicResist) > 0.0,
 
-                WeaponResistanceMod = WorldObject.GetWeaponResistanceModifier(weapon, creature, attackSkill, damageType),
+                WeaponResistanceMod = WorldObject.GetWeaponResistanceModifier(weapon, creature, attackSkill, damageType, defender),
                 IgnoreAllArmor = weapon != null && weapon.HasImbuedEffect(ImbuedEffectType.IgnoreAllArmor),
 
                 WithinShieldArc = true,
@@ -246,13 +247,13 @@ namespace ACE.Server.CombatSimulator
                     WorldObject.GetWeaponCreatureSlayerModifier(weapon, creature, defender),
                     AttackerTerms.PhysicalDamageRatingMod(creature, weapon)),
 
-                ArmorRendingMod = AttackerTerms.ArmorIgnoreMod(weapon, creature, attackSkill),
+                ArmorRendingMod = AttackerTerms.ArmorIgnoreMod(weapon, creature, attackSkill, defender),
                 IgnoreShieldMod = creature.GetIgnoreShieldMod(weapon),
 
                 IgnoreMagicArmor = HollowMath.Resolve(weapon, creature, PropertyBool.IgnoreMagicArmor) > 0.0,
                 IgnoreMagicResist = HollowMath.Resolve(weapon, creature, PropertyBool.IgnoreMagicResist) > 0.0,
 
-                WeaponResistanceMod = WorldObject.GetWeaponResistanceModifier(weapon, creature, attackSkill, damageType),
+                WeaponResistanceMod = WorldObject.GetWeaponResistanceModifier(weapon, creature, attackSkill, damageType, defender),
                 IgnoreAllArmor = weapon.HasImbuedEffect(ImbuedEffectType.IgnoreAllArmor),
 
                 WithinShieldArc = true,
@@ -301,9 +302,12 @@ namespace ACE.Server.CombatSimulator
         ///   TryResistSpell). AttackSkill is that school skill's Current.
         /// - Base: a uniform roll over the spell's own MinDamage..MaxDamage. A MONSTER gets no skill bonus (the
         ///   bonus block is gated on the source being a Player); a player gets MagicSkillBonus.
-        /// - The wand is the caster's GetEquippedWand() (Monster_Magic.cs CastSpell passes it as the projectile
-        ///   launcher): crit chance, crit multiplier, elemental damage mod, slayer and weapon resistance mod all
-        ///   read it. Most monsters have none, which gives the flat 5 percent crit and 1.0 for the rest.
+        /// - The wand is the caster's GetEquippedWand(): crit chance (and with it the caster's crit rating), crit
+        ///   multiplier, elemental damage mod, slayer and weapon resistance mod all read it. In the engine only a
+        ///   caster pet's war/void bolt carries the wand as its projectile launcher (Monster_Magic.WarVoidSpellLauncher);
+        ///   every other monster's bolt has a null launcher, so for a non-pet monster that wields a wand this spec
+        ///   OVERSTATES its bolts - a known, pre-existing simulator gap. Most monsters have no wand, which gives the
+        ///   flat 5 percent crit and 1.0 for the rest, matching the engine.
         /// - PreMitigationMod: attribute and power are 1.0 (the spell path has neither), times slayer, the caster
         ///   elemental mod and the magic damage rating mod (AttackerTerms).
         /// - IgnoreMagicResist is false: the engine passes the PROJECTILE as the resistance attacker and a null
@@ -314,7 +318,7 @@ namespace ACE.Server.CombatSimulator
         /// and weapon-mod spell multipliers (PvE player casters), Elemental Proficiency Fire, Pierce and Slash on a
         /// player caster (listed on PlayerAttackerSpecs), monster combat effect wards, and the crit-branch
         /// rating recomposition. Also not modelled: the Knot trait Overpowering Intent (a held Matron hive baton raises a
-        /// player caster's War/Void skill for the resist check against non-players; KnotTraitCombat.OverpoweringIntentResistSkill).
+        /// player caster's War/Void/Life skill for the resist check against non-players; KnotTraitCombat.OverpoweringIntentResistSkill).
         /// </summary>
         internal static AttackerSpec SpellFromValues(Creature caster, string label, MagicSchool school, DamageType damageType, int minDamage, int maxDamage, uint spellPower, Creature defender)
         {
@@ -352,9 +356,12 @@ namespace ACE.Server.CombatSimulator
                     1.0f,
                     WorldObject.GetWeaponCreatureSlayerModifier(wand, caster, defender),
                     AttackerTerms.MagicDamageRatingMod(caster, wand),
-                    WorldObject.GetCasterElementalDamageModifier(wand, caster, defender, damageType)),
+                    WorldObject.GetCasterElementalDamageModifier(wand, caster, defender, damageType))
+                    // a caster summon's Focus spell damage (SpellProjectile's caster-pet branch: a direct cast on a
+                    // non-player); exactly 1.0 for every other creature
+                    * (defender is Player ? 1.0f : CombatPet.FocusSpellDamageModFor(caster)),
 
-                WeaponResistanceMod = WorldObject.GetWeaponResistanceModifier(wand, caster, magicSkill, damageType),
+                WeaponResistanceMod = WorldObject.GetWeaponResistanceModifier(wand, caster, magicSkill, damageType, defender),
 
                 IgnoreMagicArmor = false,
                 IgnoreMagicResist = false,

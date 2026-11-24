@@ -36,11 +36,11 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "arcane_hollow",
             DisplayName = "Arcane Hollow",
-            Description = "Your war magic's elemental and physical damage types (fire, cold, acid, electric, pierce, slash " +
-                          "and bludgeon) ignore 10/20/30% (by rank) of a monster's innate resistance to that type. It " +
-                          "bypasses the monster's natural resistance only, not resistance from enchantments, and does " +
-                          "nothing against a type the monster is already weak to. Higher Magic Item Tinkering increases " +
-                          "the share.",
+            DescriptionTemplate = "Your war magic ignores part of a target's natural resistance to fire, cold, acid, electric, " +
+                          "pierce, slash and bludgeon. It skips natural resistance only, not resistance from enchantments, and does " +
+                          "nothing against a type the target is already weak to.",
+            // Live text: share = rank * class_ability_arcanehollow_ignore_per_rank (IgnoreFraction and GetReadout below).
+            RankTailTemplate = "+{per:class_ability_arcanehollow_ignore_per_rank|pct}% ignored",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,

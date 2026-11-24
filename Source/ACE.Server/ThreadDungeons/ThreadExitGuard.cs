@@ -22,6 +22,7 @@ namespace ACE.Server.ThreadDungeons
     public static class ThreadExitRules
     {
         public const string PromptText = "This Thread is complete and you will not be able to return. Your Thread Cache still holds loot. Leave anyway?";
+        public const string ShopReleasedMessage = "The Wandering Peddler packs up as you turn to go, and your Thread Cache forms. Collect it before you leave.";
         public const string AnswerOpenConfirmationMessage = "Answer your open confirmation first.";
 
         /// <summary>How long a Yes lets the re-issued exit through without asking again.</summary>
@@ -79,6 +80,29 @@ namespace ACE.Server.ThreadDungeons
         /// <summary>Reads a grant without spending it: a pre-check that must leave the grant for the exit's own gate.</summary>
         internal static bool PeekBypass(uint playerGuid, DateTime nowUtc) => bypassUntil.TryGetValue(playerGuid, out var until) && nowUtc <= until;
 
+        /// <summary>Pure prediction: does this member, standing inside the run copy, have an open peddler shop that an exit attempt would release?</summary>
+        internal static bool WouldReleaseShop(ThreadDungeonRun run, uint playerGuid, bool inside)
+            => inside && run != null && run.IsPeddlerShopOpen(playerGuid);
+
+        /// <summary>
+        /// A willing exit must not destroy a pile the player is still shopping from: no cache has formed while the shop
+        /// is open. Releases the shop (the cache then forms) and reports it through <paramref name="send"/>; true means
+        /// the exit is held once. Only the caller that wins the Open -> Done latch holds and messages: on a lost race
+        /// (a poll, Yes or /spawncache got there first) this returns false and the exit takes its normal path. A player
+        /// outside the run copy is never held here.
+        /// </summary>
+        internal static bool TryReleaseOpenShop(ThreadDungeonRun run, uint playerGuid, bool inside, Action<string> send)
+        {
+            if (!WouldReleaseShop(run, playerGuid, inside))
+                return false;
+
+            if (!ThreadPeddlerShop.Release(run, playerGuid, "tried to leave"))
+                return false;
+
+            send?.Invoke(ThreadExitRules.ShopReleasedMessage);
+            return true;
+        }
+
         /// <summary>True when a voluntary exit by this player would be held right now. Consumes nothing and sends nothing.</summary>
         public static bool WouldHoldExit(Player player)
         {
@@ -90,6 +114,9 @@ namespace ACE.Server.ThreadDungeons
                 return false;
 
             var guid = player.Guid.Full;
+
+            if (WouldReleaseShop(run, guid, ThreadCachePlacer.IsOwnerInside(run, player)))
+                return true;
 
             // isOwner's meaning becomes "may be prompted": true for any roster member, not just the owner.
             var isOwner = run.IsRosterMember(guid);
@@ -119,6 +146,10 @@ namespace ACE.Server.ThreadDungeons
 
             var now = DateTime.UtcNow;
             var playerGuid = player.Guid.Full;
+
+            if (TryReleaseOpenShop(run, playerGuid, ThreadCachePlacer.IsOwnerInside(run, player),
+                    text => player.Session?.Network.EnqueueSend(new GameMessageSystemChat(text, ChatMessageType.Broadcast))))
+                return true;
 
             // isOwner's meaning becomes "may be prompted": true for any roster member, not just the owner.
             var isOwner = run.IsRosterMember(playerGuid);

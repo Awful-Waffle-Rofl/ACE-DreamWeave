@@ -39,7 +39,7 @@ namespace ACE.Server.WorldObjects
             if (perimeter == null || !perimeter.ShouldRefuseDamage(true, Location))
                 return false;
 
-            NotifyOutdoorStrikeRefused();
+            NotifyOutdoorStrikeRefused(perimeter.RefusedStrikeLine);
 
             result = ACE.Server.Pvp.PvpArenaHookSettings.SpawnProtectedRefusal;
             return true;
@@ -49,14 +49,14 @@ namespace ACE.Server.WorldObjects
         /// R12's chat line, at most once per OutdoorCreaturePerimeter.RefusedStrikeNoticeIntervalS for this player, whichever
         /// path refused the damage (the attack gate above, a proc, a DoT tick, a projectile or a pet).
         /// </summary>
-        internal void NotifyOutdoorStrikeRefused()
+        internal void NotifyOutdoorStrikeRefused(string line = null)
         {
             var now = Timers.RunningTime;
             if (Session == null || !OutdoorCreaturePerimeter.RefusedStrikeNoticeDue(now, lastOutdoorStrikeNoticeAt))
                 return;
 
             lastOutdoorStrikeNoticeAt = now;
-            Session.Network.EnqueueSend(new GameMessageSystemChat(OutdoorCreaturePerimeter.RefusedStrikeText, ChatMessageType.Broadcast));
+            Session.Network.EnqueueSend(new GameMessageSystemChat(line ?? OutdoorCreaturePerimeter.RefusedStrikeText, ChatMessageType.Broadcast));
         }
     }
 }

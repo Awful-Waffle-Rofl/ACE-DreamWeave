@@ -478,7 +478,22 @@ namespace ACE.Server.CombatSimulator
             return CombatMode.Melee;
         }
 
-        private static DefenderProfile Walk(Player player)
+        /// <summary>
+        /// The defender walk for a LIVE, in-world Player (Character Details), answered as if it stood in
+        /// <paramref name="stance"/>. NON-MUTATING: the stance is threaded through the getters as a pure parameter
+        /// (GetEffectiveDefenseSkill / GetEffectiveMagicDefense and the weapon defense modifiers under them), never set,
+        /// and the hands are left as they are - BuildDefenderProfile's SimulatorStance and PlayerLoadout.With both write
+        /// to the Player and are for objects outside the world only. World thread.
+        /// </summary>
+        public static DefenderProfile ReadDefenderProfile(Player player, CombatMode stance)
+        {
+            if (player == null)
+                throw new ArgumentNullException(nameof(player));
+
+            return Walk(player, stance);
+        }
+
+        private static DefenderProfile Walk(Player player, CombatMode? stance = null)
         {
             var armor = new Dictionary<ArmorKey, ArmorRow>();
             var resistance = new Dictionary<DamageType, ResistancePair>();
@@ -529,9 +544,9 @@ namespace ACE.Server.CombatSimulator
             // melee one, and SwingsToKill divides by it. See DefenderProfile.DefenseSkills.
             var defenseSkills = new Dictionary<CombatType, uint>
             {
-                { CombatType.Melee, player.GetEffectiveDefenseSkill(CombatType.Melee) },
-                { CombatType.Missile, player.GetEffectiveDefenseSkill(CombatType.Missile) },
-                { CombatType.Magic, player.GetEffectiveMagicDefense() },
+                { CombatType.Melee, player.GetEffectiveDefenseSkill(CombatType.Melee, stance) },
+                { CombatType.Missile, player.GetEffectiveDefenseSkill(CombatType.Missile, stance) },
+                { CombatType.Magic, player.GetEffectiveMagicDefense(stance) },
             };
 
             // per combat type, because GetSpecDefenseBonus (Creature_Rating.cs:285-307) is folded
@@ -560,6 +575,7 @@ namespace ACE.Server.CombatSimulator
                 Shield = shield,
                 DamageResistRatingBase = damageResistRatingBase,
                 BattleHardenedMultiplier = player.GetBattleHardenedDamageResistMod(),
+                RearGuardArmorLevel = player.GetCloakRearGuardArmorLevel(pvp: false),
             };
         }
 
@@ -740,7 +756,7 @@ namespace ACE.Server.CombatSimulator
         ///    0, and CalcArmorMod(0) is 1.0 (SkillFormula.CalcArmorMod), which is the engine's
         ///    early return. Since 2026-10-25 the equipped-shield row ALSO carries the Defensive
         ///    Weapon level, added after the Shield-skill cap exactly as GetShieldMod adds it
-        ///    (DefensiveWeaponMath.AfterShieldCap). The ward shield is NOT mirrored on either
+        ///    (DefensiveWeaponMath.AfterShieldCap). The ward shield (or the Mana Barrier casting shield) is NOT mirrored on either
         ///    path: it is a transient pool, not gear.
         /// 3. ignoreMagicArmor is an attacker term (:730), so it is a KEY axis rather than
         ///    something resolvable here: the caller stores one row per value of it. Both the
@@ -797,7 +813,7 @@ namespace ACE.Server.CombatSimulator
                 shieldSkill.AdvancementClass == SkillAdvancementClass.Specialized);
 
             // Defensive Weapon joins AFTER the Shield-skill cap, mirroring GetShieldMod's equipped-shield path
-            // (DefensiveWeaponMath.AfterShieldCap). The ward term is passed as 0: a ward is a transient pool,
+            // (DefensiveWeaponMath.AfterShieldCap). The ward term (and the Mana Barrier casting shield) is passed as 0: a ward is a transient pool,
             // not gear, and the simulator profiles gear.
             return new ShieldRow((float)DefensiveWeaponMath.AfterShieldCap(cappedShieldLevel, defensiveWeapon, 0.0));
         }

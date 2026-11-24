@@ -6,6 +6,8 @@ using System.Linq;
 using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Server.Entity;
+using ACE.Server.Entity.Actions;
 using ACE.Server.Managers;
 using ACE.Server.WorldEvents.Defs;
 using ACE.Server.WorldEvents.Hold;
@@ -279,6 +281,16 @@ namespace ACE.Server.WorldEvents
 
             var scene = HoldScene(protect, ring, tuning, areaPlan);
 
+            // protect.healthWisps (null = off, so Thread Defense and every other goal is untouched): each knight's wisp row, made
+            // and removed by the run's once-a-second tick through this spawner.
+            List<List<DecorDef>> wispSpots = null;
+
+            if (protect.HealthWisps != null && run != null)
+            {
+                wispSpots = ring.Select(r => WorldEventHoldRules.HealthWispOffsets(r, protect.HealthWisps)).ToList();
+                run.AttachHealthWispHost(new HealthWispHost(this, evt, new Position(centre)));
+            }
+
             log.Info($"[WORLDEVENT] run={evt.RunId} hold knights wcids={string.Join(",", Enumerable.Range(0, ring.Count).Select(protect.WcidFor))} " +
                      $"count={ring.Count} radius={radius:F1} scene={scene.Count} participants={participants}");
 
@@ -287,12 +299,89 @@ namespace ACE.Server.WorldEvents
                 (i, creature) =>
                 {
                     PrepareKnight(evt, creature, protect, tuning, participants);
+
+                    if (wispSpots != null && i < wispSpots.Count)
+                        run.RegisterHealthWisps(creature, wispSpots[i]);
+
                     return null;
                 });
 
             // Queued on the same landblock queue AFTER the knights, so a prop can never take a knight's spot first.
             if (scene.Count > 0)
                 SpawnDecor(evt, scene, centre, holdScene: true);
+        }
+
+        /// <summary>The landblock that owns <paramref name="positionLongId"/> (pure): null when the run does not hold it or none of the loaded blocks matches.</summary>
+        internal static T PickOwningLandblock<T>(IEnumerable<T> loaded, Func<T, ulong> longId, ulong positionLongId, bool held) where T : class
+        {
+            return held ? loaded.FirstOrDefault(b => b != null && longId(b) == positionLongId) : null;
+        }
+
+        /// <summary>Creates and removes the health wisps for one run (IHoldHealthWispHost): scene decor, placed and cleaned up like the rest.</summary>
+        private sealed class HealthWispHost : IHoldHealthWispHost
+        {
+            private readonly WorldEventSpawner spawner;
+            private readonly WorldEvent evt;
+            private readonly Position centre;
+
+            public HealthWispHost(WorldEventSpawner spawner, WorldEvent evt, Position centre)
+            {
+                this.spawner = spawner;
+                this.evt = evt;
+                this.centre = centre;
+            }
+
+            public void Create(DecorDef spot, Action<WorldObject> placed)
+            {
+                // Placed from the landblock that owns the spot (a row beside a block edge can cross it); one the run does not hold fails the slot.
+                var position = DecorPosition(centre, spot.Dx, spot.Dy, spot.Dz, spot.Inverted, spot.Yaw, spot.Pitch);
+                var blocks = new List<Landblock>();
+
+                if (evt.AnchorLandblock != null)
+                {
+                    blocks.Add(evt.AnchorLandblock);
+
+                    try
+                    {
+                        var adjacents = evt.AnchorLandblock.Adjacents;
+
+                        if (adjacents != null)
+                            blocks.AddRange(adjacents.Where(a => a != null));
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error($"[WORLDEVENT] run={evt.RunId} health wisp: could not read the anchor's adjacent landblocks", ex);
+                    }
+                }
+
+                var owner = PickOwningLandblock(blocks, b => b.LongId, position.InstancedLandblock, evt.IsHeldLandblock(position.InstancedLandblock));
+
+                if (owner == null)
+                {
+                    log.Warn($"[WORLDEVENT] run={evt.RunId} health wisp at {position.ToLOCString()} is on a landblock the run does not hold or has not loaded; skipped");
+                    placed(null);
+                    return;
+                }
+
+                spawner.SpawnDecor(evt, new List<DecorDef> { spot }, centre, holdScene: true, onPlaced: placed, targetBlock: owner);
+            }
+
+            public void Destroy(WorldObject wisp)
+            {
+                if (wisp == null || wisp.IsDestroyed)
+                    return;
+
+                var landblock = wisp.CurrentLandblock;
+
+                if (landblock != null)
+                    landblock.EnqueueAction(new ActionEventDelegate(() =>
+                    {
+                        if (!wisp.IsDestroyed)
+                            wisp.Destroy();
+                    }));
+                else
+                    wisp.Destroy();
+            }
         }
 
         /// <summary>A knight's tag (pure): Kind Knight, no tuning role, the run's id and view.</summary>

@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+
 using ACE.Server.Managers;
 using ACE.Server.WorldObjects;
 
@@ -50,10 +52,22 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "crimson_harvest",
             DisplayName = "Crimson Harvest",
-            Description = "Your Drain spells also strike up to 2/3/4 more creatures by rank within 8 metres of " +
-                          "the primary target (3/4/5 creatures in all). Each extra drain resolves on its own " +
-                          "and all of the healing returns to you. Grants at most one Blood Charge per cast. " +
-                          "Against monsters only.",
+            // Live text. Extra targets per rank: CrimsonHarvestAbility.cs ~76-78; radius: WorldObject_Magic.cs ~2008. The "in all"
+            // counts are in_all: the SecondaryTargetCap the cast uses, plus the primary target.
+            DescriptionTemplate = "Your Drain spells also hit more creatures within {v:class_ability_crimsonharvest_radius|num} " +
+                          "metres of your target. Each extra drain resolves on its own, and all the healing comes back to you. One " +
+                          "cast grants at most one Blood Charge.",
+            RankTailTemplate = "up to {fn:in_all|int} creatures drained",
+            // in_all is CrimsonHarvestMath.SecondaryTargetCap (the method TryCrimsonHarvest and GetReadout call) + 1 for the primary target.
+            TextFormulas = new Dictionary<string, TextFormula>
+            {
+                ["in_all"] = new TextFormula(
+                    (values, rank) => CrimsonHarvestMath.SecondaryTargetCap(values, rank) + 1,
+                    "class_ability_crimsonharvest_extra_targets_r1",
+                    "class_ability_crimsonharvest_extra_targets_r2",
+                    "class_ability_crimsonharvest_extra_targets_r3"),
+            },
+            TunableSourceFiles = new[] { "WorldObjects/WorldObject_Magic.cs", "ClassAbilities/CrimsonHarvestMath.cs" },
             MaxRank = 3,
             // Blood Mage buff pass: one rank at 3 -> three ranks at 1/1/1. Rank 3 is the old single rank's
             // power (4 extras), and existing owners are raised to rank 3 by ClassAbilityRepricing wave 1.
@@ -72,10 +86,7 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
-            var extras = CrimsonHarvestMath.SecondaryTargetCap(rank,
-                PropertyManager.GetLong("class_ability_crimsonharvest_extra_targets_r1").Item,
-                PropertyManager.GetLong("class_ability_crimsonharvest_extra_targets_r2").Item,
-                PropertyManager.GetLong("class_ability_crimsonharvest_extra_targets_r3").Item);
+            var extras = CrimsonHarvestMath.SecondaryTargetCap(ClassAbilityText.Live, rank);
 
             return new ClassAbilityReadout
             {

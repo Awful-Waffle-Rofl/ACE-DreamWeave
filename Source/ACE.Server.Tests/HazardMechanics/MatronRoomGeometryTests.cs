@@ -890,7 +890,10 @@ namespace ACE.Server.Tests.HazardMechanics
         private const uint GrateSetup = 0x02000E15;           // 1007552 Matron Drain Grate and 1007553 Matron Drain Floor (the 8.075 m ClipMap quad)
         private const int DrainPanelPhysicsState = 20;        // Ethereal, IgnoreCollisions
 
-        /// <summary>A body with the Olthoi door's setup and physics (4451: Stuck, solid, no gravity, no exact-position flag) at the live prop path's ObjScale.</summary>
+        /// <summary>
+        /// A body with the Olthoi door's setup and physics (4451: Stuck, no gravity, no exact-position flag) at the live prop path's
+        /// ObjScale, ethereal as the pit doors spawn (MatronLayout.DoorProp sets PinnacleProp.Ethereal; player report 2026-11-11).
+        /// </summary>
         private static GenericObject MakeDrainDoorBody(PinnaclePoint at, float scale)
         {
             var weenie = new Weenie
@@ -903,7 +906,7 @@ namespace ACE.Server.Tests.HazardMechanics
                 PropertiesInt = new Dictionary<PropertyInt, int> { { PropertyInt.PhysicsState, DrainDoorPhysicsState } },
                 PropertiesBool = new Dictionary<PropertyBool, bool>
                 {
-                    { PropertyBool.Stuck, true }, { PropertyBool.Ethereal, false }, { PropertyBool.GravityStatus, false },
+                    { PropertyBool.Stuck, true }, { PropertyBool.Ethereal, MatronLayout.DoorProp(MatronData.Openings[0]).Ethereal }, { PropertyBool.GravityStatus, false },
                     { PropertyBool.ReportCollisions, true },
                 },
                 PropertiesFloat = new Dictionary<PropertyFloat, double> { { PropertyFloat.UseRadius, DrainDoorUseRadius } },
@@ -1011,6 +1014,7 @@ namespace ACE.Server.Tests.HazardMechanics
                 {
                     { PropertyBool.Stuck, true }, { PropertyBool.Ethereal, false }, { PropertyBool.GravityStatus, false },
                     { PropertyBool.SpawnAtExactPosition, true },
+                    { PropertyBool.ForcePhysicsStatic, true },   // 1007551 since 2026-11-15 (MatronPlatformStaticTests pins the weenie)
                 },
                 PropertiesFloat = new Dictionary<PropertyFloat, double> { { PropertyFloat.DefaultScale, 1.0 } },
             };

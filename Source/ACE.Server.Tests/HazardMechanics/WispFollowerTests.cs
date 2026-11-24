@@ -381,6 +381,83 @@ namespace ACE.Server.Tests.HazardMechanics
             }
         }
 
+        /// <summary>
+        /// The Grael P1 wisps once the ramp has run (hold_end=0.5, follow_lag=2): the follower's settle move must ARRIVE by
+        /// the crew's hold start, like the crew's glide, so it sits still under its pillar for the whole hold. A settle
+        /// started at the hold start takes at least one 0.5 s leg, so with a 0.5 s hold it was still gliding at the burst.
+        /// </summary>
+        [TestMethod]
+        public void Director_FollowerSettleArrivesByTheHoldStart_AtTheShortestHold()
+        {
+            foreach (var walk in new[] { 0.0f, 0.5f, 1.5f })
+            {
+                var follower = new FakeHandle { Id = 99, Pos = new Vector3(0f, -30f, -51f) };
+                var (director, port, _) = WispDirectorTests.Setup("follow=1 cycles=6 move=1.5 hold=0.5 hold_floor=0 rest=0.5 burst=1 n=3 follow_lag=2 mark_dest=1", WispRules.Scatter, squad: 3, follower: follower);
+
+                // a standing target, a slow walker and a faster one: the settle point is never exactly where the follower is
+                port.Target = t => new Vector3(10f + walk * (float)t, -30f, -51f);
+
+                WispDirectorTests.Run(director, port, 0.1);
+
+                var holdStarts = port.Moves.Select(m => m.At + m.Seconds).OrderBy(h => h).ToList();
+                var followerBursts = port.Spawns.Where(sp => sp.Ok && port.Legs.Any(l => IsAt(sp.Point, l.End.X, l.End.Y))).Select(sp => sp.At).Distinct().ToList();
+
+                Assert.IsTrue(followerBursts.Count >= 4, $"walk {walk}: control, the follower burst on most beats: {followerBursts.Count}");
+
+                foreach (var burstAt in followerBursts)
+                {
+                    var holdAt = holdStarts.Where(h => h <= burstAt + 1e-9).Max();
+                    var settle = port.Legs.Where(l => l.At < burstAt - 1e-9).OrderBy(l => l.At).Last();
+                    var arrives = settle.At + settle.Seconds;
+
+                    Assert.AreEqual(0.5, burstAt - holdAt, 0.1 + 1e-9, $"walk {walk}: control, a 0.5 s hold (hold {holdAt:0.###}, burst {burstAt:0.###})");
+                    Assert.IsTrue(arrives <= burstAt + 1e-9, $"walk {walk}: the settle move issued at {settle.At:0.###} for {settle.Seconds:0.###} s is still moving at the burst {burstAt:0.###}");
+                    Assert.IsTrue(arrives <= holdAt + 1e-9, $"walk {walk}: the settle move ends at {arrives:0.###}, after the hold start {holdAt:0.###}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// The follower's pillar fires in the same tick as the step's first crew burst, outside the crew's spacing, so one
+        /// player can be in reach of both. They are one volley: every pillar that fires in a tick strikes under one shared
+        /// ledger key, so a player in reach of every pillar is hit once per firing tick, never once per pillar.
+        /// </summary>
+        [TestMethod]
+        public void Director_TheFollowerAndTheCrewsFirstBurst_AreOneVolley_OneHitPerPlayer()
+        {
+            foreach (var fire in new[] { "unison", "sequence", "random" })
+            {
+                var follower = new FakeHandle { Id = 99, Pos = new Vector3(0f, -30f, -51f) };
+                var (director, port, _) = WispDirectorTests.Setup($"follow=1 cycles=6 move=1.5 hold=0.5 hold_floor=0 rest=0.5 burst=1 n=3 follow_lag=2 fire={fire}", WispRules.Scatter, squad: 3, follower: follower);
+
+                port.Target = _ => new Vector3(20f, -30f, -51f);
+
+                // the ledger as HazardContext keeps it, for ONE player standing in reach of every pillar: one hit per key
+                var ledger = new System.Collections.Generic.HashSet<int>();
+                port.VolleyStrikeHook = (src, volley, now) => ledger.Add(volley) ? 1 : 0;
+
+                WispDirectorTests.Run(director, port, 0.1);
+
+                var followerTicks = FollowerPillars(port, 20f, -30f).Select(p => p.At).ToList();
+                var firingTicks = port.Spawns.Where(sp => sp.Ok).Select(sp => sp.At).Distinct().Count();
+
+                Assert.IsTrue(followerTicks.Count >= 3, $"{fire}: control, the follower burst on several beats: {followerTicks.Count}");
+                Assert.IsTrue(followerTicks.All(t => port.Spawns.Count(sp => sp.Ok && Math.Abs(sp.At - t) < 1e-9) >= 2),
+                    $"{fire}: control, every follower pillar fired in the same tick as at least one crew pillar");
+                Assert.IsTrue(port.Hosts.Count > firingTicks, $"{fire}: control, more pillars ({port.Hosts.Count}) than firing ticks ({firingTicks})");
+
+                Assert.AreEqual(firingTicks, director.Hits, $"{fire}: one hit per firing tick for a player in reach of every pillar, not one per pillar ({port.Hosts.Count})");
+
+                // and the key is per tick: same tick, same key; different ticks, different keys
+                // a host's spawn tick is its Until less the 1 s burst (FakePort.SpawnPillar), rounded to the 0.1 s tick
+                var keyByTick = port.Strikes.Select((st, i) => (Tick: Math.Round(st.Source.Until - 1.0, 6), Volley: port.StrikeVolleys[i]))
+                    .Distinct().ToList();
+
+                Assert.AreEqual(keyByTick.Select(k => k.Tick).Distinct().Count(), keyByTick.Count, $"{fire}: one volley key per firing tick");
+                Assert.AreEqual(keyByTick.Count, keyByTick.Select(k => k.Volley).Distinct().Count(), $"{fire}: no key shared across ticks");
+            }
+        }
+
         [TestMethod]
         public void Director_FollowerBurstUsesStrikeHelper_AndPlaceWisp()
         {
@@ -557,6 +634,231 @@ namespace ACE.Server.Tests.HazardMechanics
             WispDirectorTests.Run(director, port, 0.1);
 
             Assert.AreEqual(0, port.Legs.Count);
+        }
+
+        // ---- follow_target=random ------------------------------------------------------------------------------------
+
+        private static readonly Vector3[] Crowd =
+        {
+            new Vector3(20f, -30f, -51f), new Vector3(30f, -30f, -51f), new Vector3(40f, -30f, -51f), new Vector3(50f, -30f, -51f),
+        };
+
+        private static System.Collections.Generic.IReadOnlyList<(Vector3 Position, uint Id)> CrowdAt(double _)
+            => Crowd.Select((p, i) => (p, (uint)(i + 1))).ToList();
+
+        /// <summary>Which crowd member (1-based id) a follower leg ends at.</summary>
+        private static uint WhoIsAt(Vector3 end)
+            => (uint)(Array.IndexOf(Crowd, Crowd.OrderBy(c => Math.Abs(c.X - end.X)).First()) + 1);
+
+        private static System.Collections.Generic.List<uint> TargetPerCycle(WispDirectorTests.FakePort port)
+        {
+            var starts = port.Moves.Select(m => m.At).OrderBy(a => a).ToList();
+            var perCycle = new System.Collections.Generic.List<uint>();
+
+            for (var i = 0; i < starts.Count; i++)
+            {
+                var until = i + 1 < starts.Count ? starts[i + 1] : double.PositiveInfinity;
+                var who = port.Legs.Where(l => l.At >= starts[i] - 1e-9 && l.At < until - 1e-9).Select(l => WhoIsAt(l.End)).Distinct().ToList();
+
+                Assert.IsTrue(who.Count <= 1, $"cycle {i + 1}: the follower trails ONE player for the whole cycle, saw [{string.Join(",", who)}]");
+
+                if (who.Count == 1)
+                    perCycle.Add(who[0]);
+            }
+
+            return perCycle;
+        }
+
+        private const string RandomArgs = "follow=1 follow_target=random cycles=10 move=1 hold=1.5 burst=1 rest=0.5 n=3 follow_lag=2";
+
+        [TestMethod]
+        public void Director_FollowTargetRandom_PicksDifferentPlayersAcrossCycles_ReproduciblyUnderTheSeed()
+        {
+            System.Collections.Generic.List<uint> Once()
+            {
+                var follower = new FakeHandle { Id = 99, Pos = new Vector3(0f, -30f, -51f) };
+                var (director, port, _) = WispDirectorTests.Setup(RandomArgs, WispRules.Scatter, squad: 3, follower: follower);
+
+                port.Candidates = CrowdAt;
+                port.Target = _ => Crowd[0];
+
+                WispDirectorTests.Run(director, port, 0.1);
+
+                Assert.AreEqual(HazardOutcome.Completed, port.Outcome);
+                return TargetPerCycle(port);
+            }
+
+            var first = Once();
+
+            Assert.IsTrue(first.Count >= 8, "a target in nearly every cycle: " + first.Count);
+            Assert.IsTrue(first.Distinct().Count() >= 3, $"4 players, 10 cycles: at least 3 different targets, got [{string.Join(",", first)}]");
+            Assert.IsTrue(first.Zip(first.Skip(1), (a, b) => a != b).Any(x => x), "the target changes between cycles, not just once");
+            CollectionAssert.AreEqual(first, Once(), "the seeded rng makes the picks reproducible");
+        }
+
+        [TestMethod]
+        public void Director_FollowTargetRandom_TheNewTargetGetsTheFullLagTelegraph()
+        {
+            // lag 3 s is longer than move + hold (2.5 s): a target picked at the cycle's first glide has not been followed
+            // for a full lag before the beat's burst, so that beat is skipped; every cycle re-picks, so the follower never bursts.
+            // first, on the same args, bursts from the second cycle on (the control).
+            const string tail = " cycles=5 move=1 hold=1.5 burst=1 rest=0.5 n=3 follow_lag=3";
+            var crew = 5 * 3;
+
+            var followerA = new FakeHandle { Id = 99, Pos = new Vector3(0f, -30f, -51f) };
+            var (dRandom, pRandom, _) = WispDirectorTests.Setup("follow=1 follow_target=random" + tail, WispRules.Scatter, squad: 3, follower: followerA);
+            pRandom.Candidates = CrowdAt;
+            pRandom.Target = _ => Crowd[0];
+            WispDirectorTests.Run(dRandom, pRandom, 0.1);
+
+            var followerB = new FakeHandle { Id = 99, Pos = new Vector3(0f, -30f, -51f) };
+            var (dFirst, pFirst, _) = WispDirectorTests.Setup("follow=1 follow_target=first" + tail, WispRules.Scatter, squad: 3, follower: followerB);
+            pFirst.Candidates = CrowdAt;
+            pFirst.Target = _ => Crowd[0];
+            WispDirectorTests.Run(dFirst, pFirst, 0.1);
+
+            Assert.IsTrue(pFirst.Hosts.Count > crew, $"control: first keeps one session and bursts on later beats ({pFirst.Hosts.Count} pillars vs {crew} crew)");
+            Assert.AreEqual(crew, pRandom.Hosts.Count, "random: every cycle's new target is warned for the full lag first, so no follower pillar fires");
+        }
+
+        [TestMethod]
+        public void Director_FollowTargetRandom_ATargetThatLeavesTheRegionIsRepickedMidCycle()
+        {
+            var follower = new FakeHandle { Id = 99, Pos = new Vector3(0f, -30f, -51f) };
+            var (director, port, _) = WispDirectorTests.Setup(RandomArgs, WispRules.Scatter, squad: 3, follower: follower);
+            var late = new Vector3(45f, -30f, -51f);
+
+            // everyone leaves at 6.0 s (cycle 2 runs from 4.7 s to about 8.8 s) and one newcomer, id 9, stands elsewhere
+            port.Candidates = t => t < 6.0
+                ? CrowdAt(t)
+                : new System.Collections.Generic.List<(Vector3, uint)> { (late, 9u) };
+            port.Target = _ => Crowd[0];
+
+            WispDirectorTests.Run(director, port, 0.1);
+
+            Assert.IsFalse(port.Moves.Any(m => m.At > 5.85 && m.At < 6.3), "control: 6.0 s is not a cycle boundary");
+
+            var before = port.Legs.Where(l => l.At >= 4.7 && l.At < 6.0).Select(l => WhoIsAt(l.End)).Distinct().ToList();
+            var after = port.Legs.Where(l => l.At >= 6.0 && l.At < 8.0).ToList();
+
+            Assert.AreEqual(1, before.Count, "control: one target from the cycle's pick until the others left");
+            Assert.IsTrue(after.Count > 0, "the follower carries on after the loss");
+            Assert.IsTrue(after.All(l => Math.Abs(l.End.X - late.X) < 1e-3), "every leg after the loss heads for the new target, never the old one");
+        }
+
+        [TestMethod]
+        public void Director_FollowTargetFirst_IsExactlyTheDefault_AndNeverDrawsFromTheRng()
+        {
+            const string baseArgs = "follow=1 cycles=4 move=1 hold=1.5 burst=1 rest=0.5 n=3 follow_lag=2";
+
+            (string Trace, int Next) Run(string args)
+            {
+                var follower = new FakeHandle { Id = 99, Pos = new Vector3(0f, -30f, -51f) };
+                var (director, port, _) = WispDirectorTests.Setup(args, WispRules.Scatter, squad: 3, follower: follower);
+
+                // many players, the first of them moving: a random pick would show; first must still follow Target/TargetId only
+                port.Candidates = CrowdAt;
+                port.Target = t => new Vector3(20f + (float)t, -30f, -51f);
+                port.TargetId = _ => 1u;
+
+                WispDirectorTests.Run(director, port, 0.1);
+
+                return (WispDirectorLiveCountTests.Trace(port), port.Rng.Next());
+            }
+
+            var omitted = Run(baseArgs);
+            var explicitFirst = Run(baseArgs + " follow_target=first");
+
+            Assert.AreEqual(omitted.Trace, explicitFirst.Trace, "explicit first == omitted, call for call");
+            Assert.AreEqual(omitted.Next, explicitFirst.Next, "and the rng stream is where it was: first never draws");
+            Assert.IsTrue(omitted.Trace.Contains("leg t="), "control: the follower did fly");
+
+            // the stream a random run leaves behind differs: it drew one pick per cycle
+            var drawn = Run(baseArgs + " follow_target=random");
+            Assert.AreNotEqual(omitted.Next, drawn.Next, "control: random does consume the rng");
+        }
+
+        [TestMethod]
+        public void Director_FollowTargetRandom_TargetLossOnTheCycleStartTick_KeepsTheNewCyclesBeat()
+        {
+            // at the cycle 2 first-glide tick (4.7 s) every old candidate is gone and id 9 stands at x 45: the pick is both
+            // "new cycle" and "target left". The new cycle's beat must survive (lag 2 <= move + hold, so a fresh target still bursts)
+            var follower = new FakeHandle { Id = 99, Pos = new Vector3(0f, -30f, -51f) };
+            var (director, port, _) = WispDirectorTests.Setup(RandomArgs, WispRules.Scatter, squad: 3, follower: follower);
+            var late = new Vector3(45f, -30f, -51f);
+
+            port.Candidates = t => t < 4.65 ? CrowdAt(t) : new System.Collections.Generic.List<(Vector3, uint)> { (late, 9u) };
+            port.Target = _ => Crowd[0];
+
+            WispDirectorTests.Run(director, port, 0.1);
+
+            var cycle2 = port.Moves.Select(m => m.At).Single(a => a > 4.65 && a < 4.75);
+            var burst = FollowerPillars(port, 45f, -30f).Where(p => p.At >= cycle2 && p.At < cycle2 + 4.0).ToList();
+
+            Assert.AreEqual(1, burst.Count, "the new target is warned a full lag (2 s of the 2.5 s move + hold) and bursts on cycle 2's beat");
+            Assert.IsTrue(burst[0].At - cycle2 >= 2.0 - 1e-9, "never before a full follow_lag after the pick: " + (burst[0].At - cycle2));
+        }
+
+        [TestMethod]
+        public void Director_FollowTargetRandom_NobodyInTheRegion_IdlesWithoutThrowing_ThenPicksWhenSomeoneAppears()
+        {
+            var follower = new FakeHandle { Id = 99, Pos = new Vector3(0f, -30f, -51f) };
+            var (director, port, _) = WispDirectorTests.Setup(RandomArgs, WispRules.Scatter, squad: 3, follower: follower);
+
+            port.Candidates = t => t < 6.0 ? new System.Collections.Generic.List<(Vector3, uint)>() : new System.Collections.Generic.List<(Vector3, uint)> { (Crowd[1], 2u) };
+            port.Target = _ => Crowd[1];
+
+            WispDirectorTests.Run(director, port, 0.1);
+
+            Assert.AreEqual(HazardOutcome.Completed, port.Outcome);
+            Assert.IsFalse(port.Legs.Any(l => l.At < 6.0), "an empty region never moves the follower");
+            Assert.IsFalse(FollowerPillars(port, Crowd[1].X, -30f).Any(p => p.At < 6.0), "and it never bursts");
+            Assert.IsTrue(port.Legs.Any(l => l.At >= 6.0 && Math.Abs(l.End.X - Crowd[1].X) < 1e-3), "it picks the newcomer");
+            Assert.IsTrue(FollowerPillars(port, Crowd[1].X, -30f).Count > 0, "and bursts on the newcomer on later beats");
+        }
+
+        [TestMethod]
+        public void Director_FollowTargetRandom_OnePlayer_RedrawsEveryCycle_SoABeatUnderOneLagIsSkipped()
+        {
+            // pinned, deliberate: even the only player is "freshly picked" at each cycle's first glide, so with
+            // follow_lag 3 > move + hold 2.5 the follower never bursts, and with lag 2 it bursts once per cycle
+            System.Collections.Generic.List<(double At, Vector3 Point)> Bursts(string lag)
+            {
+                var follower = new FakeHandle { Id = 99, Pos = new Vector3(0f, -30f, -51f) };
+                var (director, port, _) = WispDirectorTests.Setup("follow=1 follow_target=random cycles=4 move=1 hold=1.5 burst=1 rest=0.5 n=3 follow_lag=" + lag, WispRules.Scatter, squad: 3, follower: follower);
+
+                port.Candidates = _ => new System.Collections.Generic.List<(Vector3, uint)> { (Crowd[0], 1u) };
+                port.Target = _ => Crowd[0];
+
+                WispDirectorTests.Run(director, port, 0.1);
+
+                Assert.AreEqual(HazardOutcome.Completed, port.Outcome);
+                return FollowerPillars(port, Crowd[0].X, -30f);
+            }
+
+            Assert.AreEqual(0, Bursts("3").Count, "lag 3: the first step's beat of every cycle is skipped");
+            Assert.AreEqual(4, Bursts("2").Count, "lag 2: one follower burst per cycle (control)");
+        }
+
+        [TestMethod]
+        public void Director_FollowTargetRandom_TargetLeavesAndReturns_IdlesThenResumes()
+        {
+            var follower = new FakeHandle { Id = 99, Pos = new Vector3(0f, -30f, -51f) };
+            var (director, port, _) = WispDirectorTests.Setup(RandomArgs, WispRules.Scatter, squad: 3, follower: follower);
+
+            // the only player is away from 6.0 s to 9.0 s (cycle 2 runs 4.7 s to about 8.8 s, so the absence is mid-cycle)
+            port.Candidates = t => t >= 6.0 && t < 9.0
+                ? new System.Collections.Generic.List<(Vector3, uint)>()
+                : new System.Collections.Generic.List<(Vector3, uint)> { (Crowd[2], 3u) };
+            port.Target = _ => Crowd[2];
+
+            WispDirectorTests.Run(director, port, 0.1);
+
+            Assert.AreEqual(HazardOutcome.Completed, port.Outcome);
+            Assert.IsTrue(port.Legs.Any(l => l.At < 6.0), "control: it trailed before the absence");
+            Assert.IsFalse(port.Legs.Any(l => l.At >= 6.0 && l.At < 9.0 - 1e-9), "no legs while nobody is in the region");
+            Assert.IsFalse(FollowerPillars(port, Crowd[2].X, -30f).Any(p => p.At >= 6.0 && p.At < 9.0), "and no bursts");
+            Assert.IsTrue(port.Legs.Any(l => l.At >= 9.0 - 1e-9 && Math.Abs(l.End.X - Crowd[2].X) < 1e-3), "it resumes on the returning player");
         }
     }
 }

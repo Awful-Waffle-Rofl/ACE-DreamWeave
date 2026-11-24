@@ -64,5 +64,33 @@ namespace ACE.Server.WorldEvents.Defs
 
         [JsonPropertyName("members")]
         public List<SpeciesMemberDef> Members { get; set; } = new List<SpeciesMemberDef>();
+
+        public const double MinStretchOverscale = 1.0, MaxStretchOverscale = 4.0;
+
+        /// <summary>Family-stretch opt-out: false excludes this table's family from stretching. Absent means it stretches.</summary>
+        [JsonPropertyName("stretch")]
+        public bool? Stretch { get; set; }
+
+        /// <summary>Health and damage (and XP) multiplier for stretched members, valid in [1, 4]. Absent means 1.0.</summary>
+        [JsonPropertyName("stretchOverscale")]
+        public double? StretchOverscale { get; set; }
+
+        /// <summary>
+        /// Draw opt-out: false removes this table from every family draw - Threads (DungeonRosterSelector.IsEligible, family
+        /// stretch) and World Events (the catalog merge and the family registration) - while the table stays in the roster for
+        /// band statistics, so the band standard, health median and authored-top pivot do not move. Absent means drawable.
+        /// Carried across regeneration by tools/we-species-tables/generate_species_tables.py (CURATED_KEYS).
+        /// </summary>
+        [JsonPropertyName("enabled")]
+        public bool? Enabled { get; set; }
+
+        [JsonIgnore]
+        public bool Drawable => Enabled != false;
+
+        [JsonIgnore]
+        public bool Stretches => Stretch != false;
+
+        [JsonIgnore]
+        public double Overscale => StretchOverscale ?? 1.0;
     }
 }

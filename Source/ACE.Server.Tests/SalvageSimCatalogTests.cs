@@ -168,6 +168,40 @@ namespace ACE.Server.Tests
             CollectionAssert.AreEqual(live, rows);
         }
 
+        [TestMethod]
+        public void SalvageSimCatalog_ManaBarrierIsMachineryLinkedToManabarrier()
+        {
+            var row = BuildCatalog(withProvenance: false)["equipmentMods"].AsArray().Single(r => (string)r["id"] == EquipmentModId.ManaBarrier.ToString());
+
+            Assert.IsFalse((bool)row["standalone"]);
+            Assert.AreEqual(ACE.Server.ClassAbilities.ClassAbilityRegistry.Abilities[EquipmentModRegistry.Get(EquipmentModId.ManaBarrier).LinkedAbility].Name, (string)row["linkedAbility"]);
+            Assert.AreEqual("manabarrier", ((string)row["linkedAbility"]).ToLowerInvariant());
+            Assert.IsFalse(string.IsNullOrWhiteSpace((string)row["linkedAbilityName"]));
+        }
+
+        [TestMethod]
+        public void LinkedAbilityName_FallsBackToTheModNameForAnUnregisteredAbility()
+        {
+            var unregistered = new EquipmentModDefinition { DisplayName = "Orphan Mod", LinkedAbility = (ACE.Server.ClassAbilities.ClassAbilityId)9999, Standalone = false };
+
+            Assert.IsFalse(ACE.Server.ClassAbilities.ClassAbilityRegistry.Abilities.ContainsKey(unregistered.LinkedAbility));
+            Assert.AreEqual("Orphan Mod", EquipmentModDisplay.LinkedAbilityName(unregistered));
+            Assert.AreEqual("Requires Orphan Mod trained", EquipmentModDisplay.AbilityRequirement(unregistered));
+
+            var registered = EquipmentModRegistry.Get(EquipmentModId.ManaBarrier);
+            Assert.AreEqual("Mana Barrier", EquipmentModDisplay.LinkedAbilityName(registered));
+        }
+
+        [TestMethod]
+        public void SalvageSimCatalog_StandaloneCountIs15_MachineryIs33()
+        {
+            var rows = BuildCatalog(withProvenance: false)["equipmentMods"].AsArray();
+
+            Assert.AreEqual(48, rows.Count);
+            Assert.AreEqual(15, rows.Count(r => (bool)r["standalone"]));
+            Assert.AreEqual(33, rows.Count(r => !(bool)r["standalone"]));
+        }
+
         // ---------------------------------------------------------------------------------------------
         // catalog construction
         // ---------------------------------------------------------------------------------------------
@@ -321,6 +355,9 @@ namespace ACE.Server.Tests
 
             foreach (var mod in EquipmentModRegistry.AllMods)
             {
+                // TryGetValue, never the indexer: a mod can link an unregistered or retired id (EquipmentModDisplay.AbilityRequirement).
+                var registered = ACE.Server.ClassAbilities.ClassAbilityRegistry.Abilities.TryGetValue(mod.LinkedAbility, out var linked);
+
                 array.Add(new JsonObject
                 {
                     ["id"] = mod.Id.ToString(),
@@ -329,6 +366,8 @@ namespace ACE.Server.Tests
                     ["minPotency"] = mod.MinPotency,
                     ["stackCap"] = mod.StackCap,
                     ["standalone"] = mod.Standalone,
+                    ["linkedAbility"] = registered ? linked.Name : null,
+                    ["linkedAbilityName"] = EquipmentModDisplay.LinkedAbilityName(mod),
                     ["hookKind"] = mod.HookKind.ToString(),
                     ["displayFormat"] = mod.DisplayFormat,
                     ["displayScale"] = mod.DisplayScale,

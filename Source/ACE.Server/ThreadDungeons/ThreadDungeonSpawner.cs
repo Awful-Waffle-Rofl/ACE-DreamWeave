@@ -17,6 +17,7 @@ using ACE.Server.Managers;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.ThreadDungeons.Defs;
 using ACE.Server.WorldEvents;
+using ACE.Server.WorldEvents.Defs;
 using ACE.Server.WorldObjects;
 
 using log4net;
@@ -141,94 +142,12 @@ namespace ACE.Server.ThreadDungeons
 
             try
             {
-                var limits = ReadLimits(run.Group);
-                weakPointOn = limits.WeakPoint && limits.WeakPointArmorCut > 0;
-
-                var fitsDungeon = ResolveFitPredicate(run.Dungeon, out var fitKey);
-
-                // The population-plan memo (ThreadPlanCache), read on the world thread with every other dial and
-                // with the EXPLICIT-FALLBACK GetBool(key, default) form, because it is a default-TRUE switch:
-                // GetBool's own fallback `false` is returned only before PropertyManager.Initialize pre-seeds the
-                // defaults, or for a key missing from DefaultBooleanProperties, and the explicit default keeps
-                // those cases reading as shipped. Same reasoning as dynamic_dungeons_fit_filter above.
-                //
-                // NULL when the switch is off, which the builder reads as "compute everything" - its pre-cache
-                // path, byte for byte.
-                // The archetype classifier reads the POST-strip spell book, so the strip's two dials are read once here
-                // and key the cache's archetype maps (a changed dial invalidates them).
-                var spellStrip = SpellStripConfig.FromPropertyManager();
-                Func<uint, DungeonStatProfile> liveArchetypeProfileOf = wcid => LiveArchetypeProfileOf(wcid, spellStrip);
-
-                // The damage ceiling's per-hit read carries the archetype uplift's spell-output inputs (the final book's projectile
-                // mean per tier, after this same strip), so it is read with the same dials; the memo drops it with the archetype
-                // maps when a strip dial changes.
-                Func<uint, CreaturePerHit> livePerHitOf = wcid => LivePerHitOf(wcid, spellStrip);
-
-                // The strip key only matters to the archetype maps, so it is passed only when something reads them - the
-                // archetype uplift, or the archetype-weighted family draw (dynamic_dungeons_family_archetype_weighting,
-                // which classifies with the same maps whether or not the uplift is on): with all of them off, a changed
-                // strip dial must not invalidate the cache (code review 2026-10-23).
-                var archetypeUpliftOn = PropertyManager.GetBool("dynamic_dungeons_archetype_uplift", DungeonPopulationLimits.DefaultArchetypeUplift).Item;
-
-                // The creature abilities read the same post-strip archetype profiles (the budget setter's MagicShareOf
-                // weighting), so the strip key also matters while they are on (code review 2026-10-26 F3).
-                var creatureAbilitiesOn = PropertyManager.GetBool("dynamic_dungeons_creature_abilities", CreatureAbilitySettings.DefaultEnabled).Item;
-
-                var memo = ThreadPlanCache.ForRun(
-                    PropertyManager.GetBool("dynamic_dungeons_plan_cache", ThreadPlanCache.DefaultPlanCacheEnabled).Item,
-                    fitKey, LiveLevelOf, LiveHealthOf, LiveProfileOf, liveArchetypeProfileOf,
-                    // Either reader keys the maps: the abilities' cast-share weighting (StripKeyFor) or the archetype-weighted
-                    // family draw (ArchetypeMapsKey); both return the strip key or null, so the first non-null wins.
-                    StripKeyFor(archetypeUpliftOn, creatureAbilitiesOn, spellStrip) ?? ArchetypeMapsKey(archetypeUpliftOn, limits.FamilyArchetypeWeighting, spellStrip),
-                    livePerHitOf);
-
-                // The three live weenie delegates, memoised per wcid when the cache is on. Each memoised form
-                // returns exactly what its inner delegate returned for that wcid, so swapping them cannot move
-                // a single roster decision - it only stops the same weenie being re-read a few thousand times
-                // across one build's band ladders.
-                Func<uint, int> levelOf = LiveLevelOf;
-                Func<uint, uint> healthOf = LiveHealthOf;
-                Func<uint, DungeonStatProfile> profileOf = LiveProfileOf;
-
-                // The archetype uplift's profile (with ArchetypeFacts). Invoked only with dynamic_dungeons_archetype_uplift on,
-                // by a plan that tagged an uplifted non-boss entry, or by the damage ceiling's baseline when the gem level's
-                // spawn pool holds a member the band widening reaches (it predicts that member's uplifted damage).
-                Func<uint, DungeonStatProfile> archetypeProfileOf = liveArchetypeProfileOf;
-
-                // The damage ceiling's per-hit read (DamageCeilingStandard). Threads only: speed courses and the offline
-                // harness build without it, which leaves the plan's median 0 and the ceiling a no-op for them.
-                Func<uint, CreaturePerHit> perHitOf = livePerHitOf;
-
-                if (memo != null)
-                {
-                    levelOf = memo.LevelOf;
-                    healthOf = memo.HealthOf;
-                    profileOf = memo.ProfileOf;
-                    archetypeProfileOf = memo.ArchetypeProfileOf;
-                    perHitOf = memo.PerHitOf;
-                }
-
-                var planWatch = System.Diagnostics.Stopwatch.StartNew();
-
-                // Open World Threads (R6): an outdoor site's interior points carry maxCollisionHeight, so its point
-                // assignment needs each creature's movement height - the SAME measurement the dungeon fit filter uses.
-                plan = DungeonPopulationBuilder.Build(run.Spec, run.Dungeon, ThreadDungeonManager.Store,
-                    WorldEventHooks.Store.SpeciesTables, levelOf, healthOf, limits, new Random(run.Spec.Seed), profileOf,
-                    fitsDungeon, memo, run.Dungeon?.IsOutdoor == true ? LiveMovementHeightOf : (Func<uint, float>)null, archetypeProfileOf, perHitOf);
-
-                // A median of 0 switches the damage ceiling off without a word. With the switch on and a per-hit read that
-                // means the spawn pool read nothing (a cold world cache hands back empty weenies), a fault worth a warning.
-                if (limits.DamageCeiling && perHitOf != null && !(plan.PerHitMedian > 0))
-                    log.Warn($"[DYNDUNGEON] {run} damage ceiling: the per-hit median at level {run.Spec.Level} is 0; damage is NOT capped this run");
-
-                // Group creature abilities (DAMAGE-CEILING-PLAN.md step 6): ONE selection for the run's family, budgeted by
-                // the group rating the ceiling withholds from its hardest hitter. Resolved here, once, off the plan rng.
-                plan.CreatureAbilities = ResolveCreatureAbilities(plan, perHitOf, archetypeProfileOf, limits.UpliftAttributes, run.Spec.Seed);
+                plan = BuildLivePlan(run.Spec, run.Dungeon, run.Group, LivePlanSources.Live, () => run.ToString(), out var stats);
+                weakPointOn = stats.WeakPointOn;
 
                 // ace.threads.plan.duration and the run summary's planMs. Build runs on the world thread.
-                planWatch.Stop();
-                ServerMetrics.RecordThreadsPlan(planWatch.Elapsed.TotalMilliseconds, memo?.Hits ?? 0, memo?.Lookups ?? 0);
-                run.Perf.RecordPlan(planWatch.ElapsedMilliseconds, plan.EffectiveBandLow, memo?.Hits ?? 0, memo?.Lookups ?? 0);
+                ServerMetrics.RecordThreadsPlan(stats.ElapsedTotalMs, stats.MemoHits, stats.MemoLookups);
+                run.Perf.RecordPlan(stats.ElapsedMs, plan.EffectiveBandLow, stats.MemoHits, stats.MemoLookups);
             }
             catch (Exception ex)
             {
@@ -274,7 +193,7 @@ namespace ACE.Server.ThreadDungeons
             if (plan.BossNoCandidate)
                 run.RecordPlacement(DungeonRunTelemetry.Phases.Plan, DungeonRunTelemetry.Reasons.NoCandidate, 0, DungeonRole.Boss);
 
-            log.Info($"[DYNDUNGEON] {run} plan: family={plan.FamilyId ?? "none"} weak={WeakPointLabel(plan.WeakPoint)} " +
+            log.Info($"[DYNDUNGEON] {run} plan: family={plan.FamilyId ?? "none"} {StretchLogSegment(plan)} weak={WeakPointLabel(plan.WeakPoint)} " +
                      $"ceiling={plan.PerHitMedian:0.#} n{plan.PerHitSample} x{plan.DamageCeilingCap:0.##}@{plan.DamageCeilingTop:0.##} " +
                      $"entries={plan.Entries.Count} boss={plan.BossWcid} bossLevel={plan.BossLevel} " +
                      $"bandLow={plan.EffectiveBandLow}/natural {plan.NaturalBandLow} uplifted={plan.Entries.Count(e => e.UpliftLevel > 0)} " +
@@ -550,6 +469,20 @@ namespace ACE.Server.ThreadDungeons
                 // (ThreadDungeonRewardSpawner), and a cache built from a re-read of the tunables could pay a
                 // different rate than the creatures standing in the copy were built at.
                 run.MarkRewardProfile(plan.Profile, plan.LootQuantityMult, plan.SalvageAffinities);
+
+                // Thread encounters (Docs/Threads/ENCOUNTERS.md): the chain's locals an encounter type shapes its own
+                // creatures from, kept on the run write-once BEFORE MarkPopulated, so the encounter pass that
+                // ThreadDungeonManager.OnRunPopulated runs finds them. observedMaxNonBoss is final here (the boss is last).
+                // Guarded on its own: a failure costs the run its encounters, never its populate.
+                try
+                {
+                    run.MarkEncounterContext(new ThreadEncounterRunContext(plan, observedMaxNonBoss, outdoorPerimeter,
+                        new Dictionary<ushort, Landblock>(groupLandblocks), landblock));
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[DYNDUNGEON] {run} failed to record the encounter context; the run places no encounters", ex);
+                }
 
                 run.MarkPopulated(plan.Entries.Count, spawned, bossPlaced ? plan.BossWcid : 0u, plan.BossWcid);
                 ForgetRun(run.RunId);
@@ -1234,8 +1167,42 @@ namespace ACE.Server.ThreadDungeons
         }
 
         /// <summary>
+        /// Reads and sanitizes dynamic_dungeons_weapon_attack_curve_rate_above_400 (owner ruling 2026-11-17) through
+        /// DungeonStatCurve.SanitizeWeaponAttackRate ([0, 1]; NaN or Infinity reads as its default, 0.33), warning when the
+        /// value in use differs. Explicit fallback: GetDouble's own 0.0 is a legal value here (flat above 400).
+        /// </summary>
+        private static double ReadWeaponAttackCurveRateDial()
+        {
+            const string tunable = "dynamic_dungeons_weapon_attack_curve_rate_above_400";
+            var configured = PropertyManager.GetDouble(tunable, DungeonPopulationLimits.DefaultWeaponAttackCurveRateAbove400).Item;
+            var used = DungeonStatCurve.SanitizeWeaponAttackRate(configured);
+
+            if (double.IsNaN(configured) || Math.Abs(used - configured) > 1e-9)
+                log.Warn($"[DYNDUNGEON] {tunable} is configured as {configured} which is out of range (0 to 1); using {used} instead");
+
+            return used;
+        }
+
+        /// <summary>
+        /// Reads and sanitizes dynamic_dungeons_melee_defense_curve_rate_above_400 (owner ruling 2026-11-17) through
+        /// DungeonStatCurve.SanitizeMeleeDefenseRate ([0, 1]; NaN or Infinity reads as its default, 0.19), warning when the
+        /// value in use differs. Explicit fallback: GetDouble's own 0.0 is a legal value here (flat above 400).
+        /// </summary>
+        private static double ReadMeleeDefenseCurveRateDial()
+        {
+            const string tunable = "dynamic_dungeons_melee_defense_curve_rate_above_400";
+            var configured = PropertyManager.GetDouble(tunable, DungeonPopulationLimits.DefaultMeleeDefenseCurveRateAbove400).Item;
+            var used = DungeonStatCurve.SanitizeMeleeDefenseRate(configured);
+
+            if (double.IsNaN(configured) || Math.Abs(used - configured) > 1e-9)
+                log.Warn($"[DYNDUNGEON] {tunable} is configured as {configured} which is out of range (0 to 1); using {used} instead");
+
+            return used;
+        }
+
+        /// <summary>
         /// Reads and sanitizes dynamic_dungeons_magic_attack_skill_cap (owner ruling 2026-10-30) through
-        /// DungeonCombatNormalizer.SanitizeMagicAttackSkillCap (NaN or Infinity reads as the default 508, negative as 0 = off),
+        /// DungeonCombatNormalizer.SanitizeMagicAttackSkillCap (NaN or Infinity reads as the default 490, negative as 0 = off),
         /// warning when the value in use differs. Explicit fallback: 0 is a legal value here (off).
         /// </summary>
         private static double ReadMagicAttackSkillCapDial()
@@ -1245,6 +1212,23 @@ namespace ACE.Server.ThreadDungeons
             var used = DungeonCombatNormalizer.SanitizeMagicAttackSkillCap(configured);
 
             if (DungeonCombatNormalizer.MagicAttackSkillCapNeedsWarning(configured))
+                log.Warn($"[DYNDUNGEON] {tunable} is configured as {configured} which is out of range (0 or a positive skill value); using {used} instead");
+
+            return used;
+        }
+
+        /// <summary>
+        /// Reads and sanitizes dynamic_dungeons_missile_defense_skill_cap through
+        /// DungeonCombatNormalizer.SanitizeMissileDefenseSkillCap (NaN or Infinity reads as the default 720, negative as 0 = off),
+        /// warning when the value in use differs. Explicit fallback: 0 is a legal value here (off).
+        /// </summary>
+        private static double ReadMissileDefenseSkillCapDial()
+        {
+            const string tunable = "dynamic_dungeons_missile_defense_skill_cap";
+            var configured = PropertyManager.GetDouble(tunable, DungeonPopulationLimits.DefaultMissileDefenseSkillCap).Item;
+            var used = DungeonCombatNormalizer.SanitizeMissileDefenseSkillCap(configured);
+
+            if (DungeonCombatNormalizer.MissileDefenseSkillCapNeedsWarning(configured))
                 log.Warn($"[DYNDUNGEON] {tunable} is configured as {configured} which is out of range (0 or a positive skill value); using {used} instead");
 
             return used;
@@ -1459,7 +1443,14 @@ namespace ACE.Server.ThreadDungeons
         /// projectile mean the one FloorRatings reads (ArchetypeFactsResolver.LiveProjectileMeanOf).
         /// </summary>
         internal static CreaturePerHit LivePerHitOf(uint wcid, SpellStripConfig strip)
-            => CreaturePerHit.FromWeenie(DatabaseManager.World.GetCachedWeenie(wcid), w => DatabaseManager.World.GetCachedWeenie(w),
+            => PerHitOfWeenie(DatabaseManager.World.GetCachedWeenie(wcid), strip);
+
+        /// <summary>
+        /// <see cref="LivePerHitOf(uint, SpellStripConfig)"/> for a weenie the caller already holds (the static-scale tool's
+        /// modified template clone), with its Wield-row items resolved from the world weenie cache exactly as the live read does.
+        /// </summary>
+        internal static CreaturePerHit PerHitOfWeenie(ACE.Entity.Models.Weenie weenie, SpellStripConfig strip)
+            => CreaturePerHit.FromWeenie(weenie, w => DatabaseManager.World.GetCachedWeenie(w),
                 new PerHitSpellReader(strip, SpellProjectileCountOf, ArchetypeFactsResolver.LiveProjectileMeanOf));
 
         /// <summary>
@@ -1720,8 +1711,9 @@ namespace ACE.Server.ThreadDungeons
             int authoredLevel, int spellsRaised, int attributesRaised, bool upliftAttributes)
         {
             // The writes live in BandUplift.Apply (shared with World Events); this wrapper keeps the Threads
-            // log line. An empty or missing standard renders the "no band standard" form inside UpliftLogLine.
-            var standard = plan.BandStandard;
+            // log line. An empty or missing standard renders the "no band standard" form inside UpliftLogLine. A stretched
+            // entry is normalized to the standard at its MAPPED level (UpliftStandardFor), never the run's.
+            var standard = UpliftStandardFor(entry, plan);
             var (skillsRaised, partsScaled) = BandUplift.Apply(creature, entry.UpliftLevel, standard);
 
             // Effective-skill top-up and the defense-ceiling re-check (dynamic_dungeons_uplift_attributes): after
@@ -1783,11 +1775,105 @@ namespace ACE.Server.ThreadDungeons
         /// The archetype-uplift gate (pure, so it is unit-testable): the entry's resolved <see cref="ArchetypeUpliftInfo"/>
         /// when it was uplifted, is NOT a boss, and the plan carries archetype state (the switch was on when it was built);
         /// otherwise null, which every placement site reads as "the pre-existing uplift path".
+        /// A STRETCHED entry (Thread family stretch) resolves through <see cref="ArchetypeUpliftContext.ForAt"/> at its mapped
+        /// level, so its run-level standards are the curve's at the level it was placed at, not the run's.
         /// </summary>
         internal static ArchetypeUpliftInfo ArchetypeInfoFor(DungeonSpawnPlanEntry entry, DungeonSpawnPlan plan)
             => entry != null && plan?.ArchetypeUplift != null && entry.UpliftLevel > 0 && entry.Role != DungeonRole.Boss
-                ? plan.ArchetypeUplift.For(entry.Wcid)
+                ? (entry.Stretched ? plan.ArchetypeUplift.ForAt(entry.Wcid, entry.UpliftLevel) : plan.ArchetypeUplift.For(entry.Wcid))
                 : null;
+
+        /// <summary>
+        /// The band standard a NON-BOSS uplifted entry is normalized to (pure; Thread family stretch): a stretched entry's
+        /// standard at its MAPPED level (plan.Stretch.StandardAt(UpliftLevel)), so the family keeps its spread inside the
+        /// band; every other entry, and a stretched one the plan holds no standard for, reads plan.BandStandard exactly as
+        /// before. Every non-boss uplift site (spell tier, attribute raise, ApplyUplift) reads this, never plan.BandStandard.
+        /// </summary>
+        internal static DungeonBandStandard UpliftStandardFor(DungeonSpawnPlanEntry entry, DungeonSpawnPlan plan)
+            => (entry != null && entry.Stretched ? plan?.Stretch?.StandardAt(entry.UpliftLevel) : null) ?? plan?.BandStandard;
+
+        /// <summary>
+        /// The family overscale for one entry (pure): plan.Stretch.Overscale for a stretched entry, else 1.0. The boss is
+        /// never stretched (DungeonSpawnPlanEntry refuses it), so it always reads 1.0. A value that is not a finite number
+        /// at or above 1 reads as 1.0 (the species loader already refuses one; this keeps a bad plan from shrinking a pick).
+        /// </summary>
+        internal static double OverscaleFor(DungeonSpawnPlanEntry entry, DungeonSpawnPlan plan)
+        {
+            if (entry == null || !entry.Stretched || plan?.Stretch == null)
+                return 1.0;
+
+            var overscale = plan.Stretch.Overscale;
+
+            return double.IsNaN(overscale) || double.IsInfinity(overscale) || overscale < 1.0 ? 1.0 : overscale;
+        }
+
+        /// <summary>
+        /// The non-boss health terms (pure): the gem multiplier and the trash floor NonBossHealthTarget / NonBossHealthWrite
+        /// price a creature with. A stretched entry's floor is the higher of the trash floor and the health standard at its
+        /// mapped level (DungeonPopulationBuilder.StretchHealthFloor, the same term PoolMaxBase used), and its multiplier
+        /// carries the family overscale; every other entry gets (<paramref name="hpMult"/>, plan.TrashHealthFloor) unchanged.
+        /// </summary>
+        internal static (double HpMult, uint Floor) NonBossHealthTerms(DungeonSpawnPlanEntry entry, DungeonSpawnPlan plan, double hpMult)
+        {
+            if (plan == null)
+                return (hpMult, 0u);
+
+            if (entry == null || !entry.Stretched || plan.Stretch == null)
+                return (hpMult, plan.TrashHealthFloor);
+
+            return (hpMult * OverscaleFor(entry, plan),
+                DungeonPopulationBuilder.StretchHealthFloor(plan.TrashHealthFloor, plan.Stretch.HealthStandardAt(entry.UpliftLevel)));
+        }
+
+        /// <summary>
+        /// The XP anchor a stretched pick is priced from (pure): <paramref name="baseXp"/> x its overscale, rounded away from
+        /// zero and saturating at long.MaxValue. An entry with no overscale gets <paramref name="baseXp"/> back exactly,
+        /// never through a double. Luminance is NOT priced from this (it keeps the unscaled anchor).
+        /// </summary>
+        internal static long OverscaledBaseXp(long baseXp, DungeonSpawnPlanEntry entry, DungeonSpawnPlan plan)
+        {
+            var overscale = OverscaleFor(entry, plan);
+
+            if (overscale == 1.0)
+                return baseXp;
+
+            var scaled = Math.Round(baseXp * overscale, MidpointRounding.AwayFromZero);
+
+            // (double)long.MaxValue rounds UP to 2^63, so a value at or above it does not fit a long.
+            return scaled >= (double)long.MaxValue ? long.MaxValue : (long)scaled;
+        }
+
+        /// <summary>
+        /// The plan log line's stretch segment (pure): "stretch=no", or "stretch=yes {low}-{high} n{pool} x{overscale}" with
+        /// the mapped level range, the stretched pool's size and the overscale, invariant culture.
+        /// </summary>
+        internal static string StretchLogSegment(DungeonSpawnPlan plan)
+        {
+            var s = plan?.Stretch;
+
+            return s == null
+                ? "stretch=no"
+                : string.Create(CultureInfo.InvariantCulture, $"stretch=yes {s.MappedLow}-{s.MappedHigh} n{s.PoolCount} x{s.Overscale:0.##}");
+        }
+
+        /// <summary>
+        /// Multiplies a stretched pick's damage (body parts and wielded weapons or ammunition) by the family overscale, after
+        /// the uplift normalized it to its mapped level and BEFORE the damage ceiling (owner ruling: the ceiling still applies
+        /// to an overscaled family). Through ReachUpStamp.ScaleDamage, which CLONES the body-part collection: it is shared by
+        /// reference with the cached weenie, and an in-place write would re-tune every instance server-wide. Armour is left
+        /// alone (ratio 1.0). A no-op for every entry with no overscale, the boss included.
+        /// </summary>
+        private static void ApplyStretchOverscale(object logTag, Creature creature, DungeonSpawnPlanEntry entry, DungeonSpawnPlan plan)
+        {
+            var overscale = OverscaleFor(entry, plan);
+
+            if (!(overscale > 1.0))
+                return;
+
+            var (parts, weapons) = ReachUpStamp.ScaleDamage(creature, overscale, 1.0);
+
+            log.Debug($"[DYNDUNGEON] {logTag} wcid {entry.Wcid} stretch overscale x{overscale:0.##}: {parts} body part(s), {weapons} weapon(s) scaled");
+        }
 
         /// <summary>
         /// Scales a creature's body-part DVal and BaseArmor toward the band standard's own maxima, and
@@ -1938,7 +2024,7 @@ namespace ACE.Server.ThreadDungeons
         /// and reach-up stamp all carry; only the point moves.
         /// </summary>
         internal static DungeonSpawnPlanEntry RetryEntry(DungeonSpawnPlanEntry entry, DungeonSpawnPointDef point)
-            => new DungeonSpawnPlanEntry(entry.Wcid, entry.Role, point, entry.UpliftLevel, entry.StampLevel);
+            => new DungeonSpawnPlanEntry(entry.Wcid, entry.Role, point, entry.UpliftLevel, entry.StampLevel, entry.Stretched);
 
         /// <summary>
         /// The curated points an OUTDOOR retry may use (pure): every point clear of everything already placed by the
@@ -2001,9 +2087,13 @@ namespace ACE.Server.ThreadDungeons
         /// stamp, or null to fall back to plan.BandStandard (DungeonCreatureNormalizer.StripCombatTraits). The
         /// BOSS exclusion matches <see cref="StampCurveFor"/> (code review 2026-10-08): a stamped promoted boss
         /// was otherwise handed the higher stamp-level standard while every other boss reads the run's.
+        /// A STRETCHED entry (Thread family stretch) reads the standard at its mapped level (plan.Stretch), or null when the
+        /// plan holds none for it. Stretched entries are never stamped, so the two branches never meet.
         /// </summary>
         internal static DungeonBandStandard DefenseCapStandard(DungeonSpawnPlanEntry entry, DungeonSpawnPlan plan)
-            => entry.Role != DungeonRole.Boss && entry.StampLevel > 0 && plan.StatCurve != null ? plan.StatCurve.StandardAt(entry.StampLevel) : null;
+            => entry.Role == DungeonRole.Boss ? null
+                : entry.Stretched ? plan.Stretch?.StandardAt(entry.UpliftLevel)
+                : entry.StampLevel > 0 && plan.StatCurve != null ? plan.StatCurve.StandardAt(entry.StampLevel) : null;
 
         /// <summary>
         /// The authored max health captured for a reach-up stamp (pure): <paramref name="preStampMax"/> when the
@@ -2020,6 +2110,19 @@ namespace ACE.Server.ThreadDungeons
         /// </summary>
         internal static uint AuthoredHealthMax(uint? beforeUplift, uint? beforeStamp, uint liveMax)
             => beforeUplift ?? beforeStamp ?? liveMax;
+
+        /// <summary>
+        /// The perimeter binding for a run creature placed OUTSIDE the normal placement path (an encounter's adds, through
+        /// ThreadEncounterPlaceRequest.BindToRunPerimeter): exactly what TryPlaceOnce applies, via the same
+        /// <see cref="BindToOutdoorPerimeter"/>. A no-op when <paramref name="outdoor"/> is null (a dungeon run). Before EnterWorld.
+        /// </summary>
+        internal static void BindToRunPerimeter(Creature creature, OutdoorRunPerimeter outdoor, DungeonSpawnPointDef point)
+        {
+            if (creature == null || outdoor == null || point == null)
+                return;
+
+            BindToOutdoorPerimeter(creature, outdoor, point);
+        }
 
         /// <summary>
         /// Open World Threads R10/R13/R14, on a creature that has NOT entered the world yet: the perimeter binding the runtime
@@ -2060,14 +2163,7 @@ namespace ACE.Server.ThreadDungeons
         /// </summary>
         private static bool SnapScatteredToTerrain(Position position)
         {
-            if (position == null || position.Indoors)
-                return false;
-
-            var sortCell = ACE.Server.Physics.Common.LScape.get_landcell(position.Cell, position.Instance) as ACE.Server.Physics.Common.SortCell;
-            if (sortCell == null || sortCell.has_building())
-                return false;
-
-            if (!position.IsWalkable())
+            if (!IsOpenWalkableGround(position))
                 return false;
 
             var terrainZ = position.GetTerrainZ();
@@ -2077,6 +2173,45 @@ namespace ACE.Server.ThreadDungeons
             position.PositionZ = terrainZ + 0.05f;
             return true;
         }
+
+        /// <summary>
+        /// The first two ground refusals of <see cref="SnapScatteredToTerrain"/>: false when <paramref name="position"/> is
+        /// null or indoors, its cell holds a building, or the ground there is not walkable. Writes nothing. The caller must
+        /// only probe a landblock the run copy has loaded: the cell lookup loads a landblock on a miss.
+        /// </summary>
+        private static bool IsOpenWalkableGround(Position position)
+        {
+            if (position == null || position.Indoors)
+                return false;
+
+            var sortCell = ACE.Server.Physics.Common.LScape.get_landcell(position.Cell, position.Instance) as ACE.Server.Physics.Common.SortCell;
+            if (sortCell == null || sortCell.has_building())
+                return false;
+
+            return position.IsWalkable();
+        }
+
+        /// <summary>
+        /// The scatter's ground refusals (no building in the cell, walkable) plus a height check against
+        /// <paramref name="sourceZ"/> with the CALLER's tolerance <paramref name="maxDropZ"/>, without the z write. Used by
+        /// the outdoor encounter probe (ThreadEncounterPass), whose tolerance is tighter than the scatter's
+        /// <see cref="ScatterMaxDropZ"/>; the scatter itself keeps its own path above. <paramref name="terrainZ"/> is the
+        /// terrain height when the first two pass. Same loaded-landblock rule as <see cref="IsOpenWalkableGround"/>.
+        /// </summary>
+        internal static bool ProbeOutdoorGround(Position position, float sourceZ, float maxDropZ, out float terrainZ)
+        {
+            terrainZ = float.NaN;
+
+            if (!IsOpenWalkableGround(position))
+                return false;
+
+            terrainZ = position.GetTerrainZ();
+            return GroundWithin(terrainZ, sourceZ, maxDropZ);
+        }
+
+        /// <summary>Pure: is <paramref name="terrainZ"/> a real height within <paramref name="maxDropZ"/> of <paramref name="sourceZ"/>?</summary>
+        internal static bool GroundWithin(float terrainZ, float sourceZ, float maxDropZ)
+            => !float.IsNaN(terrainZ) && Math.Abs(terrainZ - sourceZ) <= maxDropZ;
 
         /// <summary>
         /// Reads every dynamic_dungeons_* dial the population builder consumes into a <see cref="DungeonPopulationLimits"/>.
@@ -2216,7 +2351,11 @@ namespace ACE.Server.ThreadDungeons
             defenseCurveRateAbove375: ReadDefenseCurveRateDial(),
             magicDefenseCurveRateAbove300: ReadMagicDefenseCurveRateDial(),
             damageCurveRateAbovePivot: ReadDamageCurveRateDial(),
+            weaponAttackCurveRateAbove400: ReadWeaponAttackCurveRateDial(),
+            meleeDefenseCurveRateAbove400: ReadMeleeDefenseCurveRateDial(),
+            familyStretch: PropertyManager.GetBool("dynamic_dungeons_family_stretch", DungeonPopulationLimits.DefaultFamilyStretch).Item,
             magicAttackSkillCap: ReadMagicAttackSkillCapDial(),
+            missileDefenseSkillCap: ReadMissileDefenseSkillCapDial(),
             // The archetype uplift (design steps 8-9, 2026-10-23). Ships ON with neutral ratios; the switch passes its
             // compiled default as the explicit fallback for the same reason as every switch above. The two ratios take
             // the boss band ratios' contract (ReadShippedDoubleDial): NaN, Infinity or a negative value reads as the
@@ -2244,6 +2383,162 @@ namespace ACE.Server.ThreadDungeons
             // value reads as the default, 0 is the admin's explicit "legacy family draw", above 1 reads as 1.
             familyArchetypeWeighting: ReadShippedDoubleDial("dynamic_dungeons_family_archetype_weighting", DungeonPopulationLimits.DefaultFamilyArchetypeWeighting, DungeonPopulationLimits.MaxFamilyArchetypeWeighting),
             upliftResistFloor: PropertyManager.GetBool("dynamic_dungeons_uplift_resist_floor", DungeonPopulationLimits.DefaultUpliftResistFloor).Item);
+        }
+
+        /// <summary>
+        /// The readers <see cref="BuildLivePlan"/> builds a plan from: the live weenie reads <see cref="TryPopulate"/> has
+        /// always used (<see cref="Live"/>), or fixtures in a test or an offline caller. The two spell-strip members take
+        /// the strip read inside the build and return the per-wcid reader for it, exactly as the live lambdas captured it.
+        /// <see cref="FitOf"/> resolves the dungeon's fit predicate and its memo key (<c>ResolveFitPredicate</c>
+        /// live): the live predicate reads each creature's movement height off the world cache and the dat, so a fixture
+        /// supplies its own rather than reaching the world database. Not everything is injectable: ResolveCreatureAbilities
+        /// still reads each member's ability traits off the world cache through <see cref="LiveAbilityTraitsOf"/>, which no
+        /// member here replaces, and a failure there is caught and silently yields null abilities.
+        /// </summary>
+        internal sealed record LivePlanSources(Func<uint, int> LevelOf, Func<uint, uint> HealthOf, Func<uint, DungeonStatProfile> ProfileOf,
+            Func<SpellStripConfig, Func<uint, DungeonStatProfile>> ArchetypeProfileOf, Func<SpellStripConfig, Func<uint, CreaturePerHit>> PerHitOf,
+            Func<uint, float> MovementHeightOf, ThreadDungeonStore Store, IReadOnlyDictionary<string, SpeciesTableDef> SpeciesTables,
+            Func<DungeonEntryDef, (Func<uint, bool> Fits, string Key)> FitOf)
+        {
+            /// <summary>
+            /// The live readers. A fresh instance per read, so <see cref="ThreadDungeonManager.Store"/> and the World Events
+            /// species tables are the ones loaded when the run builds, never ones captured at type init (both reload). The
+            /// store is read ONCE, and the same instance is both <see cref="Store"/> and the store FitOf resolves against, so
+            /// the fit filter and the build always agree. FitOf captures that instance, not the record: a copy made with
+            /// <c>with { Store = ... }</c> keeps the original FitOf, so a caller swapping the store must swap FitOf too.
+            /// </summary>
+            public static LivePlanSources Live
+            {
+                get
+                {
+                    var store = ThreadDungeonManager.Store;
+
+                    return new LivePlanSources(
+                        LiveLevelOf, LiveHealthOf, LiveProfileOf,
+                        strip => wcid => LiveArchetypeProfileOf(wcid, strip), strip => wcid => LivePerHitOf(wcid, strip),
+                        LiveMovementHeightOf, store, WorldEventHooks.Store.SpeciesTables,
+                        dungeon => (ResolveFitPredicate(store, dungeon, out var key), key));
+                }
+            }
+        }
+
+        /// <summary>
+        /// What <see cref="BuildLivePlan"/> measured and read on the way, for its caller's telemetry. ElapsedTotalMs and
+        /// ElapsedMs are the same stopwatch (Build, the zero-median check and ResolveCreatureAbilities, as before the
+        /// extraction); MemoHits and MemoLookups are the run's plan-cache counters (0 with the cache off).
+        /// </summary>
+        internal readonly record struct LivePlanBuildStats(DungeonPopulationLimits Limits, bool WeakPointOn, double ElapsedTotalMs, long ElapsedMs, int MemoHits, int MemoLookups);
+
+        /// <summary>
+        /// Builds a Threads run's population plan exactly as <see cref="TryPopulate"/> does: the dial reads
+        /// (<see cref="ReadLimits"/>), the fit predicate, the plan-cache memo and its delegate swap,
+        /// <see cref="DungeonPopulationBuilder.Build"/>, the zero-median warning and the group creature abilities.
+        /// Extracted unchanged from TryPopulate (Balance Trials plan A) so a caller other than a live run can build the
+        /// plan a real run would. <paramref name="logLabel"/> names the build in the zero-median warning (the run, live); it is
+        /// invoked only when that warning fires, because the live label (ThreadDungeonRun.ToString) takes the run's lock.
+        /// Does NOT catch: a throw reaches the caller, which for a live run opens the run empty.
+        ///
+        /// <paramref name="adjustLimits"/> (Allegiance Gauntlet, 2026-11-21) rewrites the limits ReadLimits produced before
+        /// anything reads them, so the adjusted value is the one the build, the memo and <see cref="LivePlanBuildStats.Limits"/>
+        /// all see. NULL, the default and every Thread caller, leaves the limits exactly as read: the build is then the
+        /// pre-parameter build byte for byte. It is an optional trailing parameter rather than a second overload so this
+        /// method keeps one body under one signature head, which the source-scan pins on it read.
+        /// </summary>
+        internal static DungeonSpawnPlan BuildLivePlan(DungeonGemSpec spec, DungeonEntryDef dungeon, GroupScaling group, LivePlanSources sources, Func<string> logLabel, out LivePlanBuildStats stats,
+            Func<DungeonPopulationLimits, DungeonPopulationLimits> adjustLimits = null)
+        {
+            var limits = ReadLimits(group);
+
+            if (adjustLimits != null)
+                limits = adjustLimits(limits);
+            var weakPointOn = limits.WeakPoint && limits.WeakPointArmorCut > 0;
+
+            var (fitsDungeon, fitKey) = sources.FitOf(dungeon);
+
+            // The population-plan memo (ThreadPlanCache), read on the world thread with every other dial and
+            // with the EXPLICIT-FALLBACK GetBool(key, default) form, because it is a default-TRUE switch:
+            // GetBool's own fallback `false` is returned only before PropertyManager.Initialize pre-seeds the
+            // defaults, or for a key missing from DefaultBooleanProperties, and the explicit default keeps
+            // those cases reading as shipped. Same reasoning as dynamic_dungeons_fit_filter above.
+            //
+            // NULL when the switch is off, which the builder reads as "compute everything" - its pre-cache
+            // path, byte for byte.
+            // The archetype classifier reads the POST-strip spell book, so the strip's two dials are read once here
+            // and key the cache's archetype maps (a changed dial invalidates them).
+            var spellStrip = SpellStripConfig.FromPropertyManager();
+            Func<uint, DungeonStatProfile> liveArchetypeProfileOf = sources.ArchetypeProfileOf(spellStrip);
+
+            // The damage ceiling's per-hit read carries the archetype uplift's spell-output inputs (the final book's projectile
+            // mean per tier, after this same strip), so it is read with the same dials; the memo drops it with the archetype
+            // maps when a strip dial changes.
+            Func<uint, CreaturePerHit> livePerHitOf = sources.PerHitOf(spellStrip);
+
+            // The strip key only matters to the archetype maps, so it is passed only when something reads them - the
+            // archetype uplift, or the archetype-weighted family draw (dynamic_dungeons_family_archetype_weighting,
+            // which classifies with the same maps whether or not the uplift is on): with all of them off, a changed
+            // strip dial must not invalidate the cache (code review 2026-10-23).
+            var archetypeUpliftOn = PropertyManager.GetBool("dynamic_dungeons_archetype_uplift", DungeonPopulationLimits.DefaultArchetypeUplift).Item;
+
+            // The creature abilities read the same post-strip archetype profiles (the budget setter's MagicShareOf
+            // weighting), so the strip key also matters while they are on (code review 2026-10-26 F3).
+            var creatureAbilitiesOn = PropertyManager.GetBool("dynamic_dungeons_creature_abilities", CreatureAbilitySettings.DefaultEnabled).Item;
+
+            var memo = ThreadPlanCache.ForRun(
+                PropertyManager.GetBool("dynamic_dungeons_plan_cache", ThreadPlanCache.DefaultPlanCacheEnabled).Item,
+                fitKey, sources.LevelOf, sources.HealthOf, sources.ProfileOf, liveArchetypeProfileOf,
+                // Either reader keys the maps: the abilities' cast-share weighting (StripKeyFor) or the archetype-weighted
+                // family draw (ArchetypeMapsKey); both return the strip key or null, so the first non-null wins.
+                StripKeyFor(archetypeUpliftOn, creatureAbilitiesOn, spellStrip) ?? ArchetypeMapsKey(archetypeUpliftOn, limits.FamilyArchetypeWeighting, spellStrip),
+                livePerHitOf);
+
+            // The three live weenie delegates, memoised per wcid when the cache is on. Each memoised form
+            // returns exactly what its inner delegate returned for that wcid, so swapping them cannot move
+            // a single roster decision - it only stops the same weenie being re-read a few thousand times
+            // across one build's band ladders.
+            Func<uint, int> levelOf = sources.LevelOf;
+            Func<uint, uint> healthOf = sources.HealthOf;
+            Func<uint, DungeonStatProfile> profileOf = sources.ProfileOf;
+
+            // The archetype uplift's profile (with ArchetypeFacts). Invoked only with dynamic_dungeons_archetype_uplift on,
+            // by a plan that tagged an uplifted non-boss entry, or by the damage ceiling's baseline when the gem level's
+            // spawn pool holds a member the band widening reaches (it predicts that member's uplifted damage).
+            Func<uint, DungeonStatProfile> archetypeProfileOf = liveArchetypeProfileOf;
+
+            // The damage ceiling's per-hit read (DamageCeilingStandard). Threads only: speed courses and the offline
+            // harness build without it, which leaves the plan's median 0 and the ceiling a no-op for them.
+            Func<uint, CreaturePerHit> perHitOf = livePerHitOf;
+
+            if (memo != null)
+            {
+                levelOf = memo.LevelOf;
+                healthOf = memo.HealthOf;
+                profileOf = memo.ProfileOf;
+                archetypeProfileOf = memo.ArchetypeProfileOf;
+                perHitOf = memo.PerHitOf;
+            }
+
+            var planWatch = System.Diagnostics.Stopwatch.StartNew();
+
+            // Open World Threads (R6): an outdoor site's interior points carry maxCollisionHeight, so its point
+            // assignment needs each creature's movement height - the SAME measurement the dungeon fit filter uses.
+            var plan = DungeonPopulationBuilder.Build(spec, dungeon, sources.Store,
+                sources.SpeciesTables, levelOf, healthOf, limits, new Random(spec.Seed), profileOf,
+                fitsDungeon, memo, dungeon?.IsOutdoor == true ? sources.MovementHeightOf : (Func<uint, float>)null, archetypeProfileOf, perHitOf);
+
+            // A median of 0 switches the damage ceiling off without a word. With the switch on and a per-hit read that
+            // means the spawn pool read nothing (a cold world cache hands back empty weenies), a fault worth a warning.
+            if (limits.DamageCeiling && perHitOf != null && !(plan.PerHitMedian > 0))
+                log.Warn($"[DYNDUNGEON] {logLabel?.Invoke()} damage ceiling: the per-hit median at level {spec.Level} is 0; damage is NOT capped this run");
+
+            // Group creature abilities (DAMAGE-CEILING-PLAN.md step 6): ONE selection for the run's family, budgeted by
+            // the group rating the ceiling withholds from its hardest hitter. Resolved here, once, off the plan rng.
+            plan.CreatureAbilities = ResolveCreatureAbilities(plan, perHitOf, archetypeProfileOf, limits.UpliftAttributes, spec.Seed);
+
+            // ace.threads.plan.duration and the run summary's planMs: the caller records these. Build runs on the world thread.
+            planWatch.Stop();
+            stats = new LivePlanBuildStats(limits, weakPointOn, planWatch.Elapsed.TotalMilliseconds, planWatch.ElapsedMilliseconds, memo?.Hits ?? 0, memo?.Lookups ?? 0);
+
+            return plan;
         }
 
         /// <summary>
@@ -2405,9 +2700,25 @@ namespace ACE.Server.ThreadDungeons
                 var capStandard = DefenseCapStandard(entry, plan);
                 var stripped = DungeonCreatureNormalizer.StripCombatTraits(creature, plan, entry.Role == DungeonRole.Boss, capStandard);
 
+                // THREADS ONLY: a Thread run's creature, or one a Thread speed course or the Allegiance Gauntlet flags (StripCasterVitalSpells).
+                // Balance Trials (no run, no flag) and World Events creatures keep their spell books. Caster-vital-scaled life projectiles (Martyr's Hecatomb and kin) come out of the book and off
+                // equipped items. Before the spell-tier uplift below, which only re-tiers ids already in the book.
+                if (run != null || options?.StripCasterVitalSpells == true)
+                    stripped.AddRange(ThreadEnemySpellStrip.Apply(creature));
+
                 if (stripped.Count > 0)
                     log.Debug($"[DYNDUNGEON] {logTag} wcid {entry.Wcid} ({entry.Role}) combat traits normalized: {string.Join(", ", stripped)}");
             }
+
+            // 4c. Missile variance floor (dynamic_dungeons_missile_variance_floor): every ammunition and thrown weapon the
+            // creature carries, equipped or in its pack, has its DamageVariance raised to the floor, so a missile hit's
+            // average sits where a melee hit's does. Variance only, never Damage, so the uplift and the damage ceiling below
+            // measure exactly what they did before. See MissileVarianceFloor.
+            var missileVarianceFloored = MissileVarianceFloor.Apply(creature, MissileVarianceFloor.Read());
+
+            if (missileVarianceFloored.Count > 0)
+                log.Debug($"[DYNDUNGEON] {logTag} wcid {entry.Wcid} ({entry.Role}) missile variance floored: " +
+                          string.Join(", ", missileVarianceFloored.Select(i => $"{i.Wcid} {i.Name} {i.From:0.##}->{i.To:0.##}")));
 
             // Band-standard spell-tier uplift. Only for an entry the adaptive band reached below its natural
             // low edge (entry.UpliftLevel > 0), same gate as the level/skills/melee/armour axes below - and
@@ -2431,6 +2742,11 @@ namespace ACE.Server.ThreadDungeons
             var archetypeInfo = ArchetypeInfoFor(entry, plan);
             ArchetypeUplift.Session archetypeSession = null;
 
+            // The standard every NON-BOSS uplift site below normalizes to: the run's (plan.BandStandard), or for a
+            // stretched entry (Thread family stretch) the standard at its MAPPED level. The boss sites keep reading
+            // plan.BandStandard directly.
+            var upliftStandard = UpliftStandardFor(entry, plan);
+
             if (normalizingBoss && plan.BossOffenseBandRatio > 0 && plan.BandStandard != null && !plan.BandStandard.IsEmpty && plan.BandStandard.SpellTier > 0)
                 spellsRaised = DungeonSpellTier.SetTier(creature.Biota.PropertiesSpellBook, plan.BandStandard.SpellTier);
             else if (archetypeInfo != null)
@@ -2439,8 +2755,8 @@ namespace ACE.Server.ThreadDungeons
                 if (archetypeInfo.Run.Core.SpellTier > 0)
                     spellsRaised = DungeonSpellTier.Raise(creature.Biota.PropertiesSpellBook, archetypeInfo.Run.Core.SpellTier);
             }
-            else if (entry.UpliftLevel > 0 && plan.BandStandard != null && !plan.BandStandard.IsEmpty && plan.BandStandard.SpellTier > 0)
-                spellsRaised = DungeonSpellTier.Raise(creature.Biota.PropertiesSpellBook, plan.BandStandard.SpellTier);
+            else if (entry.UpliftLevel > 0 && upliftStandard != null && !upliftStandard.IsEmpty && upliftStandard.SpellTier > 0)
+                spellsRaised = DungeonSpellTier.Raise(creature.Biota.PropertiesSpellBook, upliftStandard.SpellTier);
 
             // Boss attributes (code review 2026-09-13). A skill's Current is AttributeFormula + InitLevel + Ranks
             // (CreatureSkill.cs:170-179), so setting InitLevel alone (NormalizeBoss, further down) left a boss
@@ -2466,8 +2782,9 @@ namespace ACE.Server.ThreadDungeons
             // Health.MaxValue. The health block must therefore measure from the AUTHORED max captured below,
             // never from the post-raise MaxValue, or an uplifted creature's health would drift by the Endurance
             // change. The effective-skill top-up and the defense-ceiling re-check run after ApplyUplift.
-            // World Events share BandUplift.Apply and are untouched: this is a separate Threads-only entry.
-            var upliftAttributes = archetypeInfo == null && UpliftsAttributes(entry.UpliftLevel, entry.Role, plan.BandStandard,
+            // BandUplift.Apply is shared and untouched; this is a separate entry (World Events call it too, from
+            // WorldEventSpawner.ApplyBandUplift, under world_events_threads_uplift).
+            var upliftAttributes = archetypeInfo == null && UpliftsAttributes(entry.UpliftLevel, entry.Role, upliftStandard,
                 PropertyManager.GetBool("dynamic_dungeons_uplift_attributes", DungeonPopulationLimits.DefaultUpliftAttributes).Item);
             uint? healthMaxBeforeUplift = null;
             var attributesRaised = 0;
@@ -2476,7 +2793,8 @@ namespace ACE.Server.ThreadDungeons
             {
                 // The archetype uplift's attribute half, at the same position and for the same reason (Endurance feeds max
                 // health). Begin captures every skill's AUTHORED effective value and the authored max health first.
-                archetypeSession = ArchetypeUplift.Begin(creature, archetypeInfo, plan.HealthMultiplier);
+                // A stretched entry's health target carries the family overscale (OverscaleFor is 1.0 for everyone else).
+                archetypeSession = ArchetypeUplift.Begin(creature, archetypeInfo, plan.HealthMultiplier * OverscaleFor(entry, plan));
                 healthMaxBeforeUplift = archetypeSession.AuthoredHealthMax;
                 attributesRaised = ArchetypeUplift.RaiseAttributes(creature, archetypeSession);
 
@@ -2490,11 +2808,12 @@ namespace ACE.Server.ThreadDungeons
                 // only reachable with trash_health_floor_ratio 0 or no band median health, but when it happens
                 // the whole attribute uplift (and the top-up that depends on it) is skipped for this creature.
                 var preRaiseMax = creature.Health.MaxValue;
-                var wouldTarget = NonBossHealthTarget(preRaiseMax, plan.HealthNormalizeRatio, plan.HealthMultiplier, plan.TrashHealthFloor);
+                var (wouldHpMult, wouldFloor) = NonBossHealthTerms(entry, plan, plan.HealthMultiplier);
+                var wouldTarget = NonBossHealthTarget(preRaiseMax, plan.HealthNormalizeRatio, wouldHpMult, wouldFloor);
                 var currentEndurance = creature.Attributes.TryGetValue(PropertyAttribute.Endurance, out var enduranceAttribute) && enduranceAttribute != null
                     ? enduranceAttribute.Base : 0u;
 
-                if (!UpliftAttributeRaiseKeepsHealthReachable(wouldTarget, BandUplift.RaisedEndurance(currentEndurance, plan.BandStandard.AttributeMedianFor(PropertyAttribute.Endurance))))
+                if (!UpliftAttributeRaiseKeepsHealthReachable(wouldTarget, BandUplift.RaisedEndurance(currentEndurance, upliftStandard.AttributeMedianFor(PropertyAttribute.Endurance))))
                 {
                     upliftAttributes = false;
                     log.Debug($"[DYNDUNGEON] {logTag} wcid {entry.Wcid} attribute uplift skipped: health target {wouldTarget} is not above the raised Endurance's health term");
@@ -2502,7 +2821,7 @@ namespace ACE.Server.ThreadDungeons
                 else
                 {
                     healthMaxBeforeUplift = preRaiseMax;
-                    attributesRaised = BandUplift.RaiseAttributes(creature, plan.BandStandard);
+                    attributesRaised = BandUplift.RaiseAttributes(creature, upliftStandard);
                 }
             }
 
@@ -2669,16 +2988,20 @@ namespace ACE.Server.ThreadDungeons
                 var authoredMax = AuthoredHealthMax(healthMaxBeforeUplift, healthMaxBeforeStamp, creature.Health.MaxValue);
                 var normalized = NormalizedBase(authoredMax, plan.HealthNormalizeRatio);
 
+                // A stretched entry (Thread family stretch) is floored at the health standard at its MAPPED level and its
+                // multiplier carries the family overscale; every other entry gets (hpMult, plan.TrashHealthFloor) unchanged.
+                var (nonBossHpMult, nonBossFloor) = NonBossHealthTerms(entry, plan, hpMult);
+
                 // One line covering both terms, so a NORMALIZED creature is as visible in the log as a FLOORED
                 // one - without it, a run in which every creature moved would log nothing at all.
-                if (normalized != authoredMax || plan.TrashHealthFloor > normalized)
+                if (normalized != authoredMax || nonBossFloor > normalized)
                     log.Debug($"[DYNDUNGEON] {logTag} wcid {entry.Wcid} hp {authoredMax} normalized x{plan.HealthNormalizeRatio:0.###} to {normalized}" +
-                             (plan.TrashHealthFloor > normalized ? $" then floored to {plan.TrashHealthFloor} (band standard floor)" : ""));
+                             (nonBossFloor > normalized ? $" then floored to {nonBossFloor} (band standard floor)" : ""));
 
                 // NonBossHealthWrite compares the target against the LIVE max, not authoredMax: after an Endurance
                 // raise the two differ, and skipping on the authored value would leave the creature at its raised
                 // (wrong) max instead of the target.
-                var healthWrite = NonBossHealthWrite(authoredMax, creature.Health.MaxValue, plan.HealthNormalizeRatio, hpMult, plan.TrashHealthFloor);
+                var healthWrite = NonBossHealthWrite(authoredMax, creature.Health.MaxValue, plan.HealthNormalizeRatio, nonBossHpMult, nonBossFloor);
 
                 if (healthWrite.HasValue
                     && WorldEventSpawner.ApplyHealth(creature, healthWrite.Value))
@@ -2720,7 +3043,7 @@ namespace ACE.Server.ThreadDungeons
             var archetypeRatings = default(ArchetypeUplift.RatingResult);
 
             if (archetypeSession != null)
-                archetypeRatings = ArchetypeUplift.FloorRatings(creature, archetypeSession, ArchetypeFactsResolver.LiveProjectileMeanOf);
+                archetypeRatings = ArchetypeUplift.FloorRatings(creature, archetypeSession, ArchetypeFactsResolver.LiveProjectileMeanOf, plan.StripCombatTraits);
 
             var dr = StampedDamageRating(plan, isBoss);
             var drr = isBoss ? plan.BossDamageResistRating : plan.DamageResistRating;
@@ -2796,6 +3119,11 @@ namespace ACE.Server.ThreadDungeons
             else if (entry.UpliftLevel > 0)
                 ApplyUplift(logTag, creature, entry, plan, ownLevel, spellsRaised, attributesRaised, upliftAttributes);
 
+            // The Thread family stretch's overscale on damage: after either uplift branch has normalized the creature to its
+            // mapped level, and BEFORE the damage ceiling below (owner ruling: the ceiling still applies to an overscaled
+            // family). A no-op for every unstretched entry and the boss.
+            ApplyStretchOverscale(logTag, creature, entry, plan);
+
             // Run speed: Creature.GetRunRate reads GetCreatureSkill(Skill.Run).Current
             // (Monster_Navigation.cs:377-378), and InitLevel is the persisted base that Current is built from.
             //
@@ -2841,6 +3169,17 @@ namespace ACE.Server.ThreadDungeons
             // also keeps the uplift steps measuring the creature's UNCAPPED authored skill.
             ApplyMagicAttackCeiling(creature, plan);
 
+            // ---- missile defense ceiling (dynamic_dungeons_missile_defense_skill_cap) ----
+            // Same placement and reasoning as the magic attack ceiling above: last word on the creature's pre-enchantment
+            // Missile Defense, read-time clamp, so nothing written before or after changes the effective value.
+            ApplyMissileDefenseCeiling(creature, plan);
+
+            // ---- melee defense band cap (weapon lift bound) ----
+            // Records the band cap on every non-boss creature, so the wielded weapon's melee defense modifier cannot lift it
+            // above the cap even when its own skill sits under it (and so carries no DefenseSkillCeilings entry). Writes only
+            // Creature.MeleeDefenseBandCap: the ceilings, and the uplift counts that read them, are untouched.
+            ApplyMeleeDefenseBandCap(creature, entry, plan);
+
             // ---- damage ceiling (DAMAGE-CEILING-PLAN.md step 2) ----
             // AFTER every damage writer above (the reach-up stamp, the band and archetype uplifts, the two-way boss
             // normalization) so it measures the creature's FINAL base damage, and after the rating stamp so R and G are
@@ -2876,14 +3215,16 @@ namespace ACE.Server.ThreadDungeons
                 // Clamped at int.MaxValue and NOT widened, deliberately (2026-10-08 review): XpOverride is a
                 // PropertyInt, so the stored value - and the death path that pays it, Creature_Death's
                 // (XpOverride ?? 0) * damagePercent - is int by type. XpFor itself returns a long. Computed at the shipped
-                // dials (ThreadsRunCeilingTests.Boss_xp_saturates_the_int_clamp_only_above_the_player_maximum, solo,
+                // dials (ThreadsRunCeilingTests.Boss_xp_worst_case_saturation_is_accepted_and_clamps_to_int_max, solo,
                 // shipped roster): the worst case stacks BOTH multipliers at dynamic_dungeons_xp_mult_cap (3.0 each,
-                // since the run and boss multipliers are capped independently, so 9x). A level-410 boss - the highest a
-                // player can press today - prices at 112,383,289 plain and 1,011,449,598 worst case. A level-500 boss
-                // (stamped 576) prices at 399,940,216 plain and 3,599,461,946 worst case, which SATURATES. The worst case
-                // first reaches 2,147,483,647 at run level 463, so only admin-made gems above 462 with both caps maxed
-                // hit this clamp. NOT measured: a group run's reward factor, which multiplies on top.
-                creature.XpOverride = (int)Math.Clamp(DungeonPopulationBuilder.XpFor(plan, baseXp, entry.Role), 0, int.MaxValue);
+                // since the run and boss multipliers are capped independently, so 9x). A level-410 boss prices at
+                // 112,383,289 plain and 1,011,449,598 worst case. A level-500 boss (stamped 576) prices at 399,940,216
+                // plain and 3,599,461,946 worst case, which SATURATES. The worst case first reaches 2,147,483,647 at
+                // run level 463. Players can now press to 500 (gem ceiling raise, 2026-11-16), so a worst-case run
+                // from level 463 up (both caps maxed) hits this clamp. ACCEPTED by owner ruling 2026-11-16: the
+                // clamp stands and the XpOverride stays an int. NOT measured: a group run's reward factor, which multiplies on top.
+                // A stretched pick's XP carries the family overscale (OverscaledBaseXp); its luminance below does not.
+                creature.XpOverride = (int)Math.Clamp(DungeonPopulationBuilder.XpFor(plan, OverscaledBaseXp(baseXp, entry, plan), entry.Role), 0, int.MaxValue);
 
                 var lum = DungeonPopulationBuilder.LuminanceFor(plan, baseXp, rewardLevel, entry.Role);
 
@@ -2947,6 +3288,51 @@ namespace ACE.Server.ThreadDungeons
                 return;
 
             creature.MagicAttackSkillCeiling = DungeonCombatNormalizer.MagicAttackCeilingFor(plan.MagicAttackSkillCap);
+        }
+
+        /// <summary>
+        /// Sets the Threads missile defense ceiling (<see cref="Creature.MissileDefenseSkillCeiling"/>) from the plan's
+        /// sanitized cap. A cap of 0 sets nothing; a Player is never given one. A creature already at or below the cap reads
+        /// unchanged, since the clamp only lowers.
+        /// </summary>
+        internal static void ApplyMissileDefenseCeiling(Creature creature, DungeonSpawnPlan plan)
+        {
+            if (creature == null || plan == null || creature is Player)
+                return;
+
+            creature.MissileDefenseSkillCeiling = DungeonCombatNormalizer.MissileDefenseCeilingFor(plan.MissileDefenseSkillCap);
+        }
+
+        /// <summary>
+        /// The Threads melee defense band cap for one entry (pure), or null for none: the same cap the defense ceilings are
+        /// cut against - DungeonCombatNormalizer.DefenseSkillCap over the creature's cap standard (DefenseCapStandard, else
+        /// plan.BandStandard) for a natural, stamped or BandUplift entry, and ArchetypeUplift.DefenseCapFor for an
+        /// archetype-uplifted one (<paramref name="archetype"/>, ArchetypeInfoFor). Null for a boss (exempt from the defense
+        /// cap, see CombatTraitGuard), when the strip is off (no defense cap anywhere in the run), and when the cap is 0
+        /// (empty standard, no median, or a negative offset).
+        /// </summary>
+        internal static uint? MeleeDefenseBandCapFor(DungeonSpawnPlanEntry entry, DungeonSpawnPlan plan, ArchetypeUpliftInfo archetype)
+        {
+            if (entry == null || plan == null || !plan.StripCombatTraits || entry.Role == DungeonRole.Boss)
+                return null;
+
+            var cap = archetype != null
+                ? ArchetypeUplift.DefenseCapFor(archetype, Skill.MeleeDefense, plan.DefenseSkillCapOffset, true)
+                : DungeonCombatNormalizer.DefenseSkillCap(DefenseCapStandard(entry, plan) ?? plan.BandStandard, Skill.MeleeDefense, plan.DefenseSkillCapOffset);
+
+            return cap == 0 ? null : cap;
+        }
+
+        /// <summary>
+        /// Sets <see cref="Creature.MeleeDefenseBandCap"/> from <see cref="MeleeDefenseBandCapFor"/>. A Player is never given
+        /// one. Touches nothing else: the skill is not clamped and no DefenseSkillCeilings entry is written.
+        /// </summary>
+        internal static void ApplyMeleeDefenseBandCap(Creature creature, DungeonSpawnPlanEntry entry, DungeonSpawnPlan plan)
+        {
+            if (creature == null || creature is Player)
+                return;
+
+            creature.MeleeDefenseBandCap = MeleeDefenseBandCapFor(entry, plan, ArchetypeInfoFor(entry, plan));
         }
 
         /// <summary>
@@ -3125,6 +3511,10 @@ namespace ACE.Server.ThreadDungeons
             }
 
             creature.DungeonRole = entry.Role;
+
+            // Thread encounters: a creature added after populate whose death must not count toward the clear (a shrine
+            // guardian). In memory, before EnterWorld; read by ThreadDungeonManager.TryRecordBonusKill.
+            creature.IsThreadBonusCreature = options.ExcludedFromClear;
 
             // Mandatory: a run creature's corpse must never outlive the copy.
             creature.TimeToRot = -1;
@@ -3309,5 +3699,18 @@ namespace ACE.Server.ThreadDungeons
 
         /// <summary>Rendered after "[DYNDUNGEON] " in every shaping log line when <see cref="Run"/> is null.</summary>
         public string LogTag { get; init; }
+
+        /// <summary>
+        /// True: the creature's death never counts toward the run's clear (Creature.IsThreadBonusCreature; a shrine
+        /// guardian). Its rewards are unchanged. False (the default) for every creature the populate chain places.
+        /// </summary>
+        public bool ExcludedFromClear { get; init; }
+
+        /// <summary>
+        /// True: remove caster-vital-scaled life projectiles (Martyr's Hecatomb and kin, ThreadEnemySpellStrip) from the creature
+        /// even though it has no <see cref="Run"/>. A Thread speed course and the Allegiance Gauntlet set it; a Thread run needs no flag
+        /// (it has a run); Balance Trials leave it false and keep their spell books.
+        /// </summary>
+        public bool StripCasterVitalSpells { get; init; }
     }
 }

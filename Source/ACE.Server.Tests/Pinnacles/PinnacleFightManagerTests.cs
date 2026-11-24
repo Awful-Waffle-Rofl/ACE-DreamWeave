@@ -86,6 +86,21 @@ namespace ACE.Server.Tests.Pinnacles
         }
 
         [TestMethod]
+        public void RegisterShippedScripts_RegistersHarbinger()
+        {
+            PinnacleFightManager.RegisterShippedScripts();
+
+            Assert.IsTrue(PinnacleEncounters.TryGet("harbinger", out _));
+
+            var a = PinnacleFightManager.CreateScript("harbinger");
+            var b = PinnacleFightManager.CreateScript("harbinger");
+
+            Assert.IsInstanceOfType(a, typeof(ACE.Server.Pinnacles.Harbinger.HarbingerScript));
+            Assert.IsNotNull(b);
+            Assert.AreNotSame(a, b);
+        }
+
+        [TestMethod]
         public void Tunables_Grael_NeverThrows_AndYieldsUsableSettings()
         {
             var s = PinnacleTunables.Grael();

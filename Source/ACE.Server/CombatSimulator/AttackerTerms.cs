@@ -70,92 +70,90 @@ namespace ACE.Server.CombatSimulator
 
         /// <summary>
         /// Physical crit chance. With a defender, the production GetWeaponCriticalChance against it, which applies
-        /// that defender's crit-resist rating. Without one, the attacker is passed as its own target and that single
-        /// defender-side multiply is divided straight back out, so every attacker-side term (CriticalFrequency or
-        /// the 10 percent default, the Critical Strike imbue, crit rating, Focus, Killer Instinct) is still read from
-        /// production code rather than copied. The self-target is safe against the PvP gates inside: PvpClassifier
-        /// treats a player acting on itself as NOT PvP.
+        /// that defender's crit-resist rating. Without one, the production attacker-side half,
+        /// GetWeaponCriticalChancePreResist, with no target, so every attacker-side term (CriticalFrequency or the 10
+        /// percent default, the Critical Strike imbue, crit rating, Focus, Killer Instinct) is read from production code
+        /// rather than copied. A null target is safe against the PvP gate inside: PvpClassifier reads it as NOT PvP.
         /// </summary>
         public static float PhysicalCritChance(WorldObject weapon, Creature attacker, CreatureSkill attackSkill, Creature defender)
         {
-            float critChance;
-
-            if (defender != null)
-            {
-                critChance = WorldObject.GetWeaponCriticalChance(weapon, attacker, attackSkill, defender);
-            }
-            else
-            {
-                // GetNegativeRatingMod is strictly positive when allowBug is false (Creature_Rating.cs), so the
-                // divisor cannot be zero; the guard is belt and braces
-                var selfCritResistMod = Creature.GetNegativeRatingMod(attacker.GetCritResistRating());
-
-                critChance = WorldObject.GetWeaponCriticalChance(weapon, attacker, attackSkill, attacker);
-
-                if (selfCritResistMod > 0.0f)
-                    critChance /= selfCritResistMod;
-            }
+            var critChance = defender != null
+                ? WorldObject.GetWeaponCriticalChance(weapon, attacker, attackSkill, defender)
+                : WorldObject.GetWeaponCriticalChancePreResist(weapon, attacker, attackSkill, null);
 
             return Math.Clamp(critChance, 0.0f, 1.0f);
         }
 
         /// <summary>
-        /// Magic crit chance, GetWeaponMagicCritFrequency. With no wand that returns the flat 5 percent default and
-        /// reads nothing else - no crit rating, no target. With a wand, the same self-target divide-out as
-        /// PhysicalCritChance when no defender is given.
+        /// Magic crit chance, GetWeaponMagicCritFrequency. With no wand that returns the flat 5 percent default plus a
+        /// pet's Precision from its owner's Summoner focus, and reads no crit rating. With a wand and no defender, the attacker-side half
+        /// (GetWeaponMagicCritFrequencyPreResist) with no target, as PhysicalCritChance.
         /// </summary>
         public static float MagicCritChance(WorldObject wand, Creature caster, CreatureSkill magicSkill, Creature defender)
         {
-            float critChance;
-
-            if (defender != null || wand == null)
-            {
-                critChance = WorldObject.GetWeaponMagicCritFrequency(wand, caster, magicSkill, defender ?? caster);
-            }
-            else
-            {
-                var selfCritResistMod = Creature.GetNegativeRatingMod(caster.GetCritResistRating());
-
-                critChance = WorldObject.GetWeaponMagicCritFrequency(wand, caster, magicSkill, caster);
-
-                if (selfCritResistMod > 0.0f)
-                    critChance /= selfCritResistMod;
-            }
+            var critChance = defender != null
+                ? WorldObject.GetWeaponMagicCritFrequency(wand, caster, magicSkill, defender)
+                : WorldObject.GetWeaponMagicCritFrequencyPreResist(wand, caster, magicSkill, null);
 
             return Math.Clamp(critChance, 0.0f, 1.0f);
         }
 
         /// <summary>
         /// AttackerSpec.CritDamageMod: DamageEvent's "1.0f + GetWeaponCritDamageMod(...)" times
-        /// "1.0f + Execution". GetWeaponCritDamageMod reads its target only through the PvP Crippling Blow lever.
+        /// "1.0f + Execution" times a pet's "1.0f + Execution" from its owner's Summoner focus.
+        /// GetWeaponCritDamageMod reads its target only through the PvP Crippling Blow lever.
         /// </summary>
         public static float PhysicalCritDamageMod(WorldObject weapon, Creature attacker, CreatureSkill attackSkill, Creature defender)
         {
             return (1.0f + WorldObject.GetWeaponCritDamageMod(weapon, attacker, attackSkill, defender))
-                * (1.0f + (float)WeaponModCombat.ReadWeaponOnlyWieldedBy(weapon, WeaponModId.Execution, attacker));
+                * (1.0f + (float)WeaponModCombat.ReadWeaponOnlyWieldedBy(weapon, WeaponModId.Execution, attacker))
+                * (1.0f + (float)SummonerFocus.PetFocusModValue(attacker, defender, WeaponModId.Execution));
         }
 
         /// <summary>
         /// AttackerSpec.MagicCritDamageMod: SpellProjectile.CalculateDamage's war/void crit multiplier,
-        /// GetWeaponCritDamageMod(...) times "1.0f + Execution", with NO +1.0 on the first term.
+        /// GetWeaponCritDamageMod(...) times "1.0f + Execution" times a pet's "1.0f + Execution" from its owner's
+        /// Summoner focus, with NO +1.0 on the first term.
         /// </summary>
         public static float MagicCritDamageMod(WorldObject wand, Creature caster, CreatureSkill magicSkill, Creature defender)
         {
             return WorldObject.GetWeaponCritDamageMod(wand, caster, magicSkill, defender)
-                * (1.0f + (float)WeaponModCombat.ReadWeaponOnlyWieldedBy(wand, WeaponModId.Execution, caster));
+                * (1.0f + (float)WeaponModCombat.ReadWeaponOnlyWieldedBy(wand, WeaponModId.Execution, caster))
+                * (1.0f + (float)SummonerFocus.PetFocusModValue(caster, defender, WeaponModId.Execution));
         }
 
         /// <summary>
-        /// AttackerSpec.ArmorRendingMod: DamageEvent's Math.Min(armorRendingMod, armorCleavingMod).
+        /// AttackerSpec.ArmorRendingMod: DamageEvent's Math.Min(armorRendingMod, armorCleavingMod), the rending term from the
+        /// same WorldObject.GetArmorRendingModFor DamageEvent reads (so a pet's focus Armor Rending is in it).
         /// </summary>
-        public static float ArmorIgnoreMod(WorldObject weapon, Creature attacker, CreatureSkill attackSkill)
+        public static float ArmorIgnoreMod(WorldObject weapon, Creature attacker, CreatureSkill attackSkill, Creature defender)
         {
-            var armorRendingMod = 1.0f;
+            return Math.Min(WorldObject.GetArmorRendingModFor(weapon, attacker, attackSkill, defender), attacker.GetArmorCleavingMod(weapon));
+        }
 
-            if (weapon != null && weapon.HasImbuedEffect(ImbuedEffectType.ArmorRending))
-                armorRendingMod = WorldObject.GetArmorRendingMod(attackSkill);
+        [ThreadStatic]
+        private static bool modeOnlyStance;
 
-            return Math.Min(armorRendingMod, attacker.GetArmorCleavingMod(weapon));
+        /// <summary>
+        /// Runs <paramref name="body"/> with EnterCreatureStance writing CombatMode ONLY (Creature.SetCombatModeForSimulator), on
+        /// this thread. For a creature that must come out of the measurement untouched (a Balance Trials creature measured at
+        /// spawn): the real SetCombatMode also sets CurrentMotionState to a combat stance (which every DoAttackStance trigger is
+        /// gated on), moves LastWeaponSwap, and for a missile creature queues a reload ActionChain, none of which a caller can
+        /// undo. The caller restores CombatMode itself. The spec terms read CombatMode, not the motion stance.
+        /// </summary>
+        internal static T WithModeOnlyStance<T>(Func<T> body)
+        {
+            var previous = modeOnlyStance;
+            modeOnlyStance = true;
+
+            try
+            {
+                return body();
+            }
+            finally
+            {
+                modeOnlyStance = previous;
+            }
         }
 
         /// <summary>
@@ -173,6 +171,12 @@ namespace ACE.Server.CombatSimulator
         /// </summary>
         internal static void EnterCreatureStance(Creature creature, CombatMode combatMode)
         {
+            if (modeOnlyStance)
+            {
+                creature.SetCombatModeForSimulator(combatMode);
+                return;
+            }
+
             try
             {
                 creature.SetCombatMode(combatMode);

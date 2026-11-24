@@ -12,6 +12,7 @@ namespace ACE.Server.HazardMechanics
     ///   burst_radius   m, the damage radius at impact            default 4     clamp 0.5..15
     ///   duration       s of launching, then the run drains       default 60    clamp 1..600
     ///   drop_z         absolute z the balls start from           default: ground at the impact point + 30 m (<see cref="RainRules.DefaultDropHeight"/>)
+    ///   ball_radius    m, the falling ball's radius              default 1.8   clamp 0.1..5    (the fall ends at ground + ball_radius; the drop's top must fit under a ceiling)
     ///   max_falling    balls under way at once (the cap)         default 8     clamp 1..64     (a run's LiveCount replaces it at each launch decision)
     ///   target_share   fraction of drops aimed at a player      default 0.6   clamp 0..1      (0 = every drop uniform over the region, as before)
     ///   target_spread  m, radius of the disc round the chosen player the impact is drawn from   default 5   clamp 0..30
@@ -57,6 +58,9 @@ namespace ACE.Server.HazardMechanics
 
         public double PlayerRadius { get; private set; }
 
+        /// <summary>args "ball_radius", metres, default <see cref="RainRules.BallRadius"/> (1.8, the Rolling Death sphere), clamp 0.1..5: the falling ball's radius. Its origin is its centre, so the fall ends at ground + this, and the drop's top (drop_z + this) must fit under a ceiling.</summary>
+        public double BallRadius { get; private set; }
+
         public static RainSettings From(HazardArgs args)
         {
             args ??= HazardArgs.Empty;
@@ -77,6 +81,7 @@ namespace ACE.Server.HazardMechanics
                 BallWcid = (uint)args.GetInt("ball_wcid", (int)HazardDefaults.RollingDeathRedWcid, 1, int.MaxValue),
                 EscapeSpeed = args.GetDouble(HazardDefaults.EscapeSpeedKey, HazardDefaults.EscapeSpeed, HazardDefaults.MinEscapeSpeed, HazardDefaults.MaxEscapeSpeed),
                 PlayerRadius = args.GetDouble(HazardDefaults.PlayerRadiusKey, HazardDefaults.PlayerRadius, HazardDefaults.MinPlayerRadius, HazardDefaults.MaxPlayerRadius),
+                BallRadius = args.GetDouble("ball_radius", RainRules.BallRadius, RainRules.MinBallRadius, RainRules.MaxBallRadius),
             };
         }
     }
@@ -126,6 +131,10 @@ namespace ACE.Server.HazardMechanics
         /// <summary>The falling ball's radius: the Rolling Death sphere at its weenie scale (<see cref="HazardDefaults.RollingDeathRadius"/>, 1.8 m). The ball's origin is its centre.</summary>
         public const float BallRadius = HazardDefaults.RollingDeathRadius;
 
+        /// <summary>The clamp of the ball_radius arg.</summary>
+        public const double MinBallRadius = 0.1;
+        public const double MaxBallRadius = 5.0;
+
         /// <summary>How long a burst effect stands.</summary>
         public const double BurstSeconds = 1.5;
 
@@ -145,7 +154,7 @@ namespace ACE.Server.HazardMechanics
 
         public static readonly string[] NumberKeys =
         {
-            "speed", "lead", "burst_radius", "duration", "drop_z", "target_share", "target_spread",
+            "speed", "lead", "burst_radius", "duration", "drop_z", "target_share", "target_spread", "ball_radius",
             HazardDefaults.EdgeInsetKey, HazardDefaults.PctKey, HazardDefaults.EscapeSpeedKey, HazardDefaults.PlayerRadiusKey,
         };
 
@@ -156,7 +165,11 @@ namespace ACE.Server.HazardMechanics
 
         /// <summary>Seconds a ball takes to fall from <paramref name="dropZ"/> to resting on the ground at <paramref name="groundZ"/>.</summary>
         public static double FallSeconds(double dropZ, double groundZ, double speed)
-            => Math.Max(0.0, (dropZ - (groundZ + BallRadius)) / speed);
+            => FallSeconds(dropZ, groundZ, speed, BallRadius);
+
+        /// <summary>The same with the run's ball radius (<see cref="RainSettings.BallRadius"/>).</summary>
+        public static double FallSeconds(double dropZ, double groundZ, double speed, double ballRadius)
+            => Math.Max(0.0, (dropZ - (groundZ + ballRadius)) / speed);
 
         /// <summary>The warning one drop gets before its fall: the arg, raised so that lead + fall meets the fair-warning floor. The director spends only the arg on the ball's hang; the rest is how much earlier the marker stands.</summary>
         public static double LeadFor(RainSettings s, double fall) => Math.Max(s.Lead, WarningFloor(s) - fall);
@@ -181,7 +194,7 @@ namespace ACE.Server.HazardMechanics
         {
             var ground = region.GroundZ(region.CenterX, region.CenterY);
             var dropZ = s.DropZ ?? ground + DefaultDropHeight;
-            var fall = FallSeconds(dropZ, ground, s.Speed);
+            var fall = FallSeconds(dropZ, ground, s.Speed, s.BallRadius);
 
             return LeadFor(s, fall) + fall;
         }
@@ -232,13 +245,13 @@ namespace ACE.Server.HazardMechanics
             var ground = region.GroundZ(region.CenterX, region.CenterY);
             var dropZ = s.DropZ ?? ground + DefaultDropHeight;
 
-            if (dropZ - (ground + BallRadius) < MinFallMetres)
-                return string.Format(inv, "drop_z={0:0.##} is not above the ground ({1:0.##}) by at least the ball radius {2:0.##} + {3:0.##} m; the balls would have nothing to fall", dropZ, ground, BallRadius, MinFallMetres);
+            if (dropZ - (ground + s.BallRadius) < MinFallMetres)
+                return string.Format(inv, "drop_z={0:0.##} is not above the ground ({1:0.##}) by at least the ball radius {2:0.##} + {3:0.##} m; the balls would have nothing to fall", dropZ, ground, s.BallRadius, MinFallMetres);
 
-            if (region.CeilingZ.HasValue && dropZ + BallRadius > region.CeilingZ.Value)
+            if (region.CeilingZ.HasValue && dropZ + s.BallRadius > region.CeilingZ.Value)
                 return string.Format(inv, "the region has a ceiling at z {0:0.##}: rain cannot start from drop_z={1:0.##} (it needs open sky)", region.CeilingZ.Value, dropZ);
 
-            var fall = FallSeconds(dropZ, ground, s.Speed);
+            var fall = FallSeconds(dropZ, ground, s.Speed, s.BallRadius);
             var floor = WarningFloor(s);
 
             if (s.Lead + fall < floor - 1e-9)

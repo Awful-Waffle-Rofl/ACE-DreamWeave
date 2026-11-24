@@ -213,6 +213,10 @@ namespace ACE.Server
                 Console.Title = consoleTitle;
             }
 
+            // Salvage Roller (DESIGN 5.7, 5.9): the character purge below snapshots any escrowed item into its
+            // CharacterPurged audit row in this format, so it has to be installed before the purge runs.
+            ACE.Server.SalvageRoller.SalvageRollerAuditSnapshot.InstallPurgeSerializer();
+
             if (ConfigManager.Config.Offline.PurgeDeletedCharacters)
             {
                 log.Info($"Purging deleted characters, and their possessions, older than {ConfigManager.Config.Offline.PurgeDeletedCharactersDays} days ({DateTime.Now.AddDays(-ConfigManager.Config.Offline.PurgeDeletedCharactersDays).ToCommonString()})...");
@@ -450,6 +454,29 @@ namespace ACE.Server
             log.Info("Initializing HouseManager...");
             HouseManager.Initialize();
 
+            // Allegiance Avatars: one synchronous read of both Avatar tables before the world ticks. A failed read
+            // disables the feature for the session (logged inside) and never stops startup.
+            log.Info("Initializing AvatarManager...");
+            try
+            {
+                ACE.Server.Avatars.AvatarManager.Initialize();
+            }
+            catch (Exception ex)
+            {
+                log.Error("AvatarManager.Initialize() threw; Allegiance Avatars are disabled for this session", ex);
+            }
+
+            // Allegiance Gauntlet records: one synchronous read before the world ticks. A failed read leaves the cache
+            // unavailable (logged inside) and never stops startup.
+            try
+            {
+                ACE.Server.Avatars.Gauntlet.GauntletRecords.Initialize();
+            }
+            catch (Exception ex)
+            {
+                log.Error("GauntletRecords.Initialize() threw; Gauntlet records are unavailable for this session", ex);
+            }
+
             // Warm the IP-limit housing landblock set now so the first sweep does not run the world query on the tick thread.
             // A failure is logged and never stops startup (the set is retried lazily on first real use).
             try
@@ -476,6 +503,10 @@ namespace ACE.Server
 
             log.Info("Initializing WorldManager...");
             WorldManager.Initialize();
+
+            // The daily World Event scheduler writes its start lines to the Audit channel. Wired here, with the world,
+            // and not in BuildMarketApiOptions, which only runs when the Market API is enabled.
+            ACE.Server.WorldEvents.WorldEventScheduler.AuditWriter = (actorLabel, message) => PlayerManager.BroadcastToAuditChannel(actorLabel, message);
 
             // Started here on purpose: after WorldManager.Initialize so there is a world thread to watch,
             // and before ServerMetrics.Initialize so the ace.world.* gauges have a published state to read
@@ -505,6 +536,18 @@ namespace ACE.Server
 
             log.Info("Initializing ThreadDungeonManager...");
             ACE.Server.ThreadDungeons.ThreadDungeonManager.Initialize();
+
+            // Allegiance Gauntlet: after ThreadDungeonManager (the arena sites are checked against the Thread catalog).
+            // Closes open run rows as Restart, loads the sites and installs the run starter; until then purchases refuse.
+            log.Info("Initializing GauntletManager...");
+            try
+            {
+                ACE.Server.Avatars.Gauntlet.GauntletManager.Initialize();
+            }
+            catch (Exception ex)
+            {
+                log.Error("GauntletManager.Initialize() threw; the Allegiance Gauntlet is unavailable for this session", ex);
+            }
 
             // After ThreadDungeonManager: the course file is cross-checked against the Threads store and the species
             // tables, which do not exist yet where SpeedSeasonManager initializes.
@@ -643,6 +686,7 @@ namespace ACE.Server
                 GetAccountById = id => DatabaseManager.Authentication.GetAccountById(id),
                 AdminWebEnabled = () => PropertyManager.GetBool("admin_web_enabled").Item,
                 SuitBuilderEnabled = () => PropertyManager.GetBool("suit_builder_enabled").Item,
+                WebLaunchEnabled = () => PropertyManager.GetBool("web_launch_enabled").Item,
                 SuitCharacterMovesEnabled = () => PropertyManager.GetBool("suit_character_moves_enabled").Item,
                 EnumerateSettings = () => PropertyManager.EnumerateWithPrefix(""),
                 EnqueueWorldAction = WorldManager.EnqueueAction,
@@ -667,6 +711,29 @@ namespace ACE.Server
 
             // The same instance, for the world heartbeat's transfer watchdog sweep (WorldManager.UpdateGameWorld).
             ACE.Server.Entity.AccountVault.SuitTransferService.Live = apiOptions.SuitTransfers;
+
+            // The web sign-in launch codes. The route redeems from apiOptions.LaunchCodes and /weblogin issues into
+            // WebLaunchCodeStore.Live, so the two MUST be the same instance.
+            apiOptions.LaunchCodes = new ACE.Server.Managers.Market.WebLaunchCodeStore();
+            ACE.Server.Managers.Market.WebLaunchCodeStore.Live = apiOptions.LaunchCodes;
+
+            // The class ability web panel (.../class-abilities/panel): world-thread reads and writes on the
+            // WorldManager queue with its own short timeout, offline reads through the character sheet service.
+            // Both switches are kill switches (default on); either off answers panel_disabled.
+            apiOptions.ClassAbilityPanelEnabled = () => PropertyManager.GetBool("class_abilities_enabled").Item
+                && PropertyManager.GetBool("class_ability_web_panel_enabled").Item;
+            apiOptions.ClassAbilityPanel = new ACE.Server.Managers.Market.LiveClassAbilityPanelService(
+                WorldManager.EnqueueAction,
+                () => ACE.Server.Managers.CharacterSheets.CharacterSheetService.Instance,
+                ACE.Server.Managers.Market.MarketApiOptions.EffectivePanelWorldTimeoutMs(apiOptions.ClassAbilityPanelWorldTimeoutMs, apiOptions.RequestTimeoutMs),
+                apiOptions.ClassAbilityPanelEnabled);
+
+            // The Character Details view (.../details): online-only world-thread reads under the panel's guard and world
+            // timeout. Its own kill switch (default on) answers details_disabled.
+            apiOptions.CharacterDetailsEnabled = () => PropertyManager.GetBool("character_details_web_enabled").Item;
+            apiOptions.CharacterDetails = new ACE.Server.Managers.Market.LiveCharacterDetailsService(
+                WorldManager.EnqueueAction,
+                ACE.Server.Managers.Market.MarketApiOptions.EffectivePanelWorldTimeoutMs(apiOptions.ClassAbilityPanelWorldTimeoutMs, apiOptions.RequestTimeoutMs));
 
             // GET and run share one loaded table and one online-character rule (LiveWebCommandWorld).
             if (commandClassification != null)

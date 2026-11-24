@@ -371,6 +371,258 @@ namespace ACE.Server.Tests
             Assert.AreNotEqual(0, diff.Count, "a stack Value that does not match its own derivation is a modification");
         }
 
+        #region Physics-state-derived PropertyBools (the dye plant defect)
+
+        /// <summary>
+        /// Gravity | IgnoreCollisions | Ethereal, the PhysicsState every retail dye plant carries
+        /// (ace_world weenie 8037 Verdalim Plant, PropertyInt 93 = 1044).
+        /// </summary>
+        private const int PlantPhysicsState = 1044;
+
+        /// <summary>
+        /// A dye-plant-shaped stackable: retail Verdalim Plant 8037's stack arithmetic and
+        /// PhysicsState, with no PropertyBools at all, which is how a fresh weenie arrives.
+        /// </summary>
+        private static Biota Plant(int stackSize = 1, int? physicsState = PlantPhysicsState)
+        {
+            var biota = new Biota
+            {
+                Id = 0x80000002,
+                WeenieClassId = 8037,
+                WeenieType = WeenieType.Stackable,
+                PropertiesInt = new Dictionary<PropertyInt, int>
+                {
+                    { PropertyInt.ItemType, (int)ItemType.CraftCookingBase },
+                    { PropertyInt.MaxStackSize, 100 },
+                    { PropertyInt.StackSize, stackSize },
+                    { PropertyInt.Value, stackSize * 10 },
+                    { PropertyInt.EncumbranceVal, stackSize * 5 },
+                    { PropertyInt.StackUnitValue, 10 },
+                    { PropertyInt.StackUnitEncumbrance, 5 },
+                },
+                PropertiesString = new Dictionary<PropertyString, string> { { PropertyString.Name, "Verdalim Plant" } },
+            };
+
+            if (physicsState.HasValue)
+                biota.PropertiesInt[PropertyInt.PhysicsState] = physicsState.Value;
+
+            return biota;
+        }
+
+        /// <summary>
+        /// The plant after it has stood in the world: InitPhysicsObj -> CalculatedPhysicsState wrote
+        /// one PropertyBool = true for each PropertyBool-backed flag in its PhysicsState, through
+        /// SetPhysicsPropertyState (WorldObject_Properties.cs:993-997), which persists.
+        /// </summary>
+        private static Biota GroundPickedPlant(int stackSize = 5)
+        {
+            var plant = Plant(stackSize);
+            plant.Id = 0x80000003;
+            plant.PropertiesBool = new Dictionary<PropertyBool, bool>
+            {
+                { PropertyBool.Ethereal, true },
+                { PropertyBool.IgnoreCollisions, true },
+                { PropertyBool.GravityStatus, true },
+            };
+            return plant;
+        }
+
+        [TestMethod]
+        public void PhysicsStateDerivedBools_AreNotDifferences()
+        {
+            // The reported defect: a dye plant picked up off the ground carries the three bools its
+            // own PhysicsState implies, the fresh reference never entered the world and carries none,
+            // and so every deposit became its own stored biota instead of joining the ledger row.
+            var diff = VaultCollapse.Diff(GroundPickedPlant(5), Plant(1), candidateIsStackable: true);
+
+            CollectionAssert.AreEqual(new List<string>(), diff, string.Join(" | ", diff));
+        }
+
+        [TestMethod]
+        public void PhysicsStateDerivedBools_DoNotApplyToGrouping()
+        {
+            // Grouping compares two STORED items, never a fresh reference, so the allowance (which is
+            // decided from the candidate side alone) has no business there: applying it made
+            // AreGroupable order-dependent. Two touched items still group with each other, because their
+            // bools are simply equal.
+            Assert.IsFalse(VaultCollapse.AreGroupable(GroundPickedPlant(1), Plant(1)), "touched vs fresh must not group");
+            Assert.IsTrue(VaultCollapse.AreGroupable(GroundPickedPlant(1), GroundPickedPlant(1)), "touched vs touched must group");
+        }
+
+        [TestMethod]
+        public void AreGroupable_IsSymmetric_ForATouchedAndAFreshItem()
+        {
+            // AccountVaultStore's grouping memo assumes AreGroupable is an equivalence relation; an
+            // asymmetric answer makes the groups depend on which member happened to be the representative.
+            var touched = GroundPickedPlant(1);
+            var fresh = Plant(1);
+
+            Assert.AreEqual(VaultCollapse.AreGroupable(touched, fresh), VaultCollapse.AreGroupable(fresh, touched));
+        }
+
+        [TestMethod]
+        public void PhysicsStateDerivedBools_FollowTheDefaultStateWhenPhysicsStateIsAbsent()
+        {
+            // GetPhysicsStateOrDefault falls back to PhysicsGlobals.DefaultState
+            // (EdgeSlide | LightingOn | Gravity | ReportCollisions) when the weenie authors no
+            // PhysicsState, so those are the bools CalculatedPhysicsState writes for such an item.
+            var candidate = Plant(5, physicsState: null);
+            candidate.PropertiesBool = new Dictionary<PropertyBool, bool>
+            {
+                { PropertyBool.AllowEdgeSlide, true },
+                { PropertyBool.LightsStatus, true },
+                { PropertyBool.GravityStatus, true },
+                { PropertyBool.ReportCollisions, true },
+            };
+
+            var diff = VaultCollapse.Diff(candidate, Plant(1, physicsState: null), candidateIsStackable: true);
+
+            CollectionAssert.AreEqual(new List<string>(), diff, string.Join(" | ", diff));
+        }
+
+        [TestMethod]
+        public void PhysicsBool_ContradictingItsOwnFlag_IsADifference()
+        {
+            // False where the flag is set: CalculatedPhysicsState only ever writes true, so a false was
+            // written by something else and is a modification.
+            var falseWhereSet = GroundPickedPlant(5);
+            falseWhereSet.PropertiesBool[PropertyBool.Ethereal] = false;
+
+            var diff = VaultCollapse.Diff(falseWhereSet, Plant(1), candidateIsStackable: true);
+
+            Assert.AreEqual(1, diff.Count, string.Join(" | ", diff));
+            StringAssert.StartsWith(diff[0], "PropertiesBool.Ethereal:");
+
+            // True where the flag is NOT set (NoDraw is PropertyBool-backed, but 1044 lacks NoDraw).
+            var trueWhereUnset = GroundPickedPlant(5);
+            trueWhereUnset.PropertiesBool[PropertyBool.NoDraw] = true;
+
+            diff = VaultCollapse.Diff(trueWhereUnset, Plant(1), candidateIsStackable: true);
+
+            Assert.AreEqual(1, diff.Count, string.Join(" | ", diff));
+            StringAssert.StartsWith(diff[0], "PropertiesBool.NoDraw:");
+        }
+
+        [TestMethod]
+        public void UnrelatedBool_OnTheCandidateOnly_IsADifference()
+        {
+            var plant = GroundPickedPlant(5);
+            plant.PropertiesBool[PropertyBool.Inscribable] = true;
+
+            var diff = VaultCollapse.Diff(plant, Plant(1), candidateIsStackable: true);
+
+            Assert.AreEqual(1, diff.Count, string.Join(" | ", diff));
+            StringAssert.StartsWith(diff[0], "PropertiesBool.Inscribable:");
+        }
+
+        [TestMethod]
+        public void PhysicsBool_TheReferenceAlsoCarries_IsComparedNormally()
+        {
+            // The weenie AUTHORS the bool, so CalculatedPhysicsState never touched it (it writes only
+            // when the bool is null) and any mismatch is real.
+            var reference = Plant(1);
+            reference.PropertiesBool = new Dictionary<PropertyBool, bool> { { PropertyBool.Ethereal, false } };
+
+            var diff = VaultCollapse.Diff(GroundPickedPlant(5), reference, candidateIsStackable: true);
+
+            Assert.AreEqual(1, diff.Count, string.Join(" | ", diff));
+            StringAssert.StartsWith(diff[0], "PropertiesBool.Ethereal:");
+
+            // And the reverse: the reference carries it, the candidate lost it.
+            var authoredTrue = Plant(1);
+            authoredTrue.PropertiesBool = new Dictionary<PropertyBool, bool> { { PropertyBool.Ethereal, true } };
+
+            var lost = GroundPickedPlant(5);
+            lost.PropertiesBool.Remove(PropertyBool.Ethereal);
+
+            diff = VaultCollapse.Diff(lost, authoredTrue, candidateIsStackable: true);
+
+            Assert.AreEqual(1, diff.Count, string.Join(" | ", diff));
+            StringAssert.StartsWith(diff[0], "PropertiesBool.Ethereal:");
+        }
+
+        [TestMethod]
+        public void PhysicsBool_WithAChangedPhysicsState_IsStillADifference()
+        {
+            // The derivation is read off the candidate's own PhysicsState, and PhysicsState itself is
+            // diffed, so an item whose PhysicsState was rewritten can never be exempted into pristine.
+            var plant = GroundPickedPlant(5);
+            plant.PropertiesInt[PropertyInt.PhysicsState] = PlantPhysicsState | (int)PhysicsState.NoDraw;
+            plant.PropertiesBool[PropertyBool.NoDraw] = true;
+
+            var diff = VaultCollapse.Diff(plant, Plant(1), candidateIsStackable: true);
+
+            Assert.AreNotEqual(0, diff.Count, "a rewritten PhysicsState is a modification");
+            Assert.IsTrue(diff.Any(d => d.StartsWith("PropertiesInt.PhysicsState:", StringComparison.Ordinal)), string.Join(" | ", diff));
+        }
+
+        /// <summary>
+        /// Pins WorldObject.PersistedPhysicsStateBools to the source it restates. The pairs live only in
+        /// accessor bodies (no data structure to read at runtime, and running CalculatedPhysicsState for
+        /// real needs a live WorldObject), so this test re-derives them from the code instead:
+        /// every accessor whose getter is GetProperty(PropertyBool.X) and whose setter is
+        /// SetPhysicsPropertyState(PropertyBool.X, PhysicsState.Y, value), restricted to those the
+        /// CalculatedPhysicsState chain defaults from flag Y. The table must equal that set exactly.
+        /// </summary>
+        [TestMethod]
+        public void PersistedPhysicsStateBools_MatchTheAccessorsAndCalculatedPhysicsState()
+        {
+            var propertiesPath = FindInSourceTree("Source/ACE.Server/WorldObjects/WorldObject_Properties.cs");
+            var networkingPath = FindInSourceTree("Source/ACE.Server/WorldObjects/WorldObject_Networking.cs");
+
+            Assert.IsNotNull(propertiesPath, $"Could not find WorldObject_Properties.cs by walking up from {AppContext.BaseDirectory}");
+            Assert.IsNotNull(networkingPath, $"Could not find WorldObject_Networking.cs by walking up from {AppContext.BaseDirectory}");
+
+            var properties = File.ReadAllText(propertiesPath);
+            var networking = File.ReadAllText(networkingPath);
+
+            // accessor name -> (getter bool, setter bool, setter flag)
+            var accessorPattern = new System.Text.RegularExpressions.Regex(
+                @"public bool\? (\w+)\s*\{\s*get => GetProperty\(PropertyBool\.(\w+)\);[^\r\n]*\s*set => SetPhysicsPropertyState\(PropertyBool\.(\w+), PhysicsState\.(\w+), value\);");
+
+            var accessors = new Dictionary<string, (string Getter, string Setter, string Flag)>(StringComparer.Ordinal);
+
+            foreach (System.Text.RegularExpressions.Match m in accessorPattern.Matches(properties))
+            {
+                Assert.AreEqual(m.Groups[2].Value, m.Groups[3].Value, $"accessor {m.Groups[1].Value} reads one PropertyBool and writes another");
+                accessors[m.Groups[1].Value] = (m.Groups[2].Value, m.Groups[3].Value, m.Groups[4].Value);
+            }
+
+            // Every SetPhysicsPropertyState call site in an accessor must have been understood above.
+            var callCount = System.Text.RegularExpressions.Regex.Matches(properties, @"set => SetPhysicsPropertyState\(").Count;
+            Assert.AreEqual(callCount, accessors.Count, "an accessor calling SetPhysicsPropertyState did not match the expected shape");
+            Assert.IsTrue(accessors.Count > 0, "no persisted physics accessors found; the pattern is stale");
+
+            var start = networking.IndexOf("private PhysicsState CalculatedPhysicsState()", StringComparison.Ordinal);
+            Assert.IsTrue(start >= 0, "CalculatedPhysicsState not found");
+
+            var chainPattern = new System.Text.RegularExpressions.Regex(
+                @"if \(physicsState\.HasFlag\(PhysicsState\.(\w+)\)\)\s*if \(!(\w+)\.HasValue\)\s*(\w+) = true;");
+
+            var expected = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (System.Text.RegularExpressions.Match m in chainPattern.Matches(networking.Substring(start)))
+            {
+                var flag = m.Groups[1].Value;
+                var accessor = m.Groups[2].Value;
+
+                Assert.AreEqual(accessor, m.Groups[3].Value, $"CalculatedPhysicsState tests {accessor} but assigns {m.Groups[3].Value}");
+
+                if (accessors.TryGetValue(accessor, out var wiring))
+                {
+                    Assert.AreEqual(flag, wiring.Flag, $"CalculatedPhysicsState defaults {accessor} from {flag}, but its setter writes {wiring.Flag}");
+                    expected.Add($"{wiring.Setter}={flag}");
+                }
+            }
+
+            var actual = new HashSet<string>(WorldObject.PersistedPhysicsStateBools.Select(p => $"{p.Key}={p.Value}"), StringComparer.Ordinal);
+
+            Assert.IsTrue(expected.SetEquals(actual),
+                $"expected [{string.Join(", ", expected.OrderBy(s => s))}] but the table holds [{string.Join(", ", actual.OrderBy(s => s))}]");
+        }
+
+        #endregion
+
         #region The icon defect, end to end (needs client_portal.dat)
 
         /// <summary>
@@ -660,6 +912,105 @@ namespace ACE.Server.Tests
             item.NumTimesTinkered = 3;
 
             Assert.IsFalse(VaultCollapse.IsPristine(item), "a genuinely modified item must still keep its biota");
+        }
+
+        #endregion
+
+        #region Per-copy rolls must not leak into the reference
+
+        private const uint RolledGemProbeWcid = 990102;
+        private const uint CreationRollProbeWcid = 990103;
+
+        private static void SeedWorldWeenie(Weenie weenie)
+        {
+            var field = typeof(WorldDatabaseWithEntityCache).GetField("weenieCache", BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.IsNotNull(field, "WorldDatabaseWithEntityCache.weenieCache was not found by reflection - has it been renamed?");
+
+            var cache = (ConcurrentDictionary<uint, Weenie>)field.GetValue(DatabaseManager.World);
+            cache[weenie.WeenieClassId] = weenie;
+        }
+
+        private static Weenie AmplifierProbeWeenie()
+        {
+            return new Weenie
+            {
+                WeenieClassId = RolledGemProbeWcid,
+                ClassName = "vaultcollapseamplifierprobe",
+                WeenieType = WeenieType.Gem,
+                PropertiesFloat = new Dictionary<PropertyFloat, double> { { PropertyFloat.CloakProcAmplifier, 1.0 } },
+                PropertiesString = new Dictionary<PropertyString, string>
+                {
+                    { PropertyString.Name, "Amplifier Probe" },
+                    { PropertyString.Use, "Use on a cloak to strengthen its proc by 100% to 200%." },
+                    { PropertyString.LongDesc, "Use on a cloak to strengthen its proc by 100% to 200%." },
+                },
+            };
+        }
+
+        /// <summary>
+        /// A Cloak Weave Amplifier is rolled when it is APPLIED to a cloak, never when it is created, so a freshly
+        /// created gem is identical to its weenie and may collapse to a ledger row (nothing of the player's is lost:
+        /// the roll has not happened yet). This drives VaultCollapse.IsPristine itself, and pins that the factory
+        /// leaves the gem's marker value and description untouched even with a single-point roll range configured.
+        /// </summary>
+        [TestMethod]
+        public void IsPristine_Amplifier_IsPristine_BecauseItIsRolledOnApplyNotOnCreate()
+        {
+            DefaultPropertyManager.LoadDefaultProperties();
+            EnsureGuidManagerConstructible();
+            SeedWorldWeenie(AmplifierProbeWeenie());
+
+            try
+            {
+                PropertyManager.ModifyLong("cloak_amplifier_roll_min_pct", 137);
+                PropertyManager.ModifyLong("cloak_amplifier_roll_max_pct", 137);
+
+                var item = WorldObjectFactory.CreateNewWorldObject(RolledGemProbeWcid);
+                Assert.IsNotNull(item);
+                Assert.AreEqual(1.0, item.GetProperty(PropertyFloat.CloakProcAmplifier).Value, 1e-12, "creation must not roll: the gem keeps its marker value");
+                Assert.AreEqual("Use on a cloak to strengthen its proc by 100% to 200%.", item.GetProperty(PropertyString.Use));
+
+                Assert.IsTrue(VaultCollapse.IsPristine(item), "an unrolled gem is a pristine copy of its weenie");
+                Assert.AreEqual(0, VaultCollapse.Diff(item).Count, "the diagnostic Diff must agree with IsPristine");
+
+                item.Destroy();
+            }
+            finally
+            {
+                PropertyManager.ModifyLong("cloak_amplifier_roll_min_pct", DefaultPropertyManager.DefaultLongProperties["cloak_amplifier_roll_min_pct"].Item);
+                PropertyManager.ModifyLong("cloak_amplifier_roll_max_pct", DefaultPropertyManager.DefaultLongProperties["cloak_amplifier_roll_max_pct"].Item);
+            }
+        }
+
+        /// <summary>
+        /// Same collision for CreationRoll (CreationRollSpec weenies: the Voidclaw, the Hive batons, the Thread Gem). A
+        /// single-point grid makes the rolling reference match the item with certainty. The reference now keeps the
+        /// spec (the roll is skipped), the item has it stripped, so a rolled item always differs and keeps its biota.
+        /// </summary>
+        [TestMethod]
+        public void IsPristine_CreationRolledItem_IsNotPristine_EvenIfAReferenceWouldRollTheSame()
+        {
+            EnsureGuidManagerConstructible();
+            SeedWorldWeenie(new Weenie
+            {
+                WeenieClassId = CreationRollProbeWcid,
+                ClassName = "vaultcollapsecreationrollprobe",
+                WeenieType = WeenieType.Generic,
+                PropertiesString = new Dictionary<PropertyString, string>
+                {
+                    { PropertyString.Name, "Creation Roll Probe" },
+                    { PropertyString.CreationRollSpec, "v1|f29=1.13:1.13:0.01" },
+                },
+            });
+
+            var item = WorldObjectFactory.CreateNewWorldObject(CreationRollProbeWcid);
+            Assert.IsNotNull(item);
+            Assert.AreEqual(1.13, item.GetProperty((PropertyFloat)29).Value, 1e-12, "precondition: the roll applied");
+            Assert.IsNull(item.GetProperty(PropertyString.CreationRollSpec), "precondition: the spec is stripped from the copy");
+
+            Assert.IsFalse(VaultCollapse.IsPristine(item), "a creation-rolled item must keep its biota");
+
+            item.Destroy();
         }
 
         #endregion

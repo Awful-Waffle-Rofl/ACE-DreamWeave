@@ -97,7 +97,7 @@ namespace ACE.Server.Tests
             var enumValues = Enum.GetValues(typeof(WeaponModId)).Cast<WeaponModId>().ToList();
 
             Assert.AreEqual(22, enumValues.Count,
-                "the catalog is 4 Tier A plus 18 Tier B. Tier A is 4 v1 rows only (came down from 11 in the 2026-07-30 pool cut - Warding, Crit Ward, Resolute, Vigor and Mending were removed as defensive/sustain rows, and Armor Cleaving was cut before that - down to 5 on 2026-08-07 when Cleave was removed, and down again to 4 on 2026-08-17 when Swift Flight was retired in the catalog v4 pass). Tier B is 3 surviving v2 rows (Life Leech, Mana Leech, Stamina Leech and Overload were retired 2026-08-17 alongside Swift Flight; Sunder and Rampage are phase 2 and deliberately have no enum member) plus 6 v3-expansion rows added 2026-08-06 (Heft, Tension, Leverage, Attunement, Focus, Execution - all six were reworked from an original Tier A/native-writing draft the same day, see WeaponModRegistry.cs's Tier B v3 remarks) plus 9 v4-expansion rows added 2026-08-17, currently inert (Efficiency, Recovery, Mana Well, Cleanse, Longevity, Siphon, Quick Refresh, Arcane Defender - renamed Defensive Weapon 2026-10-25 - and Panic Reload)");
+                "the catalog is 4 Tier A plus 18 Tier B. Tier A is 4 v1 rows only (came down from 11 in the 2026-07-30 pool cut - Warding, Crit Ward, Resolute, Vigor and Mending were removed as defensive/sustain rows, and Armor Cleaving was cut before that - down to 5 on 2026-08-07 when Cleave was removed, and down again to 4 on 2026-08-17 when Swift Flight was retired in the catalog v4 pass). Tier B is 3 surviving v2 rows (Life Leech, Mana Leech, Stamina Leech and Overload were retired 2026-08-17 alongside Swift Flight; Sunder and Rampage are phase 2 and deliberately have no enum member) plus 6 v3-expansion rows added 2026-08-06 (Heft, Tension, Leverage, Attunement, Precision, Execution - all six were reworked from an original Tier A/native-writing draft the same day, see WeaponModRegistry.cs's Tier B v3 remarks) plus 9 v4-expansion rows added 2026-08-17, currently inert (Efficiency, Recovery, Mana Well, Cleanse, Longevity, Siphon, Quick Refresh, Arcane Defender - renamed Defensive Weapon 2026-10-25 - and Panic Reload)");
             Assert.AreEqual(22, WeaponModRegistry.AllMods.Count, "every WeaponModId needs exactly one registry row");
 
             Assert.AreEqual(4, WeaponModRegistry.TierAMods.Count, "the Tier A half (v1 survivors only)");
@@ -212,10 +212,10 @@ namespace ACE.Server.Tests
         /// whole system consolidated onto weapon_mods_enabled. The DEPTHS did not move with it - only which
         /// bool selects between them.
         ///
-        /// UPDATED AGAIN 2026-08-06: the v3 expansion (Heft, Tension, Leverage, Attunement, Focus, Execution)
+        /// UPDATED AGAIN 2026-08-06: the v3 expansion (Heft, Tension, Leverage, Attunement, Precision, Execution)
         /// added six rows, but every one of them is TIER B (see WeaponModRegistry.TierBExpansionBandStart), so
-        /// the GATE-OFF depths are unchanged from v1/v2. The gate-ON depths grew: v3 adds Heft+Leverage+Focus+
-        /// Execution to melee (4), Heft+Tension+Focus+Execution to missile (4), Attunement+Focus+Execution to
+        /// the GATE-OFF depths are unchanged from v1/v2. The gate-ON depths grew: v3 adds Heft+Leverage+Precision+
+        /// Execution to melee (4), Heft+Tension+Precision+Execution to missile (4), Attunement+Precision+Execution to
         /// caster (3), on top of v2's six per class.
         ///
         /// UPDATED AGAIN 2026-08-07 with the Cleave removal, and ONLY THE MELEE COLUMN MOVED: Cleave was the

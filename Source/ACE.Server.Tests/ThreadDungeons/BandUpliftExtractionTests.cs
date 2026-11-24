@@ -100,7 +100,9 @@ namespace ACE.Server.Tests.ThreadDungeons
         [TestMethod]
         public void ThreadsSpawner_StillCallsBandUplift_WithThePlanStandard()
         {
-            AssertCodeLine("ACE.Server/ThreadDungeons/ThreadDungeonSpawner.cs", "var standard = plan.BandStandard;");
+            // Re-pinned 2026-11-18 (Thread family stretch): a stretched entry is normalized to the standard at its mapped
+            // level; UpliftStandardFor returns plan.BandStandard for every other entry (StretchSpawnTests pins both halves).
+            AssertCodeLine("ACE.Server/ThreadDungeons/ThreadDungeonSpawner.cs", "var standard = UpliftStandardFor(entry, plan);");
             AssertCodeLine("ACE.Server/ThreadDungeons/ThreadDungeonSpawner.cs", "var (skillsRaised, partsScaled) = BandUplift.Apply(creature, entry.UpliftLevel, standard);");
             AssertCodeLine("ACE.Server/ThreadDungeons/ThreadDungeonSpawner.cs", "=> DungeonStatProfile.FromWeenie(weenie);");
             AssertCodeLine("ACE.Server/ThreadDungeons/ThreadDungeonSpawner.cs", "=> DungeonStatProfile.HealthOf(weenie);");

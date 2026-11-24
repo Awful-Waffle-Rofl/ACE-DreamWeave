@@ -22,8 +22,11 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "riposte",
             DisplayName = "Riposte",
-            Description = "When you Parry a melee attack, counter with a free weapon strike at 40/70/100% damage by rank. " +
-                          "The counter is a real hit, so Poison Weapon and Acid Proc apply, scaled to the counter's damage. Requires Parry.",
+            // Live text: baseFraction + (rank - 1) * stepPerRank (CounterFraction / GetReadout).
+            DescriptionTemplate = "When you Parry a melee attack, you strike back for free. The counter is a real hit, so Poison " +
+                          "Weapon and Acid Proc apply, scaled to its damage. Requires Parry.",
+            RankTailTemplate = "counter deals {ladder:class_ability_riposte_fraction_base,class_ability_riposte_fraction_step|pct}% " +
+                          "damage",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,

@@ -826,3 +826,219 @@ CREATE TABLE IF NOT EXISTS `knot_event` (
     KEY `ix_start_group` (`start_group`),
     KEY `ix_source_ts` (`source`, `ts_utc`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------------------------------
+-- Balance Trials. `trial_run` is one row per (rep, character): a scripted solo run of one archetype
+-- through one scenario on the live spawn path. `trial_event` is the combat and economy event stream of
+-- that run. Written by the trial recorder (BalanceTrials/), queued in AnalyticsManager.RecordTrialRun /
+-- RecordTrialEvent and batch-written by AnalyticsDatabase.WriteTrialRuns / WriteTrialEvents.
+--
+-- *** THESE TABLES' SHAPE FREEZES ON THEIR FIRST DEPLOY. READ THE MIGRATION NOTE ABOVE THE THREAD
+-- RUN TABLES. *** CREATE TABLE IF NOT EXISTS only: no ALTER, no migration path. A column or an index
+-- added here later never reaches a database that already has the table, and the INSERT naming the
+-- column then fails on every write. Do not rename or drop anything below.
+--
+-- RETENTION: NEVER pruned, like knot_event and the Thread run tables. Trials are stage-only and few,
+-- and the data exists for balance comparison across seasons.
+--
+-- `run_key` ties the two tables together. Rows are queued and batch-written, so no auto-increment id
+-- exists when an event is queued; `run_key` is minted in memory per (rep, character), like
+-- knot_event.attempt_id, and is unique per run (ux_run_key). trial_event.run_key has no foreign key.
+--
+-- NULL (never 0) means not applicable or not measurable: a forfeit or a death cannot fill the
+-- time-to-kill, vital-low and per-hour columns, and a run with no boss has no boss prediction. The
+-- `*_per_hour` columns are over wall-clock seconds from `started_utc` to `ended_utc`; the
+-- `*_per_engaged_hour` columns are over `engaged_secs` only (idle time excluded).
+--
+-- `end_state` and `trial_event.kind` / `dir` are closed vocabularies, all lowercase, defined once in
+-- TrialEventKinds (the const strings there are the only spelling):
+--   end_state  cleared | died | timeout | forfeit
+--   kind       hit | miss | evade | resist | kill | death | consume | proc | spawn | vital_low
+--   dir        out | in            (out = the trial character dealt it, in = it received it)
+CREATE TABLE IF NOT EXISTS `trial_run` (
+    `id`                            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `run_key`                       CHAR(32)        NOT NULL,   -- minted per (rep, character)
+    `trial_uuid`                    CHAR(32)        NOT NULL,   -- one trial = many reps
+    `rep`                           INT             NOT NULL,
+    `scenario_id`                   VARCHAR(64)     NOT NULL,
+    `scenario_hash`                 CHAR(64)        NOT NULL,
+    `archetype_id`                  VARCHAR(64)     NOT NULL,
+    `archetype_checksum`            CHAR(64)        NOT NULL,
+    `state_digest`                  CHAR(64)        NULL,       -- NULL when no digest was taken
+    `digest_drift`                  TINYINT(1)      NOT NULL,
+    `driver`                        VARCHAR(64)     NOT NULL,
+    `client_count`                  INT             NOT NULL,
+    `character_id`                  INT UNSIGNED    NOT NULL,
+    `char_level`                    INT             NOT NULL,
+    `gem_level`                     INT             NOT NULL,
+    `gem_level_pressed`             INT             NULL,       -- NULL when no gem was pressed
+    `tier`                          INT             NOT NULL,
+    `dungeon_id`                    VARCHAR(32)     NOT NULL,   -- the longest index id is 21 (ruined_empyrean_vault)
+    `family`                        VARCHAR(32)     NOT NULL,
+    `seed`                          INT             NOT NULL,
+    `mods_json`                     VARCHAR(1024)   NOT NULL,
+    `started_utc`                   DATETIME(3)     NOT NULL,
+    `ended_utc`                     DATETIME(3)     NOT NULL,
+    `end_state`                     VARCHAR(8)      NOT NULL,   -- cleared | died | timeout | forfeit
+    `engaged_secs`                  DOUBLE          NOT NULL,
+    `idle_secs`                     DOUBLE          NOT NULL,
+    `ttk_trash_avg`                 DOUBLE          NULL,       -- NULL when none killed
+    `ttk_elite_avg`                 DOUBLE          NULL,
+    `ttk_boss`                      DOUBLE          NULL,
+    `kills_trash`                   INT             NOT NULL,
+    `kills_elite`                   INT             NOT NULL,
+    `boss_killed`                   TINYINT(1)      NOT NULL,
+    `deaths`                        INT             NOT NULL,
+    `dmg_dealt`                     BIGINT          NOT NULL,
+    `dmg_taken`                     BIGINT          NOT NULL,
+    `hits_out`                      INT             NOT NULL,
+    `misses_out`                    INT             NOT NULL,
+    `resisted_out`                  INT             NOT NULL,
+    `hits_in`                       INT             NOT NULL,
+    `evaded_in`                     INT             NOT NULL,
+    `resisted_in`                   INT             NOT NULL,
+    `xp_earned`                     BIGINT          NOT NULL,
+    `lum_earned`                    BIGINT          NOT NULL,
+    `xp_per_hour`                   DOUBLE          NULL,
+    `lum_per_hour`                  DOUBLE          NULL,
+    `xp_per_engaged_hour`           DOUBLE          NULL,
+    `lum_per_engaged_hour`          DOUBLE          NULL,
+    `xp_multiplier`                 DOUBLE          NOT NULL,
+    `boss_xp_multiplier`            DOUBLE          NOT NULL,
+    `lum_multiplier`                DOUBLE          NOT NULL,
+    `hp_low_pct`                    DOUBLE          NULL,       -- lowest HP fraction seen, a 0-1 fraction of max (not a percent)
+    `stam_low_pct`                  DOUBLE          NULL,       -- lowest stamina fraction seen, 0-1 (not a percent)
+    `mana_low_pct`                  DOUBLE          NULL,       -- lowest mana fraction seen, 0-1 (not a percent)
+    `consumables_used`              INT             NOT NULL,
+    `ability_procs`                 INT             NOT NULL,
+    `pred_player_hits_to_kill_boss` DOUBLE          NULL,       -- the analytic prediction, beside the measurement
+    `pred_boss_hits_to_kill_player` DOUBLE          NULL,
+    `pred_boss_hit_chance`          DOUBLE          NULL,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `ux_run_key` (`run_key`),
+    KEY `ix_trial` (`trial_uuid`, `rep`),
+    KEY `ix_scen_arch_ts` (`scenario_id`, `archetype_id`, `started_utc`),
+    KEY `ix_started` (`started_utc`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- One row per combat or economy EVENT of a trial run. `t_ms` is milliseconds since the rep started.
+-- `actor_role` is the role of the TRIAL CREATURE in the event, either direction (Trash, Elite or
+-- Boss, capitalized, as the recorder writes them), so a hit in and a hit out are both filtered by the
+-- same column. `pred_json` carries the prediction for the event when the recorder has one. Columns an
+-- event kind does not use are NULL.
+CREATE TABLE IF NOT EXISTS `trial_event` (
+    `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `run_key`       CHAR(32)        NOT NULL,   -- = trial_run.run_key
+    `t_ms`          INT             NOT NULL,   -- ms since rep start
+    `kind`          VARCHAR(12)     NOT NULL,
+    `dir`           VARCHAR(3)      NULL,       -- out | in
+    `actor_wcid`    INT UNSIGNED    NULL,
+    `target_wcid`   INT UNSIGNED    NULL,
+    `actor_role`    VARCHAR(8)      NULL,       -- role of the trial creature, either direction
+    `damage_type`   VARCHAR(16)     NULL,
+    `amount`        BIGINT          NULL,       -- hit: damage; vital_low: HP fraction in thousandths (0.2 -> 200)
+    `crit`          TINYINT(1)      NULL,
+    `combat_type`   VARCHAR(8)      NULL,
+    `spell_id`      INT UNSIGNED    NULL,
+    `item_wcid`     INT UNSIGNED    NULL,
+    `pred_json`     VARCHAR(1024)   NULL,
+    `xp`            BIGINT          NULL,
+    `lum`           BIGINT          NULL,
+    PRIMARY KEY (`id`),
+    KEY `ix_run_t` (`run_key`, `t_ms`),
+    KEY `ix_kind` (`kind`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------------------------------
+-- Player deaths. One row per player death, written from Player.OnDeath (DeathTelemetry.RecordDeath),
+-- queued in AnalyticsManager.RecordPlayerDeath and batch-written by AnalyticsDatabase.WritePlayerDeaths.
+-- Exists to tell outlier hits, debuff stacking and missing buffs apart when a player is one-shot.
+--
+-- *** THIS TABLE'S SHAPE FREEZES ON ITS FIRST DEPLOY. READ THE MIGRATION NOTE ABOVE THE THREAD
+-- RUN TABLES. *** CREATE TABLE IF NOT EXISTS only: no ALTER, no migration path. A column or an index
+-- added here later never reaches a database that already has the table, and the INSERT naming the
+-- column then fails on every write. Do not rename or drop anything below.
+--
+-- RETENTION: NEVER pruned, like knot_event. One row per death is far below chat volume.
+--
+-- NULL (never 0) means not known or not applicable.
+--
+-- `killing_blow_known` is 1 when DamageHistory.KillingBlow named the hit exactly: the newest entry was
+-- damage, left health at 0 and carried its unclamped figure. Only three sinks record that figure
+-- (Player.TakeDamage, SpellProjectile.DamageTarget, and the Harm / Drain Health writes in
+-- WorldObject_Magic), so a DoT tick, a fall, or Creature.TakeDamage reaching a player leaves it 0 and
+-- every killing-blow column NULL. On such a row `damage_type` is the death message's damage type and
+-- the `killer_*` columns are the death handler's last damager (wcid and level only if it still exists).
+--
+-- `thrown` is the hit after every mitigation, BEFORE the clamp to remaining health (the figure in the
+-- chat line); `health_before` is the health the victim had going into it. `max_health` is the max at
+-- the killing hit when known, else at death.
+-- `attack_kind` is a closed set, lowercase (DamageAttackKindNames.Wire is the only spelling):
+--   melee | missile | magic | hazard | effect | other
+-- `damage_type` is the display name (Slashing, Fire, Health ...), or the flag list for a multi-flag value.
+-- `killer_*` is the attacker as it stood at the killing hit; for a projectile, the launcher.
+--
+-- The defensive columns are a snapshot taken AT THE KILLING HIT (not at death, when enchantments may
+-- already have expired or been stripped), and only while analytics is enabled:
+--   `element`        the single resistance element of the hit: slash | pierce | bludgeon | cold | fire |
+--                    acid | electric | nether | none (none = Undef, Health, or more than one flag).
+--   `had_vulnerability` / `had_element_protection`
+--                    an enchantment in that element's life Vulnerability / Protection (or rare Protection)
+--                    category. NULL when the element has no category: nether and none.
+--   `had_imperil` / `had_armor_self`
+--                    ArmorLowering / ArmorRaising (or rare). Read for every attack kind.
+--   `*_spell_id`     the strongest such enchantment (highest power level, then newest layer).
+--   `prot_resist_mod` / `vuln_resist_mod`
+--                    EnchantmentManager.GetProtectionResistanceMod / GetVulnerabilityResistanceMod for the
+--                    element: the enchantment factors Creature.GetResistanceMod starts from, BEFORE natural
+--                    resistance, augmentations, hollow and weapon rending are folded in. Not the final
+--                    resistance multiplier of the hit. NULL when the element is none.
+--   `body_armor_mod` EnchantmentManager.GetBodyArmorMod: net additive body armor from life spells (Armor
+--                    Self minus Imperil), the term the armor math adds before equipment.
+--
+-- `thread_*` are set when the player died inside a registered Thread run's instance: `thread_start_group`
+-- = dungeon_run.start_group (the join key; never join on instance_id, which RECYCLES), and
+-- `thread_gem_level` is the run's gem level.
+-- `message` is the exact victim chat line: the death text plus the killing-blow suffix.
+CREATE TABLE IF NOT EXISTS `player_death_event` (
+    `id`                          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `ts_utc`                      DATETIME        NOT NULL,
+    `character_id`                INT UNSIGNED    NOT NULL,
+    `name`                        VARCHAR(64)     NOT NULL,   -- name AT DEATH
+    `level`                       INT             NULL,
+    `landblock`                   INT             NOT NULL,   -- as live_roster.landblock
+    `instance_id`                 INT UNSIGNED    NULL,       -- Landblock.Instance: an ephemeral instance (RECYCLES) OR a realm id; NULL only in the default realm
+    `max_health`                  INT UNSIGNED    NOT NULL,
+    `killing_blow_known`          TINYINT(1)      NOT NULL,
+    `thrown`                      INT UNSIGNED    NULL,
+    `health_before`               INT UNSIGNED    NULL,
+    `attack_kind`                 VARCHAR(8)      NULL,       -- melee | missile | magic | hazard | effect | other
+    `damage_type`                 VARCHAR(32)     NULL,
+    `is_critical`                 TINYINT(1)      NULL,
+    `spell_id`                    INT UNSIGNED    NULL,
+    `killer_guid`                 INT UNSIGNED    NULL,
+    `killer_wcid`                 INT UNSIGNED    NULL,
+    `killer_name`                 VARCHAR(64)     NULL,
+    `killer_level`                INT             NULL,
+    `killer_is_player`            TINYINT(1)      NULL,
+    `element`                     VARCHAR(8)      NULL,       -- slash ... nether | none
+    `had_vulnerability`           TINYINT(1)      NULL,
+    `vulnerability_spell_id`      INT UNSIGNED    NULL,
+    `had_imperil`                 TINYINT(1)      NULL,
+    `imperil_spell_id`            INT UNSIGNED    NULL,
+    `had_element_protection`      TINYINT(1)      NULL,
+    `element_protection_spell_id` INT UNSIGNED    NULL,
+    `had_armor_self`              TINYINT(1)      NULL,
+    `armor_self_spell_id`         INT UNSIGNED    NULL,
+    `prot_resist_mod`             DOUBLE          NULL,
+    `vuln_resist_mod`             DOUBLE          NULL,
+    `body_armor_mod`              INT             NULL,
+    `thread_start_group`          CHAR(32)        NULL,       -- = dungeon_run.start_group
+    `thread_dungeon_id`           VARCHAR(32)     NULL,
+    `thread_gem_level`            INT             NULL,
+    `message`                     VARCHAR(512)    NOT NULL,   -- the exact victim chat line
+    PRIMARY KEY (`id`),
+    KEY `ix_ts` (`ts_utc`),
+    KEY `ix_char_ts` (`character_id`, `ts_utc`),
+    KEY `ix_thread_start_group` (`thread_start_group`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

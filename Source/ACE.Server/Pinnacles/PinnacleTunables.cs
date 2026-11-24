@@ -2,6 +2,7 @@ using System;
 
 using ACE.Server.Managers;
 using ACE.Server.Pinnacles.Grael;
+using ACE.Server.Pinnacles.Harbinger;
 using ACE.Server.Pinnacles.Matron;
 
 namespace ACE.Server.Pinnacles
@@ -67,6 +68,49 @@ namespace ACE.Server.Pinnacles
             var (pctMin, pctMax) = HazardPctClamp();
 
             return MatronSettings.Defaults with { HazardPctMin = pctMin, HazardPctMax = pctMax };
+        }
+
+        public const string HarbingerHealthMultiplierKey = "pinnacle_harbinger_health_multiplier";
+
+        /// <summary>The Harbinger crystals' health multiplier (round 2 A7; the head has its own since round 4): 2.0 doubles their tier health.</summary>
+        public const double DefaultHarbingerHealthMultiplier = 2.0;
+
+        /// <summary>The accepted range of <see cref="HarbingerHealthMultiplierKey"/> (and of the per-copy override health_multiplier).</summary>
+        public const double MinHarbingerHealthMultiplier = 0.1, MaxHarbingerHealthMultiplier = 10.0;
+
+        public const string HarbingerHeadHealthMultiplierKey = "pinnacle_harbinger_head_health_multiplier";
+
+        /// <summary>The Harbinger head's own health multiplier (round 4): 20.0 is ten times the 2.0 the head had when it shared the crystals' key.</summary>
+        public const double DefaultHarbingerHeadHealthMultiplier = 20.0;
+
+        /// <summary>The accepted range of <see cref="HarbingerHeadHealthMultiplierKey"/> (and of the per-copy override head_health_multiplier).</summary>
+        public const double MinHarbingerHeadHealthMultiplier = 0.1, MaxHarbingerHeadHealthMultiplier = 50.0;
+
+        /// <summary>The live head multiplier (<see cref="SanitizeHarbingerHeadHealthMultiplier"/>); the default when the store cannot be read.</summary>
+        public static double HarbingerHeadHealthMultiplier
+            => SanitizeHarbingerHeadHealthMultiplier(ReadDouble(HarbingerHeadHealthMultiplierKey, DefaultHarbingerHeadHealthMultiplier));
+
+        /// <summary>Pure: a non-finite value reads as the default; anything else is clamped to [0.1, 50].</summary>
+        internal static double SanitizeHarbingerHeadHealthMultiplier(double value)
+            => double.IsFinite(value) ? Math.Clamp(value, MinHarbingerHeadHealthMultiplier, MaxHarbingerHeadHealthMultiplier) : DefaultHarbingerHeadHealthMultiplier;
+
+        /// <summary>The live Harbinger health multiplier (<see cref="SanitizeHarbingerHealthMultiplier"/>); the default when the store cannot be read.</summary>
+        public static double HarbingerHealthMultiplier
+            => SanitizeHarbingerHealthMultiplier(ReadDouble(HarbingerHealthMultiplierKey, DefaultHarbingerHealthMultiplier));
+
+        /// <summary>Pure: a non-finite value reads as the default; anything else is clamped to [0.1, 10].</summary>
+        internal static double SanitizeHarbingerHealthMultiplier(double value)
+            => double.IsFinite(value) ? Math.Clamp(value, MinHarbingerHealthMultiplier, MaxHarbingerHealthMultiplier) : DefaultHarbingerHealthMultiplier;
+
+        /// <summary>
+        /// The Harbinger's tunables: the code defaults with the live hazard-pct clamp and the live health multiplier, read once
+        /// per fight at its creation. Neither read throws.
+        /// </summary>
+        public static HarbingerSettings Harbinger()
+        {
+            var (pctMin, pctMax) = HazardPctClamp();
+
+            return HarbingerSettings.Defaults with { HazardPctMin = pctMin, HazardPctMax = pctMax, HealthMultiplier = HarbingerHealthMultiplier, HeadHealthMultiplier = HarbingerHeadHealthMultiplier };
         }
 
         private static GraelSettings GraelStrings()

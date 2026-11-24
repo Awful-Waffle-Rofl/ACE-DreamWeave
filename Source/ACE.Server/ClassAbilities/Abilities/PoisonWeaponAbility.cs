@@ -31,11 +31,11 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "poisonweapon",
             DisplayName = "Poison Weapon",
-            Description = "Your weapon strikes against monsters deal separate poison damage per rank on every landed hit, " +
-                          "increased further by high Alchemy. Ranks in Acid Proc raise this damage further still. " +
-                          "The poison scales like the strike that carried it: your damage and critical damage " +
-                          "ratings, the target's damage resistance, and on a critical hit the strike's critical " +
-                          "multiplier and Killer Instinct. Extra Multishot arrows and Riposte counters carry poison reduced to match their damage.",
+            DescriptionTemplate = "Your weapon strikes deal separate poison damage on every landed hit. Ranks in Acid Proc " +
+                          "raise it further. The poison scales like the hit that carried it: your damage and critical damage " +
+                          "ratings, the target's damage resistance, and on a critical hit the critical multiplier and Killer " +
+                          "Instinct. Extra Multishot arrows and Riposte counters carry less poison, in line with their damage.",
+            RankTailTemplate = "{per:class_ability_poisonweapon_damage_per_rank|num} poison damage per hit",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },   // flat 1/rank (class ability overhaul repricing, 2026-09-12)
             Implemented = true,

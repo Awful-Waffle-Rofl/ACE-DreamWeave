@@ -200,7 +200,7 @@ namespace ACE.Server.Tests
         public void MovedSlotLevel_ShiftsWithinTheLevelRange_AndLeavesNoSlotLevelAlone()
         {
             Assert.AreEqual(120, WorldEventHoldRules.MovedSlotLevel(100, 20, -1));
-            Assert.AreEqual(275, WorldEventHoldRules.MovedSlotLevel(270, 20, -1));
+            Assert.AreEqual(WorldEventRosterSelector.MaxConsideredLevel, WorldEventHoldRules.MovedSlotLevel(WorldEventRosterSelector.MaxConsideredLevel - 5, 20, -1));
             Assert.AreEqual(1, WorldEventHoldRules.MovedSlotLevel(5, -20, -1));
             Assert.AreEqual(-1, WorldEventHoldRules.MovedSlotLevel(-1, 20, -1));
             Assert.AreEqual(100, WorldEventHoldRules.MovedSlotLevel(100, 0, -1));

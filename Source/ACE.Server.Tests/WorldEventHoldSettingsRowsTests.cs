@@ -18,7 +18,7 @@ namespace ACE.Server.Tests
     public class WorldEventHoldSettingsRowsTests
     {
         private static IReadOnlyList<WorldEventSettingRow> HoldRows =>
-            WorldEventSettingsRegistry.Default.Rows.Where(r => !r.Scope.IsGlobal).ToList();
+            WorldEventSettingsRegistry.Default.Rows.Where(r => r.Scope.Equals(WorldEventSettingsRegistry.HoldScope)).ToList();
 
         private static IReadOnlyList<WorldEventSettingRow> GlobalRows =>
             WorldEventSettingsRegistry.Default.Rows.Where(r => r.Scope.IsGlobal).ToList();
@@ -66,11 +66,16 @@ namespace ACE.Server.Tests
             ("boss_health_cap", SettingKind.Double, "0", 0, 1000, SettingUnsetRule.NonPositiveIsUnset, SettingApplies.NextRun),
             ("boss_throughput_floor_health", SettingKind.Long, "0", 0, 100000000, SettingUnsetRule.NonPositiveIsUnset, SettingApplies.NextRun),
             ("boss_throughput_cap_health", SettingKind.Long, "0", 0, 100000000, SettingUnsetRule.NonPositiveIsUnset, SettingApplies.NextRun),
+            ("boss_budget_enabled", SettingKind.Bool, "True", 0, 1, SettingUnsetRule.AlwaysSet, SettingApplies.NextRun),
+            ("boss_health_per_power", SettingKind.Double, "0", 0, 10000000, SettingUnsetRule.NonPositiveIsUnset, SettingApplies.NextRun),
+            ("boss_power_exponent", SettingKind.Double, "0", 0, 3, SettingUnsetRule.NonPositiveIsUnset, SettingApplies.NextRun),
+            ("boss_budget_floor_health", SettingKind.Long, "0", 0, 100000000, SettingUnsetRule.NonPositiveIsUnset, SettingApplies.NextRun),
+            ("boss_budget_cap_health", SettingKind.Long, "0", 0, 100000000, SettingUnsetRule.NonPositiveIsUnset, SettingApplies.NextRun),
             ("participation_payout_enabled", SettingKind.Bool, "True", 0, 1, SettingUnsetRule.AlwaysSet, SettingApplies.Live)
         };
 
         [TestMethod]
-        public void TheThirteenGlobalRows_AreUnchanged()
+        public void TheEighteenGlobalRows_AreUnchanged()
         {
             Assert.AreEqual(PinnedGlobals.Length, GlobalRows.Count);
 
@@ -107,6 +112,8 @@ namespace ACE.Server.Tests
             ("undefended_seconds_per_participant", SettingKind.Double, "-1", 0, 600, SettingUnsetRule.NegativeIsUnset, "protect.undefendedSecondsPerParticipant", "Live"),
             ("undefended_seconds_floor", SettingKind.Double, "-1", 0, 3600, SettingUnsetRule.NegativeIsUnset, "protect.undefendedSecondsFloor", "Live"),
             ("min_death_seconds", SettingKind.Double, "-1", 0, 600, SettingUnsetRule.NegativeIsUnset, "protect.minDeathSeconds", "Live"),
+            ("knight_durability_per_participant", SettingKind.Double, "-1", 0, 1, SettingUnsetRule.NegativeIsUnset, "protect.durabilityPerParticipant", "Live"),
+            ("knight_durability_cap", SettingKind.Double, "-1", 1, 10, SettingUnsetRule.NegativeIsUnset, "protect.durabilityCap", "Live"),
             ("min_survivors", SettingKind.Long, "0", 1, 3, SettingUnsetRule.NonPositiveIsUnset, "protect.minSurvivors", "Live"),
             ("defend_pose", SettingKind.Choice, "on", 0, 0, SettingUnsetRule.EmptyIsUnset, "protect.defendPose", "Live"),
             ("defend_swing_seconds", SettingKind.Double, "0", 1, 10, SettingUnsetRule.NonPositiveIsUnset, "protect.defendPose.swingSeconds", "Live"),
@@ -251,7 +258,7 @@ namespace ACE.Server.Tests
 
             foreach (var g in Golden)
             {
-                if (!WorldEventSettingsRegistry.Default.TryFind(g.Key, out var row) || row.Scope.IsGlobal || row.Key != g.Key)
+                if (!WorldEventSettingsRegistry.Default.TryFind(g.Key, out var row) || !row.Scope.Equals(WorldEventSettingsRegistry.HoldScope) || row.Key != g.Key)
                 {
                     problems.Add($"{g.Key}: in the golden table but not a Hold row");
                     continue;

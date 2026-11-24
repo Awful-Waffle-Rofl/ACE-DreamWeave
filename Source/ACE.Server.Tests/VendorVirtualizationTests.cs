@@ -33,6 +33,8 @@ namespace ACE.Server.Tests
                 "GetSellCost", "GetBuyCost", "CalculatePayoutCoinAmount",
                 "ProcessItemsForPurchase", "BuyItems_ValidateTransaction", "ApproachVendor",
                 "CanAccept",
+                // the viewer seam (Salvage Roller shared station): SalvageRollerVendor overrides all three
+                "GetItemsForSaleCount", "ForEachItemFor",
             };
 
             foreach (var name in required)

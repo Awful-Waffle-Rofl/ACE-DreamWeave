@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 using ACE.Server.Managers;
 using ACE.Server.WorldObjects;
@@ -60,6 +61,9 @@ namespace ACE.Server.ClassAbilities.Abilities
 
             return (int)Math.Round(grantedRating * fraction, MidpointRounding.AwayFromZero);
         }
+
+        /// <summary>The tunable-key prefix (rank 1-3 appended) for Heal Boost Rating's Damage Rating conversion.</summary>
+        public const string HealBoostDamageConversionPrefix = "class_ability_healboostrating_damage_conversion_r";
 
         /// <summary>The conversion fraction at a rank (0 at rank 0, or when this entry has no conversion).</summary>
         public double DamageConversionFraction(int rank)
@@ -124,6 +128,61 @@ namespace ACE.Server.ClassAbilities.Abilities
         }
 
         /// <summary>
+        /// The tunable-key prefix (rank 1-3 appended) for Crit Resist Rating's DAMAGE conversion: the fraction
+        /// of the player's TOTAL Critical Resist Rating (Creature.GetCritResistRating - gear, augs, enchantments
+        /// and the Crit Resist Rating class grant alike) that also counts as Damage Resist Rating. Vanguard pass
+        /// 2026-11-06 (owner ruling), retargeted from Damage Rating to Damage Resist Rating 2026-11-08, 30%/60%/100% by rank at the defaults - the same ladder and rounding as
+        /// <see cref="DamageRatingCritDamageConversion"/>.
+        /// </summary>
+        public const string CritResistRatingDamageConversionPrefix = "class_ability_critresistrating_damage_conversion_r";
+
+        /// <summary>
+        /// Crit Resist Rating's damage conversion for the player's CURRENT grant and total Critical Resist
+        /// Rating, read at Creature.GetDamageResistRating. The rank is recovered from
+        /// <paramref name="grantedCritResistRating"/> exactly as GetClassAbilityRating reported it, so PK-facet /
+        /// PvP-arena suppression (which zeroes the grant) zeroes the conversion with it. A negative total
+        /// converts to 0, never to a penalty. Rounded half away from zero.
+        /// </summary>
+        public static int CritResistRatingDamageConversion(int grantedCritResistRating, int totalCritResistRating)
+        {
+            var rank = RankForBonus(grantedCritResistRating);
+
+            if (rank <= 0 || totalCritResistRating <= 0)
+                return 0;
+
+            var fraction = PropertyManager.GetDouble(CritResistRatingDamageConversionPrefix + Math.Clamp(rank, 1, EnhancedStatAbility.MaxTier)).Item;
+
+            return ConvertedRating(totalCritResistRating, fraction);
+        }
+
+        /// <summary>
+        /// The tunable-key prefix (rank 1-3 appended) for Damage Resist Rating's THORNS conversion: the
+        /// fraction of the player's total Damage Resist Rating that scales a Thorns reflect, as a multiplier
+        /// of 1 + fraction x totalDRR / 100. 0.50 / 1.00 / 1.50 by rank at the defaults.
+        /// </summary>
+        public const string DamageResistRatingThornsConversionPrefix = "class_ability_damageresistrating_thorns_conversion_r";
+
+        /// <summary>
+        /// The multiplier a Thorns reflect takes from Damage Resist Rating: 1 + fraction x total / 100. The
+        /// rank is recovered from <paramref name="grantedDamageResistRating"/> as GetClassAbilityRating reported
+        /// it, so suppression (grant 0) yields exactly 1.0. A non-positive total yields 1.0, never below it.
+        /// </summary>
+        public static double DamageResistRatingThornsMultiplier(int grantedDamageResistRating, int totalDamageResistRating)
+        {
+            var rank = RankForBonus(grantedDamageResistRating);
+
+            if (rank <= 0 || totalDamageResistRating <= 0)
+                return 1.0;
+
+            var fraction = PropertyManager.GetDouble(DamageResistRatingThornsConversionPrefix + Math.Clamp(rank, 1, EnhancedStatAbility.MaxTier)).Item;
+
+            if (fraction <= 0.0)
+                return 1.0;
+
+            return 1.0 + fraction * totalDamageResistRating / 100.0;
+        }
+
+        /// <summary>
         /// Mirrors BonusForRank() above - a flat addition into the rating pool, so Unit is "" (flat). No
         /// affinity rider and no gear mod exists for this family in the shipped registry, and there is no
         /// cap. An entry with a damage conversion reports it as a Secondary, mirroring
@@ -181,6 +240,29 @@ namespace ACE.Server.ClassAbilities.Abilities
                 };
             }
 
+            // Crit Resist Rating (Vanguard, 2026-11-06): its crit resist conversion as a Secondary, on THIS
+            // rank's grant and the player's live total Critical Resist Rating (0 with no player).
+            if (Definition.Id == ClassAbilityId.CritResistRating)
+            {
+                var converted = (double)CritResistRatingDamageConversion(granted, player?.GetCritResistRating() ?? 0);
+
+                secondary = new List<ClassAbilityReadout>
+                {
+                    new ClassAbilityReadout
+                    {
+                        HasValue = true,
+                        Skill = converted,
+                        Affinity = 0.0,
+                        Gear = 0.0,
+                        Effective = converted,
+                        Unit = "",
+                        Label = "dmg resist rating from crit resist",
+                        Per = null,
+                        CapNote = null,
+                    },
+                };
+            }
+
             return new ClassAbilityReadout
             {
                 HasValue = true,
@@ -204,8 +286,31 @@ namespace ACE.Server.ClassAbilities.Abilities
             DamageConversionTunablePrefix = damageConversionTunablePrefix;
         }
 
+        /// <summary>
+        /// The rank's grant ("+3" / "+6" / "+10"): the {fn:grant} formula, which reads <see cref="RatingBonus"/> (the table
+        /// the grant is applied from), with an optional per-rank rider appended after it.
+        /// </summary>
+        private static string[] RankTails(Func<int, string> rider = null) =>
+            Enumerable.Range(1, EnhancedStatAbility.MaxTier)
+                .Select(rank => "+{fn:grant|int}" + (rider == null ? string.Empty : rider(rank)))
+                .ToArray();
+
+        /// <summary>The {fn:grant} formula every rating tail uses: a rank's grant, straight from <see cref="BonusForRank"/>.</summary>
+        private static readonly TextFormula GrantFormula = TextFormula.Constant(rank => BonusForRank(rank));
+
+        /// <summary>The structural wording of the Thorns multiplier, 1 + fraction x DRR / 100, as the one literal a tail may type.</summary>
+        private static (string Literal, string Reason)[] ThornsFormulaLiterals() =>
+            new[] { ("x(1 + ", "structural wording of the Thorns multiplier formula, 1 + fraction x DRR / 100 (the owner's format)") };
+
+        private static IReadOnlyDictionary<string, TextFormula> WithGrant(IReadOnlyDictionary<string, TextFormula> formulas)
+        {
+            var all = new Dictionary<string, TextFormula>(formulas ?? new Dictionary<string, TextFormula>()) { ["grant"] = GrantFormula };
+            return all;
+        }
+
         private static RatingAbility Make(ClassAbilityId id, ClassAbilityClass abilityClass, int tier, string name,
-            string displayName, string effect, int[] cost, string damageConversionTunablePrefix = null, string descriptionSuffix = null)
+            string displayName, string description, string[] tails, int[] cost, string damageConversionTunablePrefix = null,
+            IReadOnlyDictionary<string, TextFormula> textFormulas = null, (string Literal, string Reason)[] allowedLiterals = null)
         {
             var definition = new ClassAbilityDefinition
             {
@@ -214,7 +319,10 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Tier = tier,
                 Name = name,
                 DisplayName = displayName,
-                Description = $"Adds +3, then +6, then +10 at ranks 1-3 to your {effect}." + (descriptionSuffix ?? ""),
+                DescriptionTemplate = description,
+                RankTailTemplate = tails,
+                TextFormulas = tails == null ? textFormulas : WithGrant(textFormulas),
+                AllowedLiterals = allowedLiterals,
                 MaxRank = EnhancedStatAbility.MaxTier,
                 CostPerRank = cost,
                 Implemented = true,
@@ -280,20 +388,35 @@ namespace ACE.Server.ClassAbilities.Abilities
             yield return Make(ClassAbilityId.CritRating, ClassAbilityClass.Archer, 3, "crit_rating", "Crit Rating",
                 // premium reprice 2026-09-13: off the 1/2/3 escalator onto flat 2/rank. Archer pass
                 // (reprice wave 5): back down to flat 1/rank.
-                "Critical Hit Rating (higher critical hit chance)", new[] { 1, 1, 1 });
+                "Raises your Critical Hit Rating, so you land critical hits more often.", RankTails(), new[] { 1, 1, 1 });
             yield return Make(ClassAbilityId.CritDamageRating, ClassAbilityClass.Rogue, 3, "crit_damage_rating", "Crit Damage Rating",
-                "Critical Damage Rating (harder critical hits)", new[] { 1, 1, 1 });
+                "Raises your Critical Damage Rating, so your critical hits land harder.", RankTails(), new[] { 1, 1, 1 });
             yield return Make(ClassAbilityId.DamageResistRating, ClassAbilityClass.Vanguard, 3, "damage_resist_rating", "Damage Resist Rating",
-                "Damage Resistance Rating (less damage taken)", new[] { 1, 1, 1 });
+                // Vanguard pass 2026-11-06 (owner ruling): scales the Thorns reflect, read in Player.ApplyThornsReflect.
+                // The rider is 1 + fraction x DRR / 100, so "per DRR" is the fraction as a percentage; the tail renders
+                // it as the raw fraction (0.5 -> "0.5%" per DRR point) from class_ability_damageresistrating_thorns_conversion_r (read in DamageResistRatingThornsMultiplier).
+                "Raises your Damage Resistance Rating, so you take less damage. It also boosts Thorns damage for each point of Damage Resist Rating you have. " +
+                "Does nothing without Thorns or the Thorns gear mod.",
+                RankTails(rank => $", Thorns x(1 + {{ranks:{DamageResistRatingThornsConversionPrefix}|num}}% per DRR)"),
+                new[] { 1, 1, 1 },
+                allowedLiterals: ThornsFormulaLiterals());
             yield return Make(ClassAbilityId.CritResistRating, ClassAbilityClass.Vanguard, 2, "crit_resist_rating", "Crit Resist Rating",
-                // premium reprice 2026-09-13: 1/rank -> 2/rank
-                "Critical Resistance Rating (lower chance of being critically hit)", new[] { 2, 2, 2 });
+                // premium reprice 2026-09-13: 1/rank -> 2/rank, REVERSED 2026-11-06 (Vanguard pass, owner ruling):
+                // back to 1/rank, with a damage conversion added (ClassAbilityRepricing wave 7 keeps owners' ranks
+                // and returns the difference).
+                // The mechanic (owner ruling, PR #2011): the fraction of the player's total Critical Resist Rating that also
+                // counts as Damage Resist Rating, class_ability_critresistrating_damage_conversion_r, applied in GetDamageResistRating.
+                "Raises your Critical Resistance Rating, so you are critically hit less often. It also adds part of your Critical Resist Rating to your Damage Resist Rating.",
+                RankTails(rank => $", +{{ranks:{CritResistRatingDamageConversionPrefix}|pct}}% of it as DRR"),
+                new[] { 1, 1, 1 });
             yield return Make(ClassAbilityId.DamageRating, ClassAbilityClass.Berserker, 3, "damage_rating", "Damage Rating",
                 // premium reprice 2026-09-13: 1/rank -> 2/rank, REVERSED 2026-10-24 (Berserker pass, owner
                 // ruling): back to 1/rank, with a crit damage conversion added (ClassAbilityRepricing wave 3
                 // keeps owners' ranks and returns the difference).
-                "Damage Rating (all damage you deal)", new[] { 1, 1, 1 },
-                descriptionSuffix: " It also adds 30%/60%/100% (by rank) of your total Critical Damage Rating to your Damage Rating.");
+                // The conversion fraction is class_ability_damagerating_critdamage_conversion_r (DamageRatingCritDamageConversion).
+                "Raises your Damage Rating, which boosts all damage you deal. It also adds part of your total Critical Damage Rating to your Damage Rating.",
+                RankTails(rank => $", plus {{ranks:{DamageRatingCritDamageConversionPrefix}|pct}}% of Critical Damage Rating"),
+                new[] { 1, 1, 1 });
             // Blood Mage T2. The rating pool is HealingBoostRating, homed here from the unhomed pool - the
             // life/healing class is where DESIGN.md always meant it to go (BLOOD-MAGE-DESIGN.md sec 3).
             // Read at Creature.GetHealingBoostRating, like every other member of this family.
@@ -305,12 +428,22 @@ namespace ACE.Server.ClassAbilities.Abilities
             // heal-over-time tick multiplies by the enchanted creature's. So a rank makes healing the owner
             // RECEIVES stronger; it does not amplify heals they cast on someone else.
             yield return Make(ClassAbilityId.HealBoostRating, ClassAbilityClass.BloodMage, 2, "heal_boost_rating", "Heal Boost Rating",
-                "Healing Boost Rating (healing you receive is stronger)", new[] { 1, 1, 1 },
+                "Raises your Healing Boost Rating, so healing you receive is stronger. It also adds part of that rating to your Damage Rating.",
+                // The Damage Rating rider is ConvertedRating(grant, fraction) with the class_ability_healboostrating_damage_conversion_r
+                // fraction (3 x 0.30 -> 1, 6 x 0.60 -> 4, 10 x 1.00 -> 10 at the defaults), computed by the formula below.
+                RankTails(rank => " (+{fn:damage_rating_gain|int} Damage Rating)"),
+                new[] { 1, 1, 1 },
                 // Blood Mage buff pass: the ability's OWN granted rating also counts as Damage Rating at
                 // 30%/60%/100% by rank (read at Creature.GetDamageRating). No affinity - generated rating
                 // entries stay unscaled.
-                damageConversionTunablePrefix: "class_ability_healboostrating_damage_conversion_r",
-                descriptionSuffix: " It also adds +1, then +4, then +10 to your Damage Rating (30%/60%/100% of the rating it grants).");
+                damageConversionTunablePrefix: HealBoostDamageConversionPrefix,
+                textFormulas: new Dictionary<string, TextFormula>
+                {
+                    // The same ConvertedRating the mechanic applies (DamageRatingConversionForGranted), at this rank's grant and fraction.
+                    ["damage_rating_gain"] = new TextFormula(
+                        (values, rank) => ConvertedRating(BonusForRank(rank), values.GetDouble(HealBoostDamageConversionPrefix + Math.Clamp(rank, 1, EnhancedStatAbility.MaxTier))),
+                        Enumerable.Range(1, EnhancedStatAbility.MaxTier).Select(r => HealBoostDamageConversionPrefix + r).ToArray()),
+                });
         }
     }
 }

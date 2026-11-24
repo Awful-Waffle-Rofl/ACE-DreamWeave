@@ -61,9 +61,9 @@ namespace ACE.Server.MlDigsite
         // ---- admission ---------------------------------------------------------------------------------
 
         /// <summary>
-        /// Whether a completed dig may open an encounter. Every refusal is silent as far as the player's
-        /// property is concerned: the caller runs this AFTER the doubloon payout and AFTER the map has been
-        /// consumed, so a refusal costs neither.
+        /// Whether a completed dig may open an encounter. The caller (MlDigsiteManager.TryStart) runs this
+        /// BEFORE the payout-and-consume commit; a separation refusal skips that commit and keeps the map
+        /// (<see cref="KeepsMapOnRefusal"/>), and every other refusal runs it and consumes the map as before.
         ///
         /// The three refusals are the ones the design names. A digger who already has one running cannot
         /// stack a second; an anchor inside <paramref name="tooCloseToLiveEncounter"/> of a live encounter is
@@ -72,25 +72,51 @@ namespace ACE.Server.MlDigsite
         /// </summary>
         public static bool IsAdmitted(bool enabled, bool diggerAlreadyRunning, bool tooCloseToLiveEncounter,
             int liveCount, long maxConcurrent, out string reason)
+            => Admit(enabled, diggerAlreadyRunning, tooCloseToLiveEncounter, liveCount, maxConcurrent, out reason) == MlDigsiteAdmission.Admitted;
+
+        /// <summary>
+        /// <see cref="IsAdmitted"/>, naming WHICH gate refused so the caller can treat refusals differently
+        /// (<see cref="KeepsMapOnRefusal"/>). Same gates, same order, same reasons.
+        /// </summary>
+        public static MlDigsiteAdmission Admit(bool enabled, bool diggerAlreadyRunning, bool tooCloseToLiveEncounter,
+            int liveCount, long maxConcurrent, out string reason)
+            => Admit(enabled, diggerAlreadyRunning, false, tooCloseToLiveEncounter, liveCount, maxConcurrent, out reason);
+
+        /// <summary>
+        /// <see cref="Admit(bool, bool, bool, int, long, out string)"/> plus whether the digger's OWN live
+        /// encounter lies inside the separation radius of this dig. Owner ruling (2026-11-16): that case
+        /// refuses as <see cref="MlDigsiteAdmission.TooCloseToLiveEncounter"/>, so the map is kept and the
+        /// digger gets the same separation line as for another player's encounter. A digger whose own
+        /// encounter is FAR away (<paramref name="diggerOwnEncounterWithinSeparation"/> false) still refuses
+        /// as <see cref="MlDigsiteAdmission.DiggerAlreadyRunning"/> and consumes the map, unchanged.
+        /// </summary>
+        public static MlDigsiteAdmission Admit(bool enabled, bool diggerAlreadyRunning, bool diggerOwnEncounterWithinSeparation,
+            bool tooCloseToLiveEncounter, int liveCount, long maxConcurrent, out string reason)
         {
             reason = null;
 
             if (!enabled)
             {
                 reason = "digsite encounters are disabled";
-                return false;
+                return MlDigsiteAdmission.Disabled;
+            }
+
+            if (diggerAlreadyRunning && diggerOwnEncounterWithinSeparation)
+            {
+                reason = "the digger's own encounter is already running too close to this site";
+                return MlDigsiteAdmission.TooCloseToLiveEncounter;
             }
 
             if (diggerAlreadyRunning)
             {
                 reason = "the digger already has a live encounter";
-                return false;
+                return MlDigsiteAdmission.DiggerAlreadyRunning;
             }
 
             if (tooCloseToLiveEncounter)
             {
                 reason = "another encounter is already running too close to this site";
-                return false;
+                return MlDigsiteAdmission.TooCloseToLiveEncounter;
             }
 
             // A cap of 0 or less means "no encounters", not "unlimited" - a misconfigured cap must fail
@@ -98,11 +124,22 @@ namespace ACE.Server.MlDigsite
             if (liveCount >= maxConcurrent)
             {
                 reason = $"the server-wide concurrent encounter cap ({maxConcurrent}) is full";
-                return false;
+                return MlDigsiteAdmission.CapFull;
             }
 
-            return true;
+            return MlDigsiteAdmission.Admitted;
         }
+
+        /// <summary>
+        /// Whether a refusal must leave the digger's map unconsumed (MlDigsiteManager.TryStart then never runs
+        /// the payout-and-consume commit). Discord bug report "Wave map seems to have gotten eaten"
+        /// (2026-11-16): a map dug inside the separation radius of another player's live encounter was
+        /// consumed, opened nothing, and told the digger nothing. The separation refusal is the one a player
+        /// can fix by walking away, so it keeps the map and says why. Every other refusal still consumes
+        /// the map exactly as before this fix.
+        /// </summary>
+        public static bool KeepsMapOnRefusal(MlDigsiteAdmission admission)
+            => admission == MlDigsiteAdmission.TooCloseToLiveEncounter;
 
         // ---- the weighted type roll -------------------------------------------------------------------
 

@@ -146,6 +146,25 @@ namespace ACE.Server.ThreadDungeons
             => ceiling.HasValue && value > ceiling.Value ? ceiling.Value : value;
 
         /// <summary>
+        /// Bounds a creature's weapon-lifted effective melee defense (<paramref name="effective"/>, Current times the wielded
+        /// weapon's melee defense modifier, from Creature.GetEffectiveDefenseSkill) to max(<paramref name="current"/>,
+        /// <paramref name="ceiling"/>), where the caller passes Creature.GetMeleeDefenseWeaponBound (the melee defense ceiling,
+        /// else the Threads band cap). The pre-enchantment clamp in CreatureSkill.Current alone left a Thread creature
+        /// wielding a high-WeaponDefense weapon (Blade/Mace/Lance of the Quiddity: WeaponDefense 1.06-1.08 plus Aura of
+        /// Defender) above the cap. Only ever lowers: a value at or below the bound (a debuffed Current, a modifier below 1)
+        /// is returned unchanged, and a null ceiling is a no-op.
+        /// </summary>
+        public static uint BoundWeaponLiftedDefense(uint effective, uint current, uint? ceiling)
+        {
+            if (!ceiling.HasValue)
+                return effective;
+
+            var bound = Math.Max(current, ceiling.Value);
+
+            return effective > bound ? bound : effective;
+        }
+
+        /// <summary>
         /// True for the four magic ATTACK schools the Threads magic attack ceiling clamps (War, Life, Void, Creature
         /// Enchantment). Magic Defense is NOT one of them - it has its own curve and defense ceiling.
         /// </summary>
@@ -154,7 +173,7 @@ namespace ACE.Server.ThreadDungeons
 
         /// <summary>
         /// Sanitizes dynamic_dungeons_magic_attack_skill_cap (owner ruling 2026-10-30): NaN or Infinity reads as the compiled
-        /// default (508); a negative value reads as 0 (off); 0 is off; anything above <see cref="MaxMagicAttackSkillCap"/>
+        /// default (490); a negative value reads as 0 (off); 0 is off; anything above <see cref="MaxMagicAttackSkillCap"/>
         /// reads as that maximum. The value is rounded to a whole skill point.
         /// </summary>
         public static double SanitizeMagicAttackSkillCap(double value)
@@ -181,6 +200,36 @@ namespace ACE.Server.ThreadDungeons
         /// <summary>The ceiling value a sanitized cap stands for: null (no ceiling) when the cap is 0 or below.</summary>
         public static uint? MagicAttackCeilingFor(double sanitizedCap)
             => sanitizedCap >= 1 ? (uint)Math.Min(Math.Round(sanitizedCap), MaxMagicAttackSkillCap) : (uint?)null;
+
+        /// <summary>
+        /// Sanitizes dynamic_dungeons_missile_defense_skill_cap: NaN or Infinity reads as the compiled default (720); a negative
+        /// value reads as 0 (off); 0 is off; anything above <see cref="MaxMissileDefenseSkillCap"/> reads as that maximum. The
+        /// value is rounded to a whole skill point.
+        /// </summary>
+        public static double SanitizeMissileDefenseSkillCap(double value)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value))
+                return DungeonPopulationLimits.DefaultMissileDefenseSkillCap;
+
+            if (value <= 0)
+                return 0;
+
+            return Math.Min(Math.Round(value), MaxMissileDefenseSkillCap);
+        }
+
+        /// <summary>
+        /// True when the configured missile defense cap is out of range and the reader should warn: non-finite, negative, or above
+        /// <see cref="MaxMissileDefenseSkillCap"/>. A legal fractional value such as 720.4 is rounded silently.
+        /// </summary>
+        public static bool MissileDefenseSkillCapNeedsWarning(double configured)
+            => double.IsNaN(configured) || double.IsInfinity(configured) || configured < 0 || configured > MaxMissileDefenseSkillCap;
+
+        /// <summary>Upper bound of the missile defense skill cap dial; far above any reachable skill, so it only stops overflow.</summary>
+        public const double MaxMissileDefenseSkillCap = 100000.0;
+
+        /// <summary>The ceiling value a sanitized cap stands for: null (no ceiling) when the cap is 0 or below.</summary>
+        public static uint? MissileDefenseCeilingFor(double sanitizedCap)
+            => sanitizedCap >= 1 ? (uint)Math.Min(Math.Round(sanitizedCap), MaxMissileDefenseSkillCap) : (uint?)null;
 
         /// <summary>
         /// SETS every body part's DVal and BaseArmor onto the band standard (two-way), keeping each part's
@@ -397,8 +446,188 @@ namespace ACE.Server.ThreadDungeons
         /// </summary>
         public static readonly PropertyFloat[] BypassFloats = { PropertyFloat.IgnoreShield, PropertyFloat.IgnoreArmor, PropertyFloat.AbsorbMagicDamage, PropertyFloat.HollowIntensity };
 
-        /// <summary>Overpower (386): a successful roll skips the player's evade entirely (DamageEvent.cs:210-250).</summary>
+        /// <summary>Overpower (386): a successful roll skips the player's evade entirely (DamageEvent.cs:210-250). Removed whenever present.</summary>
         public static readonly PropertyInt[] BypassInts = { PropertyInt.Overpower };
+
+        /// <summary>
+        /// Int traits removed from the run CREATURE only (not its items), and only when they are ABOVE zero (an authored 0 is no
+        /// amplifier, and many weenies carry an explicit 0 - wcid 33459 does - so removing those would only add noise to
+        /// the "combat traits normalized" log line):
+        ///   - CritDamageRating (314): the creature's OWN authored crit-damage rating, read by
+        ///     Creature.GetCritDamageRating (Creature_Rating.cs, "get from base properties (monsters)") into the
+        ///     additive rating pool of every crit (DamageEvent.cs, CriticalDamageRatingMod). One of the "crippling
+        ///     blow style" crit-damage amplifiers (owner ruling 2026-11-21, with <see cref="StrippedImbues"/>,
+        ///     the weapon CriticalMultiplier and the Execution record). The strip runs BEFORE the archetype
+        ///     uplift's rating floor, which could set it again - see ArchetypeUplift.FloorRatings noCritDamage -
+        ///     and BEFORE the gem's own additive crit-damage rating, which is the player's chosen difficulty and stays.
+        /// </summary>
+        public static readonly PropertyInt[] BypassPositiveInts = { PropertyInt.CritDamageRating };
+
+        /// <summary>
+        /// The imbue bits a run creature's item KEEPS (owner ruling 2026-11-23: Thread family weapons carry no special
+        /// modifiers - no hollow, no imbues - so every enemy is on the same footing for damage). Every other bit is
+        /// cleared, see <see cref="StrippedImbues"/>. Kept because none of them changes the damage the item deals:
+        ///   - MeleeDefense, MissileDefense, MagicDefense: read only by Creature.GetDefenseImbues (Creature_Combat.cs),
+        ///     +1 to the WIELDER's own defense skill per imbued item - a defense term, never a damage term.
+        ///   - Spellbook: no combat reader in ACE.Server (only loot generation and display).
+        /// </summary>
+        public const ImbuedEffectType KeptImbues = ImbuedEffectType.MeleeDefense | ImbuedEffectType.MissileDefense
+            | ImbuedEffectType.MagicDefense | ImbuedEffectType.Spellbook;
+
+        /// <summary>
+        /// Every named imbue bit cleared from every item a run creature carries, in all five ImbuedEffect slots (combat's
+        /// HasImbuedEffect reads slot 1 only - WorldObject_Weapon.cs HasImbuedEffect uses the ImbuedEffect property alone,
+        /// GetImbuedEffects ORs all five for display). Every named bit except <see cref="KeptImbues"/>. The readers on the
+        /// monster attack path, verified 2026-11-23:
+        ///   - CripplingBlow: GetWeaponCritDamageMod takes Math.Max(weapon CriticalMultiplier, GetCripplingBlowMod(skill)),
+        ///     and that mod is skill-scaled, so an uplifted attack skill makes it huge (DamageEvent and SpellProjectile).
+        ///   - CriticalStrike: GetWeaponCriticalChancePreResist / GetWeaponMagicCritFrequencyPreResist take
+        ///     Math.Max(chance, GetCriticalStrikeMod(skill)), up to a 50% crit chance.
+        ///   - ArmorRending: WorldObject.GetArmorRendingModFor (DamageEvent.ResolveDefenderHalf), skill-scaled armor cut.
+        ///   - IgnoreAllArmor: DamageEvent.ResolveDefenderHalf sets ArmorMod to 1, and Creature.GetShieldMod returns 1.
+        ///   - the eight elemental/physical rends, NetherRending and the fork's HealthRending: GetWeaponResistanceModifier,
+        ///     the weapon resistance mod that floors the player's vulnerability in Creature.GetResistanceMod.
+        ///   - IgnoreSomeMagicProjectileDamage: WorldObject.GetAbsorbMagicDamage, the imbue form of AbsorbMagicDamage,
+        ///     already stripped from items in <see cref="BypassFloats"/> - cleared on the same terms.
+        ///   - AlwaysCritical: no reader today; cleared because it is a damage imbue by name.
+        /// Undefined bits are left as they are: no code names them, so nothing can read them.
+        /// </summary>
+        public static readonly ImbuedEffectType[] StrippedImbueBits = Enum.GetValues(typeof(ImbuedEffectType)).Cast<ImbuedEffectType>()
+            .Where(bit => bit != ImbuedEffectType.Undef && (bit & KeptImbues) == 0).Distinct().ToArray();
+
+        /// <summary>The OR of <see cref="StrippedImbueBits"/>.</summary>
+        public static readonly ImbuedEffectType StrippedImbues = StrippedImbueBits.Aggregate(ImbuedEffectType.Undef, (mask, bit) => mask | bit);
+
+        /// <summary>
+        /// Int damage modifiers removed from every ITEM a run creature carries (never the creature itself: each is read
+        /// off the weapon only). Owner ruling 2026-11-23. Readers on the monster attack path, verified 2026-11-23:
+        ///   - SlayerCreatureType (166): WorldObject.GetWeaponCreatureSlayerModifier, DamageEvent.DoCalculateDamage's
+        ///     SlayerMod and SpellProjectile.CalculateDamage's slayerMod. Removing the type alone is enough to disarm it;
+        ///     its SlayerDamageBonus partner is in <see cref="ItemStripFloats"/>.
+        ///   - ResistanceModifierType (263): WorldObject.GetWeaponResistanceModifier, the quest-weapon fixed cleave; the
+        ///     ResistanceModifier partner is in <see cref="ItemStripFloats"/>.
+        ///   - ParagonModSlot1-5 (9103-9107): WeaponModParagon reads the Paragon gems for every wielder that is not a
+        ///     suppressed Player - RatingAddFor in Creature.GetDamageRating/GetCritRating/GetCritDamageRating,
+        ///     IgnoreShieldAddFor in GetIgnoreShieldMod and ParagonFraction in every Tier B read (Focus, Execution).
+        /// </summary>
+        public static readonly PropertyInt[] ItemStripInts =
+        {
+            PropertyInt.SlayerCreatureType, PropertyInt.ResistanceModifierType,
+            PropertyInt.ParagonModSlot1, PropertyInt.ParagonModSlot2, PropertyInt.ParagonModSlot3, PropertyInt.ParagonModSlot4, PropertyInt.ParagonModSlot5,
+        };
+
+        /// <summary>
+        /// The offensive gear ratings removed from every ITEM a run creature carries, read through the creature's
+        /// equip-time rating cache (Creature_Equipment.cs AddItemToEquippedItemsRatingCache, summed into
+        /// Creature.GetDamageRating / GetCritRating / GetCritDamageRating in Creature_Rating.cs for any creature, not
+        /// only players). Because the cache is filled at equip time, an EQUIPPED item's entry has to be taken out of
+        /// the cache before the strip and put back after - see CombatTraitGuard.Apply. The defensive gear ratings
+        /// (GearDamageResist, GearCritResist, ...) are not damage the item deals and are left alone; GearPKDamageRating
+        /// is read only on a Player-vs-Player hit.
+        /// </summary>
+        public static readonly PropertyInt[] ItemStripGearRatings = { PropertyInt.GearDamage, PropertyInt.GearCrit, PropertyInt.GearCritDamage };
+
+        /// <summary>
+        /// The item classes whose damage-changing SPELLS are stripped (orchestrator ruling 2026-11-23, under the owner's
+        /// "same playing field with regard to damage"): weapons, launchers, thrown weapons, ammunition and casters. A fired
+        /// projectile is an Ammunition or Missile object too, so the projectile strip is covered by the same gate.
+        /// </summary>
+        public static readonly WeenieType[] DamageSpellItemTypes =
+        {
+            WeenieType.MeleeWeapon, WeenieType.MissileLauncher, WeenieType.Missile, WeenieType.Ammunition, WeenieType.Caster,
+        };
+
+        /// <summary>
+        /// Int stat keys a damage-changing item spell modifies (an Int SingleStat enchantment), with the reader of each:
+        ///   - Damage (44): EnchantmentManager.GetDamageBonus (Blood Drinker / Blood Thirst on the weapon), into
+        ///     BaseDamageMod.DamageBonus (Entity/BaseDamageMod.cs:48).
+        ///   - WeaponAuraDamage (360): the same GetDamageBonus, from the WIELDER's registry for an enchantable weapon (the
+        ///     "Aura of Blood Drinker" family, Aura of Infected Caress, Epic Blood Thirst), BaseDamageMod.cs:55.
+        ///   - DamageRating (307), CritRating (313), CritDamageRating (314): EnchantmentManager.GetRating, summed into
+        ///     Creature.GetDamageRating / GetCritRating / GetCritDamageRating (Creature_Rating.cs).
+        /// </summary>
+        public static readonly PropertyInt[] DamageSpellIntKeys =
+        {
+            PropertyInt.Damage, PropertyInt.WeaponAuraDamage, PropertyInt.DamageRating, PropertyInt.CritRating, PropertyInt.CritDamageRating,
+        };
+
+        /// <summary>
+        /// Float stat keys a damage-changing item spell modifies (a Float SingleStat enchantment):
+        ///   - DamageMod (63): EnchantmentManager.GetDamageMod, into BaseDamageMod.DamageMod (BaseDamageMod.cs:52, :57).
+        ///   - DamageVariance (22): EnchantmentManager.GetVarianceMod, into BaseDamageMod.VarianceMod (BaseDamageMod.cs:49, :56).
+        ///   - ElementalDamageMod (152), WeaponAuraElemental (170): EnchantmentManager.GetElementalDamageMod, the Spirit
+        ///     Drinker family, read by WorldObject.SumCasterElementalDamageMod for the wand and its wielder.
+        /// </summary>
+        public static readonly PropertyFloat[] DamageSpellFloatKeys =
+        {
+            PropertyFloat.DamageMod, PropertyFloat.DamageVariance, PropertyFloat.ElementalDamageMod, PropertyFloat.WeaponAuraElemental,
+        };
+
+        /// <summary>
+        /// True when an item spell with this enchantment type and stat key changes the damage its wielder deals. Every other
+        /// item spell is KEPT: attack and speed auras (WeaponAuraOffense 168, WeaponAuraSpeed 361), defense auras
+        /// (WeaponAuraDefense 169), mana conversion (171), skill spells (weapon aptitudes, masteries), attribute and vital
+        /// buffs, armor and protection spells.
+        /// </summary>
+        public static bool IsDamageSpell(EnchantmentTypeFlags statModType, uint statModKey)
+        {
+            if (!statModType.HasFlag(EnchantmentTypeFlags.SingleStat))
+                return false;
+
+            if (statModType.HasFlag(EnchantmentTypeFlags.Int))
+                return DamageSpellIntKeys.Any(k => (uint)k == statModKey);
+
+            if (statModType.HasFlag(EnchantmentTypeFlags.Float))
+                return DamageSpellFloatKeys.Any(k => (uint)k == statModKey);
+
+            return false;
+        }
+
+        /// <summary>
+        /// Float damage modifiers removed from every ITEM a run creature carries. Readers, verified 2026-11-23:
+        ///   - SlayerDamageBonus (138): GetWeaponCreatureSlayerModifier, with SlayerCreatureType.
+        ///   - ResistanceModifier (157): GetWeaponResistanceModifier, with ResistanceModifierType.
+        ///   - ElementalDamageMod (152): WorldObject.SumCasterElementalDamageMod via GetCasterElementalDamageModifier, on a
+        ///     wand a monster's LIFE cast hands in as the weapon (Monster_Magic.cs: HandleCastSpell(spell, target, null,
+        ///     caster)), which SpellProjectile.CalculateDamage reads as ProjectileLauncher. Removed, it reads 1.0.
+        ///   - ProcSpellRate (156): the chance half of a weapon proc, removed with ProcSpell (see DungeonCreatureNormalizer.StripItemDamageModifiers).
+        ///   - WeaponModFocus (8025): Tier B Precision, added to crit chance in GetWeaponCriticalChancePreResist and
+        ///     GetWeaponMagicCritFrequencyPreResist through ReadWeaponOnlyWieldedBy, which suppresses only for a Player.
+        ///   - WeaponModAttunement (8024): Tier B, added into SumCasterElementalDamageMod, the same read as ElementalDamageMod.
+        /// The Execution record (8026) is stripped too, logged as "Execution" (see StripItemCritAmplifiers).
+        /// </summary>
+        public static readonly PropertyFloat[] ItemStripFloats =
+        {
+            PropertyFloat.SlayerDamageBonus, PropertyFloat.ResistanceModifier, PropertyFloat.ElementalDamageMod, PropertyFloat.ProcSpellRate,
+            PropertyFloat.WeaponModFocus, PropertyFloat.WeaponModAttunement,
+        };
+
+        public static readonly PropertyInt[] ImbuedEffectSlots =
+        {
+            PropertyInt.ImbuedEffect, PropertyInt.ImbuedEffect2, PropertyInt.ImbuedEffect3, PropertyInt.ImbuedEffect4, PropertyInt.ImbuedEffect5,
+        };
+
+        /// <summary>
+        /// The crit CHANCE a weapon with no CriticalFrequency property falls back to: 0.1 for a physical weapon
+        /// (WorldObject_Weapon.defaultPhysicalCritFrequency), 0.05 for a caster (defaultMagicCritFrequency). A stored value
+        /// ABOVE it is an amplifier and is removed; a stored value at or below it is left alone, because removing it would
+        /// RAISE the chance to the default. Both pinned against the private constants by reflection in the tests.
+        /// </summary>
+        public const double DefaultPhysicalCritFrequency = 0.1, DefaultMagicCritFrequency = 0.05;
+
+        /// <summary>The crit damage multiplier a weapon with no CriticalMultiplier property falls back to (WorldObject_Weapon.defaultCritDamageMultiplier).</summary>
+        public const double DefaultCritMultiplier = 1.0;
+
+        /// <summary>
+        /// True when the stored CriticalFrequency is above the default the property would fall back to, i.e. removing it
+        /// lowers the crit chance. <paramref name="isCaster"/> selects the magic default. Compared against the float the
+        /// combat code uses, so an authored 0.1 (which the game widens to 0.1f) is never read as above default.
+        /// </summary>
+        public static bool CritFrequencyAboveDefault(double stored, bool isCaster)
+            => (float)stored > (float)(isCaster ? DefaultMagicCritFrequency : DefaultPhysicalCritFrequency);
+
+        /// <summary>True when the stored CriticalMultiplier is above the 1.0 the property would fall back to.</summary>
+        public static bool CritMultiplierAboveDefault(double stored) => (float)stored > (float)DefaultCritMultiplier;
 
         /// <summary>
         /// The physics bits that let a projectile or a swing pass through a creature. Stripped through the

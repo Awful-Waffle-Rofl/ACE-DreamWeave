@@ -119,6 +119,73 @@ namespace ACE.Server.Managers.Market
 
         /// <summary>The /v1/admin/world-events routes (Docs/AdminPanel/WORLD-EVENTS-START.md). Null makes every one of them answer server_error.</summary>
         public ACE.Server.WorldEvents.IWorldEventAdminService WorldEvents { get; set; }
+
+        /// <summary>POST /v1/session/launch: the one-time launch code store. Null makes the route answer launch_disabled.</summary>
+        public WebLaunchCodeStore LaunchCodes { get; set; }
+
+        /// <summary>The web_launch_enabled live switch. Null reads OFF (launch_disabled), like the other switches.</summary>
+        public Func<bool> WebLaunchEnabled { get; set; }
+
+        /// <summary>Per-IP cap on POST /v1/session/launch per minute. Its OWN bucket: redeeming a code must never spend the password-login one.</summary>
+        public int LaunchRatePerMinutePerIp { get; set; } = 120;
+
+        /// <summary>The class ability web panel routes (.../class-abilities/panel). Null makes both answer server_error.</summary>
+        public IClassAbilityPanelService ClassAbilityPanel { get; set; }
+
+        /// <summary>
+        /// class_abilities_enabled AND class_ability_web_panel_enabled, live. Null reads OFF (panel_disabled), like the
+        /// other switches; Program.cs wires it.
+        /// </summary>
+        public Func<bool> ClassAbilityPanelEnabled { get; set; }
+
+        /// <summary>GET .../characters/{guid}/details (the Character Details view). Null makes the route answer server_error.</summary>
+        public ICharacterDetailsService CharacterDetails { get; set; }
+
+        /// <summary>character_details_web_enabled, live. Null reads OFF (details_disabled), like the other switches; Program.cs wires it.</summary>
+        public Func<bool> CharacterDetailsEnabled { get; set; }
+
+        /// <summary>
+        /// The panel's OWN in-flight gate, separate from <see cref="MaxInFlight"/>, so a stalled world thread
+        /// (every panel request that visits it holds its slot for up to <see cref="ClassAbilityPanelWorldTimeoutMs"/>)
+        /// can never take the market's slots. 8: the ?since poll answers without a world visit, so slots are held
+        /// briefly except while the world stalls, and then 8 bounds what is queued on it.
+        /// </summary>
+        public int ClassAbilityPanelMaxInFlight { get; set; } = 8;
+
+        /// <summary>
+        /// The panel's OWN per-account write bucket, separate from <see cref="WriteRatePerMinute"/>: a continuous refill
+        /// of 60 per minute (one change a second) under a ceiling of <see cref="ClassAbilityPanelWriteBurst"/>, so a
+        /// player can click through a build quickly and then waits about a second per change, while a runaway client
+        /// is held to one a second.
+        /// </summary>
+        public int ClassAbilityPanelWriteRatePerMinute { get; set; } = 60;
+
+        /// <summary>The panel write bucket's capacity: 20 changes back to back before the refill rate applies.</summary>
+        public int ClassAbilityPanelWriteBurst { get; set; } = 20;
+
+        /// <summary>
+        /// How long a panel request waits for the world thread before answering timeout (outcome unknown). Below
+        /// <see cref="RequestTimeoutMs"/> so the route always hears the answer.
+        /// </summary>
+        public int ClassAbilityPanelWorldTimeoutMs { get; set; } = 1500;
+
+        /// <summary>
+        /// The panel's OWN per-account READ bucket (both GETs, the ?since poll included), separate from its write
+        /// bucket. 120 per minute: a visible tab polls 30 a minute, and a read-only page polls in full, so a few
+        /// tabs fit while a runaway client does not.
+        /// </summary>
+        public int ClassAbilityPanelReadRatePerMinute { get; set; } = 120;
+
+        /// <summary>
+        /// The world wait the panel actually uses: <paramref name="configuredMs"/> clamped to at most
+        /// min(1500, max(100, <paramref name="requestTimeoutMs"/> - 500)), so the route always hears the world call's
+        /// answer before its own RequestTimeoutMs wrapper gives up, whatever Config.js sets.
+        /// </summary>
+        public static int EffectivePanelWorldTimeoutMs(int configuredMs, int requestTimeoutMs)
+        {
+            var ceiling = Math.Min(1500, Math.Max(100, requestTimeoutMs - 500));
+            return Math.Min(Math.Max(1, configuredMs), ceiling);
+        }
     }
 
     /// <summary>
@@ -145,6 +212,9 @@ namespace ACE.Server.Managers.Market
         private static MarketRateLimiter limiter;
         private static MarketRateLimiter sheetLimiter;
         private static MarketRateLimiter announceLimiter;
+        private static MarketRateLimiter launchLimiter;
+        private static MarketRateLimiter panelLimiter;
+        private static MarketRateLimiter panelReadLimiter;
         private static AdminAuthorizer adminAuthorizer;
         private static ConfigMetadata settingsMetadata;
 
@@ -173,9 +243,19 @@ namespace ACE.Server.Managers.Market
             settingsMetadata = apiOptions.SettingsMetadata ?? ConfigMetadata.LoadEmbedded();
             announceLimiter = new MarketRateLimiter(1, Math.Max(1, apiOptions.AdminAnnounceRatePerMinute), 1, 1);
 
+            // Only TryLoginIp is used: the launch route's own per-IP bucket.
+            launchLimiter = new MarketRateLimiter(1, 1, 1, Math.Max(1, apiOptions.LaunchRatePerMinutePerIp));
+
             // Only its in-flight gate is used, so its other buckets are irrelevant; the shape matches
             // the main limiter's constructor for parity, not because logins/writes ever route through it.
             sheetLimiter = new MarketRateLimiter(Math.Max(1, apiOptions.SheetMaxInFlight), 1, 1, 1);
+
+            // The class ability panel's own gate and own per-account write bucket (its login buckets are unused).
+            panelLimiter = new MarketRateLimiter(Math.Max(1, apiOptions.ClassAbilityPanelMaxInFlight),
+                Math.Max(1, apiOptions.ClassAbilityPanelWriteRatePerMinute), 1, 1, writeBurst: Math.Max(1, apiOptions.ClassAbilityPanelWriteBurst));
+
+            // Only its per-account bucket (TryWrite) is used, as the panel's READ bucket; the gate is panelLimiter's.
+            panelReadLimiter = new MarketRateLimiter(1, Math.Max(1, apiOptions.ClassAbilityPanelReadRatePerMinute), 1, 1);
 
             var builder = WebApplication.CreateSlimBuilder();
 
@@ -216,6 +296,9 @@ namespace ACE.Server.Managers.Market
             limiter = null;
             sheetLimiter = null;
             announceLimiter = null;
+            launchLimiter = null;
+            panelLimiter = null;
+            panelReadLimiter = null;
             adminAuthorizer = null;
             settingsMetadata = null;
             ListeningUrl = null;
@@ -225,24 +308,50 @@ namespace ACE.Server.Managers.Market
 
         // ---- routes ----
 
+        // The account's characters with their live balances. SHARED by POST /v1/session and
+        // GET /v1/accounts/me deliberately: the balance refresh is exactly the session response
+        // minus the token, and building it twice is how the two silently drift apart. Both option
+        // delegates are read here and nowhere else on either route.
+        private static List<object> CharacterSummaries(uint accountId)
+        {
+            var characters = options.ListCharacters?.Invoke(accountId) ?? new List<(uint guid, string name)>();
+
+            return characters.Select(c => (object)new
+            {
+                guid = c.guid,
+                name = c.name,
+                balance_mmd = options.Wallet?.GetBalanceMmd(c.guid) ?? 0,
+            }).ToList();
+        }
+
+        // The /v1/session reply. SHARED by POST /v1/session and POST /v1/session/launch so the two cannot drift.
+        // character_guid is emitted only when given (the launch route passes it after checking the roster), and
+        // ONLY then is the session bound to that character - the class ability panel's write gate. POST
+        // /v1/session never passes one, so a password session is never bound.
+        private static IResult SessionReply(uint accountId, uint? characterGuid = null)
+        {
+            var characters = CharacterSummaries(accountId);
+            var token = sessions.Issue(accountId, characterGuid ?? 0);
+
+            if (characterGuid.HasValue)
+                return Results.Json(new
+                {
+                    session_token = token,
+                    account_id = accountId,
+                    characters,
+                    character_guid = characterGuid.Value,
+                }, Json);
+
+            return Results.Json(new
+            {
+                session_token = token,
+                account_id = accountId,
+                characters,
+            }, Json);
+        }
+
         private static void MapRoutes(WebApplication a)
         {
-            // The account's characters with their live balances. SHARED by POST /v1/session and
-            // GET /v1/accounts/me deliberately: the balance refresh is exactly the session response
-            // minus the token, and building it twice is how the two silently drift apart. Both option
-            // delegates are read here and nowhere else on either route.
-            static List<object> CharacterSummaries(uint accountId)
-            {
-                var characters = options.ListCharacters?.Invoke(accountId) ?? new List<(uint guid, string name)>();
-
-                return characters.Select(c => (object)new
-                {
-                    guid = c.guid,
-                    name = c.name,
-                    balance_mmd = options.Wallet?.GetBalanceMmd(c.guid) ?? 0,
-                }).ToList();
-            }
-
             // Liveness, key-gated like everything else so it does not confirm its own existence.
             a.MapGet("/v1/health", (HttpContext ctx) => Guard(ctx, requireSession: false, isWrite: false, handler: _ =>
                 Results.Json(new { status = "ok", generation = MarketManager.FeedGeneration, enabled = MarketManager.Enabled }, Json)));
@@ -265,12 +374,7 @@ namespace ACE.Server.Managers.Market
                 if (accountId == 0)
                     return Error(MarketError.BadCredentials);
 
-                return Results.Json(new
-                {
-                    session_token = sessions.Issue(accountId),
-                    account_id = accountId,
-                    characters = CharacterSummaries(accountId),
-                }, Json);
+                return SessionReply(accountId);
             });
 
             // The balance refresh: the session response minus the token, so the web app can reprice a
@@ -630,7 +734,10 @@ namespace ACE.Server.Managers.Market
                 Guard(ctx, requireSession: true, isWrite: true, handler: accountId => SheetLinkReply(accountId, guid, s => s.Disable((uint)guid))));
 
             MapSuitRoutes(a);
+            MapLaunchRoutes(a);
             MapClassAbilityRoutes(a);
+            MapClassAbilityPanelRoutes(a);
+            MapCharacterDetailsRoutes(a);
 
             MapSuitTransferRoutes(a);
 
@@ -930,6 +1037,11 @@ namespace ACE.Server.Managers.Market
                 // needs in order to know it may try again.
                 MarketError.BarrelUnavailable => StatusCodes.Status503ServiceUnavailable,
 
+                // Not transient, so NOT shaped like BarrelUnavailable: it does not clear within a retry
+                // window (space frees only on an admin restore or empty, or a retention purge). A
+                // conflict with server state, 409 like VaultFull.
+                MarketError.BarrelFull        => StatusCodes.Status409Conflict,
+
                 // A state conflict the seller resolves by delisting, not a rate limit that clears on
                 // its own - 409, not 429.
                 MarketError.ListingLimit      => StatusCodes.Status409Conflict,
@@ -1020,8 +1132,19 @@ namespace ACE.Server.Managers.Market
                 MarketError.InvalidTransfer       => StatusCodes.Status400BadRequest,
                 MarketError.TransferNotFound      => StatusCodes.Status404NotFound,
                 MarketError.InPvp                 => StatusCodes.Status409Conflict,
+                MarketError.LaunchDisabled        => StatusCodes.Status503ServiceUnavailable,
 
-                _                            => StatusCodes.Status500InternalServerError,
+                // Class ability web panel (market-api-v1.yaml, .../class-abilities/panel). A password session
+                // asking to write is refused like not_owner; a moved rank is a conflict the page resolves from
+                // the fresh panel it carries; a rule refusal is the request being understood and declined.
+                MarketError.NotLaunchSession      => StatusCodes.Status403Forbidden,
+                MarketError.Stale                 => StatusCodes.Status409Conflict,
+                MarketError.RuleRefused           => StatusCodes.Status422UnprocessableEntity,
+                MarketError.InvalidChange         => StatusCodes.Status400BadRequest,
+                MarketError.PanelDisabled         => StatusCodes.Status503ServiceUnavailable,
+                MarketError.DetailsDisabled       => StatusCodes.Status503ServiceUnavailable,
+
+                _                           => StatusCodes.Status500InternalServerError,
             };
         }
 

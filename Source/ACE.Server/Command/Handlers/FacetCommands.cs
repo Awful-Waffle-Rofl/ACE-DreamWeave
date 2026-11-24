@@ -16,7 +16,7 @@ using ACE.Server.WorldObjects;
 namespace ACE.Server.Command.Handlers
 {
     /// <summary>
-    /// Player Facets: /facet, /facet &lt;N&gt;, /facet name &lt;N&gt; &lt;text&gt; and /facet help. All the actual
+    /// Player Facets: /facet, /facet &lt;N&gt;, /facet name &lt;N&gt; &lt;text&gt;, /facet vault [on|off] and /facet help. All the actual
     /// gating, mutation and persistence lives on Player_Facets.cs (Player.CheckFacetGates,
     /// Player.TrySwitchFacet, Player.TrySetFacetName); this file is the thin command-layer dispatch
     /// plus the wording of the first-visit confirmation prompt. See Docs/Facets/DESIGN.md section 8.
@@ -25,12 +25,14 @@ namespace ACE.Server.Command.Handlers
     {
         [CommandHandler("facet", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, 0,
             "Player Facets: switch between configurable builds for this character.",
-            "[<N> [trim] | pk [trim] | name <N> <text> | help]\n" +
+            "[<N> [trim] | pk [trim] | name <N> <text> | reset <N|pk> | vault [on|off] | help]\n" +
             "  (no args)          - show your facets\n" +
             "  <N>                - turn to facet N, e.g. /facet 2\n" +
             "  <N> trim           - turn to facet N, trimming its skills to cover an experience shortfall\n" +
             "  pk [trim]          - turn to your PK facet, where you are always a player killer\n" +
             "  name <N> <text>    - set facet N's display name, e.g. /facet name 1 Void (N may be pk)\n" +
+            "  reset <N|pk>       - clear facet N (2+ or pk) back to a fresh build, keeping its name\n" +
+            "  vault [on|off]     - send the gear you take off when you change facets to your account vault\n" +
             "  help               - what a facet keeps, shares and costs")]
         public static void HandleFacet(Session session, params string[] parameters)
         {
@@ -41,6 +43,14 @@ namespace ACE.Server.Command.Handlers
             if (!FacetTunables.DialSource().Enabled)
             {
                 Msg(player, "Facets are not available on this server yet.");
+                return;
+            }
+
+            // /facet vault is a preference toggle with no shard read, so it is EXEMPT from the family cooldown
+            // below (which exists only because the other forms can block the world thread on a shard read).
+            if (parameters.Length > 0 && string.Equals(parameters[0], "vault", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleVault(player, parameters.Skip(1).ToArray());
                 return;
             }
 
@@ -65,6 +75,12 @@ namespace ACE.Server.Command.Handlers
                 return;
             }
 
+            if (string.Equals(parameters[0], "reset", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleReset(player, parameters.Skip(1).ToArray());
+                return;
+            }
+
             if (string.Equals(parameters[0], "help", StringComparison.OrdinalIgnoreCase))
             {
                 Msg(player, ComposeHelp(FacetTunables.DialSource()));
@@ -73,12 +89,98 @@ namespace ACE.Server.Command.Handlers
 
             if (!TryParseSwitchArgs(parameters, out var targetSlot, out var trim))
             {
-                Msg(player, "Usage: /facet [<N> [trim] | pk [trim] | name <N> <text> | help] - type /facet help for what a facet actually does.");
+                Msg(player, "Usage: /facet [<N> [trim] | pk [trim] | name <N> <text> | reset <N|pk> | vault [on|off] | help] - type /facet help for what a facet actually does.");
                 return;
             }
 
             // A typed switch is a fresh request: it supersedes any switch still waiting on the vault.
             HandleSwitch(session, player, targetSlot, false, trim, player.BeginFacetSwitchRequest(), 0.0);
+        }
+
+        /// <summary>What a /facet vault invocation asked for.</summary>
+        internal enum VaultToggleRequest
+        {
+            Show,
+            On,
+            Off,
+            Invalid,
+        }
+
+        /// <summary>"/facet vault", "/facet vault on" or "/facet vault off" (case-insensitive); anything else is Invalid. Pure, for unit tests.</summary>
+        internal static VaultToggleRequest ParseVaultArgs(string[] args)
+        {
+            if (args == null || args.Length == 0)
+                return VaultToggleRequest.Show;
+
+            if (args.Length > 1)
+                return VaultToggleRequest.Invalid;
+
+            if (string.Equals(args[0], "on", StringComparison.OrdinalIgnoreCase))
+                return VaultToggleRequest.On;
+
+            if (string.Equals(args[0], "off", StringComparison.OrdinalIgnoreCase))
+                return VaultToggleRequest.Off;
+
+            return VaultToggleRequest.Invalid;
+        }
+
+        internal const string VaultUsageLine = "Usage: /facet vault [on|off]";
+
+        /// <summary>
+        /// The grantee warning, said every time the setting is turned on and in /facet help: the deposit puts
+        /// gear where withdraw-grantees on other accounts can see and take it.
+        /// </summary>
+        internal const string VaultGranteeWarning = "Anyone you have given withdraw rights on your vault can see that gear and take it.";
+
+        /// <summary>
+        /// The reply to /facet vault, after any change has been applied. <paramref name="current"/> is the
+        /// character's setting now; <paramref name="serverEnabled"/> is facet_vault_deposit_enabled. Pure, for unit tests.
+        /// </summary>
+        internal static string ComposeVaultToggleLine(VaultToggleRequest request, bool current, bool serverEnabled)
+        {
+            string line;
+
+            switch (request)
+            {
+                case VaultToggleRequest.On:
+                    line = "Facet vault deposit is now on. When you change facets, the gear you take off goes into your account vault instead of staying in your pack - except stacks, attuned items, packs and timed items - and the facet you return to re-equips it from the vault. " + VaultGranteeWarning;
+                    break;
+
+                case VaultToggleRequest.Off:
+                    line = "Facet vault deposit is now off. Gear you take off when you change facets stays in your pack.";
+                    break;
+
+                case VaultToggleRequest.Show:
+                    line = current
+                        ? "Facet vault deposit is on: gear you take off when you change facets goes into your account vault. Use /facet vault off to keep it in your pack."
+                        : "Facet vault deposit is off: gear you take off when you change facets stays in your pack. Use /facet vault on to send it to your account vault.";
+                    break;
+
+                default:
+                    return VaultUsageLine;
+            }
+
+            if (!serverEnabled && current)
+                line += " It is switched off on this server right now, so nothing is deposited until it is turned back on.";
+
+            return line;
+        }
+
+        /// <summary>
+        /// /facet vault [on|off]. Only writes the per-character preference (PropertyBool.FacetVaultDeposit) and
+        /// rushes the next save, as /summonaggro does; the deposit itself happens inside Player.TrySwitchFacet.
+        /// </summary>
+        private static void HandleVault(Player player, string[] args)
+        {
+            var request = ParseVaultArgs(args);
+
+            if (request == VaultToggleRequest.On || request == VaultToggleRequest.Off)
+            {
+                player.FacetVaultDeposit = request == VaultToggleRequest.On;
+                player.RushNextPlayerSave(5);
+            }
+
+            Msg(player, ComposeVaultToggleLine(request, player.FacetVaultDeposit, FacetTunables.VaultDepositEnabledSource()));
         }
 
         /// <summary>Per-player window between accepted /facet commands. Matches Player.MuleVaultReadCooldownSeconds.</summary>
@@ -176,12 +278,18 @@ namespace ACE.Server.Command.Handlers
                 sb.AppendLine("  /facet pk [trim]       - turn to your PK facet (see below)");
 
             sb.AppendLine("  /facet name <N> <text> - name facet N, up to 32 characters");
+            // The PK facet is described only while it is switched on (help must not describe a facet the gates refuse).
+            sb.AppendLine(dials.PkEnabled
+                ? "  /facet reset <N|pk>    - clear facet N (2+ or pk) back to a fresh build, keeping its name"
+                : "  /facet reset <N>       - clear facet N (2+) back to a fresh build, keeping its name");
+            sb.AppendLine("  /facet vault [on|off]  - send the gear you take off when you change facets to your account vault");
             sb.AppendLine("  /facet help            - this text");
             sb.AppendLine();
             sb.AppendLine("Examples:");
             sb.AppendLine("  /facet 2               - turn to your second facet");
             sb.AppendLine("  /facet 2 trim          - turn to it, giving up just enough of its skill ranks to afford it");
             sb.AppendLine("  /facet name 1 Void     - names your first facet \"Void\"");
+            sb.AppendLine("  /facet reset 2         - clears your second facet; you start it from scratch next time you turn to it");
             sb.AppendLine();
             sb.AppendLine("Each facet keeps its own trained and specialized skills, its own class abilities, its own arrangement of your innate attribute points, and the gear it was wearing when you left it.");
             sb.AppendLine("Every facet shares your level, lifetime experience, attribute ranks, vitals, augmentations and spellbook. Switching costs nothing and never resets any of those.");
@@ -210,7 +318,9 @@ namespace ACE.Server.Command.Handlers
                 sb.AppendLine($"You can only change facets in {dials.AllowlistName}.");
 
             sb.AppendLine("The first time you turn to a facet you are asked to confirm: it has never been cut, so it starts with its skills untrained - except always-trained and augmentation-specialized ones - and no class abilities learned, and hands back all of its experience, skill credits and class ability points for you to spend differently.");
+            sb.AppendLine("/facet reset clears a facet you are not standing on (any but facet 1): its skills, class abilities and remembered gear are forgotten, its name is kept, and the next time you turn to it you start from a fresh build, as on a first visit. It is free and asks you to confirm. Experience, items and augmentations are not affected.");
             sb.AppendLine("Gear you are wearing is unequipped into your pack when you leave a facet, and the facet you turn to re-equips whatever it remembers, telling you about anything it could not.");
+            sb.AppendLine("With /facet vault on, the gear you took off then goes on into your account vault, except stacks, attuned items, packs, timed items and anything the new facet wears too; you still need room in your main pack to change facets. The facet you return to re-equips it from the vault. " + VaultGranteeWarning);
             sb.AppendLine("Experience you spend outside your skills - on attributes, vitals or augmentations - is shared by every facet and never comes back, so a facet you left can end up needing more experience than you can free. Plain /facet <N> then refuses and shows exactly which skill ranks /facet <N> trim would remove: the most expensive ranks first, just enough to cover the gap, with any experience left over from the last rank returned to you. You are warned the moment a spend puts one of your facets out of reach.");
 
             // Omitted entirely while the PK facet is switched off - help must not describe a facet the gates refuse.
@@ -255,17 +365,20 @@ namespace ACE.Server.Command.Handlers
         /// The first-visit confirmation prompt. The PK facet's names what turning to it means, because the
         /// status change is the part a player must not be surprised by. Pure, for unit tests.
         /// </summary>
-        internal static string ComposeFirstVisitPrompt(int targetSlot)
+        internal static string ComposeFirstVisitPrompt(int targetSlot, bool afterReset = false)
         {
+            // A reset slot is entered through the first-visit path, so it gets the same prompt behind one line.
+            var prefix = afterReset ? $"{Player.FacetSlotDisplayCapitalized(targetSlot)} has been reset. " : "";
+
             if (Player.IsPkFacetSlot(targetSlot))
             {
-                return "Turn to your PK facet? This face has never been cut: your current gear will be stripped to your pack, " +
+                return prefix + "Turn to your PK facet? This face has never been cut: your current gear will be stripped to your pack, " +
                        "and the new facet starts fresh (skills untrained except always-trained and augmentation-specialized ones). " +
                        "On the PK facet you are always a player killer, and class abilities, class ability points, equipment mods, " +
                        "and pickup and turn speed bonuses do not work.";
             }
 
-            return $"Turn to facet {targetSlot}? This face has never been cut: your current " +
+            return prefix + $"Turn to facet {targetSlot}? This face has never been cut: your current " +
                    "gear will be stripped to your pack, and the new facet starts fresh (skills untrained except " +
                    "always-trained and augmentation-specialized ones, no class abilities learned).";
         }
@@ -299,7 +412,8 @@ namespace ACE.Server.Command.Handlers
         /// Player.BeginFacetSwitchRequest); <paramref name="vaultWaitedSeconds"/> is how long that request
         /// has already waited on the vault, carried across re-entries so the total wait is bounded once.
         /// </summary>
-        private static void HandleSwitch(Session session, Player player, int targetSlot, bool confirmed, bool trim, int requestGeneration, double vaultWaitedSeconds)
+        private static void HandleSwitch(Session session, Player player, int targetSlot, bool confirmed, bool trim, int requestGeneration, double vaultWaitedSeconds,
+                                         bool skipVaultDeposit = false)
         {
             if (!player.CheckFacetGates(targetSlot, out var gateRefusal))
             {
@@ -307,7 +421,7 @@ namespace ACE.Server.Command.Handlers
                 return;
             }
 
-            if (player.TrySwitchFacet(targetSlot, confirmed, trim, out var result, out var needsConfirmation, out var awaitingVault))
+            if (player.TrySwitchFacet(targetSlot, confirmed, trim, out var result, out var needsConfirmation, out var awaitingVault, skipVaultDeposit))
             {
                 Msg(player, result);
 
@@ -322,7 +436,7 @@ namespace ACE.Server.Command.Handlers
 
             if (awaitingVault)
             {
-                AwaitVaultThenResume(session, player, targetSlot, confirmed, trim, requestGeneration, vaultWaitedSeconds);
+                AwaitVaultThenResume(session, player, targetSlot, confirmed, trim, requestGeneration, vaultWaitedSeconds, player.FacetVaultWaitIsDepositOnly);
                 return;
             }
 
@@ -335,7 +449,7 @@ namespace ACE.Server.Command.Handlers
             // First visit to the target slot (DESIGN.md section 8). TrySwitchFacet mutated nothing on
             // this path - it refused before its first write - so re-entering it after the prompt is a
             // clean re-run, not a resume.
-            var prompt = ComposeFirstVisitPrompt(targetSlot);
+            var prompt = ComposeFirstVisitPrompt(targetSlot, player.FacetConfirmTargetWasReset);
 
             // Accepting the prompt is a fresh player request, so it takes a new generation (superseding any
             // OTHER switch still waiting on the vault) and starts with no vault wait. It cannot cancel its
@@ -365,6 +479,12 @@ namespace ACE.Server.Command.Handlers
 
             /// <summary>Still loading and the total budget is spent. Tell the player; nothing was changed.</summary>
             GiveUp,
+
+            /// <summary>
+            /// Still loading and the budget is spent, but only the facet vault DEPOSIT was waiting (the incoming gear
+            /// is all local). The deposit must never block a switch, so the switch re-enters with the deposit skipped.
+            /// </summary>
+            ResumeWithoutDeposit,
 
             /// <summary>
             /// Ready, or failed for a reason waiting will not fix, or there is no store at all: re-enter the
@@ -417,7 +537,8 @@ namespace ACE.Server.Command.Handlers
         /// TrySwitchFacet per tick: that method does a blocking shard read on the world thread, and a stall
         /// there is paid by every player on it.
         /// </summary>
-        internal static VaultPollAction DecideVaultPoll(bool playerOnline, int requestGeneration, int currentGeneration, Func<Player.FacetVaultStatus> probeVault, double waitedSeconds)
+        internal static VaultPollAction DecideVaultPoll(bool playerOnline, int requestGeneration, int currentGeneration, Func<Player.FacetVaultStatus> probeVault, double waitedSeconds,
+                                                        bool depositOnly = false)
         {
             if (!playerOnline || requestGeneration != currentGeneration)
                 return VaultPollAction.Abandon;
@@ -427,8 +548,14 @@ namespace ACE.Server.Command.Handlers
             if (!status.IsStillLoading)
                 return VaultPollAction.Resume;
 
-            return HasVaultWaitExpired(waitedSeconds) ? VaultPollAction.GiveUp : VaultPollAction.KeepWaiting;
+            if (!HasVaultWaitExpired(waitedSeconds))
+                return VaultPollAction.KeepWaiting;
+
+            return ExpiredVaultWaitAction(depositOnly);
         }
+
+        /// <summary>What an expired vault wait means: give up for incoming gear, resume without the deposit for a deposit-only wait. Pure.</summary>
+        internal static VaultPollAction ExpiredVaultWaitAction(bool depositOnly) => depositOnly ? VaultPollAction.ResumeWithoutDeposit : VaultPollAction.GiveUp;
 
         /// <summary>
         /// Entered when TrySwitchFacet refused with awaitingVault. Tells the player once (only on the
@@ -436,18 +563,23 @@ namespace ACE.Server.Command.Handlers
         /// time and stays quiet), then polls. The clock is NOT restarted by a re-entry: an already-spent
         /// budget gives up here rather than arming another poll.
         /// </summary>
-        private static void AwaitVaultThenResume(Session session, Player player, int targetSlot, bool confirmed, bool trim, int requestGeneration, double vaultWaitedSeconds)
+        private static void AwaitVaultThenResume(Session session, Player player, int targetSlot, bool confirmed, bool trim, int requestGeneration, double vaultWaitedSeconds,
+                                                 bool depositOnly)
         {
             if (HasVaultWaitExpired(vaultWaitedSeconds))
             {
-                Msg(player, VaultTimeoutLine);
+                if (ExpiredVaultWaitAction(depositOnly) == VaultPollAction.ResumeWithoutDeposit)
+                    HandleSwitch(session, player, targetSlot, confirmed, trim, requestGeneration, vaultWaitedSeconds, skipVaultDeposit: true);
+                else
+                    Msg(player, VaultTimeoutLine);
+
                 return;
             }
 
             if (vaultWaitedSeconds <= 0.0)
                 Msg(player, VaultLoadingLine);
 
-            ScheduleVaultPoll(session, player, targetSlot, confirmed, trim, requestGeneration, vaultWaitedSeconds);
+            ScheduleVaultPoll(session, player, targetSlot, confirmed, trim, requestGeneration, vaultWaitedSeconds, depositOnly);
         }
 
         /// <summary>
@@ -456,7 +588,8 @@ namespace ACE.Server.Command.Handlers
         /// AccountVaultManager on every tick rather than captured, so a store the idle sweep retired during
         /// the wait is replaced (and its load started) instead of being polled forever.
         /// </summary>
-        private static void ScheduleVaultPoll(Session session, Player player, int targetSlot, bool confirmed, bool trim, int requestGeneration, double waitedSeconds)
+        private static void ScheduleVaultPoll(Session session, Player player, int targetSlot, bool confirmed, bool trim, int requestGeneration, double waitedSeconds,
+                                              bool depositOnly)
         {
             var chain = new ActionChain();
             chain.AddDelaySeconds(VaultPollSeconds);
@@ -469,7 +602,8 @@ namespace ACE.Server.Command.Handlers
                     requestGeneration,
                     player.FacetSwitchRequestGeneration,
                     () => Player.FacetVaultStatus.Probe(AccountVaultManager.GetStore(player.Account?.AccountId ?? 0)),
-                    waited);
+                    waited,
+                    depositOnly);
 
                 switch (action)
                 {
@@ -477,11 +611,17 @@ namespace ACE.Server.Command.Handlers
                         return;
 
                     case VaultPollAction.KeepWaiting:
-                        ScheduleVaultPoll(session, player, targetSlot, confirmed, trim, requestGeneration, waited);
+                        ScheduleVaultPoll(session, player, targetSlot, confirmed, trim, requestGeneration, waited, depositOnly);
                         return;
 
                     case VaultPollAction.GiveUp:
                         Msg(player, VaultTimeoutLine);
+                        return;
+
+                    case VaultPollAction.ResumeWithoutDeposit:
+                        // Only the deposit was waiting, and it must never block a switch: run the switch with the
+                        // deposit skipped. Every gate and refusal re-runs, as on Resume.
+                        HandleSwitch(session, player, targetSlot, confirmed, trim, requestGeneration, waited, skipVaultDeposit: true);
                         return;
 
                     case VaultPollAction.Resume:
@@ -546,7 +686,8 @@ namespace ACE.Server.Command.Handlers
 
                 if (active)
                     skills = player.CaptureFacetSkills();
-                else if (row != null)
+                else if (row != null && !FacetSnapshot.IsResetMarker(row.SkillsJson))
+                    // A reset marker row falls through to "not yet cut", exactly like a never-visited slot.
                     // A stored row can predate an augmentation the player has since bought - see
                     // Player.NormalizeIncomingFacetSkills - so without this, a specialized aug-spec skill
                     // (a tinkering skill, or Salvaging) can list here as merely Trained on a facet the
@@ -588,6 +729,80 @@ namespace ACE.Server.Command.Handlers
             sb.AppendLine("Turn to one with /facet <N>" + (dials.PkEnabled ? " or /facet pk" : "") + ", name one with /facet name <N> <text>. Type /facet help for what a facet keeps and what it shares.");
 
             Msg(player, sb.ToString().TrimEnd());
+        }
+
+        internal const string ResetUsageLine = "Usage: /facet reset <N|pk> - for example, /facet reset 2 clears your second facet back to a fresh build.";
+
+        internal const string ResetMainFacetLine = Player.MainFacetResetRefusal;
+
+        /// <summary>
+        /// The arguments after "reset": exactly one slot, as /facet N parses it, and never slot 1. A false
+        /// return carries the line to show. An out-of-range number that does parse (5) passes here and is
+        /// refused by Player.CheckFacetResetGates with the same text /facet 5 gives; an unparseable one
+        /// (100, abc, nothing) gets the usage line, as /facet 100 does. Pure, for unit tests.
+        /// </summary>
+        internal static bool TryParseResetArgs(string[] args, out int slot, out string refusal)
+        {
+            slot = 0;
+            refusal = null;
+
+            if (args == null || args.Length != 1 || !TryParseSlot(args[0], out slot))
+            {
+                slot = 0;
+                refusal = ResetUsageLine;
+                return false;
+            }
+
+            if (slot == 1)
+            {
+                slot = 0;
+                refusal = ResetMainFacetLine;
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>The reset confirmation prompt. The slot wording is Player.FacetSlotDisplay. Pure, for unit tests.</summary>
+        internal static string ComposeResetPrompt(int slot)
+        {
+            return $"Reset {Player.FacetSlotDisplay(slot)}? Its skills, class abilities and remembered gear will be cleared, and the next time you turn to it you will start from a fresh build, as on a first visit. Its name is kept. Experience, items and augmentations are not affected.";
+        }
+
+        internal static string ComposeResetSuccess(int slot) => $"{Player.FacetSlotDisplayCapitalized(slot)} has been reset. Turn to it to cut a fresh build.";
+
+        private static void HandleReset(Player player, string[] args)
+        {
+            if (!TryParseResetArgs(args, out var slot, out var parseRefusal))
+            {
+                Msg(player, parseRefusal);
+                return;
+            }
+
+            RunReset(player, slot, false);
+        }
+
+        /// <summary>
+        /// Gates are re-checked on every call, the confirmed re-entry included (the player can enter a match
+        /// or turn to the slot while the prompt is up), and TryResetFacet re-reads the row, so a slot reset or
+        /// renamed in the meantime is judged on what is stored now.
+        /// </summary>
+        private static void RunReset(Player player, int slot, bool confirmed)
+        {
+            if (player.TryResetFacet(slot, confirmed, out var refusal, out var needsConfirmation))
+            {
+                Msg(player, ComposeResetSuccess(slot));
+                return;
+            }
+
+            if (!needsConfirmation)
+            {
+                Msg(player, refusal);
+                return;
+            }
+
+            if (!player.ConfirmationManager.EnqueueSend(new Confirmation_Custom(player.Guid, () => RunReset(player, slot, true)), ComposeResetPrompt(slot)))
+                player.SendWeenieError(WeenieError.ConfirmationInProgress);
         }
 
         private static void HandleName(Player player, string[] args)

@@ -277,7 +277,7 @@ namespace ACE.Server.Tests
             weapon.ResistanceModifierType = DamageType.Fire;
             weapon.ResistanceModifier = 1.0;
 
-            Func<DamageType, float> rendFor = t => WorldObject.GetWeaponResistanceModifier(weapon, wielder, null, t);
+            Func<DamageType, float> rendFor = t => WorldObject.GetWeaponResistanceModifier(weapon, wielder, null, t, null);
 
             var fireValue = rendFor(DamageType.Fire);
             Assert.IsTrue(fireValue > 1.0f, "positive control: the weapon's Fire value is above neutral");
@@ -286,9 +286,9 @@ namespace ACE.Server.Tests
             Assert.AreEqual(fireValue, VolatileElementsMath.ResolveWeaponResistanceMod(rendFor, DamageType.Fire, DamageType.Cold));
 
             // the direct overload the two live call sites use agrees with the pure one
-            Assert.AreEqual(fireValue, VolatileElementsMath.ResolveWeaponResistanceMod(weapon, wielder, null, DamageType.Fire, DamageType.Cold));
-            Assert.AreEqual(1.0f, VolatileElementsMath.ResolveWeaponResistanceMod(weapon, wielder, null, null, DamageType.Cold), "not re-typed: plain Cold lookup");
-            Assert.AreEqual(fireValue, VolatileElementsMath.ResolveWeaponResistanceMod(weapon, wielder, null, null, DamageType.Fire), "not re-typed: plain Fire lookup");
+            Assert.AreEqual(fireValue, VolatileElementsMath.ResolveWeaponResistanceMod(weapon, wielder, null, DamageType.Fire, DamageType.Cold, null));
+            Assert.AreEqual(1.0f, VolatileElementsMath.ResolveWeaponResistanceMod(weapon, wielder, null, null, DamageType.Cold, null), "not re-typed: plain Cold lookup");
+            Assert.AreEqual(fireValue, VolatileElementsMath.ResolveWeaponResistanceMod(weapon, wielder, null, null, DamageType.Fire, null), "not re-typed: plain Fire lookup");
         }
 
         // ---- procs carry the original type for their rend -------------------------------------------------
@@ -343,12 +343,14 @@ namespace ACE.Server.Tests
         public void ProcRend_WiredAtTheWarVoidSite_StampedAtLaunch_AndLatchedOnThePlayer()
         {
             var projectileSrc = PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/SpellProjectile.cs");
-            StringAssert.Contains(projectileSrc, "weaponResistanceMod = VolatileElementsMath.ResolveWeaponResistanceMod(weapon, sourceCreature, attackSkill, RendSourceDamageType, Spell.DamageType);");
+            StringAssert.Contains(projectileSrc, "weaponResistanceMod = VolatileElementsMath.ResolveWeaponResistanceMod(weapon, sourceCreature, attackSkill, RendSourceDamageType, Spell.DamageType, target);");
             StringAssert.Contains(PooledLootSourceText.MethodBody(projectileSrc, "public static void CopyPerCastStamps("),
                 "child.RendSourceDamageType = parent.RendSourceDamageType;");
 
             var magicSrc = PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/WorldObject_Magic.cs");
-            StringAssert.Contains(magicSrc, "sp.RendSourceDamageType = (this as Player)?.ClassAbilityProcRendSourceDamageType;");
+            // the live latch reaches the launch through ResolveProcStamps (an Echo Cast wisp carries its own copy)
+            StringAssert.Contains(magicSrc, "var procStamps = ResolveProcStamps(echoWispCast, (this as Player)?.ClassAbilityProcDamageScale ?? 1.0f, (this as Player)?.ClassAbilityProcRendSourceDamageType);");
+            StringAssert.Contains(magicSrc, "sp.RendSourceDamageType = procStamps.RendSource;");
 
             var buffsSrc = PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/Player_ClassAbilityBuffs.cs");
             var overload = PooledLootSourceText.MethodBody(buffsSrc, "public void CastClassAbilityProc(Action cast, float procDamageScale, DamageType? rendSourceDamageType)");
@@ -436,7 +438,7 @@ namespace ACE.Server.Tests
             StringAssert.Contains(body, "OriginalDamageType = DamageType;");
 
             var half = PooledLootSourceText.MethodBody(src, "private float ResolveDefenderHalf(");
-            StringAssert.Contains(half, "WeaponResistanceMod = VolatileElementsMath.ResolveWeaponResistanceMod(Weapon, attacker, attackSkill, OriginalDamageType, DamageType);");
+            StringAssert.Contains(half, "WeaponResistanceMod = VolatileElementsMath.ResolveWeaponResistanceMod(Weapon, attacker, attackSkill, OriginalDamageType, DamageType, defender);");
 
             StringAssert.Contains(PooledLootSourceText.MethodBody(src, "public static DamageEvent CalculateReflectedMissile("),
                 "reflected.OriginalDamageType = incoming.OriginalDamageType;");
@@ -496,10 +498,12 @@ namespace ACE.Server.Tests
             CollectionAssert.AreEqual(new[] { 1, 1, 1 }, def.CostPerRank);
             Assert.IsTrue(def.Implemented);
             Assert.AreEqual(Skill.ItemTinkering, def.AffinitySkill);
-            Assert.AreEqual("Your melee and missile weapon hits deal a random damage type - slash, pierce, bludgeon, fire, cold, acid, " +
-                            "electric or nether - with an 8/16/24% chance (by rank) to be the element the target is weakest to. Your " +
-                            "weapon's rend applies to whichever element is dealt, and the element carries through to your Spellblade, " +
-                            "Runeblade, Spellstorm and Sundermark procs. Higher Item Tinkering increases the chance.", def.Description);
+            Assert.AreEqual("Your melee and missile weapon hits deal a random damage type: slash, pierce, bludgeon, fire, cold, acid, " +
+                            "electric or nether. Each hit has a chance to be the element the target is weakest to. Your " +
+                            "weapon's rend applies to whatever element you deal, and the element carries into your Spellblade, " +
+                            "Runeblade, Spellstorm and Sundermark procs.", ClassAbilityText.Describe(def, ClassAbilityText.Defaults));
+            Assert.AreEqual("an 8% chance of the weakest element", ClassAbilityText.RankTail(def, 1, ClassAbilityText.Defaults));
+            Assert.AreEqual("Affinity: Item Tinkering", ClassAbilityText.AffinityLine(def));
         }
 
         [TestMethod]

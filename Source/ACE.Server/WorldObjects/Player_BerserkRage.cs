@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 
 using ACE.Common;
 using ACE.Entity.Enum;
+using ACE.Server.ClassAbilities;
 using ACE.Server.ClassAbilities.Abilities;
 using ACE.Server.Managers;
 
@@ -50,9 +51,7 @@ namespace ACE.Server.WorldObjects
             if (!IsBerserkRaging)
                 return 1.0f;
 
-            var mult = PropertyManager.GetDouble(BerserkRageAbility.DamageMultiplierKey).Item;
-
-            return mult > 1.0 ? (float)mult : 1.0f;
+            return BerserkRageAbility.DamageMultiplier(ClassAbilityText.Live);
         }
 
         /// <summary>

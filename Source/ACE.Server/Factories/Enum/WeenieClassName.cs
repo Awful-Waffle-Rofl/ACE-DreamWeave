@@ -41900,5 +41900,15 @@ namespace ACE.Server.Factories.Enum
         driftwardensanguineorb = 1000243,
         driftwardensanguinestaff = 1000244,
         driftwardensanguinebaton = 1000247,
+
+        // ---------------------------------------------------------------
+        // FORK WCIDS (not retail) - Summoner caster family, summoner-casters block 1008550-1008599.
+        // Content/sql/weenies/<wcid> for the SQL, Content/wcid-registry.d/wcid-1008550.tsv for the allocation.
+        // Referenced from CasterWcids.cs's T7 and T8 ChanceTables ONLY (owner ruling 2026-11-21), funded as
+        // a tenth element at 8/10 of the retail per-member weight. Docs/SummonerCasters/DESIGN.md.
+        // ---------------------------------------------------------------
+        summonersceptre = 1008550,
+        summonerbaton = 1008551,
+        summonerstaff = 1008552,
     }
 }

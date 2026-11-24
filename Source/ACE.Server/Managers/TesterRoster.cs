@@ -77,6 +77,9 @@ namespace ACE.Server.Managers
 
         public static uint SourceSlotForRank(int rank) => SourceSlots[rank];
 
+        /// <summary>The roster as a <see cref="SeedLayout"/>: ten parked source slots named "Rostersource {i}".</summary>
+        public static SeedLayout Layout { get; } = new SeedLayout("roster", SourceSlots, ItemBandStride, i => $"Rostersource {i}");
+
         private static TesterSlot[] BuildTesterSlots()
         {
             var slots = new List<TesterSlot>(AccountWords.Length * RankCount);

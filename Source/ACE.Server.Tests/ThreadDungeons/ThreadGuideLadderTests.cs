@@ -22,13 +22,14 @@ namespace ACE.Server.Tests.ThreadDungeons
         // ---- table shape -----------------------------------------------------------------------------
 
         [TestMethod]
-        public void The_ladder_is_fourteen_rungs_from_50_to_375_in_steps_of_25()
+        public void The_ladder_is_nineteen_rungs_from_50_to_500_in_steps_of_25()
         {
-            Assert.AreEqual(14, ThreadGuideLadder.Rungs.Count);
-            CollectionAssert.AreEqual(Enumerable.Range(0, 14).Select(i => 50 + 25 * i).ToArray(),
+            Assert.AreEqual(19, ThreadGuideLadder.Rungs.Count);
+            CollectionAssert.AreEqual(Enumerable.Range(0, 19).Select(i => 50 + 25 * i).ToArray(),
                 ThreadGuideLadder.Rungs.Select(r => r.Level).ToArray());
             Assert.AreEqual(ThreadGuideLadder.FirstRung, ThreadGuideLadder.Rungs[0].Level);
-            Assert.AreEqual(ThreadGuideLadder.LastRung, ThreadGuideLadder.Rungs[13].Level);
+            Assert.AreEqual(ThreadGuideLadder.LastRung, ThreadGuideLadder.Rungs[18].Level);
+            Assert.AreEqual(500, ThreadGuideLadder.LastRung);
             Assert.AreEqual(DungeonGemSpec.MaxGemLevel, ThreadGuideLadder.LastRung, "the ladder tops out at the gem ceiling");
         }
 
@@ -74,7 +75,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         /// <summary>
         /// Below 185 the tiers are the owner's ruling for the guide ladder (50 = 3, 75 = 4, 100 = 5, 125 = 5,
         /// 150 = 6, 175 = 6); from 200 up the tier follows the shipped Raw Fragment rungs (185..235 tier 7,
-        /// 245..375 tier 8). Every rung has a tier, and the tier never falls as the rung rises.
+        /// 245..500 tier 8). Every rung has a tier, and the tier never falls as the rung rises.
         /// </summary>
         [TestMethod]
         public void Tiers_follow_the_owner_ruling_below_185_and_the_shipped_rungs_above()
@@ -83,6 +84,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             {
                 [50] = 3, [75] = 4, [100] = 5, [125] = 5, [150] = 6, [175] = 6,
                 [200] = 7, [225] = 7, [250] = 8, [275] = 8, [300] = 8, [325] = 8, [350] = 8, [375] = 8,
+                [400] = 8, [425] = 8, [450] = 8, [475] = 8, [500] = 8,
             };
 
             Assert.AreEqual(ThreadGuideLadder.Rungs.Count, expected.Count, "every rung is pinned");
@@ -148,6 +150,10 @@ namespace ACE.Server.Tests.ThreadDungeons
         [DataRow(75, 100)]
         [DataRow(175, 200)]
         [DataRow(350, 375)]
+        [DataRow(375, 400)]
+        [DataRow(400, 425)]
+        [DataRow(475, 500)]
+        [DataRow(499, 500)]
         [DataRow(-10, 50)]
         [DataRow(49, 50)]
         [DataRow(60, 75)]
@@ -158,12 +164,21 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         [TestMethod]
-        [DataRow(375)]
-        [DataRow(400)]
+        [DataRow(500)]
+        [DataRow(525)]
         [DataRow(int.MaxValue)]
         public void NextRung_is_none_once_the_ladder_is_complete(int highestWon)
         {
             Assert.IsNull(ThreadGuideLadder.NextRung(highestWon));
+        }
+
+        [TestMethod]
+        public void NextRung_of_375_is_400_and_of_500_is_null()
+        {
+            Assert.AreEqual(400, ThreadGuideLadder.NextRung(375));
+            Assert.IsNull(ThreadGuideLadder.NextRung(500));
+            Assert.IsTrue(ThreadGuideLadder.IsRungLevel(500));
+            Assert.IsFalse(ThreadGuideLadder.IsRungLevel(525));
         }
 
         [TestMethod]
@@ -183,13 +198,13 @@ namespace ACE.Server.Tests.ThreadDungeons
         // ---- RewardCap -------------------------------------------------------------------------------
 
         /// <summary>
-        /// A synthetic cumulative chart, levels 0..400, whose per-level delta is 1000 + 10 * level: so the
+        /// A synthetic cumulative chart, levels 0..600, whose per-level delta is 1000 + 10 * level: so the
         /// XP from L to L + 1 is known in closed form and strictly grows with level.
         /// </summary>
         private static IReadOnlyList<ulong> SyntheticChart()
         {
             var totals = new List<ulong> { 0 };
-            for (var level = 0; level < 400; level++)
+            for (var level = 0; level < 600; level++)
                 totals.Add(totals[level] + (ulong)(1000 + 10 * level));
             return totals;
         }
@@ -236,7 +251,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             }
 
             // A degenerate flat chart has zero deltas; the cap must still not be 0.
-            var flat = Enumerable.Repeat(0UL, 401).ToList();
+            var flat = Enumerable.Repeat(0UL, 601).ToList();
             foreach (var rung in ThreadGuideLadder.Rungs)
                 Assert.AreEqual(1L, ThreadGuideLadder.RewardCap(rung.Level, flat), $"rung {rung.Level} on a flat chart");
         }
@@ -255,8 +270,8 @@ namespace ACE.Server.Tests.ThreadDungeons
         public void GetXPBetweenLevels_keeps_the_ceiling_clamp()
         {
             var chart = SyntheticChart();
-            Assert.AreEqual((ulong)Delta(399), EnlightenmentXpCurve.GetXPBetweenLevels(chart, 399, 400));
-            Assert.AreEqual((ulong)Delta(399), EnlightenmentXpCurve.GetXPBetweenLevels(chart, 400, 401), "both ends clamp to the last step");
+            Assert.AreEqual((ulong)Delta(599), EnlightenmentXpCurve.GetXPBetweenLevels(chart, 599, 600));
+            Assert.AreEqual((ulong)Delta(599), EnlightenmentXpCurve.GetXPBetweenLevels(chart, 600, 601), "both ends clamp to the last step");
             Assert.AreEqual((ulong)Delta(1), EnlightenmentXpCurve.GetXPBetweenLevels(chart, 0, 2), "levelA clamps up to 1");
 
             // min floors, max caps, and max <= 0 is uncapped.

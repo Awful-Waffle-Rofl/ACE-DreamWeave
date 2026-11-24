@@ -36,6 +36,28 @@ namespace ACE.Server.WorldEvents
         public const string AnnouncePrefix = "[World Event] ";
 
         /// <summary>
+        /// The prefix a private Avatar event's lines carry when they go to the allegiance, in place of <see cref="AnnouncePrefix"/>
+        /// (see <see cref="AllegianceLook"/>).
+        /// </summary>
+        public const string AllegiancePrefix = "[Allegiance Event] ";
+
+        /// <summary>
+        /// Pure: the allegiance copy of a line - a prefix swap of <see cref="AnnouncePrefix"/> to <see cref="AllegiancePrefix"/>.
+        /// A line without the prefix (the ambient wave flavour, the Hold wave start, the Destroy the Source phase text) gets
+        /// <see cref="AllegiancePrefix"/> prepended, so every allegiance line carries the look. Allegiance path only.
+        /// </summary>
+        public static string AllegianceLook(string msg)
+        {
+            if (string.IsNullOrEmpty(msg))
+                return msg;
+
+            if (msg.StartsWith(AnnouncePrefix, StringComparison.Ordinal))
+                return AllegiancePrefix + msg.Substring(AnnouncePrefix.Length);
+
+            return AllegiancePrefix + msg;
+        }
+
+        /// <summary>
         /// The ChatMessageType global announcements fall back to when the tunable is unset or invalid:
         /// 0x05 System, RGB(255,126,255) PINK/MAGENTA.
         ///
@@ -489,6 +511,15 @@ namespace ACE.Server.WorldEvents
         internal static Action<string> BroadcastSink = SendBroadcast;
 
         /// <summary>
+        /// Test seam: where a quiet Avatar event's lines go (monarch guid, text); returns the guids reached. Defaults to <see cref="ACE.Server.Avatars.AvatarAnnouncer.ToAllegiance"/>.
+        /// A test must restore this in a finally block.
+        /// </summary>
+        internal static Func<uint, string, ISet<uint>> AllegianceSink = ACE.Server.Avatars.AvatarAnnouncer.ToAllegiance;
+
+        /// <summary>Test seam: the radius-scoped send around a run's anchor, skipping the guids already reached; also the public run's local leg. Defaults to <see cref="Local"/>. A test must restore this in a finally block.</summary>
+        internal static Action<WorldEvent, string, ISet<uint>> LocalAnnounceSink = Local;
+
+        /// <summary>
         /// Test seam for the Discord half of a relayed broadcast, same contract as
         /// <see cref="BroadcastSink"/>: swappable so a tick test can assert what would have been relayed
         /// without a live DiscordRelayManager, and a test must restore it in a finally block.
@@ -579,7 +610,7 @@ namespace ACE.Server.WorldEvents
         /// constructed WorldEvent in a unit test never reaches here because delivery is never called by a
         /// pure test. Delegates to <see cref="LocalAt"/> for the actual radius broadcast.
         /// </summary>
-        public static void Local(WorldEvent evt, string msg)
+        public static void Local(WorldEvent evt, string msg, ISet<uint> exclude = null)
         {
             if (evt == null || string.IsNullOrEmpty(msg))
                 return;
@@ -591,12 +622,24 @@ namespace ACE.Server.WorldEvents
                 // one, else the theme's rewardRadius exactly as before.
                 var radius = evt.EffectiveParticipantRadius;
 
-                LocalAt(anchor, radius, msg, $"run={evt.RunId} ");
+                LocalAt(anchor, radius, msg, $"run={evt.RunId} ", exclude);
             }
             catch (Exception ex)
             {
                 log.Error($"[WORLDEVENT] run={evt.RunId} local announce failed", ex);
             }
+        }
+
+        /// <summary>Pure: whether a player is in the local send - same instance, within the radius, and not already reached (<paramref name="exclude"/>).</summary>
+        internal static bool IncludesLocalRecipient(uint guid, Position loc, Position anchor, float radius, ISet<uint> exclude)
+        {
+            if (loc == null || loc.Instance != anchor.Instance)
+                return false;
+
+            if (exclude != null && exclude.Contains(guid))
+                return false;
+
+            return loc.DistanceTo(anchor) <= radius;
         }
 
         /// <summary>
@@ -607,7 +650,7 @@ namespace ACE.Server.WorldEvents
         /// not start a real WorldEvent (TreasureMapHandler/MlDigsiteManager never construct one). A no-op
         /// without a resolvable anchor/radius/message.
         /// </summary>
-        public static void LocalAt(Position anchor, float radius, string msg, string logTag = "")
+        public static void LocalAt(Position anchor, float radius, string msg, string logTag = "", ISet<uint> exclude = null)
         {
             if (anchor == null || radius <= 0 || string.IsNullOrEmpty(msg))
                 return;
@@ -619,12 +662,7 @@ namespace ACE.Server.WorldEvents
 
                 foreach (var player in PlayerManager.GetAllOnline())
                 {
-                    var loc = player?.Location;
-
-                    if (loc == null || loc.Instance != anchor.Instance)
-                        continue;
-
-                    if (loc.DistanceTo(anchor) > radius)
+                    if (player == null || !IncludesLocalRecipient(player.Guid.Full, player.Location, anchor, radius, exclude))
                         continue;
 
                     player.SendMessage(msg, type);

@@ -79,7 +79,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(1, set.AvoidanceIndexes.Count, "ramp also implements IMonsterAvoidance (a pure 0.0 GetAvoidChance)");
             Assert.AreEqual(1, set.SpellHitIndexes.Count, "ramp also implements IMonsterSpellHit");
             Assert.AreEqual(0, set.SpeedModIndexes.Count);
-            Assert.AreEqual(0, set.CastHookIndexes.Count);
+            Assert.AreEqual(1, set.CastHookIndexes.Count, "ramp also implements IMonsterCastHook, for on=cast (a no-op for this on=hit record)");
             Assert.AreEqual(1, set.HeartbeatIndexes.Count, "ramp also implements IMonsterHeartbeat, for its window lapse");
             Assert.AreEqual(1, set.RampSourceIndexes.Count, "ramp publishes through IMonsterRampSource");
         }

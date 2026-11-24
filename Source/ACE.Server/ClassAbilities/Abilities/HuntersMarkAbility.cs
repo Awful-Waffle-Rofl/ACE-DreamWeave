@@ -52,11 +52,13 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "hunters_mark",
             DisplayName = "Hunter's Mark",
-            Description = "Any weapon attack you land marks the target for 10 seconds. A marked creature takes " +
-                          "2/4/6/8/10% more damage (by rank) from every source and damage type, including your " +
-                          "fellows and pets. The mark is its own debuff: it stacks with Vulnerability, Imperil " +
-                          "and rending weapons. If several archers mark a target, the strongest mark applies. " +
-                          "Higher Assess Creature multiplies the bonus.",
+            // Live text: perRank * rank is MarkPercent / GetReadout (class_ability_huntersmark_percent_per_rank);
+            // the mark length is class_ability_huntersmark_duration_seconds.
+            DescriptionTemplate = "Any weapon hit you land marks the target for {v:class_ability_huntersmark_duration_seconds|num} " +
+                          "seconds. A marked creature takes more damage from every source and damage type, including your fellows " +
+                          "and pets. The mark is its own debuff, so it stacks with Vulnerability, Imperil and rending weapons. When " +
+                          "several archers mark one target, only the strongest mark counts.",
+            RankTailTemplate = "+{per:class_ability_huntersmark_percent_per_rank|pct}% damage taken",
             MaxRank = 5,
             CostPerRank = new[] { 1, 1, 1, 1, 1 },
             Implemented = true,

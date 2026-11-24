@@ -224,6 +224,17 @@ namespace ACE.Server.HazardMechanics
         /// <summary>args "dirs": two adjacent sides such as "ne", or random (default). A cross's two start sides.</summary>
         public string Dirs { get; init; } = "random";
 
+        /// <summary>
+        /// args "axis": any (default), ns or ew. RANDOM PATTERN ONLY. any draws each launch's side from all four
+        /// (rng.Next(4)) and its lane anywhere across that side, exactly as before. ns (lanes along y, from the north or
+        /// south side) or ew (lanes along x, from the east or west side) draws the side from the axis's two (rng.Next(2))
+        /// and the lane only from the lateral positions whose WHOLE path keeps the ball's body (ball_radius) clear of every
+        /// exclusion (<see cref="BallPatterns.ClearLanes"/>), uniformly over their total width. So an axis run never rolls any
+        /// part of a ball through an exclusion: an exclusion only slides a lane's ends (<see cref="BallPatterns.Trim"/>), which keeps a
+        /// lane that crosses one, and drops a lane that starts and ends in one (an any run's draw there plans no ball).
+        /// </summary>
+        public string Axis { get; init; } = BallPatterns.AxisAny;
+
         /// <summary>args "cx"/"cy": the ring centre in landblock-local metres. Null: the region centre.</summary>
         public Vector2? Centre { get; init; }
 
@@ -389,6 +400,7 @@ namespace ACE.Server.HazardMechanics
             RayMarkers = p.RayMarkers,
             Dir = p.Dir,
             Dirs = p.Dirs,
+            Axis = p.Axis,
             Centre = p.Centre,
             Spread = p.Spread,
             Target = p.Target,
@@ -446,6 +458,13 @@ namespace ACE.Server.HazardMechanics
                 problem = $"dir '{args.GetString("dir")}' is not n, s, e, w or random";
 
             var dirs = (args.GetString("dirs") ?? "random").Trim().ToLowerInvariant();
+
+            var axis = (args.GetString("axis") ?? BallPatterns.AxisAny).Trim().ToLowerInvariant();
+
+            if (axis != BallPatterns.AxisAny && axis != BallPatterns.AxisNorthSouth && axis != BallPatterns.AxisEastWest)
+                problem ??= $"axis '{args.GetString("axis")}' is not any, ns or ew";
+            else if (axis != BallPatterns.AxisAny && pattern != BallPatterns.Random)
+                problem ??= $"axis={axis} only works with the random pattern";
 
             if (dirs != "random" && !ValidPair(dirs))
                 problem ??= $"dirs '{args.GetString("dirs")}' must be two adjacent sides such as ne, nw, se, sw, or random";
@@ -530,6 +549,7 @@ namespace ACE.Server.HazardMechanics
                 RayMarkers = args.GetBool("ray_markers", false),
                 Dir = dir,
                 Dirs = dirs,
+                Axis = axis,
                 Centre = centre,
                 Problem = problem,
             };
@@ -747,7 +767,17 @@ namespace ACE.Server.HazardMechanics
 
             var sides = pattern == BallPatterns.Row ? SidesFor(p.Dir)
                 : pattern == BallPatterns.Cross ? (p.Dirs == "random" ? AllSides : SidesFor(p.Dirs[0].ToString(), p.Dirs[1].ToString()))
-                : AllSides;
+                : BallPatterns.AxisSides(p.Axis);
+
+            // an axis run draws its lanes from the clear ones only: each of its two sides needs at least one
+            if (pattern == BallPatterns.Random && p.Axis != BallPatterns.AxisAny)
+            {
+                foreach (var side in sides)
+                    if (BallPatterns.ClearLanes(region, side, p).Count == 0)
+                        return F($"axis={p.Axis}: no lane from the {BallPatterns.Name(side)} side clears every exclusion of this region; use axis=any or a region with room beside its exclusions");
+
+                return null;
+            }
 
             var walls = new Dictionary<BallSide, int>();
 
@@ -1123,6 +1153,151 @@ namespace ACE.Server.HazardMechanics
         /// each with its own random rotation. Validated, laned and fair-led exactly as ring-out and ring-in are.
         /// </summary>
         public const string RingAlt = "ring-alt";
+
+        /// <summary>The random pattern's "axis" values (<see cref="BallParams.Axis"/>).</summary>
+        public const string AxisAny = "any";
+        public const string AxisNorthSouth = "ns";
+        public const string AxisEastWest = "ew";
+
+        /// <summary>The step (m) <see cref="ClearLanes"/> samples a side's lateral range at.</summary>
+        public const float ClearLaneStep = 0.02f;
+
+        private static readonly BallSide[] AnySides = { BallSide.North, BallSide.East, BallSide.South, BallSide.West };
+        private static readonly BallSide[] NorthSouthSides = { BallSide.North, BallSide.South };
+        private static readonly BallSide[] EastWestSides = { BallSide.East, BallSide.West };
+
+        /// <summary>The sides a random run with <paramref name="axis"/> draws from: all four for any, else the axis's two.</summary>
+        public static IReadOnlyList<BallSide> AxisSides(string axis)
+            => axis == AxisNorthSouth ? NorthSouthSides : axis == AxisEastWest ? EastWestSides : AnySides;
+
+        /// <summary>
+        /// The lateral intervals of a lane from <paramref name="side"/> whose whole path, from the shape's edge to its far
+        /// edge (<see cref="RawLane"/>, no exclusion slide), keeps the ball's body clear of every exclusion: the lateral range
+        /// sampled every <see cref="ClearLaneStep"/> m, each sample's lane tested exactly against every exclusion grown by the
+        /// ball radius (<see cref="PathClear"/>), and the clear samples joined into runs (a run of one sample is a zero-width interval). Pure. With no exclusion it is the
+        /// whole lateral range wherever a lane is long enough.
+        /// </summary>
+        public static IReadOnlyList<(float Lo, float Hi)> ClearLanes(HazardRegion r, BallSide side, BallParams p)
+        {
+            var runs = new List<(float Lo, float Hi)>();
+            var (lo, hi) = LateralRange(r, side, p);
+            var n = (int)Math.Floor((hi - lo) / ClearLaneStep + 1e-4);
+            float? start = null;
+            var last = lo;
+
+            for (var i = 0; i <= n; i++)
+            {
+                var lat = i == n ? hi : lo + i * ClearLaneStep;
+                var clear = RawLane(r, side, lat, p, out var a, out var b) && PathClear(r, a, b, p.BallRadius);
+
+                if (clear)
+                {
+                    start ??= lat;
+                    last = lat;
+                }
+                else if (start.HasValue)
+                {
+                    runs.Add((start.Value, last));
+                    start = null;
+                }
+            }
+
+            if (start.HasValue)
+                runs.Add((start.Value, last));
+
+            return runs;
+        }
+
+        /// <summary>
+        /// True when no point of the segment from <paramref name="a"/> to <paramref name="b"/> comes within
+        /// <paramref name="clearance"/> of an exclusion: exact against each closed disc grown by the clearance, and against each
+        /// closed rect grown by the clearance on every side (a square-cornered growth, so a hair stricter than a true disc
+        /// sweep at a rect's corners). Clearance 0 is "never inside one".
+        /// </summary>
+        public static bool PathClear(HazardRegion r, Vector2 a, Vector2 b, float clearance = 0f)
+        {
+            for (var i = 0; i < r.Exclusions.Count; i++)
+                if (SegmentTouches(r.Exclusions[i], a, b, Math.Max(0f, clearance)))
+                    return false;
+
+            return true;
+        }
+
+        /// <summary>Whether the segment meets the closed exclusion shape grown by <paramref name="grow"/> (HazardExclusion.Contains is inclusive at the edge).</summary>
+        private static bool SegmentTouches(HazardExclusion e, Vector2 a, Vector2 b, float grow)
+        {
+            var d = b - a;
+
+            if (e.Shape == HazardShape.Circle)
+            {
+                var len2 = d.LengthSquared();
+                var t = len2 < 1e-12f ? 0f : Math.Clamp(Vector2.Dot(new Vector2(e.CenterX, e.CenterY) - a, d) / len2, 0f, 1f);
+                var reach = e.Radius + grow;
+                return Vector2.DistanceSquared(a + t * d, new Vector2(e.CenterX, e.CenterY)) <= reach * reach;
+            }
+
+            // slab clip of the parameter range [0, 1] against the grown rect, inclusive
+            var t0 = 0f;
+            var t1 = 1f;
+
+            return Clip(-d.X, a.X - (e.MinX - grow), ref t0, ref t1) && Clip(d.X, (e.MaxX + grow) - a.X, ref t0, ref t1)
+                && Clip(-d.Y, a.Y - (e.MinY - grow), ref t0, ref t1) && Clip(d.Y, (e.MaxY + grow) - a.Y, ref t0, ref t1);
+        }
+
+        /// <summary>One Liang-Barsky edge: keeps the part of [t0, t1] on the inner side of p t &lt;= q.</summary>
+        private static bool Clip(float p, float q, ref float t0, ref float t1)
+        {
+            if (Math.Abs(p) < 1e-12f)
+                return q >= 0f;
+
+            var t = q / p;
+
+            if (p < 0f)
+            {
+                if (t > t1)
+                    return false;
+
+                if (t > t0)
+                    t0 = t;
+            }
+            else
+            {
+                if (t < t0)
+                    return false;
+
+                if (t < t1)
+                    t1 = t;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// The lateral position a uniform draw <paramref name="u"/> in [0, 1) lands on, spread over <paramref name="runs"/>
+        /// by width (a zero-width run still takes the draws that land on it). Null when there is no run.
+        /// </summary>
+        public static float? DrawLateral(IReadOnlyList<(float Lo, float Hi)> runs, double u)
+        {
+            if (runs == null || runs.Count == 0)
+                return null;
+
+            // every run gets at least one sample step of weight, so a single clear sample is drawable
+            var weights = runs.Select(x => Math.Max(x.Hi - x.Lo, ClearLaneStep)).ToArray();
+            var at = u * weights.Sum();
+
+            for (var i = 0; i < runs.Count; i++)
+            {
+                if (at < weights[i] || i == runs.Count - 1)
+                {
+                    var f = Math.Min(1.0, Math.Max(0.0, at / weights[i]));
+                    return runs[i].Lo + (float)f * (runs[i].Hi - runs[i].Lo);
+                }
+
+                at -= weights[i];
+            }
+
+            return null;
+        }
 
         /// <summary>The registry's pattern list. The first is the default.</summary>
         public static readonly IReadOnlyList<string> All = new[] { RingOut, RingIn, Row, Random, Cross, Fan, RingAlt };
@@ -2074,8 +2249,25 @@ namespace ACE.Server.HazardMechanics
             var wave = new BallWave();
             var slot = p.Window / Math.Max(1, p.Count);
 
+            // an axis run: its two sides' clear lanes, computed once per wave (axis=any never reads them)
+            var axisSides = p.Axis == AxisAny ? null : AxisSides(p.Axis);
+            var clear = axisSides?.ToDictionary(sd => sd, sd => ClearLanes(r, sd, p));
+
             for (var i = 0; i < p.Count; i++)
             {
+                if (axisSides != null)
+                {
+                    var aside = axisSides[rng.Next(axisSides.Count)];
+                    var alat = DrawLateral(clear[aside], rng.NextDouble());
+                    var adelay = (i + 0.1 + 0.8 * rng.NextDouble()) * slot;
+
+                    // a clear lane is never slid (no end is in an exclusion), so the route is the raw lane itself
+                    if (alat.HasValue && RawLane(r, aside, alat.Value, p, out var astart, out var aend))
+                        wave.Routes.Add(new BallRoute(astart, aend, adelay, "random-" + Name(aside)));
+
+                    continue;
+                }
+
                 var side = (BallSide)rng.Next(4);
                 var (lo, hi) = LateralRange(r, side, p);
                 var lat = lo + (float)rng.NextDouble() * (hi - lo);

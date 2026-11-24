@@ -33,6 +33,7 @@ namespace ACE.Server.KnotLoot
             var wcids = new List<string>(drops.Count);
             var texts = new List<string>(drops.Count);
             var isTrait = new List<bool>(drops.Count);
+            var notes = new List<string>(drops.Count);
 
             foreach (var drop in drops)
             {
@@ -45,13 +46,16 @@ namespace ACE.Server.KnotLoot
                     text = KnotTraitDisplay.Describe(definition, effect);
                 }
 
+                // the Guard u is drawn later, in the materializer, so only its presence is known here
+                notes.Add(drop.Mutation == KnotLootMutation.HarbingerGuard ? " + Harbinger's Guard" : string.Empty);
+
                 wcids.Add(wcid);
                 isTrait.Add(text != null);
                 texts.Add(text ?? "x" + drop.StackSize.ToString(CultureInfo.InvariantCulture));
             }
 
             // Never split a roll across lines: shorten the longest trait text until the line fits.
-            while (Build(prefix, wcids, texts).Length > MaxLineLength)
+            while (Build(prefix, wcids, texts, notes).Length > MaxLineLength)
             {
                 var longest = -1;
 
@@ -64,18 +68,18 @@ namespace ACE.Server.KnotLoot
                 if (longest < 0)
                     break;
 
-                var over = Build(prefix, wcids, texts).Length - MaxLineLength;
+                var over = Build(prefix, wcids, texts, notes).Length - MaxLineLength;
                 var keep = Math.Max(MinTraitText, texts[longest].Length - Ellipsis.Length - over);
 
                 texts[longest] = texts[longest].Substring(0, keep) + Ellipsis;
             }
 
-            var line = Build(prefix, wcids, texts);
+            var line = Build(prefix, wcids, texts, notes);
 
             return line.Length > MaxLineLength ? line.Substring(0, MaxLineLength) : line;
         }
 
-        private static string Build(string prefix, List<string> wcids, List<string> texts)
+        private static string Build(string prefix, List<string> wcids, List<string> texts, List<string> notes)
         {
             var sb = new StringBuilder(prefix);
 
@@ -84,7 +88,7 @@ namespace ACE.Server.KnotLoot
                 if (i > 0)
                     sb.Append("; ");
 
-                sb.Append(wcids[i]).Append(' ').Append(texts[i]);
+                sb.Append(wcids[i]).Append(' ').Append(texts[i]).Append(notes[i]);
             }
 
             return sb.ToString();

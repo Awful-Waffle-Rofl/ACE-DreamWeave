@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 using ACE.Entity.Enum;
 using ACE.Server.EquipmentMods;
@@ -35,9 +36,18 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "fastaim",
             DisplayName = "Fast Aim",
-            Description = "Raises the low end of your missile accuracy range by 10/20/30 percentage " +
-                          "points (by rank), narrowing the gap between snap shots and careful aim without " +
-                          "changing your accuracy at full precision. Higher Run multiplies the bonus.",
+            // Live text: rank * class_ability_fastaim_low_end_per_rank (GetReadout; Player.GetFastAimLowEndBonus). low_end is
+            // LowEndBonus, the method GetFastAimLowEndBonus calls (neutral Run affinity and no gear in the text), so the whole-bonus
+            // clamp to 1.0 is exact. The tail quotes that same clamped value, so a retune past the clamp still reads true.
+            DescriptionTemplate = "Raises the low end of your missile accuracy, so quick shots land closer to careful ones. Your " +
+                          "accuracy at full precision does not change.",
+            RankTailTemplate = "+{fn:low_end|pct} points to the low end",
+            TextFormulas = new Dictionary<string, TextFormula>
+            {
+                ["low_end"] = new TextFormula(
+                    (values, rank) => LowEndBonus(values, rank),
+                    "class_ability_fastaim_low_end_per_rank"),
+            },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
@@ -75,6 +85,17 @@ namespace ACE.Server.ClassAbilities.Abilities
         }
 
         /// <summary>
+        /// <see cref="LowEndBonus(int, double, double, double)"/> with the class_ability_fastaim_low_end_per_rank tunable
+        /// read through <paramref name="values"/>. Player.GetFastAimLowEndBonus calls this with
+        /// <see cref="ClassAbilityText.Live"/>; the live text's low_end formula calls it with the neutral affinity and no gear.
+        /// </summary>
+        public static float LowEndBonus(ITunableValues values, int rank, double affinityMultiplier = 1.0, double gearModFraction = 0.0) =>
+            LowEndBonus(rank, LowEndPerRank(values), affinityMultiplier, gearModFraction);
+
+        /// <summary>The class_ability_fastaim_low_end_per_rank tunable read through <paramref name="values"/>; the readout passes <see cref="ClassAbilityText.Live"/>.</summary>
+        public static double LowEndPerRank(ITunableValues values) => values.GetDouble("class_ability_fastaim_low_end_per_rank");
+
+        /// <summary>
         /// Mirrors the terms Player.GetFastAimLowEndBonus (Player_ClassAbilityBuffs.cs) feeds into
         /// LowEndBonus above - the two must stay in step. Reports the CLAMPED affinity contribution, not the
         /// raw one: Skill + Affinity + Gear must sum to Effective exactly even when the overall [0,1] clamp
@@ -83,7 +104,7 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
-            var perRank = PropertyManager.GetDouble("class_ability_fastaim_low_end_per_rank").Item;
+            var perRank = LowEndPerRank(ClassAbilityText.Live);
             var multiplier = player?.GetClassAbilityAffinityMultiplier(Skill.Run) ?? 1.0;
             var gear = Math.Max(0.0, player?.GetEquippedModValue(EquipmentModId.EagleEye) ?? 0.0);
 

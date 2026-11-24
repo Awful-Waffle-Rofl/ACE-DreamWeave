@@ -64,6 +64,7 @@ namespace ACE.Database.Tests
         [TestMethod]
         [TestCategory("RequiresMySql")]
         [TestCategory("WeenieFidelity")]
+        [TestCategory("Slow")] // minutes against the full world database; CI excludes it by name (build-test.yml) and runs it via --filter in content-apply-ci.yml
         public void BulkMatchesPerId_AllWeenies()
         {
             TestEnvironment.RequireWorldDatabaseOrFailInCi(referenceDb);

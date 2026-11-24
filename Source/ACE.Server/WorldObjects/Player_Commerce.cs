@@ -290,7 +290,7 @@ namespace ACE.Server.WorldObjects
             var validateScope = SellPhaseProfile.Begin();
             var validateCharged = SellPhaseProfile.ChargedTicks;
 
-            var sellList = VerifySellItems(itemProfiles, vendor);
+            var sellList = VerifySellItems(itemProfiles, vendor, out var requestedSellItems);
 
             SellPhaseProfile.EndExclusive(SellPhase.Validate, validateScope, validateCharged);
 
@@ -300,6 +300,12 @@ namespace ACE.Server.WorldObjects
                 SendUseDoneEvent();
                 return;
             }
+
+            // Whole-basket gate (Salvage Roller, Docs/SalvageRoller/DESIGN.md 5.4 step 3): a vendor may refuse
+            // the ENTIRE sale here, before the detach loop below touches anything. On a refusal every item is
+            // still in the pack and nothing has been saved. Permissive for every vendor that does not override it.
+            if (!PassesSellBasketHook(vendor, requestedSellItems, sellList))
+                return;
 
             // calculate pyreals to receive
             var payoutCoinAmount = vendor.CalculatePayoutCoinAmount(sellList);
@@ -384,8 +390,9 @@ namespace ACE.Server.WorldObjects
 
             // Mule Vendor: depositing is not a sale. Zero payout is correct, but the bank branch would
             // still announce a 0-pyreal deposit on every item stored, and RushNextPlayerSave(5) would fire
-            // for a balance that did not move.
-            if (!(vendor is PersonalVendor))
+            // for a balance that did not move. The same holds for the Salvage Roller station, which pays
+            // nothing either; both answer true to SellBypassesPriceGates.
+            if (!vendor.SellBypassesPriceGates)
             {
                 // One leaf phase over the whole payout leg. Opened here rather than around the `if` so a mule
                 // deposit reports sell_payout_n=0 - "this leg did not run" - instead of a zero that could be
@@ -518,8 +525,16 @@ namespace ACE.Server.WorldObjects
         /// mule weenie's mask to accept every type in data, so a code bypass here is never needed. The
         /// Attuned check is unconditional for every vendor, not just a PersonalVendor - see the remarks
         /// at its call site.
+        ///
+        /// Salvage Roller (Docs/SalvageRoller/DESIGN.md 5.3 and 5.8): each bypass is now named separately.
+        /// <paramref name="isVault"/> (vendor is PersonalVendor) drives ONLY the vault-specific pet-device
+        /// refusal; <paramref name="bypassPriceGates"/> drives IsSellable, Retained and Value &lt; 1
+        /// (<see cref="Vendor.SellBypassesPriceGates"/>), and <paramref name="bypassAttunedRefusal"/> the
+        /// Attuned refusal (<see cref="Vendor.SellBypassesAttunedRefusal"/>). A PersonalVendor answers
+        /// true/false and a retail vendor false/false, so both keep exactly their previous gate sets. The
+        /// MerchandiseItemTypes mask and the non-empty-container refusal are never bypassed.
         /// </summary>
-        internal static bool IsAcceptableToSell(WorldObject wo, ItemType acceptedItemTypes, bool isVault, out string rejectionMessage)
+        internal static bool IsAcceptableToSell(WorldObject wo, ItemType acceptedItemTypes, bool isVault, bool bypassPriceGates, bool bypassAttunedRefusal, out string rejectionMessage)
         {
             // Fix round 1 (F7): local, not a variable computed up front - GetPluralName() falls back to
             // Name.Pluralize() (Humanizer), so it used to run on every call including the accept path.
@@ -540,7 +555,7 @@ namespace ACE.Server.WorldObjects
             // restriction - none of the give or trade paths read it. A vault pays nothing, so the flag
             // has nothing to protect there. Do not re-widen: live test 2026-08-29 hit a pyreal nugget
             // (wcid 6354) refused with "unsellable" for exactly this reason.
-            if (!isVault && !wo.IsSellable)
+            if (!bypassPriceGates && !wo.IsSellable)
             {
                 rejectionMessage = $"The {ItemName()} is unsellable."; // retail message did not include item name, leaving in that for now.
                 return false;
@@ -559,8 +574,9 @@ namespace ACE.Server.WorldObjects
             // Retained: bypass for a PersonalVendor. Retained is a player-set "do not accidentally sell
             // this for coin" flag; depositing is not selling - the item survives, the player owns it,
             // and it is withdrawable. The items a player marks Retained are exactly the ones they most
-            // want in a vault.
-            if (!isVault && wo.Retained)
+            // want in a vault. The Salvage Roller station bypasses it too: the manual salvage path never checks
+            // Retained (Docs/SalvageRoller/DESIGN.md section 4), and the item comes back to its seller.
+            if (!bypassPriceGates && wo.Retained)
             {
                 rejectionMessage = $"The {ItemName()} is unsellable."; // retail message did not include item name, leaving in that for now.
                 return false;
@@ -589,7 +605,12 @@ namespace ACE.Server.WorldObjects
             // IsAttunedOrContainsAttuned is the exact predicate the give and trade paths use; the
             // Container override recurses into contents, so this stays correct even if a later
             // change lets a non-empty container through the gate below.
-            if (wo.IsAttunedOrContainsAttuned)
+            //
+            // Salvage Roller exception (Docs/SalvageRoller/DESIGN.md 5.3): an item sold to the roller window
+            // returns only to the character that sold it, so no cross-account transfer is possible, and the
+            // manual salvage path the window mirrors allows attuned targets. SellBypassesAttunedRefusal is
+            // true for that window alone.
+            if (!bypassAttunedRefusal && wo.IsAttunedOrContainsAttuned)
             {
                 rejectionMessage = $"The {ItemName()} is attuned to you and cannot be sold or stored.";
                 return false;
@@ -598,7 +619,7 @@ namespace ACE.Server.WorldObjects
             // Value < 1: bypass for a PersonalVendor. It is a price gate. At zero price it means
             // nothing, and zero-value items exist (quest items, some tokens). Keeping it would make a
             // whole class of item permanently unstorable for no stated reason.
-            if (!isVault && wo.Value < 1)
+            if (!bypassPriceGates && wo.Value < 1)
             {
                 rejectionMessage = $"The {ItemName()} has no value and cannot be sold."; // retail message did not include item name, leaving in that for now.
                 return false;
@@ -625,15 +646,25 @@ namespace ACE.Server.WorldObjects
         /// Filters the list of ItemProfiles the player is attempting to sell to the vendor
         /// to the list of verified WorldObjects in the player's inventory w/ validations
         /// </summary>
-        private Dictionary<uint, WorldObject> VerifySellItems(List<ItemProfile> sellItems, Vendor vendor)
+        private Dictionary<uint, WorldObject> VerifySellItems(List<ItemProfile> sellItems, Vendor vendor, out List<WorldObject> requested)
         {
             var allPossessions = GetAllPossessions().ToDictionary(i => i.Guid.Full, i => i);
+
+            // One entry per profile the client sent, in order, null where it named nothing the player owns.
+            // Built before any gate below can return early, so its Count is always the number of lines the
+            // player asked to sell - what Vendor.TryValidateSellBasket compares the accepted basket against.
+            requested = BuildRequestedSellBasket(sellItems, allPossessions);
 
             var acceptedItemTypes = (ItemType)(vendor.MerchandiseItemTypes ?? 0);
 
             // Mule Vendor (DESIGN 9.2, edit 2): a PersonalVendor bypasses IsSellable, Retained and
             // Value < 1 - see IsAcceptableToSell's remarks. MerchandiseItemTypes is never bypassed.
+            // Since the Salvage Roller (Docs/SalvageRoller/DESIGN.md 5.8) those bypasses are read from the
+            // vendor's SellBypassesPriceGates / SellBypassesAttunedRefusal; isVault itself now drives only the
+            // PvP-template action choice and the pet-device refusal, both of which stay mule-only.
             var isVault = vendor is PersonalVendor;
+            var bypassPriceGates = vendor.SellBypassesPriceGates;
+            var bypassAttunedRefusal = vendor.SellBypassesAttunedRefusal;
 
             var verified = new Dictionary<uint, WorldObject>();
 
@@ -693,7 +724,7 @@ namespace ACE.Server.WorldObjects
                 }
 
                 // verify wo / vendor / player properties
-                if (!IsAcceptableToSell(wo, acceptedItemTypes, isVault, out var rejectionMessage))
+                if (!IsAcceptableToSell(wo, acceptedItemTypes, isVault, bypassPriceGates, bypassAttunedRefusal, out var rejectionMessage))
                 {
                     Session.Network.EnqueueSend(new GameEventCommunicationTransientString(Session, rejectionMessage));
                     continue;
@@ -739,6 +770,46 @@ namespace ACE.Server.WorldObjects
             }
 
             return verified;
+        }
+
+        /// <summary>
+        /// The requested side of <see cref="Vendor.TryValidateSellBasket"/>: one entry per profile, in order,
+        /// null where the profile named nothing in <paramref name="possessions"/>. A guid named twice appears
+        /// twice. Never null; an absent profile list gives an empty list.
+        /// </summary>
+        internal static List<WorldObject> BuildRequestedSellBasket(List<ItemProfile> sellItems, IReadOnlyDictionary<uint, WorldObject> possessions)
+        {
+            var requested = new List<WorldObject>(sellItems?.Count ?? 0);
+
+            if (sellItems == null)
+                return requested;
+
+            foreach (var sellItem in sellItems)
+                requested.Add(sellItem != null && possessions.TryGetValue(sellItem.ObjectGuid, out var wo) ? wo : null);
+
+            return requested;
+        }
+
+        /// <summary>
+        /// Runs <see cref="Vendor.TryValidateSellBasket"/> and, on a refusal, answers the client the way every
+        /// other whole-sale refusal in HandleActionSellItemCore does: the refusal text, one
+        /// GameEventInventoryServerSaveFailed carrying the player's guid (the same packet the empty-basket and
+        /// negative-payout refusals send), and the use-done that releases the panel. Nothing is detached or
+        /// saved on either branch - this is called before the detach loop, and it reads the basket only.
+        /// Returns true when the sale may proceed.
+        /// </summary>
+        internal bool PassesSellBasketHook(Vendor vendor, IReadOnlyList<WorldObject> requested, Dictionary<uint, WorldObject> sellList)
+        {
+            var accepted = sellList.Values.ToList();
+
+            if (vendor.TryValidateSellBasket(this, requested ?? new List<WorldObject>(), accepted, out var basketRefusal))
+                return true;
+
+            Session.Network.EnqueueSend(new GameEventCommunicationTransientString(Session, basketRefusal ?? "Transaction failed."));
+            Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, Guid.Full));
+            SendUseDoneEvent();
+
+            return false;
         }
 
         /// <summary>

@@ -173,6 +173,10 @@ namespace ACE.Server.WorldObjects.Entity
 
                     // Threads magic attack ceiling (owner ruling 2026-10-30), same pre-enchantment point.
                     total = DungeonCombatNormalizer.ClampToDefenseCeiling(total, creature.GetMagicAttackSkillCeiling(Skill));
+
+                    // Threads missile defense ceiling (dynamic_dungeons_missile_defense_skill_cap), same pre-enchantment point;
+                    // the effective ceiling is the lower of this and the defense-skill ceiling above.
+                    total = DungeonCombatNormalizer.ClampToDefenseCeiling(total, creature.GetMissileDefenseSkillCeiling(Skill));
                 }
 
                 return total;
@@ -203,6 +207,10 @@ namespace ACE.Server.WorldObjects.Entity
                     // Threads magic attack ceiling (owner ruling 2026-10-30), same pre-enchantment point: a player debuff
                     // on the monster still lands on top of the capped value.
                     total = DungeonCombatNormalizer.ClampToDefenseCeiling(total, creature.GetMagicAttackSkillCeiling(Skill));
+
+                    // Threads missile defense ceiling (dynamic_dungeons_missile_defense_skill_cap), same pre-enchantment point;
+                    // the effective ceiling is the lower of this and the defense-skill ceiling above.
+                    total = DungeonCombatNormalizer.ClampToDefenseCeiling(total, creature.GetMissileDefenseSkillCeiling(Skill));
                 }
 
                 // base gets scaled by vitae

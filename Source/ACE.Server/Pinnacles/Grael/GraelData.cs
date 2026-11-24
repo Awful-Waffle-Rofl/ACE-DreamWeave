@@ -112,9 +112,12 @@ namespace ACE.Server.Pinnacles.Grael
         /// <summary>
         /// The reward cache and the Knot Exit, on the head's platform: the west block (x 5 to 15, y -25 to -15, solid top
         /// z -48, Content/dungeons/pinnacle_arena.sql), east of HeadPoint on the side the head faces. Both objects are
-        /// ethereal with gravity, so they pass through the floor Ward Planes; anywhere off the three blocks they fell to
-        /// the pit floor (z -54) when they were stood at the owner (playtest 2026-10-22). Here they come to rest on the
-        /// block top. PinnacleArenaGeometryTests proves both against the real arena geometry.
+        /// ethereal with gravity. While the floor Ward Planes' physics bodies were not Static they passed through them,
+        /// and anywhere off the three blocks they fell to the pit floor (z -54) when they were stood at the owner
+        /// (playtest 2026-10-22); that is why these points sit over a block. Since 2026-11-06 the Ward Plane weenie
+        /// carries PropertyBool.ForcePhysicsStatic, so its bodies are Static and an ethereal body rests on the plate top
+        /// anywhere on the floor, here included. PinnacleArenaGeometryTests proves both, against the real arena geometry
+        /// and against plates without the bool.
         /// </summary>
         public static readonly PinnaclePoint CachePoint = new PinnaclePoint(0x00690113, 13.0f, -18.0f, SpawnZ);
 

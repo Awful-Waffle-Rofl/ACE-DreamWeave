@@ -42,10 +42,15 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void UntrainedSkill_GetsNoAttributeContribution()
         {
-            // the advancement-class gate: an inactive skill stays at zero even with high attributes
+            // the advancement-class gate: an inactive skill stays at zero even with high attributes. Sword (a retired
+            // skill, MinLevel 0, formula (Str+Coord)/3 from AddRetiredSkills) needs training to be usable.
             var attacker = TestCreatures.CreateAttacker(strength: 100, coordination: 80);
 
-            Assert.AreEqual(0u, attacker.GetCreatureSkill(Skill.LightWeapons).Current);
+            Assert.AreEqual(0u, attacker.GetCreatureSkill(Skill.Sword).Current);
+
+            // positive control: Light Weapons is usable untrained in the live dat (MinLevel 1), so the same gate lets
+            // its formula through - (100 + 80) / 3 = 60
+            Assert.AreEqual(60u, attacker.GetCreatureSkill(Skill.LightWeapons).Current);
         }
 
         [TestMethod]

@@ -116,6 +116,7 @@ namespace ACE.Server.WorldObjects
 
                 store = value;
                 storeItems.Clear();
+                storeItemWireGuids.Clear();
                 sortNames.Clear();
 
                 // AFTER the account-mismatch refusal above, not before it: a refused rebind leaves the
@@ -157,8 +158,21 @@ namespace ACE.Server.WorldObjects
         /// UniqueItemsForSale (WorldObject.cs:921-927), so this dictionary is what keeps a stored item
         /// outside its reach. Rebuilt on every <see cref="RebuildView"/> call; items in here are never
         /// destroyed by this class.
+        ///
+        /// KEYED BY DISPLAY ALIAS, NOT BY THE ITEM'S OWN GUID. A row is listed, bought and appraised
+        /// under the alias the store keeps for that item (AccountVaultStore.GetOrCreateDisplayAlias), so
+        /// the client never sees a stored item's real guid until the CreateObject at withdraw - a client
+        /// plugin that first records a guid from a vendor blob does not let that later CreateObject
+        /// replace the record (see AccountVaultStore_DisplayAliases.cs). So no key here ever equals its
+        /// value's Guid; anything asking "is this biota in storeItems" must look at the VALUES.
         /// </summary>
         private readonly Dictionary<ObjectGuid, WorldObject> storeItems = new Dictionary<ObjectGuid, WorldObject>();
+
+        /// <summary>
+        /// The reverse of <see cref="storeItems"/>: a stored item's real guid -> the alias its row is
+        /// listed under. Read by <see cref="GetWireGuid"/>. Filled and cleared together with storeItems.
+        /// </summary>
+        private readonly Dictionary<ObjectGuid, ObjectGuid> storeItemWireGuids = new Dictionary<ObjectGuid, ObjectGuid>();
 
         /// <summary>
         /// The <see cref="AccountVaultStore.Version"/> the current contents of <see cref="storeItems"/>
@@ -520,10 +534,43 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         internal void RegisterSortName(ObjectGuid guid, string baseName) => sortNames[guid] = baseName;
 
+        /// <summary>
+        /// A stored item resolves by its display alias (the key <see cref="storeItems"/> is filed
+        /// under), never by its own guid - the client was never told that one.
+        /// </summary>
         public override bool TryGetItemForSale(ObjectGuid itemGuid, out WorldObject itemForSale)
         {
             return storeItems.TryGetValue(itemGuid, out itemForSale) || DefaultItemsForSale.TryGetValue(itemGuid, out itemForSale);
         }
+
+        /// <summary>
+        /// A stored item's row goes out under its display alias; everything else this window lists (ledger,
+        /// class and proxy displays) is a disposable object whose own guid already names nothing real.
+        /// Checked by reference as well as by guid, so a stale reverse entry can never put an alias on an
+        /// object it does not belong to.
+        /// </summary>
+        public override uint GetWireGuid(WorldObject obj)
+        {
+            if (obj != null && storeItemWireGuids.TryGetValue(obj.Guid, out var alias)
+                && storeItems.TryGetValue(alias, out var stored) && ReferenceEquals(stored, obj))
+            {
+                return alias.Full;
+            }
+
+            return base.GetWireGuid(obj);
+        }
+
+        /// <summary>Test seam: the display alias the stored item <paramref name="stored"/> is listed under, or null when it is not listed directly.</summary>
+        internal ObjectGuid? DisplayGuidOf(WorldObject stored)
+        {
+            if (stored != null && storeItemWireGuids.TryGetValue(stored.Guid, out var alias))
+                return alias;
+
+            return null;
+        }
+
+        /// <summary>Test seam: the keys stored-item rows are filed under.</summary>
+        internal IReadOnlyCollection<ObjectGuid> StoreItemKeys => storeItems.Keys;
 
         /// <summary>
         /// Fix round 1, I1: GameEventApproachVendor.cs computed numItems from the two base dictionaries
@@ -556,7 +603,9 @@ namespace ACE.Server.WorldObjects
             // Every MEMBER of every proxied row is checked, not just each row's representative: a group
             // row's non-representative members are stored biotas too, and they are reachable from
             // nowhere else in this class.
-            if (item != null && (storeItems.ContainsKey(item.Guid) || proxiedItems.Values.Any(members => members.Any(stored => stored.Guid == item.Guid))))
+            // storeItems is searched by VALUE: it is keyed by display alias, so its keys never equal a
+            // stored biota's own guid (see storeItems).
+            if (item != null && (storeItems.Values.Any(stored => stored.Guid == item.Guid) || proxiedItems.Values.Any(members => members.Any(stored => stored.Guid == item.Guid))))
             {
                 log.Error($"[MULE VENDOR] {Name}: refused to add 0x{item.Guid.Full:X8} ({item.Name}) to DefaultItemsForSale - it is one of this store's own biotas. WorldObject.Destroy only walks DefaultItemsForSale/UniqueItemsForSale (WorldObject.cs:921-927), so this would have made a stored item destroyable by a routine vendor Destroy.");
                 return;
@@ -584,6 +633,14 @@ namespace ACE.Server.WorldObjects
         public override int GetBuyCost(Weenie item) => 0;
 
         public override int CalculatePayoutCoinAmount(Dictionary<uint, WorldObject> items) => 0;
+
+        /// <summary>
+        /// A vault pays nothing, so IsSellable, Value &lt; 1, Retained and the payout leg are bypassed at it
+        /// (DESIGN 9.2, edit 2 - see Player.IsAcceptableToSell). The Attuned refusal is NOT bypassed here:
+        /// <see cref="Vendor.SellBypassesAttunedRefusal"/> stays false because a vault is exactly the
+        /// cross-account path that refusal closes.
+        /// </summary>
+        public override bool SellBypassesPriceGates => true;
 
         /// <summary>
         /// The SELL direction (player -> vendor) is a deposit here. Retail destroys anything
@@ -2116,6 +2173,7 @@ namespace ACE.Server.WorldObjects
 
             DefaultItemsForSale.Clear();
             storeItems.Clear();
+            storeItemWireGuids.Clear();
             proxiedItems.Clear();
             classDisplays.Clear();
             sortNames.Clear();
@@ -2137,6 +2195,7 @@ namespace ACE.Server.WorldObjects
                 // this line and the loop below can only make the stamp one BEHIND the state actually built
                 // from, which costs an extra rebuild later; it can never stamp a view as newer than it is.
                 builtFromVersion = store.Version;
+                var versionStamp = builtFromVersion;
 
                 // Read alongside the version stamp above, for the SAME reason that stamp is read before
                 // the contents are: a mutation (or a load finishing) landing between this line and the loop
@@ -2149,9 +2208,16 @@ namespace ACE.Server.WorldObjects
                 LastRebuildShown = 0;
                 LastRebuildTotal = 0;
 
+                // Every stored biota this pass saw, filtered or not - the set the store keeps display
+                // aliases for once this pass completes (see the RetainDisplayAliases call below).
+                var liveStoredGuids = new HashSet<uint>();
+
                 foreach (var entry in store.GetEntries(0, -1))
                 {
                     LastRebuildTotal++;
+
+                    foreach (var member in entry.Members)
+                        liveStoredGuids.Add(member.Guid.Full);
 
                     // Filtering happens BEFORE any display object is created - a skipped entry never burns a
                     // dynamic guid. The match rule itself lives in VaultSearch.Matches, shared with
@@ -2238,11 +2304,26 @@ namespace ACE.Server.WorldObjects
                         }
                         else
                         {
+                            // Listed under the store's display alias, never the item's own guid - see
+                            // storeItems. The alias is the store's, not this window's, so it is the
+                            // same across rebuilds, across windows, and across a re-summon.
                             foreach (var member in entry.Members)
-                                storeItems[member.Guid] = member;
+                            {
+                                var alias = store.GetOrCreateDisplayAlias(member.Guid);
+
+                                storeItems[alias] = member;
+                                storeItemWireGuids[member.Guid] = alias;
+                            }
                         }
                     }
                 }
+
+                // Only after a COMPLETE pass over a LOADED store: an unloaded store's GetEntries is empty
+                // by design, and a pass that threw part way saw only part of the vault. Either would drop
+                // aliases of items still stored. Dropping is what keeps the store's alias map bounded by
+                // what the vault holds; a dropped alias is never reissued (it was never recycled).
+                if (builtFromLoadedStore)
+                    store.RetainDisplayAliases(liveStoredGuids, versionStamp);
             }
             finally
             {
@@ -2307,6 +2388,11 @@ namespace ACE.Server.WorldObjects
 
             if (display == null)
                 return null;
+
+            // This guid is about to reach a client inside a vendor blob. Retired on destroy instead of
+            // recycled, so it can never come back on a real item a client plugin still holds a stale
+            // vendor-blob record for - see WorldObject.SuppressGuidRecycle.
+            display.SuppressGuidRecycle = true;
 
             LastRebuildCreated++;
 

@@ -158,6 +158,127 @@ namespace ACE.Server.Tests.HazardMechanics
             }
         }
 
+        /// <summary>
+        /// Review 2026-11-06: the floor plates became Static (ForcePhysicsStatic), and a Static target is collided with even
+        /// by an ethereal mover, so the hazard bodies that move over the plates must still clear them. With the shipped plates
+        /// present, a prepared ball (Rolling Death, radius 1.8 at the default ball_z 2: centre -45.75, bottom -47.55) and a
+        /// prepared wisp (Ember Wisp 1006950, setup 0x020009DB, origin at its feet, at ground + 0.5 = -47.25) are spawned and
+        /// snapped (HazardMotion.SnapFlags) over the pit and over the east block: each snap returns OK and keeps its z.
+        /// CONTROL: a ball snapped low enough to cut into a plate (centre -46.60, bottom -48.40, plate z -47.90 to -47.75)
+        /// over the pit keeps that z through plates WITHOUT the bool, and is NOT kept through the Static plates, so the
+        /// clearance assertions can fail.
+        /// </summary>
+        [TestMethod]
+        [TestCategory("RequiresDatFiles")]
+        public void HazardBallAndWispSnaps_OverTheStaticPlates_KeepTheirZ_AndALowBallIsObstructed()
+        {
+            RequireDats();
+
+            const float WispZ = -47.25f;   // ground -47.75 + 0.5
+            const float LowBallZ = -46.60f;
+            var pit = new Vector3(29.6f, -10f, 0f);
+            var block = new Vector3(29.6f, -20f, 0f);
+
+            var plates = SpawnFloorPlates();
+
+            try
+            {
+                foreach (var (name, body, z) in new[]
+                {
+                    ("ball", MakeBall(PitCell, new Vector3(pit.X, pit.Y, HoverZ)), HoverZ),
+                    ("wisp", MakeWisp(PitCell, new Vector3(pit.X, pit.Y, WispZ)), WispZ),
+                })
+                {
+                    try
+                    {
+                        SpawnPrepared(body);
+                        Assert.AreEqual(z, body.Location.PositionZ, 1e-3f, $"{name}: spawned over the Static plates at its z");
+
+                        foreach (var (cell, xy) in new[] { (EastBlockCell, block), (PitCell, pit) })
+                        {
+                            var target = new Vector3(xy.X, xy.Y, z);
+                            var result = Snap(body, cell, target);
+
+                            Assert.AreEqual(ACE.Server.Physics.Common.SetPositionError.OK, result, $"{name}: snap to {target} in 0x{cell:X8}");
+                            Assert.AreEqual(z, body.PhysicsObj.Position.Frame.Origin.Z, 1e-3f, $"{name}: snap to {target} keeps its z over the Static plates");
+                            Assert.AreEqual(target.X, body.PhysicsObj.Position.Frame.Origin.X, 1e-3f, $"{name}: snap to {target}: not slid");
+                        }
+                    }
+                    finally
+                    {
+                        Remove(body);
+                    }
+                }
+            }
+            finally
+            {
+                foreach (var wo in plates)
+                    Remove(wo);
+            }
+
+            // CONTROL: the same low snap, through plates without the bool and then through the Static ones
+            foreach (var forceStatic in new[] { false, true })
+            {
+                var controlPlates = SpawnFloorPlates(forceStatic);
+                var ball = MakeBall(PitCell, new Vector3(pit.X, pit.Y, HoverZ));
+
+                try
+                {
+                    SpawnPrepared(ball);
+
+                    var target = new Vector3(pit.X, pit.Y, LowBallZ);
+                    var result = Snap(ball, PitCell, target);
+                    var kept = result == ACE.Server.Physics.Common.SetPositionError.OK && Math.Abs(ball.PhysicsObj.Position.Frame.Origin.Z - LowBallZ) < 1e-3f;
+
+                    if (forceStatic)
+                        Assert.IsFalse(kept, $"control: a ball cutting into a Static plate is obstructed (result {result}, z {ball.PhysicsObj.Position.Frame.Origin.Z:0.000}); if it is kept, the clearance checks above prove nothing");
+                    else
+                        Assert.IsTrue(kept, $"control: through plates without the bool the ethereal ball keeps the low z (result {result}, z {ball.PhysicsObj.Position.Frame.Origin.Z:0.000}), so the difference is the bool");
+                }
+                finally
+                {
+                    Remove(ball);
+
+                    foreach (var wo in controlPlates)
+                        Remove(wo);
+                }
+            }
+        }
+
+        private const uint WispSetup = 0x020009DB;     // 1006950 Ember Wisp, Setup
+        private const int WispPhysicsState = 2068;    // 1006950: Ethereal, IgnoreCollisions, LightingOn
+
+        private static GenericObject MakeWisp(uint cell, Vector3 at)
+            => MakeGeneric(cell, at, Quaternion.Identity, WispSetup, WispPhysicsState, 1f, new Dictionary<PropertyBool, bool> { { PropertyBool.Stuck, true } });
+
+        /// <summary>The hazard spawn path for any moving body (HazardContext.Spawn: PrepareMovingBody, then AddPhysicsObj).</summary>
+        private static void SpawnPrepared(WorldObject wo)
+        {
+            WithClientPhysics(() =>
+            {
+                HazardMotion.PrepareMovingBody(wo);
+                Assert.IsTrue(wo.AddPhysicsObj(), $"{wo.Name}: AddPhysicsObj failed - it did not spawn at all");
+            });
+        }
+
+        /// <summary>A leg-end snap with HazardMotion.Snap's exact SetPosition flags, as HazardBallSnap_* does.</summary>
+        private static ACE.Server.Physics.Common.SetPositionError Snap(WorldObject wo, uint cell, Vector3 target)
+        {
+            var result = ACE.Server.Physics.Common.SetPositionError.GeneralFailure;
+
+            WithClientPhysics(() =>
+            {
+                var setPosition = new ACE.Server.Physics.Common.SetPosition(0);
+                setPosition.Pos = new ACE.Server.Physics.Common.Position(new Position(cell, target.X, target.Y, target.Z, 0f, 0f, 0f, 1f, 0));
+                setPosition.Flags = HazardMotion.SnapFlags;
+
+                result = wo.PhysicsObj.SetPosition(setPosition);
+                wo.SyncLocation();
+            });
+
+            return result;
+        }
+
         /// <summary>Why only the platform lanes stuck: over the pit the floor is out of step-down reach, Missile or not.</summary>
         [TestMethod]
         [TestCategory("RequiresDatFiles")]
@@ -226,7 +347,11 @@ namespace ACE.Server.Tests.HazardMechanics
         // ================= 2026-10-19 playtest: the encounter's spawns =================
 
         private const uint WardPlaneSetup = 0x02000C2E;   // 1006900 Pinnacle Ward Plane, PropertyDataId 1
-        private const int WardPlaneState = 24;            // ReportCollisions, IgnoreCollisions (1006900.sql)
+        private const int WardPlaneState = 24;            // ReportCollisions, IgnoreCollisions (1006900.sql; pinned by WardPlaneWeenie_MatchesTheFixturePlates)
+        private const bool WardPlaneForcesStatic = true;  // ForcePhysicsStatic (bool 9091) on 1006900.sql, same pin; false = the controls' pre-2026-11-06 plates
+        private const uint PetSetup = 0x02001C26;         // 1007703 Ossuary Adept (a Custom Summons CombatPet), Setup
+        private const uint PetMotionTable = 0x09000001;   // 1007703, MotionTable
+        private const int PetPhysicsState = 1036;         // 1007703: ReportCollisions, Ethereal, Gravity
         private const float WardPlaneScale = 0.997f;
         private const uint GraelBodySetup = 0x020015A2;   // 1006904-1006907 all carry it (Setup, MotionTable 0x09000007, state 1032, scale 1)
         private const uint GraelMotionTable = 0x09000007;
@@ -268,7 +393,7 @@ namespace ACE.Server.Tests.HazardMechanics
                 foreach (var (cell, x, y) in FloorPlates)
                 {
                     var plate = MakeGeneric(cell, new Vector3(x, y, FloorPlateZ), new Quaternion(0.707107f, 0f, 0f, 0.707107f), WardPlaneSetup, WardPlaneState, WardPlaneScale,
-                        new Dictionary<PropertyBool, bool> { { PropertyBool.Stuck, true }, { PropertyBool.ReportCollisions, true }, { PropertyBool.Ethereal, false }, { PropertyBool.GravityStatus, false } });
+                        WardPlaneBools(WardPlaneForcesStatic));
                     Assert.IsTrue(TrySpawn(plate), $"floor plate at ({x}, {y}) must spawn, or the test proves nothing");
                     plates.Add(plate);
                 }
@@ -317,6 +442,190 @@ namespace ACE.Server.Tests.HazardMechanics
             }
         }
 
+        private const uint MarkerSetup = 0x020009DB;      // 1006800-1006803 Hill Marker, Setup (the red wisp model)
+        private const float MarkerScale = 0.35f;          // 1006800-1006803, DefaultScale
+        private const int MarkerPhysicsState = 2069;      // 0x815: Static, Ethereal, IgnoreCollisions, LightingOn (1006800 Hill Marker Red.sql)
+
+        /// <summary>The Hill Marker weenie's bools (1006800.sql); <paramref name="exact"/> adds SpawnAtExactPosition (9069), which only the SERVER honours.</summary>
+        private static Dictionary<PropertyBool, bool> MarkerBools(bool exact)
+        {
+            var bools = new Dictionary<PropertyBool, bool>
+            {
+                { PropertyBool.Stuck, true }, { PropertyBool.IgnoreCollisions, true }, { PropertyBool.Ethereal, true }, { PropertyBool.GravityStatus, false },
+                { PropertyBool.Attackable, false }, { PropertyBool.UiHidden, true },
+            };
+
+            if (exact)
+                bools[PropertyBool.SpawnAtExactPosition] = true;
+
+            return bools;
+        }
+
+        /// <summary>Spawns a real-shape Hill Marker at <paramref name="at"/> (its cell resolved from the dat) and reports whether it kept that exact spot.</summary>
+        private static (bool Spawned, bool Kept, Vector3 Got) SpawnMarkerAt(Vector3 at, bool exact)
+        {
+            var cell = AdjustCell.Get(Landblock, 0).GetCell(at);
+            Assert.IsTrue(cell.HasValue, $"the marker point {at} resolves to a cell of 0x{Landblock:X4}");
+
+            var marker = MakeGeneric(cell.Value, at, Quaternion.Identity, MarkerSetup, MarkerPhysicsState, MarkerScale, MarkerBools(exact));
+
+            try
+            {
+                var spawned = TrySpawn(marker);
+                var got = new Vector3(marker.Location.PositionX, marker.Location.PositionY, marker.Location.PositionZ);
+                var kept = spawned && Vector3.Distance(got, at) < 1e-3f;
+
+                return (spawned, kept, got);
+            }
+            finally
+            {
+                Remove(marker);
+            }
+        }
+
+        /// <summary>A recording <see cref="IMemoryWorld"/> over the real Pinnacle region: the ground point is PointFor(Ground) as HazardMemoryWorld computes it, every cell exists.</summary>
+        private sealed class MarkerRecordingWorld : IMemoryWorld
+        {
+            private sealed class Piece : IMemoryPiece
+            {
+                public bool Alive => true;
+            }
+
+            public double Now { get; set; }
+            public Random Rng { get; } = new Random(1);
+            public HazardRegion Region { get; } = HazardRegionPresets.Pinnacle(0);
+            public HazardArgs Args { get; } = HazardArgs.Parse(HazardDefaults.Memory);
+            public float EdgeInset => (float)HazardDefaults.EdgeInset;
+
+            public List<Vector3> Markers { get; } = new List<Vector3>();
+            public List<string> Logged { get; } = new List<string>();
+            public List<string> Ended { get; } = new List<string>();
+
+            public Vector3 GroundPoint(float x, float y) => HazardGround.FollowPoint(Region, HazardFollow.Ground, 0f, new Vector3(x, y, Region.GroundZ(x, y)), null);
+            public bool HasCell(Vector3 point, bool raise) => true;
+
+            public IMemoryPiece SpawnMarker(uint wcid, Vector3 position, string tag)
+            {
+                Markers.Add(position);
+                return new Piece();
+            }
+
+            public bool SpawnBeam(Vector3 point, uint script, double seconds, string tag, Quaternion orientation, bool raise) => true;
+            public IMemoryPiece SpawnPillar(Vector3 point, double seconds, string tag) => null;
+            public int Strike(IMemoryPiece pillar, Vector3 centre, float radius) => 0;
+            public IReadOnlyList<(uint Id, Vector2 Position)> Players() => Array.Empty<(uint, Vector2)>();
+            public string NameOf(uint id) => "P" + id;
+            public void Say(string line) { }
+            public void Log(string line) => Logged.Add(line);
+            public void End(HazardOutcome outcome, string reason) => Ended.Add($"{outcome}: {reason}");
+        }
+
+        /// <summary>
+        /// Playtest 2026-11-08: after the floor Ward Planes became Static (ForcePhysicsStatic, PR #1986) the colour memory
+        /// pad rings stopped showing on clients, while the server still logged all 44 markers spawned. The markers are
+        /// SpawnAtExactPosition (bool 9069), which only the SERVER honours; the client runs the normal placement, which is
+        /// what the server's physics is ported from, so a marker built WITHOUT the bool models what the client does with
+        /// it. The marker setup's lower sphere (r 0.48 centred 0.475 above the origin at scale 1) has its bottom 1.75 mm UNDER
+        /// the origin at scale 0.35, so at the ground plane -47.75 it cuts into the plate top, and a Static plate is collided with even by an ethereal body.
+        ///
+        /// CONTROLS on the same pad ring point over the pit at the ground plane: kept through plates WITHOUT the bool
+        /// (the difference is the bool), kept through the Static plates WITH SpawnAtExactPosition (why the server logs
+        /// every marker), NOT kept through the Static plates without it (the client's view; if this is kept the test
+        /// cannot see the bug). THE FIX: every marker point the mechanic actually spawns (MemoryMechanic.StartCore over
+        /// the real Pinnacle region) is PLACED through the Static plates by the client-model placement, not slid, and rests
+        /// on the plate top (measured 2026-11-09: asked -47.70, settled -47.74855, as the Grael bodies settle at -47.745).
+        /// Before MemoryMechanic.MarkerLift the mechanic asked -47.75 and every marker was refused.
+        /// </summary>
+        [TestMethod]
+        [TestCategory("RequiresDatFiles")]
+        public void MemoryPadMarkers_OverTheStaticPlates_KeepTheirSpot_InTheClientModelPlacement()
+        {
+            RequireDats();
+
+            // the setup numbers the hypothesis rests on
+            var setup = DatManager.PortalDat.ReadFromDat<ACE.DatLoader.FileTypes.SetupModel>(MarkerSetup);
+            Assert.IsTrue(setup.Spheres.Count > 0, "the marker setup has collision spheres");
+            var lowest = setup.Spheres.Min(s => (s.Origin.Z - s.Radius) * MarkerScale);
+            Assert.IsTrue(lowest <= 0f && lowest > -0.01f, $"the marker's lowest sphere bottom sits at (a hair under) its origin at scale {MarkerScale}: {lowest:0.00000} (spheres: {string.Join(" ", setup.Spheres.Select(s => $"r{s.Radius:0.###}@z{s.Origin.Z:0.###}"))})");
+
+            var world = new MarkerRecordingWorld();
+            var mechanic = new MemoryMechanic();
+            mechanic.StartCore(world);
+
+            Assert.AreEqual(0, world.Ended.Count, "the run starts: " + string.Join(" | ", world.Ended));
+            Assert.AreEqual(44, world.Markers.Count, "4 pads x 11 markers, as the prod log's markers=44 per-pad=11");
+
+            var ground = world.Region.GroundZ(0f, 0f);
+            Assert.AreEqual(-47.75f, ground, 1e-4f, "the Pinnacle ground plane");
+
+            var probe = new Vector3(world.Markers[0].X, world.Markers[0].Y, ground);
+
+            // CONTROL 1: plates without the bool keep the marker at the ground plane
+            var plates = SpawnFloorPlates(forceStatic: false);
+            try
+            {
+                var r = SpawnMarkerAt(probe, exact: false);
+                Assert.IsTrue(r.Kept, $"control: through plates without the bool a marker at the ground plane {probe} keeps its spot (spawned {r.Spawned}, got {r.Got}), so the difference is the bool");
+            }
+            finally
+            {
+                foreach (var wo in plates)
+                    Remove(wo);
+            }
+
+            plates = SpawnFloorPlates();
+            try
+            {
+                // CONTROL 2: the server's own path (SpawnAtExactPosition) keeps it: why the server logs all 44
+                var server = SpawnMarkerAt(probe, exact: true);
+                Assert.IsTrue(server.Kept, $"control: with SpawnAtExactPosition the server keeps the marker at {probe} (spawned {server.Spawned}, got {server.Got})");
+
+                // CONTROL 3: the client-model placement at the ground plane is disturbed by the Static plates
+                var client = SpawnMarkerAt(probe, exact: false);
+                Assert.IsFalse(client.Kept, $"control: the client-model placement of a marker at the ground plane {probe} through the Static plates is refused or moved (spawned {client.Spawned}, got {client.Got}); if it is kept, the bug is not this");
+
+                // THE FIX: every point the mechanic spawns is placed (not refused), not slid, and rests on the plate top
+                // (stepped down the few mm from the lifted z, as the Grael bodies settle at -47.745 from GraelData.SpawnZ)
+                foreach (var at in world.Markers)
+                {
+                    var r = SpawnMarkerAt(at, exact: false);
+                    var what = $"the mechanic's marker at {at} (ground {ground}, offset {at.Z - ground:0.000}) in the client-model placement through the Static plates (spawned {r.Spawned}, got {r.Got.X:0.0000}, {r.Got.Y:0.0000}, {r.Got.Z:0.00000})";
+
+                    Assert.IsTrue(at.Z > ground, $"the marker at {at} is asked above the plate top {ground}");
+                    Assert.IsTrue(r.Spawned, what + ": placed, not refused");
+                    Assert.AreEqual(at.X, r.Got.X, 1e-3f, what + ": not slid");
+                    Assert.AreEqual(at.Y, r.Got.Y, 1e-3f, what + ": not slid");
+                    Assert.IsTrue(r.Got.Z >= ground - 0.01f && r.Got.Z <= at.Z + 1e-3f, what + ": rests between the plate top and its asked z");
+                }
+            }
+            finally
+            {
+                foreach (var wo in plates)
+                    Remove(wo);
+            }
+        }
+
+        /// <summary>
+        /// Dat-free pin for the RequiresDatFiles test above (which skips in CI): the pad markers are lifted, and a marker at
+        /// the Pinnacle ground point plus the lift sits above the floor plate top (-47.75), with its lower sphere's bottom
+        /// (1.75 mm under the origin at scale 0.35, measured from setup 0x020009DB) clear of it.
+        /// </summary>
+        [TestMethod]
+        public void MemoryMarkerLift_PutsThePinnacleMarkersAboveThePlateTop()
+        {
+            const float PlateTop = -47.75f;           // FloorPlateZ -47.85 + the plate's 0.10 thickness; the Pinnacle ground plane
+            const float SphereBottomUnderOrigin = 0.00175f;
+
+            Assert.IsTrue(MemoryMechanic.MarkerLift > 0f, "the markers are lifted off the ground point");
+
+            var ground = HazardRegionPresets.Pinnacle(0).GroundZ(0f, 0f);
+            Assert.AreEqual(PlateTop, ground, 1e-4f, "the Pinnacle ground plane is the plate top");
+            Assert.IsTrue(ground + MemoryMechanic.MarkerLift - SphereBottomUnderOrigin > PlateTop + 0.01f,
+                $"a marker at ground + {MemoryMechanic.MarkerLift} keeps its lowest sphere more than 1 cm above the plate top {PlateTop}");
+            Assert.IsTrue(ground + MemoryMechanic.MarkerLift <= ACE.Server.Pinnacles.Grael.GraelData.SpawnZ + 1e-4f,
+                "no higher than the arena's proven spawn height (GraelData.SpawnZ)");
+        }
+
         private const uint CacheSetup = 0x02000F7A;       // 1007005 Pinnacle Cache.sql, Setup (retail Ornate Chest)
         private const float CacheScale = 2.0f;            // 1007005 Pinnacle Cache.sql, DefaultScale
         private const int CacheState = 1052;              // 1007005's 1048 (ReportCollisions, IgnoreCollisions, Gravity) + Ethereal, set by PinnacleCache
@@ -324,14 +633,16 @@ namespace ACE.Server.Tests.HazardMechanics
         private const int ExitState = 3076;               // Ethereal, Gravity, LightingOn (1003604.sql)
 
         /// <summary>
-        /// Playtest 2026-10-22: the Knot's cache and Knot Exit fell through the floor. Both are ethereal with gravity, so
-        /// they pass through the floor Ward Planes, and they were stood at the owner, who is usually over the pit. With
-        /// the 20 floor plates present, each real setup at GraelData's fixed point (the head's west block) comes to rest
-        /// on the block top after 4 s of physics; the control, the same body over the pit, falls past it.
+        /// Playtest 2026-10-22: the Knot's cache and Knot Exit fell through the floor. Both are ethereal with gravity, and
+        /// while the floor Ward Planes' physics bodies were not Static an ethereal body passed through them; they were stood
+        /// at the owner, who is usually over the pit. CONTROL (plates without ForcePhysicsStatic): the real setup over the
+        /// pit falls past the plates, and at GraelData's fixed point (the head's west block) it passes through the plate and
+        /// rests on the block top (-48). WITH the shipped plates (ForcePhysicsStatic, 2026-11-06) both points rest on the
+        /// plate top instead.
         /// </summary>
         [TestMethod]
         [TestCategory("RequiresDatFiles")]
-        public void KnotCacheAndExitPoints_RestOnTheHeadsBlock_WhereThePitPointFalls()
+        public void KnotCacheAndExitPoints_RestOnTheStaticPlates_AndFallThroughNonStaticOnes()
         {
             RequireDats();
 
@@ -339,21 +650,43 @@ namespace ACE.Server.Tests.HazardMechanics
             Assert.AreEqual(ACE.Server.Pinnacles.Grael.GraelData.CachePoint, data.CachePoint, "the script data carries the cache point");
             Assert.AreEqual(ACE.Server.Pinnacles.Grael.GraelData.ReturnPortalPoint, data.ReturnPortalPoint, "the script data carries the exit point");
 
-            var plates = SpawnFloorPlates();
+            var bodies = new[]
+            {
+                ("cache", CacheSetup, CacheScale, CacheState, ACE.Server.Pinnacles.Grael.GraelData.CachePoint),
+                ("exit", ExitSetup, 1f, ExitState, ACE.Server.Pinnacles.Grael.GraelData.ReturnPortalPoint),
+            };
+
+            // CONTROL: the pre-fix, non-Static plates
+            var plates = SpawnFloorPlates(forceStatic: false);
 
             try
             {
-                foreach (var (name, setup, scale, state, at) in new[]
+                foreach (var (name, setup, scale, state, at) in bodies)
                 {
-                    ("cache", CacheSetup, CacheScale, CacheState, ACE.Server.Pinnacles.Grael.GraelData.CachePoint),
-                    ("exit", ExitSetup, 1f, ExitState, ACE.Server.Pinnacles.Grael.GraelData.ReturnPortalPoint),
-                })
+                    var (pit, _) = DropAndSettle(MakeDropped(PitCell, new Vector3(29.6f, -10f, at.Z), setup, scale, state));
+                    Assert.IsTrue(pit < -49f, $"control: with non-Static plates the {name} over the pit falls past them (z {pit:0.00}); if it does not, this test cannot see the bug");
+
+                    var (block, _) = DropAndSettle(MakeDropped(at.Cell, new Vector3(at.X, at.Y, at.Z), setup, scale, state));
+                    Assert.IsTrue(block > -48.2f && block < -47.9f, $"control: with non-Static plates the {name} passes through the plate onto the west block top (-48); z {block:0.0000}");
+                }
+            }
+            finally
+            {
+                foreach (var wo in plates)
+                    Remove(wo);
+            }
+
+            plates = SpawnFloorPlates();
+
+            try
+            {
+                foreach (var (name, setup, scale, state, at) in bodies)
                 {
-                    var (control, _) = DropAndSettle(MakeDropped(PitCell, new Vector3(29.6f, -10f, at.Z), setup, scale, state));
-                    Assert.IsTrue(control < -49f, $"control: the {name} over the pit must fall past the plates (z {control:0.00}); if it does not, this test cannot see the bug");
+                    var (pit, _) = DropAndSettle(MakeDropped(PitCell, new Vector3(29.6f, -10f, at.Z), setup, scale, state));
+                    Assert.IsTrue(pit > -47.9f && pit < -47.5f, $"the {name} over the pit rests on the Static plate top, not the pit floor (-54); z {pit:0.0000}");
 
                     var (z, cell) = DropAndSettle(MakeDropped(at.Cell, new Vector3(at.X, at.Y, at.Z), setup, scale, state));
-                    Assert.IsTrue(z > -48.2f && z < -47.5f, $"{name} at ({at.X}, {at.Y}) must rest on the west block top (-48), not fall; z {z:0.00}");
+                    Assert.IsTrue(z > -47.9f && z < -47.5f, $"{name} at ({at.X}, {at.Y}) rests on the Static plate top over the west block; z {z:0.0000}");
                     Assert.AreEqual(at.Cell, cell, $"{name}: the authored cell is the one it rests in");
                 }
             }
@@ -362,6 +695,209 @@ namespace ACE.Server.Tests.HazardMechanics
                 foreach (var wo in plates)
                     Remove(wo);
             }
+        }
+
+        /// <summary>
+        /// 2026-11-06: player summons fell through the Grael floor. Pet.SetEphemeralValues sets Ethereal on every pet, and
+        /// a non-Static Ward Plane is an ethereal obstruction to an ethereal mover (PhysicsObj.FindObjCollisions), so the
+        /// body passed through. A real CombatPet (1007703 Ossuary Adept's setup, motion table and PhysicsState) dropped
+        /// from SpawnZ with the shipped plates (ForcePhysicsStatic, so their bodies are Static) comes to rest on the plate
+        /// top over the pit AND over a block. CONTROL: the same drop against plates without the bool (the same PhysicsState
+        /// 24, a non-Static body) falls to the pit floor and to the block top.
+        /// </summary>
+        [TestMethod]
+        [TestCategory("RequiresDatFiles")]
+        public void EtherealPet_DroppedOnTheStaticPlates_RestsOnThePlateTop_OverThePitAndABlock()
+        {
+            RequireDats();
+
+            var points = new[]
+            {
+                ("over the pit", PitCell, new Vector3(29.6f, -10f, ACE.Server.Pinnacles.Grael.GraelData.SpawnZ), -54.0f),
+                ("over the east block", EastBlockCell, new Vector3(30f, -20f, ACE.Server.Pinnacles.Grael.GraelData.SpawnZ), -48.0f),
+            };
+
+            foreach (var isStatic in new[] { false, true })
+            {
+                var plates = SpawnFloorPlates(forceStatic: isStatic);
+
+                try
+                {
+                    Assert.AreEqual(isStatic, plates.All(p => p.PhysicsObj.State.HasFlag(PhysicsState.Static)), $"ForcePhysicsStatic {isStatic}: the plates' physics body carries Static exactly when the bool is set");
+
+                    foreach (var (name, cell, at, floorZ) in points)
+                    {
+                        var pet = MakeCombatPet(cell, at);
+
+                        try
+                        {
+                            Assert.IsTrue(TrySpawn(pet), $"{name}: the pet spawns at SpawnZ");
+                            Assert.IsTrue(pet.PhysicsObj.State.HasFlag(PhysicsState.Ethereal), "the pet's physics body is ethereal, as Pet makes every pet");
+                            Assert.IsTrue(pet.PhysicsObj.State.HasFlag(PhysicsState.Gravity), "and has gravity");
+
+                            Settle(pet);
+
+                            if (isStatic)
+                            {
+                                Assert.AreEqual(-47.745f, pet.Location.PositionZ, 0.01f, $"{name}: an ethereal pet rests on the Static plate top");
+                                Assert.AreEqual(at.X, pet.Location.PositionX, 0.01f, $"{name}: not slid");
+                                Assert.AreEqual(at.Y, pet.Location.PositionY, 0.01f, $"{name}: not slid");
+                            }
+                            else
+                                Assert.AreEqual(floorZ, pet.Location.PositionZ, 0.02f, $"control {name}: with non-Static plates the ethereal pet passes through them to the floor below; if it does not, this test cannot see the bug");
+                        }
+                        finally
+                        {
+                            Remove(pet);
+                        }
+                    }
+                }
+                finally
+                {
+                    foreach (var wo in plates)
+                        Remove(wo);
+                }
+            }
+        }
+
+        /// <summary>
+        /// The dat tests above place hand-built plates with <see cref="WardPlaneState"/> and <see cref="WardPlaneBools"/>;
+        /// this pins both to the shipped weenie (Content/sql/weenies/1006900 Pinnacle Ward Plane.sql): its PhysicsState
+        /// (int 93) and every bool the fixture sets, ForcePhysicsStatic (9091) included. The content and the fixture can
+        /// then never drift apart again. No dats needed.
+        /// </summary>
+        [TestMethod]
+        public void WardPlaneWeenie_MatchesTheFixturePlates()
+        {
+            var sql = ACE.Server.Tests.ThreadDungeons.PooledLootSourceText.Read("Content/sql/weenies/1006900 Pinnacle Ward Plane.sql");
+            var ints = new System.Text.RegularExpressions.Regex(@"\(\s*1006900\s*,\s*93\s*,\s*(?<v>\d+)\s*\)").Matches(sql);
+
+            Assert.AreEqual(1, ints.Count, "exactly one PhysicsState (int 93) row in the Ward Plane weenie");
+
+            var state = int.Parse(ints[0].Groups["v"].Value, System.Globalization.CultureInfo.InvariantCulture);
+
+            Assert.AreEqual(WardPlaneState, state, "the fixture's WardPlaneState is the weenie's PhysicsState");
+            Assert.IsFalse(((PhysicsState)state).HasFlag(PhysicsState.Ethereal), "never Ethereal, or nothing collides with it");
+
+            var bools = new Dictionary<int, bool>();
+            foreach (System.Text.RegularExpressions.Match m in new System.Text.RegularExpressions.Regex(@"\(\s*1006900\s*,\s*(?<k>\d+)\s*,\s*(?<v>True|False)\s*\)").Matches(sql))
+                bools.Add(int.Parse(m.Groups["k"].Value, System.Globalization.CultureInfo.InvariantCulture), m.Groups["v"].Value == "True");
+
+            Assert.IsTrue(bools.TryGetValue((int)PropertyBool.ForcePhysicsStatic, out var forced) && forced,
+                "the weenie carries ForcePhysicsStatic True, or ethereal bodies (pets, the cache, the exit) fall through the floor");
+
+            foreach (var (key, value) in WardPlaneBools(WardPlaneForcesStatic))
+            {
+                Assert.IsTrue(bools.TryGetValue((int)key, out var shipped), $"the weenie has a {key} ({(int)key}) row, as the fixture does");
+                Assert.AreEqual(value, shipped, $"{key}: the fixture plate matches the weenie");
+            }
+        }
+        /// <summary>
+        /// The east-door seal is a runtime spawn of 1006900 (PinnacleFight seals at GraelData.SealPoint), so since
+        /// 2026-11-06 its body is Static too. With the floor plates present: CONTROL, no seal, a human placed in the
+        /// doorway at the seal's x keeps that x. With the Static seal spawned there, the same human is not let into the
+        /// seal's slab (refused, or put clear of it), and neither is an ethereal pet, which a non-Static seal would have
+        /// let through. After the seal leaves the world (the despawn path) its body is out of every cell and the human
+        /// spawns in the doorway again. Placement only: walking into the seal is not simulated here.
+        /// </summary>
+        [TestMethod]
+        [TestCategory("RequiresDatFiles")]
+        public void DoorSeal_IsStatic_BlocksAHumanAndAPetInTheDoorway_AndLeavesCleanly()
+        {
+            RequireDats();
+
+            var seal = ACE.Server.Pinnacles.Grael.GraelData.SealPoint;
+            var plates = SpawnFloorPlates();
+            var doorway = new Vector3(seal.X, seal.Y, ACE.Server.Pinnacles.Grael.GraelData.SpawnZ);
+            const float SlabMinX = 34.75f, SlabMaxX = 34.90f;   // pinnacle_arena.sql WARD east rows: x 34.75 to 34.90
+
+            bool InsideSlab(WorldObject wo, float radius) => wo.Location.PositionX + radius > SlabMinX && wo.Location.PositionX - radius < SlabMaxX;
+
+            try
+            {
+                var control = MakeHuman(seal.Cell, doorway);
+                Assert.IsTrue(TrySpawn(control), "control: with no seal a human spawns in the doorway");
+                Assert.AreEqual(seal.X, control.Location.PositionX, 0.01f, "control: and keeps the seal's x, so the doorway itself does not push it");
+                Remove(control);
+
+                var ward = MakeGeneric(seal.Cell, new Vector3(seal.X, seal.Y, seal.Z), new Quaternion(seal.QX, seal.QY, seal.QZ, seal.QW), WardPlaneSetup, WardPlaneState, WardPlaneScale,
+                    WardPlaneBools(WardPlaneForcesStatic));
+                Assert.IsTrue(TrySpawn(ward), "the seal spawns at SealPoint");
+                Assert.IsTrue(ward.PhysicsObj.State.HasFlag(PhysicsState.Static), "the seal's body is Static");
+
+                try
+                {
+                    var human = MakeHuman(seal.Cell, doorway);
+                    var humanIn = TrySpawn(human);
+                    if (humanIn)
+                    {
+                        Assert.IsFalse(InsideSlab(human, human.PhysicsObj.GetPhysicsRadius()), $"the human is not let into the seal's slab (x {human.Location.PositionX:0.000}, r {human.PhysicsObj.GetPhysicsRadius():0.00})");
+                        Remove(human);
+                    }
+
+                    var pet = MakeCombatPet(seal.Cell, doorway);
+                    var petIn = TrySpawn(pet);
+                    if (petIn)
+                    {
+                        Assert.IsFalse(InsideSlab(pet, pet.PhysicsObj.GetPhysicsRadius()), $"the ethereal pet is not let into the Static seal's slab (x {pet.Location.PositionX:0.000})");
+                        Remove(pet);
+                    }
+                }
+                finally
+                {
+                    Remove(ward);
+                }
+
+                Assert.IsNull(ward.PhysicsObj.CurCell, "the seal's body has left every cell");
+
+                var after = MakeHuman(seal.Cell, doorway);
+                Assert.IsTrue(TrySpawn(after), "after the seal leaves, a human spawns in the doorway again");
+                Assert.AreEqual(seal.X, after.Location.PositionX, 0.01f, "at the seal's x");
+                Remove(after);
+
+                // CONTROL for the pet half: a seal WITHOUT the bool lets the ethereal pet straight into its slab
+                var oldWard = MakeGeneric(seal.Cell, new Vector3(seal.X, seal.Y, seal.Z), new Quaternion(seal.QX, seal.QY, seal.QZ, seal.QW), WardPlaneSetup, WardPlaneState, WardPlaneScale,
+                    WardPlaneBools(forceStatic: false));
+                Assert.IsTrue(TrySpawn(oldWard), "control: the pre-2026-11-06 seal spawns");
+
+                try
+                {
+                    var oldPet = MakeCombatPet(seal.Cell, doorway);
+                    Assert.IsTrue(TrySpawn(oldPet), "control: the pet spawns");
+                    Assert.AreEqual(seal.X, oldPet.Location.PositionX, 0.01f, "control: a non-Static seal lets the ethereal pet into its slab; if this fails the pet half above proves nothing");
+                    Remove(oldPet);
+                }
+                finally
+                {
+                    Remove(oldWard);
+                }
+            }
+            finally
+            {
+                foreach (var wo in plates)
+                    Remove(wo);
+            }
+        }
+
+        private static CombatPet MakeCombatPet(uint cell, Vector3 at)
+        {
+            var weenie = new Weenie
+            {
+                WeenieClassId = 999973,
+                ClassName = "pinnaclearenatestpet",
+                WeenieType = WeenieType.CombatPet,
+                PropertiesString = new Dictionary<PropertyString, string> { { PropertyString.Name, "Pinnacle Arena Test Pet" } },
+                PropertiesDID = new Dictionary<PropertyDataId, uint> { { PropertyDataId.Setup, PetSetup }, { PropertyDataId.MotionTable, PetMotionTable } },
+                PropertiesInt = new Dictionary<PropertyInt, int> { { PropertyInt.PhysicsState, PetPhysicsState } },
+                PropertiesBool = new Dictionary<PropertyBool, bool> { { PropertyBool.Stuck, true }, { PropertyBool.ReportCollisions, true }, { PropertyBool.GravityStatus, true } },
+                PropertiesFloat = new Dictionary<PropertyFloat, double> { { PropertyFloat.DefaultScale, 1.0 } },
+            };
+
+            TestGameTables.EnsureInitialized();   // Creature's ctor reads the vital formula tables
+
+            var wo = new CombatPet(weenie, new ObjectGuid(nextGuid++));   // Pet's ctor sets Ethereal, as live
+            wo.Location = new Position(cell, at.X, at.Y, at.Z, 0f, 0f, 0f, 1f, 0);
+            return wo;
         }
 
         private static GenericObject MakeDropped(uint cell, Vector3 at, uint setup, float scale, int state)
@@ -400,50 +936,71 @@ namespace ACE.Server.Tests.HazardMechanics
         /// WHY GRAEL NEVER HIT THE MATRON FILL ABORT (2026-10-27). The default doubled fill on the Pinnacle preset puts
         /// floor_z at ground -47.75 + 0.05 = -47.70, but this arena's cell floor under the plates is the block tops
         /// (-48.00) or the pit (-54.00): 0.30 m or more under every face-down panel, past HazardPanels.FaceClearance.
-        /// So the real director lifts nothing here and every tile with a cell enters both faces exactly, with the solid
-        /// floor plates in place. MatronFillSpawnTests is the room where floor_z is 0.05 m over the cell floor.
+        /// So the real director lifts nothing here. MatronFillSpawnTests is the room where floor_z is 0.05 m over the cell
+        /// floor.
+        ///
+        /// 2026-11-06: the floor plates' bodies became Static (ForcePhysicsStatic on 1006900). The fill panels are
+        /// ethereal, and an ethereal body is no longer let through a Static plate, so a face-down panel at -47.70 (whose
+        /// geometry reaches into the plate top at -47.75) is refused by the placement, and the director then takes the tile's
+        /// face-up partner out again: every tile is missed and no fill sheet stands over the floor. ACCEPTED by the owner 2026-11-06:
+        /// Grael's script does not run the fill, and no hazard code was changed for it. CONTROL: with plates WITHOUT the
+        /// bool (the pre-2026-11-06 floor) every tile still enters both faces exactly, so the difference is the bool.
         /// </summary>
         [TestMethod]
         [TestCategory("RequiresDatFiles")]
-        public void DefaultDoubledFill_OverTheFloorPlates_EveryTileEntersBothFacesExactly_AndNothingIsLifted()
+        public void DefaultDoubledFill_OverTheFloorPlates_FaceDownPanelsAreRefusedOnlyByStaticPlates()
         {
             RequireDats();
 
-            var plates = SpawnFloorPlates();
             var region = HazardRegionPresets.Pinnacle(0);
             var fill = FillSettings.From(HazardArgs.Empty, region);
-            var port = new MatronFillSpawnTests.DatFillPort(MatronFillSpawnTests.Lookup(Landblock), fill);
+            var tiles = FillRules.SheetTiles(region, fill.PanelSize, fill.SheetMargin);
 
-            try
+            Assert.IsTrue(fill.Doubled, "the default sheet is doubled");
+            Assert.AreEqual(-47.70, fill.FloorZ, 1e-6, "the default floor_z");
+
+            foreach (var forceStatic in new[] { false, true })
             {
-                Assert.IsTrue(fill.Doubled, "the default sheet is doubled");
-                Assert.AreEqual(-47.70, fill.FloorZ, 1e-6, "the default floor_z");
+                var plates = SpawnFloorPlates(forceStatic);
+                var port = new MatronFillSpawnTests.DatFillPort(MatronFillSpawnTests.Lookup(Landblock), fill);
 
-                var tiles = FillRules.SheetTiles(region, fill.PanelSize, fill.SheetMargin);
-                var director = new FillDirector<WorldObject, string>(region, fill, port);
-
-                director.Start(0);
-
-                Assert.AreEqual(0, director.TilesMissed, "every tile enters: " + string.Join(" | ", port.Refusals));
-                Assert.AreEqual(2 * tiles.Count, port.Placed.Count, "both faces of every tile");
-                Assert.AreEqual(0, port.Logs.Count(l => l.Contains("draws its panels")), "nothing is lifted: " + string.Join(" | ", port.Logs));
-
-                foreach (var (body, asked, faceDown) in port.Placed)
+                try
                 {
-                    var at = new Vector3(body.Location.PositionX, body.Location.PositionY, body.Location.PositionZ);
-                    Assert.IsTrue(Vector3.Distance(at, asked) < 1e-3f, $"{(faceDown ? "down" : "up")} panel asked at {asked} rests at {at}");
-                    Assert.AreEqual(-47.70f, asked.Z, 1e-4f, "every face at floor_z, one plane");
+                    var director = new FillDirector<WorldObject, string>(region, fill, port);
+
+                    director.Start(0);
+
+                    Assert.AreEqual(0, port.Logs.Count(l => l.Contains("draws its panels")), $"ForcePhysicsStatic {forceStatic}: nothing is lifted: " + string.Join(" | ", port.Logs));
+
+                    foreach (var (body, asked, faceDown) in port.Placed)
+                    {
+                        var at = new Vector3(body.Location.PositionX, body.Location.PositionY, body.Location.PositionZ);
+                        Assert.IsTrue(Vector3.Distance(at, asked) < 1e-3f, $"{(faceDown ? "down" : "up")} panel asked at {asked} rests at {at}");
+                        Assert.AreEqual(-47.70f, asked.Z, 1e-4f, "every face at floor_z, one plane");
+                    }
+
+                    if (!forceStatic)
+                    {
+                        Assert.AreEqual(0, director.TilesMissed, "control: without the bool every tile enters: " + string.Join(" | ", port.Refusals));
+                        Assert.AreEqual(2 * tiles.Count, port.Placed.Count, "control: both faces of every tile");
+                    }
+                    else
+                    {
+                        Assert.AreEqual(tiles.Count, director.TilesMissed, "every tile misses its face-down panel over the Static plates: " + string.Join(" | ", port.Refusals));
+                        Assert.AreEqual(tiles.Count, port.Refusals.Count, "one refusal per tile: " + string.Join(" | ", port.Refusals));
+                        Assert.IsTrue(port.Refusals.All(r => r.StartsWith("down ")), "only face-down panels are refused: " + string.Join(" | ", port.Refusals));
+                        Assert.AreEqual(0, port.Placed.Count, "the director takes each missed tile's face-up partner out again, so no fill panel stands over the plates");
+                    }
+                }
+                finally
+                {
+                    port.RemoveAll();
+
+                    foreach (var p in plates)
+                        Remove(p);
                 }
             }
-            finally
-            {
-                port.RemoveAll();
-
-                foreach (var p in plates)
-                    Remove(p);
-            }
         }
-
         /// <summary>
         /// Review 2026-10-20: the four P4 corner pillars (zones / corners) at exactly the points ZonesMechanic.Start uses
         /// (ZonesMechanic.PillarPoints: each Pinnacle corner clamped edge_inset inside, at the ground plane + 0.05 =
@@ -471,7 +1028,7 @@ namespace ACE.Server.Tests.HazardMechanics
                 foreach (var (cell, x, y) in FloorPlates)
                 {
                     var plate = MakeGeneric(cell, new Vector3(x, y, FloorPlateZ), new Quaternion(0.707107f, 0f, 0f, 0.707107f), WardPlaneSetup, WardPlaneState, WardPlaneScale,
-                        new Dictionary<PropertyBool, bool> { { PropertyBool.Stuck, true }, { PropertyBool.ReportCollisions, true }, { PropertyBool.Ethereal, false }, { PropertyBool.GravityStatus, false } });
+                        WardPlaneBools(WardPlaneForcesStatic));
                     Assert.IsTrue(TrySpawn(plate), $"floor plate at ({x}, {y}) must spawn, or the test proves nothing");
                     plates.Add(plate);
                 }
@@ -1309,14 +1866,25 @@ namespace ACE.Server.Tests.HazardMechanics
             return applied;
         }
 
-        private static List<WorldObject> SpawnFloorPlates()
+        /// <summary>The Ward Plane weenie's bools (1006900.sql); <paramref name="forceStatic"/> false builds the pre-2026-11-06 plate.</summary>
+        private static Dictionary<PropertyBool, bool> WardPlaneBools(bool forceStatic)
+        {
+            var bools = new Dictionary<PropertyBool, bool> { { PropertyBool.Stuck, true }, { PropertyBool.ReportCollisions, true }, { PropertyBool.Ethereal, false }, { PropertyBool.GravityStatus, false } };
+
+            if (forceStatic)
+                bools[PropertyBool.ForcePhysicsStatic] = true;
+
+            return bools;
+        }
+
+        private static List<WorldObject> SpawnFloorPlates(bool forceStatic = WardPlaneForcesStatic)
         {
             var plates = new List<WorldObject>();
 
             foreach (var (cell, x, y) in FloorPlates)
             {
                 var plate = MakeGeneric(cell, new Vector3(x, y, FloorPlateZ), new Quaternion(0.707107f, 0f, 0f, 0.707107f), WardPlaneSetup, WardPlaneState, WardPlaneScale,
-                    new Dictionary<PropertyBool, bool> { { PropertyBool.Stuck, true }, { PropertyBool.ReportCollisions, true }, { PropertyBool.Ethereal, false }, { PropertyBool.GravityStatus, false } });
+                    WardPlaneBools(forceStatic));
                 Assert.IsTrue(TrySpawn(plate), $"floor plate at ({x}, {y}) must spawn, or the test proves nothing");
                 plates.Add(plate);
             }

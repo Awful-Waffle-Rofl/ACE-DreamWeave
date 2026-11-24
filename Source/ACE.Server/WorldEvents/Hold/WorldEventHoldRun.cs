@@ -600,10 +600,33 @@ namespace ACE.Server.WorldEvents.Hold
         public void SetWaveNumber(int wave) => waveNumber = Math.Max(0, wave);
 
         /// <summary>World thread: the run went Active.</summary>
-        public void MarkActive() => isActive = true;
+        public void MarkActive()
+        {
+            // counted first, so the count is never below the number of runs that read as active
+            if (Interlocked.Exchange(ref activeCounted, 1) == 0)
+                Interlocked.Increment(ref activeRunCount);
+
+            isActive = true;
+        }
+
+        private int activeCounted;
+        private static int activeRunCount;
+
+        /// <summary>How many runs are marked active right now (any thread). A cheap gate for engine paths that only matter while a run is up.</summary>
+        internal static int ActiveRunCount => Volatile.Read(ref activeRunCount);
+
+        /// <summary>True while at least one run is marked active. Any thread.</summary>
+        public static bool AnyActive => ActiveRunCount > 0;
 
         /// <summary>World thread: the run finished (any outcome). Hooks treat its creatures as untagged-equivalent from here.</summary>
-        public void MarkInactive() => isActive = false;
+        public void MarkInactive()
+        {
+            // the run stops reading as active first, then leaves the count: the count only ever errs high
+            isActive = false;
+
+            if (Interlocked.Exchange(ref activeCounted, 0) == 1)
+                Interlocked.Decrement(ref activeRunCount);
+        }
 
         /// <summary>
         /// Publishes the knights (a copy; nulls dropped) as a new immutable array, and adds each to

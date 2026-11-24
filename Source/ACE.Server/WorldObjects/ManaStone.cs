@@ -179,6 +179,10 @@ namespace ACE.Server.WorldObjects
                         var msg = $"The Mana Stone gives {itemsGivenMana.Values.Sum():N0} points of mana to the following items: {itemsGivenMana.Select(c => c.Key.Name).Aggregate((a, b) => a + ", " + b)}.{additionalManaText}";
                         player.Session.Network.EnqueueSend(new GameMessageSystemChat(msg, ChatMessageType.Broadcast));
 
+                        // Balance Trials recorder: a mana stone use during a rep. One field read otherwise.
+                        if (player.TrialActive)
+                            ACE.Server.BalanceTrials.TrialHooks.OnConsume(player, WeenieClassId);
+
                         if (!DoDestroyDiceRoll(player) && !UnlimitedUse)
                         {
                             ItemCurMana = null;
@@ -215,6 +219,10 @@ namespace ACE.Server.WorldObjects
                         target.ItemCurMana = targetItemCurMana + manaToPour;
                         var msg = $"The Mana Stone gives {manaToPour:N0} points of mana to the {target.Name}.";
                         player.Session.Network.EnqueueSend(new GameMessageSystemChat(msg, ChatMessageType.Broadcast));
+
+                        // Balance Trials recorder: a mana stone use during a rep. One field read otherwise.
+                        if (player.TrialActive)
+                            ACE.Server.BalanceTrials.TrialHooks.OnConsume(player, WeenieClassId);
 
                         if (!DoDestroyDiceRoll(player) && !UnlimitedUse)
                         {

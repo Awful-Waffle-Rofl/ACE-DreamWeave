@@ -307,8 +307,7 @@ namespace ACE.Server.WorldObjects
             // has.
             if (!success)
             {
-                var bumped = GetOwnerSpotPlacement(player);
-                bumped.PositionZ += PetFollowRules.OwnerSpotBumpHeight;
+                var bumped = GetLiftedOwnerSpotPlacement(player);
 
                 // A copy, because AddPhysicsObj adjusts Location in place and the landing has to be judged
                 // against what was asked for.
@@ -328,9 +327,7 @@ namespace ACE.Server.WorldObjects
                 var landedBlock = CurrentLandblock;
                 var physics = PhysicsObj;
 
-                if (success && !(landedBlock != null && physics != null
-                        && PetFollowRules.AcceptBumpedOwnerSpot(requested.LandblockId.Raw, requested.Pos, requested.Instance,
-                            physics.Position.ObjCellID, physics.Position.Frame.Origin, landedBlock.Instance, physics.CurCell != null)))
+                if (success && !(landedBlock != null && IsPlacedAtLiftedOwnerSpot(requested, landedBlock.Instance)))
                 {
                     log.Debug($"{Name} (0x{Guid}) summon placement on {player.Name}'s lifted spot reported OK but did not land there (requested 0x{requested.LandblockId.Raw:X8} {requested.Pos} instance {requested.Instance}, landed 0x{physics?.Position.ObjCellID ?? 0:X8} {physics?.Position.Frame.Origin} instance {landedBlock?.Instance}); refusing it");
 
@@ -359,7 +356,10 @@ namespace ACE.Server.WorldObjects
             if (petsPendingSwapDismissal != null)
             {
                 foreach (var oldPet in petsPendingSwapDismissal)
+                {
+                    oldPet.RemovalReason = "swap";
                     oldPet.Destroy();
+                }
 
                 petsPendingSwapDismissal = null;
             }
@@ -382,7 +382,96 @@ namespace ACE.Server.WorldObjects
             if (IsPassivePet)
                 nextSlowTickTime = Time.GetUnixTime();
 
+            // CombatPet.Init still adjusts Lifespan after this returns, so it logs the line itself
+            if (!(this is CombatPet))
+                LogSummoned(player, petDevice, source);
+
             return true;
+        }
+
+        /// <summary>Unix time the pet entered the world (set by LogSummoned), for the removal line's aliveS.</summary>
+        private double? summonedAtUnixTime;
+
+        /// <summary>Why the pet is leaving, when a call site could say cheaply; null falls back to expire/destroy.</summary>
+        internal string RemovalReason;
+
+        private bool removalLogged;
+
+        /// <summary>
+        /// Diagnostic only (prod memory-ramp investigation): one INFO line when the pet is actually in the world.
+        /// Called from the end of a successful Init, never on a failed placement.
+        /// </summary>
+        protected void LogSummoned(Player owner, PetDevice petDevice, PetSummonSource source)
+        {
+            try
+            {
+                summonedAtUnixTime = Time.GetUnixTime();
+
+                log.Info(FormatSummoned(Name, Guid.Full, WeenieClassId, GetType().Name, owner.Name, owner.Guid.Full,
+                    FormatSource(source, petDevice?.WeenieClassId, DuoSummonGem.IsDuoGem(petDevice)),
+                    Location?.Cell ?? 0, Location?.Instance ?? 0, Lifespan));
+            }
+            catch (Exception ex)
+            {
+                log.Warn("[PET] lifecycle log failed", ex);
+            }
+        }
+
+        /// <summary>
+        /// Diagnostic only: one INFO line when the pet leaves the world. Called from WorldObject.Destroy, which is
+        /// guarded by IsDestroyed so it runs once; removalLogged is a second guard. A pet that was never summoned
+        /// into the world (failed placement) logs nothing.
+        /// </summary>
+        internal void LogRemoved(bool fromLandblockUnload = false)
+        {
+            if (removalLogged)
+                return;
+
+            removalLogged = true;
+
+            // never throws: this runs in WorldObject.Destroy ahead of the owner-slot and device cleanup
+            try
+            {
+                if (summonedAtUnixTime == null)
+                    return;
+
+                var reason = RemovalReason ?? (fromLandblockUnload ? "unload" : IsLifespanSpent ? "expire" : "destroy");
+
+                log.Info(FormatRemoved(Name, Guid.Full, WeenieClassId, GetType().Name, P_PetOwner?.Name, P_PetOwner?.Guid.Full,
+                    reason, Time.GetUnixTime() - summonedAtUnixTime.Value));
+            }
+            catch (Exception ex)
+            {
+                log.Warn("[PET] lifecycle log failed", ex);
+            }
+        }
+
+        internal static string FormatSource(PetSummonSource source, uint? deviceWcid, bool duo)
+        {
+            if (source == null && deviceWcid == null)
+                return "none";
+
+            var text = deviceWcid.HasValue ? $"device{deviceWcid.Value}" : "none";
+
+            if (source != null && source.HasBoundSpells)
+                text += "+spells";
+
+            if (duo)
+                text += "+duo";
+
+            return text;
+        }
+
+        internal static string FormatSummoned(string petName, uint guid, uint wcid, string typeName, string ownerName, uint ownerGuid,
+            string source, uint cell, uint instance, int? lifespan)
+        {
+            return $"[PET] summoned pet={petName} (0x{guid:X8}) wcid={wcid} type={typeName} owner={ownerName} (0x{ownerGuid:X8}) source={source} cell=0x{cell:X8} inst=0x{instance:X8} lifespan={(lifespan.HasValue ? lifespan.Value.ToString() : "none")}";
+        }
+
+        internal static string FormatRemoved(string petName, uint guid, uint wcid, string typeName, string ownerName, uint? ownerGuid,
+            string reason, double? aliveSeconds)
+        {
+            return $"[PET] removed pet={petName} (0x{guid:X8}) wcid={wcid} type={typeName} owner={ownerName ?? "none"} (0x{ownerGuid ?? 0:X8}) reason={reason} aliveS={(aliveSeconds.HasValue ? aliveSeconds.Value.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) : "unknown")}";
         }
 
         /// <summary>
@@ -507,6 +596,261 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// The owner's own spot lifted by PetFollowRules.OwnerSpotBumpHeight: the last placement attempt both
+        /// Pet.Init (summon) and <see cref="PlaceBesideOwner"/> (follow teleport, /telesummon) make. At the owner's
+        /// exact Z the placement refuses a physics sphere larger than a player's, through enter_world and through
+        /// SetPosition(Teleport | Slide) alike - measured, Ethereal or not, in PetIndoorPlacementTests. Always a copy.
+        /// </summary>
+        protected static Position GetLiftedOwnerSpotPlacement(Player owner)
+        {
+            var lifted = GetOwnerSpotPlacement(owner);
+            lifted.PositionZ += PetFollowRules.OwnerSpotBumpHeight;
+            return lifted;
+        }
+
+        /// <summary>
+        /// Whether this pet's physics object landed where a lifted owner-spot placement asked for
+        /// (PetFollowRules.AcceptBumpedOwnerSpot: same cell, a live physics cell, within
+        /// OwnerSpotPlacementTolerance, and the same landblock instance). <paramref name="landedInstance"/> is
+        /// supplied by the caller because nothing on the physics object carries it: Pet.Init reads it off the
+        /// landblock the pet joined, the teleport passes the instance its SetPosition was scoped to.
+        /// </summary>
+        protected bool IsPlacedAtLiftedOwnerSpot(Position requested, uint landedInstance)
+        {
+            var physicsObj = PhysicsObj;
+
+            if (physicsObj == null || requested == null)
+                return false;
+
+            return PetFollowRules.AcceptBumpedOwnerSpot(requested.LandblockId.Raw, requested.Pos, requested.Instance,
+                physicsObj.Position.ObjCellID, physicsObj.Position.Frame.Origin, landedInstance, physicsObj.CurCell != null);
+        }
+
+        /// <summary>
+        /// Physically moves this pet, already in the world, to its owner: the follow teleport
+        /// (CombatPet.TryTeleportToOwner) and /telesummon both come through here, so they cannot drift apart.
+        /// The caller has already checked PetFollowRules.CanTeleportToOwner - this must only ever run on the
+        /// pet's own tick thread with the owner on the same one - and has stopped any MoveTo in flight.
+        ///
+        /// Three attempts, in order, each judged on where the pet actually landed:
+        ///   1. in front of the owner, outdoors only (GetInFrontPlacement), kept only if IsPlacedAt;
+        ///   2. the owner's own spot, kept on any OK result (unchanged from before 2026-11-07);
+        ///   3. the owner's spot lifted by OwnerSpotBumpHeight, kept only if IsPlacedAtLiftedOwnerSpot. Indoors
+        ///      this is what actually places a pet whose sphere is larger than a player's. A landing that fails
+        ///      the check is moved back to where the pet stood before the attempt, never kept.
+        /// Location is synced and broadcast once, after the final attempt, whenever the physics object moved.
+        /// Returns TRUE when the pet was placed; <paramref name="result"/> is the last SetPosition result.
+        /// </summary>
+        protected bool PlaceBesideOwner(Player owner, out Physics.Common.SetPositionError result)
+        {
+            var moved = false;
+            var placed = false;
+
+            result = Physics.Common.SetPositionError.OK;
+
+            var inFront = GetInFrontPlacement(owner, GetOwnerPlacementDistance(owner), IsPassivePet);
+
+            if (inFront != null && PhysicsTeleport(inFront) == Physics.Common.SetPositionError.OK)
+            {
+                moved = true;
+                placed = IsPlacedAt(inFront);
+            }
+
+            if (!placed)
+            {
+                var ownerSpot = GetOwnerSpotPlacement(owner);
+
+                result = PhysicsTeleport(ownerSpot);
+
+                if (result == Physics.Common.SetPositionError.OK)
+                {
+                    moved = true;
+                    placed = true;
+
+                    if (!IsPlacedAt(ownerSpot))
+                        log.Debug($"{Name} (0x{Guid}) was teleported toward its owner {owner.Name}'s spot but slid to {PhysicsObj.Position}");
+                }
+            }
+
+            if (!placed)
+            {
+                var lifted = GetLiftedOwnerSpotPlacement(owner);
+                var before = new Physics.Common.Position(PhysicsObj.Position);
+
+                // the SetPosition below is scoped to this instance, so it is where the pet lands if it lands
+                var instance = Location.Instance;
+
+                // whether anything EARLIER moved the pet: a lifted landing that is rejected and then put back
+                // where it stood must not count as a move, or every 1 s retry broadcasts a teleport in place
+                var movedBeforeLift = moved;
+
+                result = PhysicsTeleport(lifted);
+
+                if (result == Physics.Common.SetPositionError.OK)
+                {
+                    moved = true;
+
+                    if (IsPlacedAtLiftedOwnerSpot(lifted, instance))
+                        placed = true;
+                    else
+                    {
+                        log.Debug($"{Name} (0x{Guid}) teleport to {owner.Name}'s lifted spot reported OK but landed at 0x{PhysicsObj.Position.ObjCellID:X8} {PhysicsObj.Position.Frame.Origin}; moving it back");
+
+                        var restored = MoveBackAfterRejectedLift(before, instance);
+
+                        moved = PetFollowRules.MovedAfterRejectedLift(movedBeforeLift, restored);
+
+                        result = Physics.Common.SetPositionError.NoValidPosition;
+                    }
+                }
+            }
+
+            if (moved)
+                SyncTeleportedPosition();
+
+            return placed;
+        }
+
+        /// <summary>Timers.RunningTime of this pet's last "parked off its original spot" warning, for the rate limit.</summary>
+        private double? lastParkedWarnTime;
+
+        /// <summary>
+        /// Puts the pet back on <paramref name="before"/> after the lifted owner-spot landing was rejected. The
+        /// spot it came from can itself be refused: a pet standing on the floor plane is exactly the case the lift
+        /// exists for (a body larger than a player's is refused at floor Z, PetIndoorPlacementTests). So the exact
+        /// spot is tried first, then the same spot lifted by OwnerSpotBumpHeight, and either landing is accepted
+        /// only on the same cell within OwnerSpotPlacementTolerance of <paramref name="before"/>
+        /// (PetFollowRules.AcceptMoveBack). Returns TRUE when the pet is back where it stood. When both fail the
+        /// pet stays wherever physics left it - its Location is still synced by the caller - and a rate-limited
+        /// Warn says so.
+        /// </summary>
+        protected bool MoveBackAfterRejectedLift(Physics.Common.Position before, uint instance)
+        {
+            const Physics.Common.SetPositionFlags flags = Physics.Common.SetPositionFlags.Teleport | Physics.Common.SetPositionFlags.Slide;
+
+            var back = PhysicsObj.SetPosition(new Physics.Common.SetPosition(new Physics.Common.Position(before), flags, instance));
+
+            if (back == Physics.Common.SetPositionError.OK && IsBackAt(before))
+                return true;
+
+            var liftedBack = new Physics.Common.Position(before);
+            liftedBack.Frame.Origin.Z += PetFollowRules.OwnerSpotBumpHeight;
+
+            var backLifted = PhysicsObj.SetPosition(new Physics.Common.SetPosition(liftedBack, flags, instance));
+
+            if (backLifted == Physics.Common.SetPositionError.OK && IsBackAt(before))
+                return true;
+
+            var now = Timers.RunningTime;
+
+            if (PetFollowRules.ShouldLogTeleportFailure(lastParkedWarnTime, now))
+            {
+                lastParkedWarnTime = now;
+                log.Warn($"{Name} (0x{Guid}) is parked off its original spot after a rejected lifted teleport: could not move it back to 0x{before.ObjCellID:X8} {before.Frame.Origin} (exact {back}, lifted {backLifted}); it is at 0x{PhysicsObj.Position.ObjCellID:X8} {PhysicsObj.Position.Frame.Origin}");
+            }
+
+            return false;
+        }
+
+        private bool IsBackAt(Physics.Common.Position before)
+        {
+            var physicsObj = PhysicsObj;
+
+            return physicsObj != null && PetFollowRules.AcceptMoveBack(before.ObjCellID, before.Frame.Origin,
+                physicsObj.Position.ObjCellID, physicsObj.Position.Frame.Origin, physicsObj.CurCell != null);
+        }
+
+        /// <summary>The outcome of one pet in a /telesummon, for the chat line.</summary>
+        public enum TeleSummonOutcome
+        {
+            Teleported,
+            NoValidSpot,
+            OwnerUnavailable,
+            OutOfReach,
+            Gone,
+        }
+
+        /// <summary>
+        /// /telesummon for this pet. MUST run on this pet's own landblock tick thread (the command enqueues it on
+        /// the pet's action chain), and re-checks everything there: the owner is still this pet's owner, alive,
+        /// not teleporting, in this instance and on this tick thread (PetFollowRules.CanTeleportToOwner - the
+        /// cross-thread rule is a hard safety constraint). A passive pet stops its follow MoveTo and is placed;
+        /// CombatPet extends this to clear its follow state and its attack target.
+        /// </summary>
+        public virtual TeleSummonOutcome TeleportToOwnerOnCommand(Player owner)
+        {
+            var refusal = CheckTeleSummonReach(owner);
+
+            if (refusal != null)
+                return refusal.Value;
+
+            StopMovingForTeleport();
+
+            return PlaceBesideOwner(owner, out _) ? TeleSummonOutcome.Teleported : TeleSummonOutcome.NoValidSpot;
+        }
+
+        /// <summary>
+        /// Every reason /telesummon may not move this pet, or NULL when it may. Pure reads, so the command can
+        /// also run it up front to word its reply and decide whether to start the cooldown; the enqueued action
+        /// runs it again on the pet's own thread, which is the check that counts.
+        /// </summary>
+        public TeleSummonOutcome? CheckTeleSummonReach(Player owner)
+        {
+            if (IsDestroyed || PhysicsObj == null || Location == null || owner == null || !ReferenceEquals(P_PetOwner, owner))
+                return TeleSummonOutcome.Gone;
+
+            if (owner.PhysicsObj == null || owner.Location == null)
+                return TeleSummonOutcome.OwnerUnavailable;
+
+            var petBlock = CurrentLandblock;
+            var ownerBlock = owner.CurrentLandblock;
+
+            var sharesThread = petBlock != null && ownerBlock != null
+                && PetFollowRules.SharesTickThread(petBlock == ownerBlock, petBlock.CurrentLandblockGroup, ownerBlock.CurrentLandblockGroup);
+
+            var sameInstance = owner.Location.Instance == Location.Instance;
+
+            if (!sameInstance || !sharesThread)
+                return TeleSummonOutcome.OutOfReach;
+
+            if (!PetFollowRules.CanTeleportToOwner(owner.Teleporting, owner.IsDead, sameInstance, sharesThread))
+                return TeleSummonOutcome.OwnerUnavailable;
+
+            return null;
+        }
+
+        /// <summary>The owner's chat line for one pet's /telesummon outcome. ASCII, well under the 255-char limit.</summary>
+        internal static string FormatTeleSummonOutcome(string petName, TeleSummonOutcome outcome)
+        {
+            switch (outcome)
+            {
+                case TeleSummonOutcome.Teleported: return $"{petName} returns to your side.";
+                case TeleSummonOutcome.NoValidSpot: return $"{petName} could not find room beside you.";
+                case TeleSummonOutcome.OutOfReach: return $"{petName} is too far away to call.";
+                case TeleSummonOutcome.OwnerUnavailable: return $"{petName} cannot reach you right now.";
+                default: return $"{petName} is no longer with you.";
+            }
+        }
+
+        /// <summary>
+        /// Ends whatever movement is in flight before a teleport. A passive pet only ever moves through its own
+        /// follow MoveTo (StartFollow), so cancelling that and clearing IsMoving is all it needs; SlowTick
+        /// re-issues the follow once the pet is placed. CombatPet overrides this with its own cancel.
+        /// </summary>
+        protected virtual void StopMovingForTeleport()
+        {
+            var moveToManager = PhysicsObj?.MovementManager?.MoveToManager;
+
+            if (moveToManager != null)
+            {
+                moveToManager.CancelMoveTo(WeenieError.ActionCancelled);
+                moveToManager.FailProgressCount = 0;
+            }
+
+            IsMoving = false;
+        }
+
+        /// <summary>
         /// Whether this pet's physics object actually ended up at <paramref name="requested"/> after a placement
         /// that reported OK (PetFollowRules.AcceptPlacement). A Slide placement accepts whatever spot the
         /// transition resolves to, so an OK result alone does not mean the pet is where it was sent.
@@ -616,6 +960,7 @@ namespace ACE.Server.WorldObjects
             var stowPet = WeenieClassId == player.CurrentActivePet.WeenieClassId;
 
             // despawn passive pet
+            player.CurrentActivePet.RemovalReason = "dismiss";
             player.CurrentActivePet.Destroy();
 
             return !stowPet;
@@ -645,6 +990,7 @@ namespace ACE.Server.WorldObjects
                 // using a passive pet device
                 // stow currently active passive/combat pet, as per retail
                 // spawning the new passive pet requires another double click
+                player.CurrentActivePet.RemovalReason = "dismiss";
                 player.CurrentActivePet.Destroy();
             }
             else
@@ -665,6 +1011,7 @@ namespace ACE.Server.WorldObjects
                     // stow currently active passive pet
                     // stowing the currently active passive pet w/ a combat pet device will unfortunately start the cooldown timer (and decrease the structure?) on the combat pet device, as per retail
                     // spawning the combat pet will require another double click in ~45s, as per retail
+                    player.CurrentActivePet.RemovalReason = "dismiss";
                     player.CurrentActivePet.Destroy();
 
                     return null;
@@ -699,7 +1046,7 @@ namespace ACE.Server.WorldObjects
         /// <summary>
         /// Called 1x per second
         /// </summary>
-        public void SlowTick(double currentUnixTime)
+        public virtual void SlowTick(double currentUnixTime)
         {
             //Console.WriteLine($"{Name}.HeartbeatStatic({currentUnixTime})");
 
@@ -708,6 +1055,7 @@ namespace ACE.Server.WorldObjects
             if (P_PetOwner?.PhysicsObj == null)
             {
                 log.Error($"{Name} ({Guid}).SlowTick() - P_PetOwner: {P_PetOwner}, P_PetOwner.PhysicsObj: {P_PetOwner?.PhysicsObj}");
+                RemovalReason = "ownerlost";
                 Destroy();
                 return;
             }
@@ -715,7 +1063,10 @@ namespace ACE.Server.WorldObjects
             var dist = GetCylinderDistance(P_PetOwner);
 
             if (dist > MaxDistance)
+            {
+                RemovalReason = "leash";
                 Destroy();
+            }
 
             if (!IsMoving && dist > MinDistance)
                 StartFollow();

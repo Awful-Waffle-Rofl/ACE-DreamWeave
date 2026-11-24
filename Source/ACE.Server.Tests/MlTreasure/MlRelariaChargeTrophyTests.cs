@@ -329,8 +329,15 @@ namespace ACE.Server.Tests.MlTreasure
 
             var pattern = new Regex(@"if\s*\(player\.TryConsumeFromInventoryWithNetworking\(wo,\s*1\)\)\s*MlRelariaChargeTrophy\.TryAddMapCharge\(player\);");
 
-            Assert.AreEqual(2, pattern.Matches(src).Count,
-                "expected the guarded 'consume then charge' shape exactly twice - once in the boss-variant branch, once in the ordinary branch");
+            // The ordinary branch (PayAndConsume, 2026-11-16 review) keeps the consume's result in `consumed`
+            // so its catch can tell a throw before the consume from one after it; the charge is still guarded
+            // on that same result.
+            var tracked = new Regex(@"consumed\s*=\s*player\.TryConsumeFromInventoryWithNetworking\(wo,\s*1\);\s*if\s*\(consumed\)\s*MlRelariaChargeTrophy\.TryAddMapCharge\(player\);");
+
+            Assert.AreEqual(1, pattern.Matches(src).Count,
+                "expected the guarded 'consume then charge' shape once, in the boss-variant branch");
+            Assert.AreEqual(1, tracked.Matches(src).Count,
+                "expected the tracked 'consume then charge' shape once, in the ordinary branch");
         }
 
         /// <summary>Both branches wrap their consume-and-charge pair in a try/catch that LOGS rather than

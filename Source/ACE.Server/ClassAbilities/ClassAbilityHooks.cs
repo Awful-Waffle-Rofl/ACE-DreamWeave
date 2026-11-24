@@ -142,8 +142,9 @@ namespace ACE.Server.ClassAbilities
     /// ManaBarrierAbility for the incident). A handler that wants a death save must therefore read the
     /// defender's Health itself and lower Damage deliberately - it must never assume Damage is bounded by it.
     ///
-    /// EVERY OTHER FIELD IS INIT-ONLY. Only Damage is settable, so a handler cannot rewrite who attacked or
-    /// what damage type landed out from under the handlers that run after it.
+    /// Every other field is init-only, so a handler cannot rewrite who attacked or what damage type landed. Damage is
+    /// settable and is the handlers' to lower; the share has an internal setter that only the dispatcher may write.
+    /// (Player.ApplyPreWriteDamageClassAbilities does so for the Jewelry Aspect Fortitude rescale.)
     /// </summary>
     public class PreWriteDamageContext
     {
@@ -190,9 +191,9 @@ namespace ACE.Server.ClassAbilities
         /// can mix casters: a monster's Incantation of Flame Bane and a PvP rival's poison land as ONE tick
         /// with a null source. The tick site sums only the contributions whose caster passes the filter and
         /// hands that in, so a handler can act on the creature part without touching the rest. For the three
-        /// single-source spell sites it is simply the whole hit or nothing. Never greater than the hit.
+        /// single-source spell sites it is simply the whole hit or nothing. Never greater than the hit as thrown; the dispatcher's Fortitude rescale then shrinks it in proportion to what Fortitude removed.
         /// </summary>
-        public uint SpellDamageFromEnemyCreature { get; init; }
+        public uint SpellDamageFromEnemyCreature { get; internal set; }
 
         /// <summary>
         /// TRUE when the hit comes from the hazard library (HazardContext.HitPlayers: rolling balls, wisp pillars), whose
@@ -333,6 +334,24 @@ namespace ACE.Server.ClassAbilities
         public const int Immunity = 75;
 
         /// <summary>
+        /// JEWELRY ASPECT FORTITUDE - not a class ability and never registered as one. The dispatcher
+        /// (Player.ApplyPreWriteDamageClassAbilities) applies it in place, immediately before the first handler whose
+        /// order is at or above this value (so AFTER the observers and the immunity window, and BEFORE every absorb
+        /// pool, which therefore sees the reduced hit), or after the loop when no handler sits at or above it. It also
+        /// runs when the class-ability kill switch is off or the rank cache is empty, which is why it cannot be a
+        /// handler. See <see cref="RunsFortitudeBefore"/>.
+        /// </summary>
+        public const int GearFortitude = 90;
+
+        /// <summary>
+        /// TRUE when the gear Fortitude step belongs immediately before a handler at <paramref name="handlerOrder"/>:
+        /// it has not run yet and the handler sits at or above <see cref="GearFortitude"/>. Pure, so the placement rule
+        /// is unit-testable without a live Player.
+        /// </summary>
+        public static bool RunsFortitudeBefore(int handlerOrder, bool alreadyApplied) =>
+            !alreadyApplied && handlerOrder >= GearFortitude;
+
+        /// <summary>
         /// Finite absorb pools that eat damage outright (Sanguine Ward, Runic Ward). First of the
         /// mitigations, so a pool is spent against the full hit rather than against whatever a proportional
         /// mitigation left of it - which is the order these abilities have run in at every site since they
@@ -396,9 +415,9 @@ namespace ACE.Server.ClassAbilities
     ///
     /// EXCLUDING class-ability-spawned children is NOT done for you. Several handlers self-exclude on
     /// SpellProjectile.IsClassAbilitySpawned so that effects spawning further projectiles cannot cascade;
-    /// Elemental Rend deliberately does not, and Cascade uses a generation counter instead. An Echo Cast
-    /// recast is NOT flagged IsClassAbilitySpawned (it is a full second cast, so Spell AOE radiates off it);
-    /// it carries SpellProjectile.IsEchoCopy, which only Echo Cast reads.
+    /// Elemental Rend deliberately does not, and Cascade uses a generation counter instead. An Echo Cast wisp
+    /// cast is NOT flagged IsClassAbilitySpawned (it is the player's own cast, so Spell AOE radiates off it);
+    /// Echo Cast itself is not on this hook (it triggers at cast commit, Player.TryTriggerEchoWisp).
     /// </summary>
     public interface ISpellHitAbility : IClassAbility
     {

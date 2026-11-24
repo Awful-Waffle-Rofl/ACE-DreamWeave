@@ -459,7 +459,9 @@ namespace ACE.Server.Tests.ThreadDungeons
             var src = PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadLootPool.cs");
             var body = PooledLootSourceText.MethodBody(src, "public static bool BankKill(Creature creature, DamageHistoryInfo killer)");
 
-            StringAssert.Contains(body, "var rolls = run.IsGroup ? RollCount(isBoss ? run.BossLootFactor : run.TrashLootFactor, DrawUniform01) : 1;");
+            // Thread Shrine (2026-11-09): the roll count goes through LootRollsFor, which keeps the pre-shrine count and
+            // draws exactly for a kill without a loot blessing (pinned behaviourally in ThreadLootBoonTests).
+            StringAssert.Contains(body, "var rolls = LootRollsFor(run.IsGroup, () => isBoss ? run.BossLootFactor : run.TrashLootFactor, KillerLootBoon(run, killer), DrawUniform01);");
 
             var guard = body.IndexOf("if (run.IsGroup)\n            {\n                rareFor = ResolveRareFor(", StringComparison.Ordinal);
             Assert.IsTrue(guard >= 0, "the recipient pick sits under the group guard");
@@ -467,7 +469,8 @@ namespace ACE.Server.Tests.ThreadDungeons
             var groupEnd = body.IndexOf("}", fallback, StringComparison.Ordinal);
             var roll = body.IndexOf("var entry = ThreadLootLedgerEntry.FromKill(", StringComparison.Ordinal);
             Assert.IsTrue(guard < fallback && fallback < groupEnd && groupEnd < roll, "the roster-killer fallback is inside the group block, before the roll");
-            Assert.AreEqual(1, Occurrences(body, "RollCount("), "one roll-count site");
+            Assert.AreEqual(1, Occurrences(body, "LootRollsFor("), "one roll-count site");
+            Assert.AreEqual(0, Occurrences(body, "RollCount("), "the roll count is LootRollsFor's");
             Assert.AreEqual(1, Occurrences(body, "ResolveRareFor("), "one recipient site");
             Assert.IsFalse(body.Contains("ThreadSafeRandom"), "BankKill draws only through the group-guarded helpers");
 
@@ -631,7 +634,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             var one = BonusSteps(PooledLootSourceText.MethodBody(src, "public static List<WorldObject> BuildBossBonusItems(ThreadDungeonRun run)"));
             var two = BonusSteps(PooledLootSourceText.MethodBody(src, "public static List<WorldObject> BuildBossBonusItems(ThreadDungeonRun run, double rewardBonus)"));
 
-            CollectionAssert.AreEqual(new[] { "AddBonusTradeNotes", "AddBonusLegendaryKey", "AddBonusSalvageBags", "AddBonusLegendaryItems" }, one, "the one-argument steps");
+            CollectionAssert.AreEqual(new[] { "AddBonusTradeNotes", "AddBonusLegendaryKey", "AddBonusFoolproof", "AddBonusSalvageBags", "AddBonusLegendaryItems" }, one, "the one-argument steps");
             CollectionAssert.AreEqual(one, two, "the two builders' ordered step names match");
 
             StringAssert.Contains(PooledLootSourceText.MethodBody(src, "public static List<WorldObject> BuildBossBonusItems(ThreadDungeonRun run)"),

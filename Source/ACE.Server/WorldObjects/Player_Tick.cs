@@ -69,6 +69,10 @@ namespace ACE.Server.WorldObjects
             // this tick cancels its waiting delete first. One volatile read while nothing is waiting.
             DrainTeleportDeletes();
 
+            // Allegiance Gauntlet death hold: the 1 Hz pen check and release (Player_Gauntlet.cs). A timestamp compare, then one
+            // volatile read while nobody on the server is held.
+            GauntletHoldTick(currentUnixTime);
+
             if (nextAgeUpdateTime <= currentUnixTime)
             {
                 nextAgeUpdateTime = currentUnixTime + ageUpdateInterval;

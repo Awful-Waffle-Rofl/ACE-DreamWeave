@@ -28,9 +28,12 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "intimidate",
             DisplayName = "Intimidate",
-            Description = "While your attack is reckless (Recklessness trained, power bar between 10% and 90%), the " +
-                          "monster's defense skill against it is reduced by 15 per rank. Higher Recklessness " +
-                          "increases the reduction.",
+            // Live text: reduction = rank * class_ability_intimidate_defense_per_rank (DefensePerRankKey, ReducedDefense below).
+            // The 10% / 90% power-bar window is IsRecklessAttackQualifying (Player_Combat.cs), a code constant.
+            DescriptionTemplate = "While your attack is reckless (Recklessness trained, power bar between 10% and 90%), the " +
+                          "target's defense against it drops.",
+            RankTailTemplate = "-{per:class_ability_intimidate_defense_per_rank|num} target defense",
+            AllowedLiterals = new[] { ("between 10% and 90%", "the reckless power-bar window is hard-coded in Player.IsRecklessAttackQualifying (0.1 and 0.9), a code constant with no tunable") },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,

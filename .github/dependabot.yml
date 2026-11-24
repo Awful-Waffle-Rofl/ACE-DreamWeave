@@ -11,12 +11,42 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # One PR per ecosystem per week for minor/patch bumps instead of one per package (or per
+    # project): a burst of separate bump PRs moves master repeatedly, which invalidates any
+    # merge train built in between (tools/merge-train.ps1 refuses when master moves) and runs
+    # CI once per PR. Majors still arrive one PR each, so a breaking change stays isolated.
+    groups:
+      actions-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   # Maintain dependencies for NuGet
   - package-ecosystem: "nuget"
-    directory: "/Source"
+    # Every project under Source/ is its own update scope (#2134-#2138 were one MSTest bump split
+    # into five PRs, one per csproj). Listing the project dirs and grouping by dependency name
+    # turns that into ONE PR per dependency across all projects.
+    directories:
+      - "/Source/ACE.*"
+      # the standalone test-impact selector (not in ACE.sln); pins Microsoft.CodeAnalysis.CSharp
+      - "/tools/test-impact"
     schedule:
       interval: "weekly"
+    # One PR per ecosystem per week for minor/patch bumps instead of one per package (or per
+    # project): a burst of separate bump PRs moves master repeatedly, which invalidates any
+    # merge train built in between (tools/merge-train.ps1 refuses when master moves) and runs
+    # CI once per PR. Majors still arrive one PR each, so a breaking change stays isolated.
+    groups:
+      # MSTest.TestAdapter and MSTest.TestFramework must move together (a split pair runs zero tests;
+      # the shared $(MSTestVersion) in Source/Directory.Build.props pins them). Listed first so it wins
+      # over nuget-minor-patch, and with no group-by and every update type so a major moves both too
+      # (the one exception to "majors arrive one PR each" above).
+      mstest:
+        patterns: ["MSTest*"]
+        update-types: ["major", "minor", "patch"]
+      nuget-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+        group-by: dependency-name
     #open-pull-requests-limit: 15
     ignore:
       # Ignore major version updates for the following
@@ -34,6 +64,14 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # One PR per ecosystem per week for minor/patch bumps instead of one per package (or per
+    # project): a burst of separate bump PRs moves master repeatedly, which invalidates any
+    # merge train built in between (tools/merge-train.ps1 refuses when master moves) and runs
+    # CI once per PR. Majors still arrive one PR each, so a breaking change stays isolated.
+    groups:
+      docker-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
     ignore:
       - dependency-name: "dotnet/sdk"
         # For dotnet/runtime, ignore all updates for version 7

@@ -81,7 +81,7 @@ namespace ACE.Server.WorldObjects
         /// <summary>
         /// Short, action-specific refusal text. Kept well under the client's chat line budget.
         /// </summary>
-        private static string GetMuleRefusal(MuleAction action)
+        internal static string GetMuleRefusal(MuleAction action)
         {
             switch (action)
             {

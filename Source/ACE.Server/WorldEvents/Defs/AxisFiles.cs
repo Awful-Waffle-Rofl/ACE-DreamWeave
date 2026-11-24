@@ -7,6 +7,13 @@ namespace ACE.Server.WorldEvents.Defs
 
     public class SourcesFile
     {
+        /// <summary>
+        /// Optional random-roll buckets: group name to bucket weight. A source joins one through its
+        /// randomGroup key; the roll picks a bucket by this weight, then a source inside it by randomWeight.
+        /// </summary>
+        [JsonPropertyName("randomGroups")]
+        public Dictionary<string, double> RandomGroups { get; set; } = new Dictionary<string, double>();
+
         [JsonPropertyName("sources")]
         public List<SourceThemeDef> Sources { get; set; } = new List<SourceThemeDef>();
     }

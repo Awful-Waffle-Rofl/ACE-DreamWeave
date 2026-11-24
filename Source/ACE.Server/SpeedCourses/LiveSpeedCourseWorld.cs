@@ -210,6 +210,7 @@ namespace ACE.Server.SpeedCourses
                 Rewards = false,
                 GroupEffort = GroupScaling.Solo.Effort,
                 LogTag = Tag,
+                StripCasterVitalSpells = true,
             });
 
             // Speed kills must not advance retail kill tasks (the puzzle-gate ambush strip, PuzzleGateManager.PrepareAmbush).

@@ -24,6 +24,19 @@ namespace ACE.Server.WorldObjects
         public bool? SummonAttackOnTargetOverride => GetProperty(PropertyBool.SummonAttackOnTarget);
 
         /// <summary>
+        /// Summon aggro: whether this player's never-initiates summons (the Archer and every caster pet) may start
+        /// fights. A null underlying property means the player has never set it, which is OFF. Read live by
+        /// CombatPet.NeverInitiates. Set by the player via /summonaggro on|off.
+        /// </summary>
+        public bool SummonAggro
+        {
+            // Biota != null: existing unit tests build biota-less Player owners for by-design pets, and a by-design
+            // pet still reads this; such an owner reads as off rather than throwing
+            get => Biota != null && (GetProperty(PropertyBool.SummonAggro) ?? false);
+            set => SetProperty(PropertyBool.SummonAggro, value);
+        }
+
+        /// <summary>
         /// The monster this player most recently landed an attack on. Runtime-only, never persisted.
         ///
         /// Written by OnAttackMonster, which can run on a projectile-collision path, and read by this player's

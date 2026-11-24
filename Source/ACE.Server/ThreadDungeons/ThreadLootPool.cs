@@ -53,7 +53,12 @@ namespace ACE.Server.ThreadDungeons
 
             // Group Threads (rulings R17, R18). A SOLO run takes neither branch: one roll, the killer's own rare roll,
             // and no random draw or presence lookup beyond what it made before Group Threads.
-            var rolls = run.IsGroup ? RollCount(isBoss ? run.BossLootFactor : run.TrashLootFactor, DrawUniform01) : 1;
+            //
+            // Thread Shrine loot blessing (Docs/Threads/ENCOUNTERS.md "Shrine"): the KILLER's (a pet's owner, resolved
+            // above) multiplies the roll factor - the group factor for a group run, 1 for a solo one - when they stand
+            // inside this run. With no blessing the factor is exactly the pre-shrine one, so a solo kill still makes one
+            // roll and no draw. The rare below is still rolled once per kill, whatever the roll count.
+            var rolls = LootRollsFor(run.IsGroup, () => isBoss ? run.BossLootFactor : run.TrashLootFactor, KillerLootBoon(run, killer), DrawUniform01);
 
             DamageHistoryInfo rareFor = null;
             uint rareRecipientGuid = 0;
@@ -100,6 +105,48 @@ namespace ACE.Server.ThreadDungeons
 
         /// <summary>A run cannot ask a loot factory for an unbounded number of rolls on a landblock thread (the ScaledLootCount rule).</summary>
         internal const int MaxRollsPerKill = 100;
+
+        /// <summary>
+        /// Rolls per banked kill. Without a blessing (<paramref name="lootBoon"/> at most 1): a group run's
+        /// <see cref="RollCount"/> of its factor (ruling R17), a solo run exactly 1 with no draw and the factor never read,
+        /// both as before the shrine. With one: <see cref="RollCount"/> of (group factor or 1) x the blessing, still capped
+        /// at <see cref="MaxRollsPerKill"/>. Pure over its delegates.
+        /// </summary>
+        internal static int LootRollsFor(bool isGroup, Func<double> groupFactor, double lootBoon, Func<double> uniform01)
+        {
+            var boosted = !double.IsNaN(lootBoon) && lootBoon > 1.0;
+
+            if (!isGroup)
+                return boosted ? RollCount(lootBoon, uniform01) : 1;
+
+            var factor = groupFactor();
+            return RollCount(boosted ? factor * lootBoon : factor, uniform01);
+        }
+
+        /// <summary>
+        /// The corpse model's share of the loot blessing (pooled loot off; Creature.GenerateTreasure): how many EXTRA
+        /// DeathTreasure rolls a run creature's corpse gets on top of its one, from the killer's blessing (a pet's owner's).
+        /// The corpse model has no group factor, so this is RollCount(blessing) - 1. 0, with no draw, for a creature no run
+        /// owns (both keys, the kill-hook rule) or a killer without a blessing inside the run.
+        /// </summary>
+        internal static int CorpseExtraRolls(ThreadDungeonRun run, int? runIdStamp, DamageHistoryInfo killer)
+        {
+            if (run == null || runIdStamp == null)
+                return 0;
+
+            var boon = KillerLootBoon(run, DamageHistoryInfo.ResolvePetOwnerAsKiller(killer));
+
+            return double.IsNaN(boon) || boon <= 1.0 ? 0 : Math.Max(0, RollCount(boon, DrawUniform01) - 1);
+        }
+
+        /// <summary>
+        /// Test seam: the loot blessing the (already pet-resolved) killer of a kill in <paramref name="run"/> holds. Production:
+        /// the killer's Player, through ThreadBoons.ForRun (inside THIS run, else 1.0). 1.0 for a null or non-player killer.
+        /// </summary>
+        internal static Func<ThreadDungeonRun, DamageHistoryInfo, double> KillerLootBoon = (run, killer) =>
+            ThreadBoons.AnyLive && killer != null && killer.IsPlayer && killer.TryGetAttacker() is Player player
+                ? ThreadBoons.ForRun(run, player, ThreadBoonKind.Loot)
+                : 1.0;
 
         /// <summary>
         /// Ruling R17: a loot roll factor realised as whole rolls. floor(f), plus one more with probability frac(f).

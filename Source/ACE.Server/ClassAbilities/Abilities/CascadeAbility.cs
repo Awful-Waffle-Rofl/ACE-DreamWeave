@@ -19,9 +19,9 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// Cascade then triggers on a landed proc - so an unflagged cascade child is itself a landed proc, and
     /// could cascade again, and again. At 25% per link that converges (expected 1.33 extra hits, terminates
     /// with probability 1), so it is not a hang, but it is unbounded in the tail and no class ability in the
-    /// codebase chains today: both existing precedents (SpellAoeAbility, EchoCastAbility) refuse outright on
-    /// IsClassAbilitySpawned (and Echo Cast also on IsEchoCopy, its own recasts - which since 2026-09-21 are
-    /// full casts that Spell AOE radiates off, once).
+    /// codebase chains today: the existing precedent (SpellAoeAbility) refuses outright on
+    /// IsClassAbilitySpawned. (Echo Cast was a second precedent until the 2026-11-22 wisp rework retired its
+    /// spell-hit recast.)
     ///
     /// Q13, ACCEPTED: an explicit GENERATION COUNTER on SpellProjectile rather than reuse of the boolean.
     /// SpellProjectile.ClassAbilityGeneration starts at 0, a cascade child is 1, and this handler refuses at
@@ -37,7 +37,7 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// Three candidates existed and the choice is worth recording:
     ///
     ///  - SpellProjectile.FromProc - already set on every proc cast, needs no new state, but it is ALSO set
-    ///    on ordinary item cast-on-strike procs, on cloak procs and on Echo Cast recasts. It answers "did
+    ///    on ordinary item cast-on-strike procs and on cloak procs. It answers "did
     ///    something proc this" rather than "is this one of MY class's procs", which is a different question;
     ///  - the generation counter - cannot serve here, because generation 0 is exactly what a primary proc
     ///    and an ordinary cast have in common;
@@ -64,13 +64,19 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "cascade",
             DisplayName = "Cascade",
-            Description = "A landed proc has a 5/10/15% chance (by rank) to immediately fire again at a second " +
-                          "nearby enemy. The second casting cannot cascade further. Higher Item Enchantment " +
-                          "increases the chance.",
+            // Live text. Chance per rank: CascadeAbility.cs ~96-98 (LiveBaseChance).
+            DescriptionTemplate = "A proc you land can fire again at a second nearby enemy. The second cast cannot cascade.",
+            RankTailTemplate = "{ranks:class_ability_cascade_chance_r|pct}% chance",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },   // Spellsword pass 2026-10-24: one rank at 3 -> three at 1/1/1 (ClassAbilityRepricing wave 4, PromoteToPaid)
             Implemented = true,
             AffinitySkill = Skill.ItemEnchantment,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "affinity", Bounds = CeilingBounds.Affinity, Source = CeilingSource.Tunable, Key = "class_ability_affinity_chance_cap", Label = "max chance from affinity", Format = "pct" },
+                new ClassAbilityCeiling { Id = "gear", Bounds = CeilingBounds.Gear, Source = CeilingSource.GearStackCap, GearMod = EquipmentModId.Cascade, Label = "max from gear", Format = "pct" },
+                new ClassAbilityCeiling { Id = "generation", Bounds = CeilingBounds.Level, Source = CeilingSource.Tunable, Key = "class_ability_cascade_max_generation", Label = "max cascade hops", Format = "int", ZeroIsLimit = true },
+            },
         };
 
         /// <summary>
@@ -186,8 +192,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             if (secondTarget == null)
                 return;
 
-            // Re-cast the same spell at the SECOND target - this is EchoCastAbility's recast, aimed
-            // elsewhere. The launcher is carried through so the cascade keeps the wielded sword's rend,
+            // Re-cast the same spell at the SECOND target. The launcher is carried through so the cascade keeps the wielded sword's rend,
             // slayer and crit frequency, which is what makes it the same proc rather than a weaker copy
             // (Q11, sec 5a). fromProc suppresses item procs on the child, exactly as the primary proc does.
             var children = caster.CreateSpellProjectiles(projectile.Spell, secondTarget, projectile.ProjectileLauncher,
@@ -287,10 +292,17 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
+            return BuildReadout(rank, player?.GetClassAbilityAffinityMultiplier(Skill.ItemEnchantment) ?? 1.0, player?.GetEquippedModValue(EquipmentModId.Cascade) ?? 0.0);
+        }
+
+        /// <summary>
+        /// The pure core of <see cref="GetReadout"/>: every live input is a parameter, so a test can pin the readout (and its ceiling readings) without a Player.
+        /// </summary>
+        public ClassAbilityReadout BuildReadout(int rank, double affinityMultiplier, double gearModValue)
+        {
             var skillChance = LiveBaseChance(rank);
             var affinityCap = PropertyManager.GetDouble("class_ability_affinity_chance_cap").Item;
 
-            var affinityMultiplier = player?.GetClassAbilityAffinityMultiplier(Skill.ItemEnchantment) ?? 1.0;
             var rawAdded = skillChance * affinityMultiplier - skillChance;
 
             var clampedAdded = affinityCap > 0.0 ? Math.Min(rawAdded, affinityCap) : rawAdded;
@@ -299,7 +311,7 @@ namespace ACE.Server.ClassAbilities.Abilities
 
             var gearChance = rank <= 0
                 ? 0.0
-                : Math.Max(0.0, player?.GetEquippedModValue(EquipmentModId.Cascade) ?? 0.0);
+                : Math.Max(0.0, gearModValue);
 
             var skill = skillChance * 100.0;
             var affinity = clampedAdded * 100.0;
@@ -316,6 +328,13 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "chain",
                 Per = null,
                 CapNote = capBit ? "affinity cap" : null,
+                Ceilings = new[]
+                {
+                    ClassAbilityCeilings.Read(Definition, "affinity", rawAdded * 100.0, rank, ClassAbilityText.Live),
+                    ClassAbilityCeilings.Read(Definition, "gear", gear, rank, ClassAbilityText.Live),
+                    // structural: the ability is stateless, so there is no running hop count to read; 0 just states the ceiling
+                    ClassAbilityCeilings.Read(Definition, "generation", 0.0, rank, ClassAbilityText.Live),
+                },
             };
         }
     }

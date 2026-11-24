@@ -40,7 +40,7 @@ namespace ACE.Server.Tests
 
         // ---- builders ----------------------------------------------------------------------------------
 
-        private sealed class OpenObjective : IWorldEventObjective
+        internal sealed class OpenObjective : IWorldEventObjective
         {
             public bool IsComplete => false;
 
@@ -57,7 +57,7 @@ namespace ACE.Server.Tests
             public WorldEventMvp Mvp() => WorldEventMvp.None;
         }
 
-        private static WorldEventComposition BuildComposition()
+        internal static WorldEventComposition BuildComposition()
         {
             var source = new SourceThemeDef
             {

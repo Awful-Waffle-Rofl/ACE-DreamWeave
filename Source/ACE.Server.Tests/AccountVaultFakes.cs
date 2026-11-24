@@ -1121,47 +1121,146 @@ namespace ACE.Server.Tests
         /// <summary>Makes <see cref="UpdateAccountVaultBarrel"/> report false with the row left untouched.</summary>
         public bool FailUpdateBarrel;
 
+        /// <summary>Row ids whose <see cref="UpdateAccountVaultBarrel"/> reports false with the row left untouched.</summary>
+        public readonly HashSet<uint> FailUpdateBarrelIds = new HashSet<uint>();
+
         public List<AccountVaultBarrel> GetAccountVaultBarrels(uint accountId, int limit)
         {
             if (FailBarrelRead)
                 return null;
 
-            return Barrels.Where(b => b.AccountId == accountId)
+            var rows = Barrels.Where(b => b.AccountId == accountId)
                 .OrderByDescending(b => b.BarreledAt)
                 .ThenByDescending(b => b.Id)
                 .Take(Math.Max(1, limit))
                 .ToList();
+
+            return BarrelListsReturnCopies ? rows.Select(CopyBarrelRow).ToList() : rows;
         }
 
         /// <summary>
+        /// Makes <see cref="GetAccountVaultBarrels"/> and <see cref="GetOpenAccountVaultBarrelItems"/> return
+        /// DETACHED copies, as the real NoTracking DAO does. Without it a stamp written through a planned
+        /// row would also change the fake's own row, and a stale-snapshot guard could never be exercised.
+        /// </summary>
+        public bool BarrelListsReturnCopies;
+
+        /// <summary>How many times <see cref="GetOpenAccountVaultBarrelItems"/> has been called.</summary>
+        public int OpenBarrelItemReads;
+
+        /// <summary>Makes <see cref="GetOpenAccountVaultBarrelItems"/> alone report a failed read, null.</summary>
+        public bool FailOpenBarrelItemRead;
+
+        public List<AccountVaultBarrel> GetOpenAccountVaultBarrelItems(uint accountId, int limit)
+        {
+            OpenBarrelItemReads++;
+
+            if (FailBarrelRead || FailOpenBarrelItemRead)
+                return null;
+
+            // The real DAO's clamp, so a test of the bounded read sees the same ceiling.
+            var clamped = Math.Min(Math.Max(1, limit), ACE.Database.ShardDatabase.MaxAccountVaultBarrelRows);
+
+            var rows = Barrels.Where(b => b.AccountId == accountId && b.ItemGuid != null && b.RestoredAt == null && b.PurgedAt == null)
+                .OrderByDescending(b => b.BarreledAt)
+                .ThenByDescending(b => b.Id)
+                .Take(clamped)
+                .ToList();
+
+            return BarrelListsReturnCopies ? rows.Select(CopyBarrelRow).ToList() : rows;
+        }
+
+        private static AccountVaultBarrel CopyBarrelRow(AccountVaultBarrel b) => new AccountVaultBarrel
+        {
+            Id = b.Id,
+            AccountId = b.AccountId,
+            Wcid = b.Wcid,
+            ItemGuid = b.ItemGuid,
+            ClassKey = b.ClassKey,
+            CanonicalForm = b.CanonicalForm,
+            Value = b.Value,
+            Count = b.Count,
+            ItemName = b.ItemName,
+            BarreledAt = b.BarreledAt,
+            ActorCharacterGuid = b.ActorCharacterGuid,
+            ActorCharacterName = b.ActorCharacterName,
+            RestoredAt = b.RestoredAt,
+            PurgedAt = b.PurgedAt,
+        };
+
+        /// <summary>Row ids whose single-row read (<see cref="GetAccountVaultBarrel"/>) reports a failure, null.</summary>
+        public readonly HashSet<uint> FailBarrelRowReadIds = new HashSet<uint>();
+
+        /// <summary>
         /// Returns the LIVE row object, not a copy, which is what makes an in-place stamp visible to a
-        /// test the way the real DAO's re-read of the table is. <see cref="FailBarrelRead"/> is
-        /// honoured here too, because the restore path refuses on null and that arm needs to be
-        /// reachable.
+        /// test the way the real DAO's re-read of the table is. <see cref="FailBarrelRead"/> and
+        /// <see cref="FailBarrelRowReadIds"/> are honoured here too, because the restore path refuses on
+        /// null and that arm needs to be reachable.
         /// </summary>
         public AccountVaultBarrel GetAccountVaultBarrel(uint id)
         {
-            if (FailBarrelRead)
+            if (FailBarrelRead || FailBarrelRowReadIds.Contains(id))
                 return null;
 
-            return Barrels.FirstOrDefault(b => b.Id == id);
+            var found = Barrels.FirstOrDefault(b => b.Id == id);
+
+            // Under the same opt-in as the list reads: a detached copy, as the NoTracking DAO returns.
+            return BarrelListsReturnCopies && found != null ? CopyBarrelRow(found) : found;
         }
+
+        /// <summary>
+        /// Makes <see cref="GetExpiredAccountVaultBarrels"/> return DETACHED copies, as the real
+        /// NoTracking DAO does, instead of the live rows. A test of a stale snapshot needs this: with live
+        /// rows a later restore would be visible through the reaper's own snapshot.
+        /// </summary>
+        public bool ExpiredReadReturnsCopies;
+
+        /// <summary>Every limit <see cref="GetExpiredAccountVaultBarrels"/> was asked for, in call order.</summary>
+        public readonly List<int> ExpiredReadLimits = new List<int>();
 
         public List<AccountVaultBarrel> GetExpiredAccountVaultBarrels(DateTime cutoffUtc, int limit)
         {
+            ExpiredReadLimits.Add(limit);
+
             if (FailBarrelRead)
                 return null;
 
-            return Barrels.Where(b => b.RestoredAt == null && b.PurgedAt == null && b.BarreledAt < cutoffUtc)
+            var rows = Barrels.Where(b => b.RestoredAt == null && b.PurgedAt == null && b.BarreledAt < cutoffUtc)
                 .OrderBy(b => b.BarreledAt)
                 .ThenBy(b => b.Id)
                 .Take(Math.Max(1, limit))
                 .ToList();
+
+            if (!ExpiredReadReturnsCopies)
+                return rows;
+
+            return rows.Select(b => new AccountVaultBarrel
+            {
+                Id = b.Id,
+                AccountId = b.AccountId,
+                Wcid = b.Wcid,
+                ItemGuid = b.ItemGuid,
+                ClassKey = b.ClassKey,
+                Count = b.Count,
+                ItemName = b.ItemName,
+                BarreledAt = b.BarreledAt,
+                ActorCharacterGuid = b.ActorCharacterGuid,
+                ActorCharacterName = b.ActorCharacterName,
+                RestoredAt = b.RestoredAt,
+                PurgedAt = b.PurgedAt,
+            }).ToList();
         }
+
+        /// <summary>When set, the insert with this 1-based call number (counted by <see cref="AddBarrelCalls"/>) reports false with nothing recorded.</summary>
+        public int FailAddBarrelOnCall;
+
+        public int AddBarrelCalls;
 
         public bool AddAccountVaultBarrel(AccountVaultBarrel row)
         {
-            if (FailAddBarrel || row == null)
+            AddBarrelCalls++;
+
+            if (FailAddBarrel || row == null || AddBarrelCalls == FailAddBarrelOnCall)
                 return false;
 
             // The real column carries a CURRENT_TIMESTAMP default and the DAO stamps UtcNow over it
@@ -1175,9 +1274,14 @@ namespace ACE.Server.Tests
             return true;
         }
 
+        /// <summary>Runs at the top of <see cref="UpdateAccountVaultBarrel"/>, on the writing thread, before anything is written.</summary>
+        public Action<AccountVaultBarrel> BeforeUpdateBarrel;
+
         public bool UpdateAccountVaultBarrel(AccountVaultBarrel row)
         {
-            if (FailUpdateBarrel || row == null)
+            BeforeUpdateBarrel?.Invoke(row);
+
+            if (FailUpdateBarrel || row == null || FailUpdateBarrelIds.Contains(row.Id))
                 return false;
 
             var existing = Barrels.FirstOrDefault(b => b.Id == row.Id);
@@ -1282,6 +1386,19 @@ namespace ACE.Server.Tests
             public void Dispose() => Interlocked.Decrement(ref owner.concurrentCalls);
         }
 
+        /// <summary>Every alias this fake handed out, in order. Drawn from the same counter as the fake's objects, so an alias can never collide with one.</summary>
+        public readonly List<uint> AliasesIssued = new List<uint>();
+
+        public uint NewDisplayAliasGuid()
+        {
+            var alias = NextGuid();
+
+            lock (AliasesIssued)
+                AliasesIssued.Add(alias);
+
+            return alias;
+        }
+
         public WorldObject CreateNewWorldObject(uint weenieClassId)
         {
             using (EnterCall())
@@ -1318,8 +1435,20 @@ namespace ACE.Server.Tests
         /// </summary>
         public readonly HashSet<uint> FailLoadContainerGuids = new HashSet<uint>();
 
+        /// <summary>Every <see cref="LoadContainer"/> call, answered or not. How a test counts store loads by container.</summary>
+        public int LoadContainerCalls => Volatile.Read(ref loadContainerCalls);
+
+        private int loadContainerCalls;
+
+        /// <summary>Runs at the top of every <see cref="LoadContainer"/> call, with the guid asked for.</summary>
+        public Action<uint> BeforeLoadContainer;
+
         public VaultContainerLoad LoadContainer(uint containerGuid, out Container container)
         {
+            Interlocked.Increment(ref loadContainerCalls);
+
+            BeforeLoadContainer?.Invoke(containerGuid);
+
             using (EnterCall())
             {
                 container = null;
@@ -1637,8 +1766,30 @@ namespace ACE.Server.Tests
                 if (ok)
                     Saved.Add(worldObject);
 
+                if (InterceptCompletion?.Invoke(worldObject, false, ok, callback) == true)
+                    return;
+
                 callback?.Invoke(ok);
             }
+        }
+
+        /// <summary>
+        /// Takes over the completion of a save or a destroy-with-callback: (object, isDestroy, ok, callback). Returning
+        /// true means the hook now owns the callback - it may run it later (a deferred write), with a different outcome,
+        /// or never (a crash). Returning false completes inline as before. The Salvage Roller batch tests use it to hold
+        /// the shard's acknowledgements back and release them one at a time.
+        /// </summary>
+        public Func<WorldObject, bool, bool, Action<bool>, bool> InterceptCompletion;
+
+        /// <summary>The removal-acknowledging destroy: the plain destroy, then the callback (through <see cref="InterceptCompletion"/>).</summary>
+        public void DestroyItem(WorldObject item, Action<bool> landed)
+        {
+            DestroyItem(item);
+
+            if (InterceptCompletion?.Invoke(item, true, true, landed) == true)
+                return;
+
+            landed?.Invoke(true);
         }
 
         /// <summary>

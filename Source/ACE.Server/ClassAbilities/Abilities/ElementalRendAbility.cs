@@ -25,8 +25,9 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// no effect. Players, pets and game pieces never take one (ElementalProficiencyMath.IsEligibleTarget),
     /// which also keeps PvP out.
     ///
-    /// GetVulnerabilitySpell and its table below are KEPT UNCHANGED from the Elemental Rend days: Sundermark
-    /// and DebuffEffect read the vulnerability ids from here, and a test pins those call texts.
+    /// GetVulnerabilitySpell and its table below are KEPT UNCHANGED from the Elemental Rend days: Sundermark,
+    /// DebuffEffect, Player_ElementalProficiency (the Lightning visual) and ElementalRendVulnAbility read the
+    /// vulnerability ids from here, and a test pins those call texts.
     /// </summary>
     public class ElementalRendAbility : ISpellHitAbility, IAbilityReadout
     {
@@ -37,19 +38,38 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "elementalrend",
             DisplayName = "Elemental Proficiency",
-            Description = "Your damaging spells apply an effect by element when they land on a monster. " +
-                          "Fire: +10/20/30% damage. " +
-                          "Lightning: the target takes 10/20/30% more damage from all sources for 10 seconds. " +
-                          "Frost: the target is slowed by 20/40/60% for 10 seconds. " +
-                          "Acid: the target burns for 20/40/60% of the hit over 6 seconds; a new acid hit refreshes the burn. " +
-                          "Bludgeon: the target is stunned for 2/3/4 seconds, then cannot be stunned again for 8 seconds. " +
-                          "Pierce: ignores 10/20/30% of the target's resistance or deals 10/20/30% more damage, whichever is greater. " +
-                          "Slash: +5/10/15 percentage points of critical chance. " +
-                          "Higher War Magic strengthens the Fire, Lightning, Acid and Pierce effects.",
+            DescriptionTemplate = "Your damaging spells add an effect by element when they hit a target. Fire deals extra damage. " +
+                          "Lightning makes the target take more damage from all sources for " +
+                          "{v:class_ability_elementalproficiency_lightning_seconds|num} seconds. Frost slows it for " +
+                          "{v:class_ability_elementalproficiency_frost_seconds|num} seconds. Acid burns for a share of the hit over " +
+                          "{v:class_ability_elementalproficiency_acid_seconds|num} seconds, and a new acid hit restarts the burn. " +
+                          "Bludgeon stuns, and the target then cannot be stunned again for " +
+                          "{v:class_ability_elementalproficiency_bludgeon_immunity_seconds|num} seconds. Pierce ignores part of the " +
+                          "target's resistance or adds the same share as damage, whichever is more. Slash raises your critical " +
+                          "chance.",
+            // Live text. Every value is rank x a per-rank tunable (ElementalProficiencyMath.Magnitude, ElementalProficiencyMath.cs:102-111 and :123),
+            // except the Bludgeon stun, which is base + (rank - 1) * step (ElementalProficiencyMath.StunSeconds, :160-161) and the
+            // flat durations (LightningSeconds :173, FrostSeconds :179, AcidSeconds :185, StunImmunitySeconds :167). Pierce reads the
+            // one pierce_ignore_per_rank key for both of its shapes. Every key here is built as KeyPrefix + suffix, which the source-scan guard accepts
+            // from ElementalProficiencyMath.cs: it sees the quoted prefix and the quoted suffix.
+            RankTailTemplate = "Fire +{per:class_ability_elementalproficiency_fire_percent_per_rank|pct}%, Lightning " +
+                          "+{per:class_ability_elementalproficiency_lightning_percent_per_rank|pct}%, Frost " +
+                          "{per:class_ability_elementalproficiency_frost_slow_per_rank|pct}% slow, Acid " +
+                          "{per:class_ability_elementalproficiency_acid_fraction_per_rank|pct}% burn, Bludgeon " +
+                          "{ladder:class_ability_elementalproficiency_bludgeon_stun_base_seconds,class_ability_elementalproficiency_bludgeon_stun_step_seconds|num} " +
+                          "s stun, Pierce {per:class_ability_elementalproficiency_pierce_ignore_per_rank|pct}%, Slash " +
+                          "+{per:class_ability_elementalproficiency_slashcrit_points_per_rank|pct}% crit chance",
+            TunableSourceFiles = new[] { "ClassAbilities/ElementalProficiencyMath.cs" },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
             AffinitySkill = Skill.WarMagic,
+            // The multiplier clamp min(affinityMultiplier, 1 + cap) means affinity adds at most `cap` of each element's effect.
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "affinity", Bounds = CeilingBounds.Affinity, Source = CeilingSource.Tunable, Key = "class_ability_elementalproficiency_affinity_cap", Label = "max effect from affinity", Format = "pct", ZeroIsLimit = true },
+                new ClassAbilityCeiling { Id = "gear", Bounds = CeilingBounds.Gear, Source = CeilingSource.GearStackCap, GearMod = EquipmentModId.ElementalRend, Label = "max from gear", Format = "pct" },
+            },
         };
         // Per-element Life-Magic Vulnerability progressions (the "...Other" line). The SpellId enum values
         // are not contiguous per family, so the levels are listed explicitly rather than computed.
@@ -142,9 +162,20 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
-            return BuildReadout(rank,
-                player?.GetClassAbilityAffinityMultiplier(Skill.WarMagic) ?? 1.0,
-                player?.GetEquippedModValue(EquipmentModId.ElementalRend) ?? 0.0);
+            var affinityMultiplier = player?.GetClassAbilityAffinityMultiplier(Skill.WarMagic) ?? 1.0;
+            var gearAmplifier = player?.GetEquippedModValue(EquipmentModId.ElementalRend) ?? 0.0;
+
+            // The ceilings ride the PRIMARY (Fire) line only: the affinity clamp is the same for every scaled element. Affinity is
+            // the RAW (pre-clamp) fraction the multiplier adds; gear is the amplifier, already bounded by the mod's StackCap in the
+            // accessor (R9).
+            return BuildReadout(rank, affinityMultiplier, gearAmplifier) with
+            {
+                Ceilings = new[]
+                {
+                    ClassAbilityCeilings.Read(Definition, "affinity", Math.Max(0.0, affinityMultiplier - 1.0) * 100.0, rank, ClassAbilityText.Live),
+                    ClassAbilityCeilings.Read(Definition, "gear", Math.Max(0.0, gearAmplifier) * 100.0, rank, ClassAbilityText.Live),
+                },
+            };
         }
 
         /// <summary>The pure core of <see cref="GetReadout"/>, taking the live affinity multiplier and gear amplifier.</summary>

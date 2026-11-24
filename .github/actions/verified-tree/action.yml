@@ -11,38 +11,127 @@ description: >
   the heavy steps in full". The key the caller passes must cover every input of the job it
   guards, including the workflow file and this action.
 
+  Two more modes cover the "superseded push" case (see superseded.py): `superseded` (master push
+  runs, after checkout) fetches the current master tip and reports whether it is a STRICT
+  descendant of this run's commit; the caller then computes the TIP's key the same way it computes
+  its own and runs `lookup` for it; `combine` merges the own-key and tip-key lookups into the one
+  verdict the heavy steps are gated on, verified=true only on an own hit or on a superseded commit
+  whose tip key was verified. `pending` (design step 11) checks whether the superseding tip has
+  exactly one queued or in-progress first-attempt push run of this workflow on master; combine
+  then also covers a superseded commit on that basis (basis=pending) when the tip key did not
+  verify. A run covered either way must never record its own key, and is refused by the deploy
+  gates. Every error in any mode fails closed to "run the full job".
+
 inputs:
   mode:
-    description: "'record' or 'lookup'."
+    description: "'record', 'lookup', 'superseded', 'pending' or 'combine'."
     required: true
   names:
     description: >-
       record: the single artifact name to upload. lookup: newline-separated candidate names in
-      preference order; the first acceptable one wins.
-    required: true
+      preference order; the first acceptable one wins. Unused by superseded, pending and combine.
+    required: false
+    default: ''
   workflow-path:
-    description: "lookup: the calling workflow's file, e.g. .github/workflows/build-test.yml."
+    description: "lookup / pending: the calling workflow's file, e.g. .github/workflows/build-test.yml."
     required: false
     default: ''
   token:
-    description: "lookup: a token with actions:read."
+    description: "lookup / pending: a token with actions:read."
     required: false
     default: ''
   retention-days:
     description: "record: marker artifact retention."
     required: false
     default: '5'
+  own-verified:
+    description: "combine: the own-key lookup's verified output."
+    required: false
+    default: ''
+  own-run-url:
+    description: "combine: the own-key lookup's run-url output."
+    required: false
+    default: ''
+  own-matched-name:
+    description: "combine: the own-key lookup's matched-name output."
+    required: false
+    default: ''
+  superseded:
+    description: "combine: the superseded step's superseded output."
+    required: false
+    default: ''
+  tip-sha:
+    description: "pending: the superseding tip sha to check. combine: the superseded step's tip-sha output."
+    required: false
+    default: ''
+  tip-names:
+    description: "combine: the newline-separated tip key names the caller computed and looked up."
+    required: false
+    default: ''
+  tip-verified:
+    description: "combine: the tip-key lookup's verified output."
+    required: false
+    default: ''
+  tip-run-url:
+    description: "combine: the tip-key lookup's run-url output."
+    required: false
+    default: ''
+  tip-matched-name:
+    description: "combine: the tip-key lookup's matched-name output."
+    required: false
+    default: ''
+  tip-pending:
+    description: "combine: the pending step's pending output."
+    required: false
+    default: ''
+  tip-pending-sha:
+    description: "combine: the pending step's tip-sha output (the sha it actually checked)."
+    required: false
+    default: ''
+  tip-pending-run-url:
+    description: "combine: the pending step's run-url output."
+    required: false
+    default: ''
+  job-label:
+    description: "combine: a short job name for the step-summary heading."
+    required: false
+    default: ''
 
 outputs:
+  # Only one of the lookup / combine steps runs per call, so `a || b` yields that step's value.
   verified:
-    description: "lookup: 'true' when a valid producer was found, otherwise 'false'."
-    value: ${{ steps.lookup.outputs.verified }}
+    description: "lookup / combine: 'true' when a valid producer was found, otherwise 'false'."
+    value: ${{ steps.lookup.outputs.verified || steps.combine.outputs.verified }}
   run-url:
-    description: "lookup: html_url of the pull_request or master-push run being reused (empty when not verified)."
-    value: ${{ steps.lookup.outputs.run-url }}
+    description: "lookup / combine: html_url of the pull_request or master-push run being reused (empty when not verified)."
+    value: ${{ steps.lookup.outputs.run-url || steps.combine.outputs.run-url }}
   matched-name:
-    description: "lookup: the candidate name that was accepted (empty when not verified)."
-    value: ${{ steps.lookup.outputs.matched-name }}
+    description: "lookup / combine: the candidate name that was accepted (empty when not verified)."
+    value: ${{ steps.lookup.outputs.matched-name || steps.combine.outputs.matched-name }}
+  source:
+    description: "combine: 'own', 'superseded' or 'none'."
+    value: ${{ steps.combine.outputs.source }}
+  basis:
+    description: "combine: 'verified' (tip key verified) or 'pending' (tip's full push run queued or in progress); superseded hits only."
+    value: ${{ steps.combine.outputs.basis }}
+  covering-sha:
+    description: "combine: the master tip whose verification covers this commit (superseded hits only)."
+    value: ${{ steps.combine.outputs.covering-sha }}
+  pending:
+    description: "pending: 'true' when the tip has exactly one queued or in-progress first-attempt push run of this workflow on master."
+    value: ${{ steps.pending.outputs.pending }}
+  pending-run-url:
+    description: "pending: that run's html_url (empty unless pending is 'true')."
+    value: ${{ steps.pending.outputs.run-url }}
+  pending-tip-sha:
+    description: "pending: the tip sha the check was made for."
+    value: ${{ steps.pending.outputs.tip-sha }}
+  superseded:
+    description: "superseded: 'true' when the current master tip is a strict descendant of this run's commit."
+    value: ${{ steps.superseded.outputs.superseded }}
+  tip-sha:
+    description: "superseded: that master tip's sha (empty unless superseded is 'true')."
+    value: ${{ steps.superseded.outputs.tip-sha }}
 
 runs:
   using: composite
@@ -51,10 +140,20 @@ runs:
       shell: bash
       env:
         VT_MODE: ${{ inputs.mode }}
+        VT_NAMES: ${{ inputs.names }}
       run: |
         case "$VT_MODE" in
-          record|lookup) ;;
-          *) echo "::error::verified-tree: unknown mode '$VT_MODE' (expected record or lookup)"; exit 1 ;;
+          record|lookup|superseded|pending|combine) ;;
+          *) echo "::error::verified-tree: unknown mode '$VT_MODE' (expected record, lookup, superseded, pending or combine)"; exit 1 ;;
+        esac
+        # names is optional only for superseded/pending/combine; an empty one for record or lookup is a
+        # caller bug (a key step that produced nothing), so fail loudly rather than skip quietly.
+        case "$VT_MODE" in
+          record|lookup)
+            if [ -z "$(printf '%s' "$VT_NAMES" | tr -d '[:space:]')" ]; then
+              echo "::error::verified-tree: mode '$VT_MODE' needs a non-empty 'names' input"
+              exit 1
+            fi ;;
         esac
 
     - name: Look up a verifying pull_request run
@@ -66,6 +165,42 @@ runs:
         VT_NAMES: ${{ inputs.names }}
         VT_WORKFLOW_PATH: ${{ inputs.workflow-path }}
       run: python3 "$GITHUB_ACTION_PATH/lookup.py"
+
+    - name: Detect a superseding master tip
+      id: superseded
+      if: inputs.mode == 'superseded'
+      shell: bash
+      run: python3 "$GITHUB_ACTION_PATH/superseded.py" detect
+
+    - name: Check for a pending full run of the superseding tip
+      id: pending
+      if: inputs.mode == 'pending'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        VT_TIP_SHA: ${{ inputs.tip-sha }}
+        VT_WORKFLOW_PATH: ${{ inputs.workflow-path }}
+      run: python3 "$GITHUB_ACTION_PATH/superseded.py" pending
+
+    - name: Combine the own and superseding-tip lookups
+      id: combine
+      if: inputs.mode == 'combine'
+      shell: bash
+      env:
+        VT_OWN_VERIFIED: ${{ inputs.own-verified }}
+        VT_OWN_RUN_URL: ${{ inputs.own-run-url }}
+        VT_OWN_MATCHED_NAME: ${{ inputs.own-matched-name }}
+        VT_SUPERSEDED: ${{ inputs.superseded }}
+        VT_TIP_SHA: ${{ inputs.tip-sha }}
+        VT_TIP_NAMES: ${{ inputs.tip-names }}
+        VT_TIP_VERIFIED: ${{ inputs.tip-verified }}
+        VT_TIP_RUN_URL: ${{ inputs.tip-run-url }}
+        VT_TIP_MATCHED_NAME: ${{ inputs.tip-matched-name }}
+        VT_TIP_PENDING: ${{ inputs.tip-pending }}
+        VT_TIP_PENDING_SHA: ${{ inputs.tip-pending-sha }}
+        VT_TIP_PENDING_RUN_URL: ${{ inputs.tip-pending-run-url }}
+        VT_JOB_LABEL: ${{ inputs.job-label }}
+      run: python3 "$GITHUB_ACTION_PATH/superseded.py" combine
 
     - name: Write the verification marker
       if: inputs.mode == 'record'

@@ -37,6 +37,13 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("displayName")]
         public string DisplayName { get; set; }
 
+        /// <summary>
+        /// Random-roll weight, default 1: this goal's share among the compatible goals of the rolled source.
+        /// 0 = never rolled (a pinned --goal still starts it).
+        /// </summary>
+        [JsonPropertyName("randomWeight")]
+        public double RandomWeight { get; set; } = 1.0;
+
         [JsonPropertyName("type")]
         public string Type { get; set; }
 
@@ -83,6 +90,15 @@ namespace ACE.Server.WorldEvents.Defs
         /// </summary>
         [JsonPropertyName("failTemplate")]
         public string FailTemplate { get; set; }
+
+        /// <summary>
+        /// Optional: a longer maximum run length for this goal, in seconds (0 / absent = none). The run's
+        /// effective maximum is the LARGER of the run's own maximum (the default or an override) and this, so
+        /// a goal value never shortens a run - see WorldEvent.ResolveMaxDuration. Authored as the LAST key of
+        /// a goal object.
+        /// </summary>
+        [JsonPropertyName("maxDurationSeconds")]
+        public int MaxDurationSeconds { get; set; }
 
         /// <summary>
         /// Computed at load time from <see cref="Type"/> (case-insensitive). Never read from JSON.

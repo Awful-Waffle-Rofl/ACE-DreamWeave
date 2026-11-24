@@ -26,13 +26,21 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "soultether",
             DisplayName = "Soul Tether",
-            Description = "Your combat pets take 10.5/19/27.5% less damage (50% cap), and when a combat pet dies " +
-                          "its summoning device can be used again immediately. Higher Loyalty increases the " +
-                          "damage reduction.",
+            // Live text: the ladder is base + (rank - 1) * step, the terms GetReadout and Player_ClassAbilityBuffs.cs:831-832 feed to
+            // DamageReduction, clamped to class_ability_soultether_max_reduction like the mechanic's total.
+            DescriptionTemplate = "Your combat pets take less damage, up to {v:class_ability_soultether_max_reduction|pct}%, and " +
+                          "when one dies you can use its summoning device again straight away.",
+            RankTailTemplate = "{ladder:class_ability_soultether_base,class_ability_soultether_step,class_ability_soultether_max_reduction|pct}% " +
+                          "less damage",
+            TunableSourceFiles = new[] { "WorldObjects/Player_ClassAbilityBuffs.cs" },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
             AffinitySkill = Skill.Loyalty,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "total", Bounds = CeilingBounds.Total, Source = CeilingSource.Tunable, Key = "class_ability_soultether_max_reduction", Label = "max pet damage reduction", Format = "pct", ZeroIsLimit = true },
+            },
         };
 
         /// <summary>
@@ -70,7 +78,11 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// gearBonus, 0.0, cap) DamageReduction uses. CapNote is set only when the clamp actually reduced
         /// this call's value.
         /// </summary>
-        public ClassAbilityReadout GetReadout(Player player, int rank)
+        public ClassAbilityReadout GetReadout(Player player, int rank) =>
+            BuildReadout(rank, player.GetClassAbilityAffinityMultiplier(Skill.Loyalty), player.GetEquippedModValue(EquipmentModId.SoulTether));
+
+        /// <summary>The pure core of <see cref="GetReadout"/>, taking the live affinity multiplier and gear mod value so the readings can be pinned with fixed inputs.</summary>
+        public ClassAbilityReadout BuildReadout(int rank, double multiplier, double gearModValue)
         {
             var baseReduction = PropertyManager.GetDouble("class_ability_soultether_base").Item;
             var stepPerRank = PropertyManager.GetDouble("class_ability_soultether_step").Item;
@@ -80,11 +92,9 @@ namespace ACE.Server.ClassAbilities.Abilities
 
             // Affinity is a MULTIPLIER on the rank reduction, reported as the AMOUNT it adds so the three
             // displayed terms stay in one unit. The cap below bounds the TOTAL, not this term.
-            var multiplier = player.GetClassAbilityAffinityMultiplier(Skill.Loyalty);
-
             var rawAffinity = Math.Max(0.0, skillReduction * multiplier - skillReduction);
 
-            var gearBonus = Math.Max(0.0, player.GetEquippedModValue(EquipmentModId.SoulTether));
+            var gearBonus = Math.Max(0.0, gearModValue);
 
             var abilityReduction = skillReduction + rawAffinity;
             var uncapped = abilityReduction + gearBonus;
@@ -105,6 +115,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "pet DR",
                 Per = null,
                 CapNote = clamped < uncapped - 0.0000001 ? "tether cap" : null,
+                Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "total", uncapped * 100.0, rank, ClassAbilityText.Live) },
             };
         }
     }

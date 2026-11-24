@@ -21,6 +21,18 @@ namespace ACE.Server.ClassAbilities
         /// Maximum Blood Charge stacks at a given rank, from the class_ability_bloodmage_charge_stack_cap_rN
         /// tunables (0 for rank 0 / unlearned or any rank outside 1-3).
         /// </summary>
+        public static int StackCap(ITunableValues values, int rank) => StackCap(rank,
+            values.GetLong("class_ability_bloodmage_charge_stack_cap_r1"),
+            values.GetLong("class_ability_bloodmage_charge_stack_cap_r2"),
+            values.GetLong("class_ability_bloodmage_charge_stack_cap_r3"));
+
+        /// <summary>
+        /// The pool size after one more Blood Charge is granted: one more, unless the pool already holds the cap
+        /// (<paramref name="cap"/> from <see cref="StackCap(ITunableValues, int)"/>). Player.AddBloodChargeStack grows the pool through this.
+        /// </summary>
+        public static int NextStacks(int stacks, int cap) => stacks < cap ? stacks + 1 : stacks;
+
+        /// <summary>The cap from explicit tunable values; see the <see cref="ITunableValues"/> overload.</summary>
         public static int StackCap(int rank, long capR1, long capR2, long capR3) => rank switch
         {
             1 => (int)capR1,
@@ -43,6 +55,25 @@ namespace ACE.Server.ClassAbilities
         /// </summary>
         public static double PerChargeValue(double perStack, double affinityMultiplier) =>
             perStack * Math.Max(1.0, affinityMultiplier);
+
+        /// <summary>The raw class_ability_bloodmage_charge_per_stack tunable read through <paramref name="values"/> (Sanguine Reserve's readout passes <see cref="ClassAbilityText.Live"/>).</summary>
+        public static double PerStack(ITunableValues values) => values.GetDouble("class_ability_bloodmage_charge_per_stack");
+
+        /// <summary>
+        /// <see cref="PerChargeValue(double, double)"/> with the class_ability_bloodmage_charge_per_stack tunable
+        /// read through <paramref name="values"/>. Player.BloodChargePerStack calls this with
+        /// <see cref="ClassAbilityText.Live"/> and the caster's Creature Enchantment affinity.
+        /// </summary>
+        public static double PerChargeValue(ITunableValues values, double affinityMultiplier) =>
+            PerChargeValue(values.GetDouble("class_ability_bloodmage_charge_per_stack"), affinityMultiplier);
+
+        /// <summary>
+        /// The damage bonus (0.35 = +35%) of a FULL Blood Charge pool at a Sanguine Reserve rank, for the live
+        /// text: <see cref="DamageMultiplier"/> over the rank's <see cref="StackCap(ITunableValues, int)"/> at the
+        /// NEUTRAL affinity (1.0) and no gear, minus the 1.0 base. Rank 0 (no cap) is 0.
+        /// </summary>
+        public static double FullPoolBonus(ITunableValues values, int rank) =>
+            DamageMultiplier(StackCap(values, rank), PerChargeValue(values, 1.0)) - 1.0;
 
         /// <summary>
         /// TRUE once more than expireSeconds have elapsed since the last stack was added - the same

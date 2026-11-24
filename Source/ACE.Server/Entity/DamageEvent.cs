@@ -302,6 +302,22 @@ namespace ACE.Server.Entity
 
             var damage = damageEvent.DoCalculateDamage(attacker, defender, damageSource);
 
+            // Pinning Shot damage reduction rider, read site 1 of 4 (PinReductionMath documents all four): a monster
+            // carrying a live pin reduction deals less physical damage to a player or a combat pet. Applied ONCE per hit,
+            // after the whole defender half and before FinishOutgoingHit. Deliberately NOT inside
+            // ResolveDefenderHalf, so the Reflect bounce (which calls it directly on the firer) stays at full
+            // strength. Rounding is the damage float's own; nothing here rounds.
+            if (PinReductionMath.AppliesTo(attacker, defender))
+            {
+                var pinMod = attacker.GetPinOutgoingDamageMod();
+
+                if (pinMod != 1.0f)
+                {
+                    damageEvent.Damage *= pinMod;
+                    damageEvent.DamageMitigated = damageEvent.DamageBeforeMitigation - damageEvent.Damage;
+                }
+            }
+
             if (!deferOutgoingHitEffects)
                 FinishOutgoingHit(attacker, defender, damageEvent);
 
@@ -589,8 +605,10 @@ namespace ACE.Server.Entity
 
                     // Weapon mods v3 Tier B (2026-08-06): Execution MULTIPLIES CriticalDamageMod by
                     // (1 + magnitude), read directly off the weapon - see WeaponModRegistry.cs's Tier B v3
-                    // remarks for why this is a multiplier rather than a write into GetWeaponCritDamageMod.
+                    // remarks for why this is a multiplier rather than a write into GetWeaponCritDamageMod. The line
+                    // after it is a pet's share from its owner's Summoner focus (0 for every other attacker).
                     CriticalDamageMod *= 1.0f + (float)WeaponModCombat.ReadWeaponOnlyWieldedBy(Weapon, WeaponModId.Execution, attacker);
+                    CriticalDamageMod *= 1.0f + (float)SummonerFocus.PetFocusModValue(attacker, defender, WeaponModId.Execution);
 
                     CriticalDamageRatingMod = Creature.GetPositiveRatingMod(ratingScales.ScaleCritDamageRating(attacker.GetCritDamageRating()));
 
@@ -631,9 +649,7 @@ namespace ACE.Server.Entity
             }
 
             // armor rending and cleaving
-            var armorRendingMod = 1.0f;
-            if (Weapon != null && Weapon.HasImbuedEffect(ImbuedEffectType.ArmorRending))
-                armorRendingMod = WorldObject.GetArmorRendingMod(attackSkill);
+            var armorRendingMod = WorldObject.GetArmorRendingModFor(Weapon, attacker, attackSkill, defender);
 
             var armorCleavingMod = attacker.GetArmorCleavingMod(Weapon);
 
@@ -673,7 +689,7 @@ namespace ACE.Server.Entity
             // get resistance modifiers
             // Volatile Elements: when the hit was re-typed, the weapon keeps the better of its original type's rend
             // and the rolled type's (a fire-rend weapon rolling cold keeps its fire rend). The plain lookup otherwise.
-            WeaponResistanceMod = VolatileElementsMath.ResolveWeaponResistanceMod(Weapon, attacker, attackSkill, OriginalDamageType, DamageType);
+            WeaponResistanceMod = VolatileElementsMath.ResolveWeaponResistanceMod(Weapon, attacker, attackSkill, OriginalDamageType, DamageType, defender);
 
             if (playerDefender != null)
             {
@@ -693,6 +709,14 @@ namespace ACE.Server.Entity
                     : null;
 
                 ResistanceMod = (float)Math.Max(0.0f, defender.GetResistanceMod(resistanceType, Attacker, Weapon, WeaponResistanceMod, inversionInnate));
+
+                // Jewelry Aspects Penetration (elemental resistance only, never armor): a player's hit on a non-player defender
+                // moves a resisted modifier (< 1) toward 1.0, never a weakness
+                if (attacker is Player penetrationAttacker)
+                {
+                    var penetrationP = penetrationAttacker.GetPenetrationAgainst(defender);
+                    ResistanceMod = JewelryAspectMath.Penetrate(ResistanceMod, penetrationP, penetrationP > 0 ? penetrationAttacker.GetPenetrationAmplify() : 0.0);
+                }
             }
 
             // damage resistance rating
@@ -765,7 +789,9 @@ namespace ACE.Server.Entity
         {
             AccuracyMod = attacker.GetAccuracyMod(Weapon);
 
-            EffectiveAttackSkill = attacker.GetEffectiveAttackSkill();
+            // the skill for how THIS hit is delivered: a monster's melee hit rolls its melee skill even while it
+            // still wields a launcher (Creature.GetEffectiveAttackSkillForHit)
+            EffectiveAttackSkill = attacker.GetEffectiveAttackSkillForHit(CombatType);
 
             //var attackType = attacker.GetCombatType();
 

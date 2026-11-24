@@ -128,13 +128,13 @@ namespace ACE.Server.Tests.KnotLoot
         }
 
         [TestMethod]
-        public void Roll_Matron_RareGroupAlwaysDropsExactlyOne_QuartersEach()
+        public void Roll_Matron_RareGroupAlwaysDropsExactlyOne_FifthsEach()
         {
-            var expected = new uint[] { 1007600, 1007601, 1007603, 1007604 };
+            var expected = new uint[] { 1007600, 1007601, 1007603, 1007604, 1007605 };
 
-            for (var i = 0; i < 4; i++)
+            for (var i = 0; i < 5; i++)
             {
-                var r = (i + 0.5) / 4.0;
+                var r = (i + 0.5) / 5.0;
                 var d = KnotLootRoller.Roll(KnotLootTables.Matron, 300, new FakeDefaults(), Script(0.0, r, 0.3, 0.9, 0.9, 0.5, 0.5));
 
                 Assert.AreEqual(expected[i], d[1].Wcid, "r " + r);
@@ -207,7 +207,7 @@ namespace ACE.Server.Tests.KnotLoot
         public void Table_EveryKeyHasARegisteredDefaultEqualToTheTableDefault()
         {
             // reads the DefaultPropertyManager dictionaries only, never the live store
-            foreach (var table in new[] { KnotLootTables.Grael, KnotLootTables.Matron })
+            foreach (var table in new[] { KnotLootTables.Grael, KnotLootTables.Matron, KnotLootTables.Harbinger })
             {
                 foreach (var group in table.Picks)
                     foreach (var entry in group.Entries)
@@ -246,10 +246,10 @@ namespace ACE.Server.Tests.KnotLoot
             Assert.IsTrue(t.Picks[0].Entries.All(e => e.Trait == null));
 
             Assert.AreEqual("rare", t.Picks[1].Key);
-            CollectionAssert.AreEqual(new[] { "voidclaw", "torc", "hive_stinger_baton", "hive_nether_baton" }, t.Picks[1].Entries.Select(e => e.Key).ToArray());
-            CollectionAssert.AreEqual(new uint[] { 1007600, 1007601, 1007603, 1007604 }, t.Picks[1].Entries.Select(e => e.Wcid).ToArray());
-            CollectionAssert.AreEqual(new long[] { 1, 1, 1, 1 }, t.Picks[1].Entries.Select(e => e.DefaultWeight).ToArray());
-            CollectionAssert.AreEqual(new KnotTraitId?[] { null, null, KnotTraitId.OverpoweringIntent, KnotTraitId.OverpoweringIntent }, t.Picks[1].Entries.Select(e => e.Trait).ToArray(), "only the two batons carry a trait");
+            CollectionAssert.AreEqual(new[] { "voidclaw", "torc", "hive_stinger_baton", "hive_nether_baton", "hive_ichor_baton" }, t.Picks[1].Entries.Select(e => e.Key).ToArray());
+            CollectionAssert.AreEqual(new uint[] { 1007600, 1007601, 1007603, 1007604, 1007605 }, t.Picks[1].Entries.Select(e => e.Wcid).ToArray());
+            CollectionAssert.AreEqual(new long[] { 1, 1, 1, 1, 1 }, t.Picks[1].Entries.Select(e => e.DefaultWeight).ToArray());
+            CollectionAssert.AreEqual(new KnotTraitId?[] { null, null, KnotTraitId.OverpoweringIntent, KnotTraitId.OverpoweringIntent, KnotTraitId.OverpoweringIntent }, t.Picks[1].Entries.Select(e => e.Trait).ToArray(), "only the three batons carry a trait");
             Assert.IsTrue(t.Picks[1].Entries.All(e => e.Mutation == KnotLootMutation.None));
             Assert.IsTrue(t.Picks[0].Entries.All(e => e.Mutation == KnotLootMutation.None));
 
@@ -307,8 +307,8 @@ namespace ACE.Server.Tests.KnotLoot
         [TestMethod]
         public void Roll_Matron_BatonPick_MakesExactlyOneExtraDraw_ForItsTraitU()
         {
-            // infusion r, rare r 0.6 = stinger, trait u 0.25, spines gate (skipped), mmd u, note u
-            var stinger = KnotLootRoller.Roll(KnotLootTables.Matron, 300, new FakeDefaults { LiveChance = 0.75 }, Script(0.5, 0.6, 0.25, 0.9, 0.5, 0.5));
+            // infusion r, rare r 0.5 = stinger, trait u 0.25, spines gate (skipped), mmd u, note u
+            var stinger = KnotLootRoller.Roll(KnotLootTables.Matron, 300, new FakeDefaults { LiveChance = 0.75 }, Script(0.5, 0.5, 0.25, 0.9, 0.5, 0.5));
             Assert.AreEqual(6, calls, "a trait pick draws its u right after r, before the gate and the currencies");
             Assert.AreEqual(4, stinger.Count);
             Assert.AreEqual(1007603u, stinger[1].Wcid);
@@ -319,11 +319,17 @@ namespace ACE.Server.Tests.KnotLoot
             Assert.AreEqual(20630u, stinger[2].Wcid);
             Assert.AreEqual(43901u, stinger[3].Wcid);
 
-            var nether = KnotLootRoller.Roll(KnotLootTables.Matron, 300, new FakeDefaults { LiveChance = 0.75 }, Script(0.5, 0.9, 0.75, 0.9, 0.5, 0.5));
+            var nether = KnotLootRoller.Roll(KnotLootTables.Matron, 300, new FakeDefaults { LiveChance = 0.75 }, Script(0.5, 0.7, 0.75, 0.9, 0.5, 0.5));
             Assert.AreEqual(6, calls);
             Assert.AreEqual(1007604u, nether[1].Wcid);
             Assert.AreEqual(KnotTraitId.OverpoweringIntent, nether[1].Trait);
             Assert.AreEqual(0.75, nether[1].U, 1e-9);
+
+            var ichor = KnotLootRoller.Roll(KnotLootTables.Matron, 300, new FakeDefaults { LiveChance = 0.75 }, Script(0.5, 0.9, 0.6, 0.9, 0.5, 0.5));
+            Assert.AreEqual(6, calls);
+            Assert.AreEqual(1007605u, ichor[1].Wcid);
+            Assert.AreEqual(KnotTraitId.OverpoweringIntent, ichor[1].Trait);
+            Assert.AreEqual(0.6, ichor[1].U, 1e-9);
         }
 
         [TestMethod]

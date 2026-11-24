@@ -42,7 +42,7 @@ namespace ACE.Server.Entity.AccountVault
                 if (!ItemTextSearch.IsMatch(filter, text))
                     return false;
             }
-            else if (entry.WorldObject == null || !ItemTextSearch.IsMatch(filter, ItemTextSearch.SearchText(entry.WorldObject)))
+            else if (entry.WorldObject == null || !ItemTextSearch.IsMatch(filter, ItemTextSearch.SearchText(entry.WorldObject, includeJewelryMods: true)))
             {
                 return false;
             }

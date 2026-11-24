@@ -69,8 +69,8 @@ namespace ACE.Server.Tests
 
             // Positive control: the table walk must actually see the Sanguine family, or an empty list
             // would make the assertion below pass vacuously.
-            CollectionAssert.IsSubsetOf(new[] { 1000242, 1000244, 1000247 }, forkLootWcids,
-                "Expected CasterWcids to roll the Sanguine sceptre/staff/baton (1000242/1000244/1000247).");
+            CollectionAssert.IsSubsetOf(new[] { 1000242, 1000244, 1000247, 1008550, 1008551, 1008552 }, forkLootWcids,
+                "Expected CasterWcids to roll the Sanguine sceptre/staff/baton (1000242/1000244/1000247) and the Summoner sceptre/baton/staff (1008550/1008551/1008552).");
 
             var rows = LoadCookbookRows();
 

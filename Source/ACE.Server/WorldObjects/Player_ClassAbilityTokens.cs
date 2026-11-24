@@ -372,7 +372,7 @@ namespace ACE.Server.WorldObjects
 
             Session.Network.EnqueueSend(new GameMessageSound(Guid, Sound.PickUpItem));
             Session.Network.EnqueueSend(new GameMessageSystemChat(
-                $"You learn {def.DisplayName} rank {tier}. ({AvailableClassAbilityPoints:N0} class ability point{(AvailableClassAbilityPoints == 1 ? "" : "s")} left.)",
+                ClassAbilityChangeMessages.Learned(def.DisplayName, tier, AvailableClassAbilityPoints),
                 ChatMessageType.Broadcast));
 
             // altCurrencySpent = price, matching FinalizeBuyTransaction's own successful-buy call: the

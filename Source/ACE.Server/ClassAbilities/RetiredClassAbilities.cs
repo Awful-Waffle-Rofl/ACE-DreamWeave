@@ -99,10 +99,8 @@ namespace ACE.Server.ClassAbilities
             },
 
             // Retired 2026-09-12 (class ability overhaul): its stacking avoidance overlapped Parry inside the
-            // same pooled cap. Killer Instinct replaces it in the class but sits at Rogue TIER 3, not the
-            // Tier 2 an earlier version of this comment claimed: T3 is the signed-off placement and the only
-            // one that reproduces Rogue's 44 CAP total (ClassAbilityDefinition's KillerInstinct entry
-            // carries the arithmetic - T3 would otherwise be 9 and T2 18, against 15/15). Verified against
+            // same pooled cap. Killer Instinct replaces it in the class: Rogue T2 since 2026-11-06 (T3
+            // before, via the Acid Proc swap, reprice wave 8); Rogue CAP is now T1 14 / T2 18 / T3 18 = 50. Verified against
             // SurefootedAbility.cs as it stood immediately before deletion (lines 38/43/44): Name =
             // "surefooted" (no underscore), MaxRank = 3, CostPerRank = { 2, 2, 2 }.
             ["surefooted"] = new RetiredEntry

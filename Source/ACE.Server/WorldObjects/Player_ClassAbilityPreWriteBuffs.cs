@@ -5,6 +5,7 @@ using ACE.Entity.Enum;
 using ACE.Server.ClassAbilities;
 using ACE.Server.Entity;
 using ACE.Server.Managers;
+using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Pvp.Rules;
 
 namespace ACE.Server.WorldObjects
@@ -41,6 +42,12 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         private void ClassAbilityPreWriteBuffsHeartbeat(double now)
         {
+            if (soulJumpImmuneUntil > 0.0 && now >= soulJumpImmuneUntil)
+            {
+                soulJumpImmuneUntil = 0.0;
+                SendClassAbilityBuffMessage("The void no longer shields you.");
+            }
+
             if (adrenalineWindowEndTime > 0.0 && now > adrenalineWindowEndTime)
             {
                 adrenalineWindowEndTime = 0.0;
@@ -319,6 +326,20 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// The standing ward as a percentage of maximum health (0 when none is standing or the window has lapsed), the unit the
+        /// Runic Ward ceiling reading uses. Pure read, for the /abilities readout.
+        /// </summary>
+        public double GetRunicWardFillPercent()
+        {
+            var max = Health.MaxValue;
+
+            if (max == 0 || RunicWardMath.IsExpired(runicWard, Time.GetUnixTime()))
+                return 0.0;
+
+            return runicWard.Amount * 100.0 / max;
+        }
+
+        /// <summary>
         /// Runs one incoming hit through the ward and returns what is LEFT of it to apply to Health, the
         /// same reduction-before-the-write contract Sanguine Ward and Mana Barrier use: this never calls
         /// UpdateVitalDelta and can never put health back.
@@ -385,7 +406,8 @@ namespace ACE.Server.WorldObjects
         /// the moment the pool empties, because the pool is what is tested here on every blow.
         ///
         /// THIS DOES NOT ENABLE SHIELD BLOCK OR THORNS: both gate on GetEquippedShield() != null directly and
-        /// never read GetShieldMod.
+        /// never read GetShieldMod. A ward does INCREASE Thorns (owner ruling 2026-11-05), but through
+        /// <see cref="GetWardThornsLevel"/>, which has no frontal cone and is not read from here.
         /// </summary>
         public double GetWardShieldLevel(WorldObject attacker, WorldObject facing = null)
         {
@@ -409,6 +431,33 @@ namespace ACE.Server.WorldObjects
                 PropertyManager.GetLong("class_ability_sanguine_ward_shield_level").Item);
         }
 
+        /// <summary>
+        /// The Thorns armor-level bonus this player's standing wards grant against <paramref name="attacker"/>
+        /// (owner ruling 2026-11-05), or 0 when none applies. Read only by ApplyThornsReflect, AFTER its shield
+        /// check, so a ward never enables shieldless Thorns. Same inputs as <see cref="GetWardShieldLevel"/> minus
+        /// the frontal cone: it applies to every Thorns trigger (melee, missile, spell, block, Reflect bounce).
+        /// The decision is WardShieldMath.ThornsLevelFor.
+        ///
+        /// The pool is read at reflect time. If the same hit's absorb already drained the pool before the reflect
+        /// runs, that hit reflects without the bonus - accepted, the hit order is not restructured for it.
+        /// </summary>
+        public double GetWardThornsLevel(WorldObject attacker)
+        {
+            // pools first, as in GetWardShieldLevel: nearly no reflect has a ward up
+            var runicUp = HasActiveRunicWard();
+            var sanguineUp = GetSanguineWardRemaining() > 0;
+
+            if (!runicUp && !sanguineUp)
+                return 0.0;
+
+            var enemyCreature = ClassAbilityAttackerFilter.EnemyCreature(attacker, this) != null;
+
+            return WardShieldMath.ThornsLevelFor(runicUp, sanguineUp, enemyCreature,
+                PropertyManager.GetBool("class_abilities_enabled").Item,
+                PropertyManager.GetLong("class_ability_runicward_shield_level").Item,
+                PropertyManager.GetLong("class_ability_sanguine_ward_shield_level").Item);
+        }
+
         // ---- Soul Jump (Void/Summon T3): a combat pet dies in the summoner's place --------------------
 
         /// <summary>
@@ -417,6 +466,25 @@ namespace ACE.Server.WorldObjects
         /// on login, and the alternative is a persisted property for a minutes-long timer.
         /// </summary>
         private double soulJumpReadyTime;
+
+        /// <summary>
+        /// Unix time the post-save immunity window ends; 0 means no window. Transient (not persisted), so a
+        /// relog or PK-facet switch ends it. Deliberately NOT the lifestone-protection flag: that lasts 60s,
+        /// persists, is dispelled by attacking and blocks PvP.
+        /// </summary>
+        private double soulJumpImmuneUntil;
+
+        /// <summary>TRUE while Soul Jump's post-save immunity window is open.</summary>
+        public bool IsSoulJumpImmune => soulJumpImmuneUntil > 0 && Time.GetUnixTime() < soulJumpImmuneUntil;
+
+        /// <summary>
+        /// The retail "you are protected" feedback (the same shield flash HandleLifestoneProtection plays),
+        /// without the lifestone error text or the protection flag.
+        /// </summary>
+        public void PlaySoulJumpShield()
+        {
+            EnqueueBroadcast(new GameMessageScript(Guid, PlayScript.ShieldUpBlue));
+        }
 
         /// <summary>
         /// The death save itself, called from SoulJumpAbility's pre-write hook at the DeathSave band with
@@ -434,7 +502,7 @@ namespace ACE.Server.WorldObjects
         /// the summoner is not recorded as having killed their own summons. That also routes through
         /// CombatPet.OnDeath, which arms Soul Tether's free resummon exactly as a normal pet death does.
         /// </summary>
-        public uint TrySoulJumpSave(uint incomingDamage, Creature attacker, double cooldownSeconds, double restoreFraction)
+        public uint TrySoulJumpSave(uint incomingDamage, Creature attacker, double cooldownSeconds, double restoreFraction, double immunitySeconds)
         {
             if (incomingDamage == 0 || attacker == null)
                 return incomingDamage;
@@ -459,7 +527,13 @@ namespace ACE.Server.WorldObjects
             if (Health.Current < save.HealthAfterSave)
                 UpdateVitalDelta(Health, (int)(save.HealthAfterSave - Health.Current));
 
-            SendClassAbilityBuffMessage($"{petName} dies in your place! You are restored to {save.HealthAfterSave:N0} health.");
+            var shield = Math.Max(0.0, immunitySeconds);
+
+            soulJumpImmuneUntil = shield > 0.0 ? now + shield : 0.0;
+
+            var shieldClause = soulJumpImmuneUntil > 0.0 ? $" and shielded from harm for {shield:0.#} seconds" : string.Empty;
+
+            SendClassAbilityBuffMessage($"{petName} dies in your place! You are restored to {save.HealthAfterSave:N0} health{shieldClause}.");
             ApplyVisualEffects(PlayScript.EnchantUpPurple);
 
             return save.DamageAfterSave;

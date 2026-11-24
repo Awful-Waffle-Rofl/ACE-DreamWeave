@@ -165,10 +165,11 @@ namespace ACE.Server.Entity.AccountVault
                 // therefore go through Biota and never through Weenie - a write through Weenie would
                 // recolour every future spawn of the DONOR wcid, process-wide.
                 //
-                // A stand-in body has none of the three: they index the DONOR's Setup, and the stand-in
-                // model is drawn from its own parts and textures untouched.
+                // A stand-in body has no palette or anim parts: they index the DONOR's Setup. Its texture
+                // map is a FRESH list built from the stand-in's own rows on every clone (never a shared
+                // static instance: biotas get mutated).
                 PropertiesPalette = hasStandIn ? null : donor.PropertiesPalette,
-                PropertiesTextureMap = hasStandIn ? null : donor.PropertiesTextureMap,
+                PropertiesTextureMap = hasStandIn ? standIn.BuildTextureMap() : donor.PropertiesTextureMap,
                 PropertiesAnimPart = hasStandIn ? null : donor.PropertiesAnimPart,
             };
 

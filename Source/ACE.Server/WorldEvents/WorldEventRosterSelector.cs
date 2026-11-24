@@ -271,7 +271,7 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         public readonly int UpliftLevel;
 
-        /// <summary>The p90 level the champion was drawn against (clamped to 275); the combat-trait guard's band level.</summary>
+        /// <summary>The p90 level the champion was drawn against (clamped to MaxConsideredLevel); the combat-trait guard's band level.</summary>
         public readonly int SlotLevel;
 
         public readonly uint Wcid;
@@ -362,11 +362,11 @@ namespace ACE.Server.WorldEvents
         /// directive 2026-08-16, proportional bands - a sampled level is clamped to this before it is handed
         /// to <see cref="TrashBand"/>/<see cref="EliteBand"/>, while
         /// <see cref="AudienceEstimate.Levels"/> itself stays raw), and for the trash/elite band high edges.
-        /// The client's own level chart tops out here (see CLAUDE.md "Client patching is an absolute no"),
-        /// and nothing on this fork raises a character above it today. RAISE THIS when post-retail leveling
-        /// content lands.
+        /// It is 400 because the player XP chart now extends past the retail 275 (Pinnacles keep the retail
+        /// cap through PinnacleScaling.BandHighEdge; <see cref="PowerReferenceLevel"/> stays 275 because it is
+        /// a named-boss power normalizer, not a cap).
         /// </summary>
-        public const int MaxConsideredLevel = 275;
+        public const int MaxConsideredLevel = 400;
 
         /// <summary>
         /// WP-24: an elite band narrower than this many levels (owner ruling - a band collapsed to a single
@@ -591,8 +591,8 @@ namespace ACE.Server.WorldEvents
         /// the built-in defaults (1.0/1.5) that is [100, 150] - level 100 and level 150 are both in, 99 and
         /// 151 are both out.
         ///
-        /// WP-24: the high edge additionally clamps to <see cref="MaxConsideredLevel"/>, so a level-275
-        /// audience is never handed a level-300+ trash member. A non-finite or non-positive <paramref
+        /// WP-24: the high edge additionally clamps to <see cref="MaxConsideredLevel"/>, so a cap-level
+        /// audience is never handed a trash member above the cap. A non-finite or non-positive <paramref
         /// name="low"/>/<paramref name="high"/> falls back to <see cref="DefaultTrashBandLow"/>/<see
         /// cref="DefaultTrashBandHigh"/>. If the rounded high edge ends up below the low edge (a
         /// pathologically low high multiplier), the high edge is raised to match the low edge rather than
@@ -634,8 +634,8 @@ namespace ACE.Server.WorldEvents
         /// rounding as <see cref="TrashBand(int, double, double)"/>. At p90 150 and the built-in defaults
         /// (1.25/1.75) that is [187, 263] (150 * 1.25 = 187.5 -> floor 187; 150 * 1.75 = 262.5 -> ceil 263).
         ///
-        /// WP-24: the high edge clamps to <see cref="MaxConsideredLevel"/> (a level-275 audience is never
-        /// handed a level-300+ elite), and once that clamp (or a tight <paramref name="low"/>/<paramref
+        /// WP-24: the high edge clamps to <see cref="MaxConsideredLevel"/> (a cap-level audience is never
+        /// handed an elite above the cap), and once that clamp (or a tight <paramref name="low"/>/<paramref
         /// name="high"/> pair) narrows the band below <see cref="NarrowEliteBandFallbackWidth"/> levels wide,
         /// this returns <see cref="TrashBand(int, double, double)"/> at the BUILT-IN trash DEFAULT constants
         /// (this 3-arg overload has no configured trash multipliers to fall back to - see

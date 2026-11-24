@@ -59,7 +59,7 @@ namespace ACE.Server.ThreadDungeons
         /// </summary>
         public const double MaxExponent = 50.0;
 
-        /// <summary>The reference level the LUMINANCE ratio is measured against. DungeonGemSpec.MaxGemLevel in production (the gem ceiling, never the run one).</summary>
+        /// <summary>The reference level the LUMINANCE ratio is measured against. In production it is the dynamic_dungeons_survey_reference_level tunable (375 by default, DungeonGemSpec.SurveyReferenceLevelDefault; NOT the gem ceiling).</summary>
         public int MaxLevel { get; }
 
         /// <summary>

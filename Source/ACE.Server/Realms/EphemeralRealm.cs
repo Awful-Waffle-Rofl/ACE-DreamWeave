@@ -47,8 +47,38 @@ namespace ACE.Server.Realms
         public uint? ThreadCopyExitPortalWcid => Run?.ExitPortalWcid ?? RunlessThreadCopyExitPortalWcid;
 
         /// <summary>
+        /// Allegiance Gauntlet: the outdoor site a run-less copy loads, so it takes the same outdoor allow-list, the same one
+        /// synthesized click-only exit and the same encounter suppression as an outdoor Thread run's copy. It is read only
+        /// together with <see cref="RunlessThreadCopyExitPortalWcid"/> (the filter runs only for a Thread-shaped copy), and only
+        /// when there is no <see cref="Run"/> dungeon: a Thread copy's <c>Run.Dungeon</c> is always read first
+        /// (<see cref="OutdoorSiteFor"/>). Null for every other instance. Never set together with <see cref="Run"/>. Set it
+        /// before the copy's primary is constructed (RealmManager.GetNewGauntletOutdoorLandblock) and never change it.
+        /// </summary>
+        public ACE.Server.ThreadDungeons.Defs.DungeonEntryDef OutdoorEntry { get; init; }
+
+        /// <summary>
+        /// The outdoor site whose allow-list Landblock.CreateWorldObjects applies to <paramref name="realm"/>'s copy, or null for
+        /// the dungeon filter (or no filter at all). Only a Thread-shaped copy (<see cref="ThreadCopyExitPortalWcid"/> set) has
+        /// one. The site comes from the Thread run's dungeon FIRST, so every Thread copy resolves exactly as it did before
+        /// <see cref="OutdoorEntry"/> existed; only a run-less copy falls back to OutdoorEntry.
+        /// An entry that is not an outdoor row resolves to null.
+        /// </summary>
+        internal static ACE.Server.ThreadDungeons.Defs.OutdoorSiteDef OutdoorSiteFor(EphemeralRealm realm)
+        {
+            if (realm?.ThreadCopyExitPortalWcid == null)
+                return null;
+
+            var outdoorEntry = realm.Run?.Dungeon ?? realm.OutdoorEntry;
+
+            return outdoorEntry?.IsOutdoor == true ? outdoorEntry.Outdoor : null;
+        }
+
+        /// <summary>
         /// A non-Thread keeper of this copy: a Pinnacle fight (PinnacleFightManager.AttachHold sets it when the copy is
-        /// created and clears it to null when the fight ends). Never set together with <see cref="Run"/>.
+        /// created and clears it to null when the fight ends), or an Allegiance Gauntlet arena (set before the copy loads,
+        /// RealmManager.GetNewGauntletOutdoorLandblock). A hold may also implement <see cref="IEphemeralAdmission"/> (it then
+        /// decides <see cref="Accepts"/>) and <see cref="IFootprintHold"/> (it then may hold an outdoor group's members,
+        /// <see cref="HoldsFootprintMembers"/>). Never set together with <see cref="Run"/>.
         /// </summary>
         public IEphemeralHold Hold { get; set; }
 
@@ -72,8 +102,11 @@ namespace ACE.Server.Realms
         /// every non-run instance (a Pinnacle hold, the /enter-instance-group seam), which keep #1753's per-member idle
         /// unload unchanged, and false the moment the run is marked Ended, which releases the members. Pulled on every
         /// heartbeat.
+        /// Allegiance Gauntlet: also true while a <see cref="Hold"/> that is an <see cref="IFootprintHold"/> says HoldsMembers
+        /// (an arena, until its run closes). The Thread half is evaluated first and is unchanged; a Pinnacle hold is not an
+        /// IFootprintHold, so it still never holds members.
         /// </summary>
-        public bool HoldsFootprintMembers => Run != null && Run.State != ACE.Server.ThreadDungeons.ThreadDungeonRunState.Ended;
+        public bool HoldsFootprintMembers => Run != null && Run.State != ACE.Server.ThreadDungeons.ThreadDungeonRunState.Ended || Hold is IFootprintHold { HoldsMembers: true };
 
         /// <summary>
         /// The landblocks this instance owns, or null for the default: the one landblock the creator loads, which
@@ -127,6 +160,12 @@ namespace ACE.Server.Realms
             // also the guard for an OFFLINE same-key roster member, whom the lockout sweep never sees.
             if (Run != null && ACE.Server.ThreadDungeons.ThreadPuzzleFailPolicy.RefusesEntry(Run, player))
                 return false;
+
+            // Allegiance Gauntlet: a hold that decides admission (IEphemeralAdmission) has the final word, both ways, right
+            // after the puzzle refusal: an arena has no Owner and admits by live allegiance membership and run state. Every
+            // other copy (no hold, or a Pinnacle hold) skips this and keeps the rules below unchanged.
+            if (Hold is IEphemeralAdmission admission)
+                return admission.Admits(player);
 
             if (player == Owner)
                 return true;

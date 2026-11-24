@@ -57,68 +57,87 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// TRUE when this projectile was itself spawned by a class ability as a SECONDARY copy - today only a
-        /// Spell AOE radiated copy. The general no-cascade guard: the projectile-spawning spell-hit skills
-        /// (Spell AOE, Echo Cast) skip a projectile carrying this flag so a spawned copy never spawns
-        /// further copies. Non-spawning effects (Elemental Rend, Pinning Shot, Dispelling Edge) deliberately
-        /// ignore it, so AOE copies can still apply their effect.
+        /// Spell AOE radiated copy. The general no-cascade guard: Spell AOE, the projectile-spawning spell-hit
+        /// skill, skips a projectile carrying this flag so a spawned copy never spawns further copies.
+        /// Non-spawning effects (Elemental Rend, Pinning Shot, Dispelling Edge) deliberately ignore it, so AOE
+        /// copies can still apply their effect.
         ///
-        /// AN ECHO CAST RECAST DOES NOT CARRY THIS FLAG (since 2026-09-21). Owner ruling: an echo is a full
-        /// second cast of the spell with all its modifiers, AOE included, so Spell AOE must radiate off it -
-        /// which this one-way "spawns nothing further" door would forbid. The echo's only remaining
-        /// restriction, "never echo again", is Echo Cast's own, and lives on <see cref="IsEchoCopy"/>.
+        /// An Echo Cast wisp's projectile does not carry this flag: a wisp cast is the player's own first-hand
+        /// cast, so Spell AOE radiates off it. Echo Cast no longer reacts to landed hits at all (the wisp rework
+        /// retired the spell-hit recast), so no "never echo again" flag is needed; what follows a wisp cast to
+        /// impact time is <see cref="IsEchoWispCast"/>.
         /// </summary>
         public bool IsClassAbilitySpawned { get; set; }
 
         /// <summary>
-        /// TRUE when this projectile is an Echo Cast recast, or a Spell AOE child radiated off one (the child
-        /// inherits it in SpawnClassAbilityAoeChild). Read ONLY by Echo Cast, which refuses to echo a
-        /// projectile carrying it - the "an echo never echoes" guard.
+        /// TRUE when this projectile was launched by an Echo Cast wisp cast (Player.CastAsEchoWisp), or is a
+        /// Spell AOE child radiated off one. Stamped in WorldObject_Magic.LaunchSpellProjectiles BEFORE
+        /// AddObject, from the Player.EchoWispCast latch, and carries the wisp rules to IMPACT time, when the
+        /// latch is no longer armed:
+        ///  - Blood Price 1.0 and the Adrenaline window left unspent (GetClassAbilitySpellDamageMod);
+        ///  - no Blood Charge grant (<see cref="GrantsLifeProjectileCharge"/>);
+        ///  - it lands NOTHING on a player (<see cref="EchoWispBlocksHit"/>): rings and walls are target-blind,
+        ///    and class abilities never reach PvP.
         ///
-        /// WHY A SEPARATE FLAG RATHER THAN <see cref="IsClassAbilitySpawned"/>. That boolean means "spawns
-        /// nothing further", which was right for an echo until the owner ruled (2026-09-21) that an echo is a
-        /// full recast that Spell AOE radiates off. An echo now needs a narrower guarantee - no re-echo, but
-        /// every other spell-hit handler behaves as on a normal cast - so it gets a flag that says exactly
-        /// that. The AOE child of an echo is still bounded by IsClassAbilitySpawned (it neither echoes nor
-        /// radiates), and carrying this flag too makes the no-echo half hold on two independent fields.
+        /// NOT a derived emission: a wisp cast is the player's own first-hand cast, so FromProc stays false,
+        /// ProjectileSource stays the player and <see cref="IncomingDamageOrigin"/> deliberately ignores this.
         /// </summary>
-        public bool IsEchoCopy { get; set; }
+        public bool IsEchoWispCast { get; set; }
+
+        /// <summary>
+        /// The PvP guard for an Echo Cast wisp's projectile: TRUE when it must land nothing on what it touched.
+        /// Pure so the rule is unit-testable.
+        /// </summary>
+        public static bool EchoWispBlocksHit(bool isEchoWispCast, bool targetIsPlayer)
+        {
+            return isEchoWispCast && targetIsPlayer;
+        }
+
+        /// <summary>
+        /// The Echo Cast wisp mark a Spell AOE child inherits from the projectile it radiated off, so the child of
+        /// a wisp cast follows the same wisp rules (no Blood Charge, no Adrenaline spend, never lands on a player).
+        /// Public and static so the inheritance rule is unit-testable on two plain projectiles.
+        /// </summary>
+        public static void InheritEchoWispMark(SpellProjectile child, SpellProjectile parent)
+        {
+            if (child == null || parent == null)
+                return;
+
+            child.IsEchoWispCast = parent.IsEchoWispCast;
+        }
 
         /// <summary>
         /// The launching cast's Blood Mage per-cast terms (Blood Price, the Blood Charge ramp or Exsanguinate
         /// burst, and which of the two it resolved to), snapshotted in WorldObject_Magic.LaunchSpellProjectiles
         /// and read at impact by the life-projectile branch of CalculateDamage. Same capture-at-launch pattern as
         /// <see cref="LifeProjectileDamage"/> and <see cref="SpellweaveDamageMod"/>, for the same reason: the
-        /// player-side fields belong to whatever the caster cast most recently. An Echo Cast recast takes its
-        /// PARENT's snapshot (EchoCastAbility.StampEchoCopy). See ClassAbilities.LifeProjectileCastStamp.
+        /// player-side fields belong to whatever the caster cast most recently. A Spell AOE or Cascade child takes its
+        /// PARENT's snapshot (<see cref="CopyPerCastStamps"/>). See ClassAbilities.LifeProjectileCastStamp.
         /// </summary>
         public LifeProjectileCastStamp LifeProjectileStamp { get; set; } = LifeProjectileCastStamp.None;
 
         /// <summary>
         /// Whether a landed life projectile may grant the caster a Blood Charge: only the AIMED projectile of
         /// the cast (<paramref name="hasProjectileTarget"/> - only i == 0 of a launch gets a ProjectileTarget,
-        /// so a Raven Fury ring grants one charge, not eight), and never an Echo Cast recast
-        /// (<paramref name="isEchoCopy"/>), because the charge is one per CAST and the echo copies a cast whose
-        /// aimed bolt already earned it. Pure so the rule is unit-testable.
+        /// so a Raven Fury ring grants one charge, not eight), and never an Echo Cast wisp cast
+        /// (<paramref name="isEchoWispCast"/>): wisp casts build no pool. Pure so the rule is unit-testable.
         /// </summary>
-        public static bool GrantsLifeProjectileCharge(bool hasProjectileTarget, bool isEchoCopy)
+        public static bool GrantsLifeProjectileCharge(bool hasProjectileTarget, bool isEchoWispCast)
         {
-            return hasProjectileTarget && !isEchoCopy;
+            return hasProjectileTarget && !isEchoWispCast;
         }
 
         /// <summary>
         /// Copies the per-cast stamps a child projectile must inherit from the projectile it was spawned
         /// from, rather than from whatever the live player fields hold by then (which may belong to a later
         /// cast): <see cref="SpellweaveDamageMod"/>, <see cref="LifeProjectileDamage"/>,
-        /// <see cref="LifeProjectileStamp"/>, <see cref="ProcDamageScale"/> and <see cref="RendSourceDamageType"/>. Every child-spawn site - Echo Cast's recast, a Spell AOE child, a
+        /// <see cref="LifeProjectileStamp"/>, <see cref="ProcDamageScale"/> and <see cref="RendSourceDamageType"/>. Every child-spawn site - a Spell AOE child, a
         /// Cascade child - must call this, because an unstamped <see cref="LifeProjectileDamage"/> defaults to 0
         /// and a life-projectile spell (Martyr's Hecatomb, Curse of Raven Fury) then lands for 0 damage.
         ///
-        /// Does NOT set <see cref="IsEchoCopy"/> - that flag is Echo Cast's own "never echo again" guard, not a
-        /// property of the per-cast stamps, so callers that are not Echo Cast must not set it via this helper.
-        ///
         /// Deliberately does NOT copy <see cref="VolatileWallCounter"/> (owner ruling 2026-10-24): Volatile Wall
         /// counts only the wall's OWN projectiles, so a Spell AOE child or a Cascade re-fire neither ramps nor
-        /// advances the parent's counter, and an Echo Cast keeps the fresh counter its own launch created.
+        /// advances the parent's counter.
         ///
         /// Public and static so the inheritance rule is unit-testable on two plain projectiles.
         /// </summary>
@@ -152,6 +171,14 @@ namespace ACE.Server.WorldObjects
         public uint LastAppliedDamage { get; private set; }
 
         /// <summary>
+        /// The Summoner wielder cut (SummonerFocus.WielderDamageMod) this projectile's health hit took, 1 when none, set at
+        /// the same hit as <see cref="LastAppliedDamage"/>. A follow-on effect sized from LastAppliedDamage whose own damage
+        /// lands through a sink that cuts again (the Elemental Proficiency Acid burn, through Creature.TakeDamage) divides
+        /// it back out first, so the effect carries the cut once.
+        /// </summary>
+        public float LastAppliedWielderDamageMod { get; private set; } = 1.0f;
+
+        /// <summary>
         /// TRUE when this projectile is a derived/secondary emission aimed at something other than what the
         /// caster targeted, so it must not record a summon-assist target (Player.OnAttackMonster's
         /// RecordAttackedMonster) when it lands - doing so would yank the player's combat pets off the
@@ -159,9 +186,9 @@ namespace ACE.Server.WorldObjects
         ///
         /// THIS IS NOT A SECOND SPELLING OF <see cref="IsClassAbilitySpawned"/> OR <see cref="FromProc"/> -
         /// those carry unrelated design rulings (ruling Q10 deliberately leaves some children UNflagged on
-        /// IsClassAbilitySpawned so Echo Cast/Elemental Rend still fire off them) and must not be reused for
-        /// this. A projectile can be a "spawned" child for cascade/no-recast purposes while still being aimed
-        /// at the primary target (e.g. an Echo Cast recast at the same creature), and conversely this flag is
+        /// IsClassAbilitySpawned so Elemental Rend still fires off them) and must not be reused for
+        /// this. A projectile can be a "spawned" child for cascade purposes while still being aimed
+        /// at the primary target, and conversely this flag is
         /// about targeting intent alone, not chain provenance.
         /// </summary>
         public bool SuppressPetAssist { get; set; }
@@ -172,19 +199,18 @@ namespace ACE.Server.WorldObjects
         /// child of that proc; and so on. SPELLSWORD-DESIGN.md sec 5f / Q13.
         ///
         /// THIS IS NOT A SECOND SPELLING OF <see cref="IsClassAbilitySpawned"/>, and the two are deliberately
-        /// independent. The boolean means "NEVER chain again" - it is a one-way door, used by Spell AOE and
-        /// Echo Cast, which have no notion of depth and want none. The counter means "chain at most N more
+        /// independent. The boolean means "NEVER chain again" - it is a one-way door, used by Spell AOE,
+        /// which has no notion of depth and wants none. The counter means "chain at most N more
         /// times", which is a different guarantee and the only one Cascade can be built on.
         ///
         /// Cascade needed the counter because ruling Q10 leaves proc projectiles UNflagged on the boolean, so
-        /// that Echo Cast and Elemental Rend still fire off them ("I want this class to be a firework"). A
+        /// that Elemental Rend still fires off them ("I want this class to be a firework"). A
         /// cascade child is therefore itself a landed proc, and reusing the boolean to stop it chaining would
-        /// have made the child behave visibly differently from the proc that spawned it - no echo, no rend -
+        /// have made the child behave visibly differently from the proc that spawned it - no rend -
         /// which is exactly what Q13 rejected. The counter stops the chain without changing what the child IS.
         ///
-        /// An Echo Cast recast is built through the normal cast path (CreateSpellProjectiles), so it starts at
-        /// generation 0 and is not a class-ability proc; what stops it echoing again is
-        /// <see cref="IsEchoCopy"/>, not this counter. Nothing resets this to 0 except creating a fresh
+        /// An Echo Cast wisp cast is built through the normal cast path (CreateSpellProjectiles), so it starts at
+        /// generation 0 and is not a class-ability proc. Nothing resets this to 0 except creating a fresh
         /// projectile through the normal cast path.
         /// </summary>
         public int ClassAbilityGeneration { get; set; }
@@ -194,7 +220,7 @@ namespace ACE.Server.WorldObjects
         /// Cascade child of one - rather than by an ordinary cast, an item's cast-on-strike, or a cloak proc.
         ///
         /// WHY NOT JUST USE <see cref="FromProc"/>. FromProc answers "was this cast triggered by something
-        /// procing", which is true of item cast-on-strike spells, cloak procs and Echo Cast recasts as well.
+        /// procing", which is true of item cast-on-strike spells and cloak procs as well.
         /// Cascade needs the narrower question - "is this one of MY class's procs" - because its dispatch
         /// site fires for every landed war-spell hit, so without a narrow signal it would chain off ordinary
         /// war casts and off any proc weapon the player happens to swing.
@@ -208,16 +234,17 @@ namespace ACE.Server.WorldObjects
         public bool IsClassAbilityProc { get; set; }
 
         /// <summary>
-        /// True on an Echo Cast recast of a Spellsword class-ability proc (set by EchoCastAbility.StampEchoCopy).
-        /// The echo is the same proc spell off the same sword, so it reads the proc's caster skill, but it is
-        /// deliberately NOT flagged <see cref="IsClassAbilityProc"/>: that flag is also Cascade's gate, and an
-        /// echo must not start a cascade it never could before. Skill selection only.
+        /// True on a projectile of an Echo Cast wisp spawned off a Spellsword class-ability proc (stamped in
+        /// WorldObject_Magic.LaunchSpellProjectiles from EchoWispCastScope.InheritsProcCasterSkill). The wisp recasts
+        /// the same proc spell, so it reads the proc's caster skill, but it is deliberately NOT flagged
+        /// <see cref="IsClassAbilityProc"/>: that flag is also Cascade's gate, and a wisp cast must not start a
+        /// cascade. Skill selection only.
         /// </summary>
         public bool InheritsProcCasterSkill { get; set; }
 
         /// <summary>
         /// The caster skill a Spellsword class-ability proc (<see cref="IsClassAbilityProc"/>, Cascade children
-        /// and Echo Cast recasts included - see <see cref="InheritsProcCasterSkill"/>) reads in place of the
+        /// and Echo Cast wisp casts off a proc included - see <see cref="InheritsProcCasterSkill"/>) reads in place of the
         /// spell's school for its resist roll, imbue scaling (attackSkill) and skill damage bonus: Item
         /// Enchantment. Null for every other projectile, which keeps reading the spell's own school. The single
         /// source of truth for both the resist call and <see cref="GetCasterMagicCreatureSkill"/>, so the three
@@ -252,8 +279,8 @@ namespace ACE.Server.WorldObjects
         /// <see cref="IsClassAbilityProc"/>, both decided while the projectile is built.
         ///
         /// CHILDREN INHERIT THE PARENT'S VALUE, never the live field: SpawnClassAbilityAoeChild copies it, and
-        /// EchoCastAbility / CascadeAbility overwrite the live stamp CreateSpellProjectiles gave their
-        /// children with the parent projectile's capture.
+        /// CascadeAbility overwrites the live stamp CreateSpellProjectiles gave its children with the parent
+        /// projectile's capture.
         /// </summary>
         public float SpellweaveDamageMod { get; set; } = 1.0f;
 
@@ -266,7 +293,7 @@ namespace ACE.Server.WorldObjects
         /// LaunchSpellProjectiles, which stamps it here. Read once in the war/void branch of CalculateDamage.
         ///
         /// Captured at launch for the same reason as <see cref="SpellweaveDamageMod"/>, and inherited by every
-        /// child (Cascade, Echo Cast, Spell AOE) through <see cref="CopyPerCastStamps"/>: each of those re-fires
+        /// child (Cascade, Spell AOE) through <see cref="CopyPerCastStamps"/>: each of those re-fires
         /// the SAME spell, so the parent's scale is the right one. An elemental proc is never stamped, and a
         /// multiply by exactly 1.0f is the identity, so its damage is bit-identical.
         /// </summary>
@@ -281,7 +308,7 @@ namespace ACE.Server.WorldObjects
         ///
         /// Stamped at launch from Player.ClassAbilityProcRendSourceDamageType, armed by
         /// Player.CastClassAbilityProc(cast, scale, rendSourceDamageType) for exactly one synchronous proc cast,
-        /// and inherited by every child (Cascade, Echo Cast, Spell AOE) through <see cref="CopyPerCastStamps"/>,
+        /// and inherited by every child (Cascade, Spell AOE) through <see cref="CopyPerCastStamps"/>,
         /// for the same reason as <see cref="ProcDamageScale"/>. Null leaves the rend lookup exactly as before.
         /// </summary>
         public DamageType? RendSourceDamageType { get; set; }
@@ -298,14 +325,14 @@ namespace ACE.Server.WorldObjects
         /// MonsterEffects.IncomingDamageOrigin): DirectHit only for a projectile the caster cast directly -
         /// every projectile of an ordinary cast, whether or not it is the aimed one. Secondary for every
         /// derived emission, each excluded on its own flag so no single flag's ruling has to cover the others:
-        ///   FromProc               - item cast-on-strike, cloak procs, Echo Cast recasts, Spell AOE children
+        ///   FromProc               - item cast-on-strike, cloak procs, Spell AOE children
         ///   IsClassAbilityProc     - a Spellsword weapon proc and its Cascade children
         ///   ClassAbilityGeneration - any Cascade hop (> 0), even one that somehow lost the proc flag
         ///   IsClassAbilityAoeChild / IsClassAbilitySpawned - a Spell AOE splash radiated off another target
-        ///   IsEchoCopy             - an Echo Cast recast, or an AOE child radiated off one
+        /// An Echo Cast wisp cast is NOT here: it is the player's own first-hand cast (IsEchoWispCast is deliberately ignored).
         /// </summary>
         public IncomingDamageOrigin IncomingDamageOrigin =>
-            FromProc || IsClassAbilityProc || ClassAbilityGeneration > 0 || IsClassAbilityAoeChild || IsClassAbilitySpawned || IsEchoCopy
+            FromProc || IsClassAbilityProc || ClassAbilityGeneration > 0 || IsClassAbilityAoeChild || IsClassAbilitySpawned
                 ? IncomingDamageOrigin.Secondary
                 : IncomingDamageOrigin.DirectHit;
 
@@ -587,6 +614,11 @@ namespace ACE.Server.WorldObjects
             if (creatureTarget == null || target == ProjectileSource)
                 return;
 
+            // Echo Cast wisp: a wisp's projectile (rings and walls included, which are target-blind) lands nothing
+            // on a player - no damage, no enchantment, no PK message. Class abilities never reach PvP.
+            if (EchoWispBlocksHit(IsEchoWispCast, creatureTarget is Player))
+                return;
+
             if (player != null)
                 player.LastHitSpellProjectile = Spell;
             
@@ -678,7 +710,7 @@ namespace ACE.Server.WorldObjects
                     }
 
                     // Class ability hook: a player's landed damaging-spell hit can radiate (Spell AOE),
-                    // recast (Echo Cast), apply Vulnerability (Elemental Rend), chain (Cascade), pin
+                    // apply Vulnerability (Elemental Rend), chain (Cascade), pin
                     // (Pinning Shot), strip a buff and cleanse the caster (Dispelling Dance) or apply
                     // Sundermark's vulnerability.
                     //
@@ -695,10 +727,10 @@ namespace ACE.Server.WorldObjects
                     // path, and the player-facing descriptions say "damaging spell projectiles" for exactly
                     // this reason.
                     //
-                    // Each handler still owns its own rules: Spell AOE's Arc-only test, Spell AOE and Echo
-                    // Cast self-excluding on AOE children via IsClassAbilitySpawned to avoid cascade, Echo
-                    // Cast also refusing its own recasts via IsEchoCopy (an echo is otherwise a full cast, so
-                    // Spell AOE radiates off it), and Cascade's generation counter. Rend, Pinning Shot and
+                    // Each handler still owns its own rules: Spell AOE's Arc-only test, Spell AOE
+                    // self-excluding on AOE children via IsClassAbilitySpawned to avoid cascade, and Cascade's
+                    // generation counter. Echo Cast is not on this hook (the wisp rework triggers it at cast
+                    // commit instead, Player.TryTriggerEchoWisp), so no landed hit ever spawns a wisp. Rend, Pinning Shot and
                     // Dispelling Dance (internal name DispellingEdge) and Sundermark fire on every landed copy.
                     if (player != null)
                         player.ApplySpellHitClassAbilities(creatureTarget, this);
@@ -709,6 +741,10 @@ namespace ACE.Server.WorldObjects
                     // weapon_mods_enabled inside. See Player_WeaponMods.cs.
                     if (player != null)
                         player.ApplyWeaponModSpellHit(creatureTarget, damage.Value * ClassAbilityAoeDamageMultiplier);
+                    // Summoner casters: a pet's landed damaging projectile rolls its owner's focus Siphon once, as a
+                    // player's does with a Siphon wand; a derived emission (proc, AOE child, Cascade hop) never rolls
+                    else if (sourceCreature is CombatPet siphonPet && damage.Value > 0.0f && IncomingDamageOrigin == IncomingDamageOrigin.DirectHit)
+                        SummonerFocus.TryPetSiphon(siphonPet, creatureTarget);
                 }
 
                 // if this SpellProjectile has a TargetEffect, play it on successful hit
@@ -887,18 +923,27 @@ namespace ACE.Server.WorldObjects
                     weaponCritDamageMod = GetWeaponCritDamageMod(weapon, sourceCreature, attackSkill, target);
 
                     // Weapon mods v3 Tier B (2026-08-06): Execution's spell half, the same multiplier as
-                    // DamageEvent.cs's physical path - see WeaponModRegistry.cs's Tier B v3 remarks.
+                    // DamageEvent.cs's physical path - see WeaponModRegistry.cs's Tier B v3 remarks. The line
+                    // after it is a pet's share from its owner's Summoner focus (0 for every other caster).
                     weaponCritDamageMod *= 1.0f + (float)WeaponModCombat.ReadWeaponOnlyWieldedBy(weapon, WeaponModId.Execution, sourceCreature);
+                    weaponCritDamageMod *= 1.0f + (float)SummonerFocus.PetFocusModValue(sourceCreature, target, WeaponModId.Execution);
 
                     critDamageBonus = lifeMagicDamage * 0.5f * weaponCritDamageMod;
                 }
 
-                weaponResistanceMod = GetWeaponResistanceModifier(weapon, sourceCreature, attackSkill, Spell.DamageType);
+                weaponResistanceMod = GetWeaponResistanceModifier(weapon, sourceCreature, attackSkill, Spell.DamageType, target);
 
                 // if attacker/weapon has IgnoreMagicResist directly, do not transfer to spell projectile
                 // only pass if SpellProjectile has it directly, such as 2637 - Invoking Aun Tanua
 
                 resistanceMod = (float)Math.Max(0.0f, target.GetResistanceMod(resistanceType, this, null, weaponResistanceMod));
+
+                // Jewelry Aspects Penetration (life projectiles): a player's spell against a non-player, resisted mods only
+                if (sourceCreature is Player lifePenetrationCaster && target is not Player)
+                {
+                    var lifePenetrationP = lifePenetrationCaster.GetPenetrationAgainst(target);
+                    resistanceMod = JewelryAspectMath.Penetrate(resistanceMod, lifePenetrationP, lifePenetrationP > 0 ? lifePenetrationCaster.GetPenetrationAmplify() : 0.0);
+                }
 
                 // Reflect (Vanguard T3): the caster's own attack half, before anything about THIS target
                 // scales it, for CalculateReflectedDamage
@@ -932,19 +977,24 @@ namespace ACE.Server.WorldObjects
                 //
                 // The per-cast terms (Blood Price, the Blood Charge ramp or Exsanguinate burst) come from THIS
                 // projectile's launch-time snapshot, LifeProjectileStamp - not the player's live fields, which
-                // a later cast may already have overwritten. An Echo Cast recast carries a copy of its PARENT's
-                // snapshot (EchoCastAbility.StampEchoCopy), so it reads the cast it copies and consumes nothing -
-                // and it never grants the charge: that is one per CAST, and the original's aimed bolt had it.
+                // a later cast may already have overwritten. An Echo Cast wisp cast carries the neutral stamp
+                // (WorldObject.ResolveLaunchStamps) and never grants the charge: wisp casts build no pool.
                 if (sourceCreature is Player lifeClassAbilityCaster && targetPlayer == null)
                 {
                     finalDamage *= lifeClassAbilityCaster.ApplyLifeProjectileClassAbilityDamage(target,
-                        grantCharge: GrantsLifeProjectileCharge(ProjectileTarget != null, IsEchoCopy), castStamp: LifeProjectileStamp,
+                        grantCharge: GrantsLifeProjectileCharge(ProjectileTarget != null, IsEchoWispCast), castStamp: LifeProjectileStamp,
                         spellweaveDamageMod: SpellweaveDamageMod);
 
                     // FORK: Focus spell damage (magic_damage_per_focus_point). A direct cast only: a proc, cascade,
-                    // echo recast or AOE child is Secondary and never earns it. PvE only (targetPlayer == null).
+                    // or AOE child is Secondary and never earns it. PvE only (targetPlayer == null).
                     if (Player.QualifiesForFocusSpellDamage(IncomingDamageOrigin == IncomingDamageOrigin.DirectHit, targetPlayer != null, FromProc, IsClassAbilityProc))
                         finalDamage *= lifeClassAbilityCaster.GetFocusSpellDamageMod();
+                }
+                // FORK: Focus spell damage for a caster summon (its own buffed Focus), under the same gates
+                else if (sourceCreature is CombatPet { IsCasterPet: true } && targetPlayer == null
+                    && Player.QualifiesForFocusSpellDamage(IncomingDamageOrigin == IncomingDamageOrigin.DirectHit, false, FromProc, IsClassAbilityProc))
+                {
+                    finalDamage *= CombatPet.FocusSpellDamageModFor(sourceCreature);
                 }
             }
             // war/void magic projectiles
@@ -983,6 +1033,7 @@ namespace ACE.Server.WorldObjects
                     // Weapon mods v3 Tier B (2026-08-06): Execution's spell half - see the life magic branch
                     // above for the same hook.
                     weaponCritDamageMod *= 1.0f + (float)WeaponModCombat.ReadWeaponOnlyWieldedBy(weapon, WeaponModId.Execution, sourceCreature);
+                    weaponCritDamageMod *= 1.0f + (float)SummonerFocus.PetFocusModValue(sourceCreature, target, WeaponModId.Execution);
 
                     critDamageBonus *= weaponCritDamageMod;
                 }
@@ -1006,7 +1057,7 @@ namespace ACE.Server.WorldObjects
                 // Volatile Elements: a proc launched off a re-typed weapon hit keeps the better of the launcher's
                 // rend for the spell's own type and for the hit's original type (RendSourceDamageType). Null
                 // (every other projectile) is the plain lookup.
-                weaponResistanceMod = VolatileElementsMath.ResolveWeaponResistanceMod(weapon, sourceCreature, attackSkill, RendSourceDamageType, Spell.DamageType);
+                weaponResistanceMod = VolatileElementsMath.ResolveWeaponResistanceMod(weapon, sourceCreature, attackSkill, RendSourceDamageType, Spell.DamageType, target);
 
                 // if attacker/weapon has IgnoreMagicResist directly, do not transfer to spell projectile
                 // only pass if SpellProjectile has it directly, such as 2637 - Invoking Aun Tanua
@@ -1024,6 +1075,13 @@ namespace ACE.Server.WorldObjects
 
                 resistanceMod = (float)Math.Max(0.0f, target.GetResistanceMod(resistanceType, this, null, weaponResistanceMod, archmageInnate));
 
+                // Jewelry Aspects Penetration (war/void projectiles): before the void PvP modifier below, which is PvP only
+                if (sourceCreature is Player warPenetrationCaster && target is not Player)
+                {
+                    var warPenetrationP = warPenetrationCaster.GetPenetrationAgainst(target);
+                    resistanceMod = JewelryAspectMath.Penetrate(resistanceMod, warPenetrationP, warPenetrationP > 0 ? warPenetrationCaster.GetPenetrationAmplify() : 0.0);
+                }
+
                 if (isPVP && Spell.DamageType == DamageType.Nether)
                 {
                     // for direct damage from void spells in pvp,
@@ -1040,6 +1098,7 @@ namespace ACE.Server.WorldObjects
                 // below, so the proc behaves everywhere as if it were the weaker spell. 1.0 for anything that is
                 // not a Nether class-ability proc. See ProcDamageScale.
                 finalDamage *= ProcDamageScale;
+                if (FromProc && weapon != null && Cloak.IsCloak(weapon) && weapon.ProcSpell == Spell.Id) finalDamage *= (float)CloakMantleMath.AmplifierFactor(weapon, isPVP);
 
                 // Reflect (Vanguard T3): the caster's own attack half, as in the life branch above
                 ReflectAttackDamage = finalDamage * elementalDamageMod * slayerMod;
@@ -1048,13 +1107,13 @@ namespace ACE.Server.WorldObjects
                 finalDamage *= elementalDamageMod * slayerMod * resistanceMod * absorbMod;
 
                 // class abilities: flat void/war spell-damage multipliers (PvE only). Applies to radiated
-                // Spell AOE children and Echo recasts too, since those route through here as well.
+                // Spell AOE children and Echo Cast wisp casts too, since those route through here as well.
                 if (sourceCreature is Player classAbilityCaster && target is not Player)
                 {
-                    finalDamage *= classAbilityCaster.GetClassAbilitySpellDamageMod(Spell, SpellweaveDamageMod);
+                    finalDamage *= classAbilityCaster.GetClassAbilitySpellDamageMod(Spell, SpellweaveDamageMod, IsEchoWispCast);
 
                     // FORK: Focus spell damage (magic_damage_per_focus_point), direct casts only - a proc, cascade,
-                    // echo recast or AOE child is Secondary and never earns it. PvE only (the enclosing gate).
+                    // or AOE child is Secondary and never earns it. PvE only (the enclosing gate).
                     if (Player.QualifiesForFocusSpellDamage(IncomingDamageOrigin == IncomingDamageOrigin.DirectHit, target is Player, FromProc, IsClassAbilityProc))
                         finalDamage *= classAbilityCaster.GetFocusSpellDamageMod();
 
@@ -1074,12 +1133,19 @@ namespace ACE.Server.WorldObjects
                     // the Blood Charge ramp and grants its charge at this site. The CHARGE TERM ONLY, from this
                     // projectile's launch-time stamp - Blood Price is already in the multiplier above. Returns
                     // 1.0 and grants nothing for any war or void spell. Same one-charge-per-cast rule as
-                    // Hecatomb: only the aimed, non-echo projectile can grant.
+                    // Hecatomb: only the aimed, non-wisp projectile can grant.
                     finalDamage *= classAbilityCaster.ApplyLifeHealthBoltBloodCharge(Spell,
-                        aimedNonEchoProjectile: GrantsLifeProjectileCharge(ProjectileTarget != null, IsEchoCopy), castStamp: LifeProjectileStamp);
+                        aimedNonEchoProjectile: GrantsLifeProjectileCharge(ProjectileTarget != null, IsEchoWispCast), castStamp: LifeProjectileStamp);
 
                     // (Runic Ward's war-spell spend used to be read here; the 2026-10-24 Spellsword pass
                     // removed it - the ward now drains only by absorbing incoming damage.)
+                }
+                // FORK: Focus spell damage for a caster summon (its own buffed Focus), under the player's gates: a
+                // direct, non-proc hit on a non-player. Any other monster (pet or not) is 1.0 here and never enters.
+                else if (sourceCreature is CombatPet { IsCasterPet: true } && target is not Player
+                    && Player.QualifiesForFocusSpellDamage(IncomingDamageOrigin == IncomingDamageOrigin.DirectHit, false, FromProc, IsClassAbilityProc))
+                {
+                    finalDamage *= CombatPet.FocusSpellDamageModFor(sourceCreature);
                 }
 
                 // Tier B weapon mods: Ambush's spell half, read off the equipped WAND. Same PvE-only
@@ -1179,7 +1245,26 @@ namespace ACE.Server.WorldObjects
 
         public float GetAbsorbMod(Creature target)
         {
-            switch (target.CombatMode)
+            return AbsorbModCore(target, target.CombatMode, this, false);
+        }
+
+        /// <summary>
+        /// <see cref="GetAbsorbMod"/>'s arithmetic with the two live reads passed in, writing nothing: <paramref name="stance"/>
+        /// in place of target.CombatMode, and <paramref name="withinShieldArc"/> in place of the projectile's angle (which only
+        /// the shield path reads). Character Details reads it with an explicit facing.
+        /// </summary>
+        public static float AbsorbModFor(Creature target, CombatMode stance, bool withinShieldArc)
+        {
+            return AbsorbModCore(target, stance, null, withinShieldArc);
+        }
+
+        /// <summary>
+        /// The one absorb switch. The shield arc comes from <paramref name="arcFrom"/>'s angle when a projectile is given (the
+        /// live hit: computed only on the shield path, nothing allocated), else from <paramref name="withinShieldArc"/>.
+        /// </summary>
+        private static float AbsorbModCore(Creature target, CombatMode stance, SpellProjectile arcFrom, bool withinShieldArc)
+        {
+            switch (stance)
             {
                 case CombatMode.NonCombat:
 
@@ -1188,7 +1273,7 @@ namespace ACE.Server.WorldObjects
                     {
                         var peaceShield = target.GetEquippedShield();
                         if (peaceShield != null && peaceShield.GetAbsorbMagicDamage() != null)
-                            return GetShieldMod(target, peaceShield);
+                            return ShieldAbsorbMod(target, peaceShield, arcFrom != null ? arcFrom.IsWithinShieldArc(target) : withinShieldArc);
                     }
 
                     break;
@@ -1198,7 +1283,7 @@ namespace ACE.Server.WorldObjects
                     // does target have shield equipped?
                     var shield = target.GetEquippedShield();
                     if (shield != null && shield.GetAbsorbMagicDamage() != null)
-                        return GetShieldMod(target, shield);
+                        return ShieldAbsorbMod(target, shield, arcFrom != null ? arcFrom.IsWithinShieldArc(target) : withinShieldArc);
 
                     break;
 
@@ -1206,7 +1291,7 @@ namespace ACE.Server.WorldObjects
 
                     var missileLauncherOrShield = target.GetEquippedMissileLauncher() ?? target.GetEquippedShield();
                     if (missileLauncherOrShield != null && missileLauncherOrShield.GetAbsorbMagicDamage() != null)
-                        return AbsorbMagic(target, missileLauncherOrShield);
+                        return AbsorbMagicFor(target, missileLauncherOrShield);
 
                     break;
 
@@ -1214,23 +1299,27 @@ namespace ACE.Server.WorldObjects
 
                     var caster = target.GetEquippedWand();
                     if (caster != null && caster.GetAbsorbMagicDamage() != null)
-                        return AbsorbMagic(target, caster);
+                        return AbsorbMagicFor(target, caster);
 
                     break;
             }
             return 1.0f;
         }
 
-        /// <summary>
-        /// Calculates the amount of damage a shield absorbs from magic projectile
-        /// </summary>
-        public float GetShieldMod(Creature target, WorldObject shield)
+        /// <summary>is spell projectile in front of creature target, within shield effectiveness area?</summary>
+        private bool IsWithinShieldArc(Creature target)
         {
-            // is spell projectile in front of creature target,
-            // within shield effectiveness area?
             var effectiveAngle = 180.0f;
             var angle = target.GetAngle(this);
-            if (Math.Abs(angle) > effectiveAngle / 2.0f)
+            return Math.Abs(angle) <= effectiveAngle / 2.0f;
+        }
+
+        /// <summary>
+        /// Calculates the amount of damage a shield absorbs from magic projectile, the frontal-arc test passed in. Writes nothing.
+        /// </summary>
+        public static float ShieldAbsorbMod(Creature target, WorldObject shield, bool withinShieldArc)
+        {
+            if (!withinShieldArc)
                 return 1.0f;
 
             // https://asheron.fandom.com/wiki/Shield
@@ -1268,7 +1357,7 @@ namespace ACE.Server.WorldObjects
         /// Calculates the damage reduction modifier for bows and casters
         /// with 'Magic Absorbing' property
         /// </summary>
-        public float AbsorbMagic(Creature target, WorldObject item)
+        public static float AbsorbMagicFor(Creature target, WorldObject item)
         {
             // https://asheron.fandom.com/wiki/Category:Magic_Absorbing
 
@@ -1342,6 +1431,10 @@ namespace ACE.Server.WorldObjects
             var pkDamageResistRatingMod = 1.0f;
 
             WorldObject equippedCloak = null;
+
+            // TRUE when the cloak spell proc was ROLLED (phase one) ahead of Thorns in the health branch and its cast
+            // (Cloak.CompleteSpellProc) is still owed at the bottom - see the roll site for why they are split
+            var cloakSpellProcRolled = false;
 
             // whether the target had a live ward up BEFORE AbsorbMonsterEffectDamage ran - set only on the
             // monster-target branch below, since a ward is a monster combat effect and never carried by a
@@ -1418,8 +1511,25 @@ namespace ACE.Server.WorldObjects
                 // applied straight to the vital here rather than through Creature.TakeDamage, so the pet's
                 // melee/missile site (CombatPet.TakeDamage) does not cover this path and the mod is read
                 // again - live, so a rank learned mid-fight applies immediately.
-                if (target is CombatPet soulTetherPet)
+                if (target is CombatPet soulTetherPet && !soulTetherPet.IsHuntersEcho)
                     damage *= soulTetherPet.P_PetOwner?.GetSoulTetherDamageReductionMod() ?? 1.0f;
+
+                // Hunter's Echo: no Soul Tether (it is not a summon); its owner-equivalent resistance and magic damage
+                // resist rating snapshot instead, the spell twin of its CombatPet.TakeDamage branch
+                if (target is CombatPet huntersEchoTarget && huntersEchoTarget.IsHuntersEcho)
+                    damage *= huntersEchoTarget.HuntersEchoMagicMitigation(Spell.DamageType);
+
+                // Summoner casters (Docs/SummonerCasters/DESIGN.md): the live focus multiplier, read at the hit; the launcher
+                // the bolt left from also triggers the wielder cut, so swapping the focus off mid-flight does not escape it
+                LastAppliedWielderDamageMod = SummonerFocus.WielderDamageMod(ProjectileSource, target, ProjectileLauncher);
+                damage *= SummonerFocus.HitMod(ProjectileSource, target, ProjectileLauncher);
+
+                // Pinning Shot damage reduction rider, read site 2 of 4 (PinReductionMath documents all four): a monster
+                // carrying a live pin reduction deals less spell damage to a player or a combat pet. Health branch only (the
+                // stamina and mana branches above never reach here), applied ONCE per projectile, ahead of the
+                // PvP caps, the cloak proc and the pre-write mitigations below. No rounding of its own.
+                if (PinReductionMath.AppliesTo(sourceCreature, target))
+                    damage *= sourceCreature.GetPinOutgoingDamageMod();
 
                 // PvP rules choke point C2 (Docs/Pvp/DESIGN.md "PvP rules (levers)"): the per-hit damage cap, after
                 // the ratings and before the cloak proc and the pre-write mitigations below, so those reduce the
@@ -1529,6 +1639,9 @@ namespace ACE.Server.WorldObjects
                     damage = ACE.Server.WorldEvents.WorldEventHooks.HoldWardDamage(target, ACE.Server.WorldEvents.Defs.WorldEventCombatKinds.Magic, damage);
                     damage = ACE.Server.WorldEvents.WorldEventHooks.ScaleHoldKnightHit(target, ProjectileSource, damage);
 
+                    // Allegiance Gauntlet: the Avatar fighter's cap on a war bolt, which never reaches Creature.TakeDamage.
+                    damage = ACE.Server.Avatars.Gauntlet.GauntletAvatarFighter.CapGauntletFighterHit(target, damage);
+
                     if (damage != beforeHold)
                         percent = damage / target.Health.MaxValue;
                 }
@@ -1555,19 +1668,44 @@ namespace ACE.Server.WorldObjects
                     }
                 }
 
+                // THE CLOAK SPELL PROC IS ROLLED HERE, AHEAD OF THE HEALTH WRITE AND AHEAD OF THORNS, and cast at the
+                // bottom. Ahead of Thorns since the Vanguard pass (2026-11-06): a successful roll opens Cloaked in Power's
+                // Critical Thorns window and this hit's own reflect must see it open. Ahead of the WRITE since Hunter's
+                // Echo (2026-11-10): a winning roll may hand this bolt to the Echo before it reaches Health. The cast
+                // keeps its place after the IsAlive check, so a killing bolt still never casts.
+                //
+                // The gate is the old post-write target.IsAlive taken one statement earlier: the write clamps at zero,
+                // so health after it is above zero exactly when it is above Math.Round(damage) now - and for a
+                // non-player with a P_HealthFloor, the floor rule UpdateVital applies is modelled too, so a floored boss
+                // still rolls on an overkill exactly as before (HuntersEchoMath.ShouldRollCloakProc / WouldSurviveWrite).
+                // Only a PLAYER target can reserve an Echo absorb.
+                var canReserveEchoAbsorb = targetPlayer != null && equippedCloak != null && Cloak.HasProcSpell(equippedCloak) && targetPlayer.CanReserveHuntersEchoAbsorb(ProjectileSource, isHazard: false);
+
+                cloakSpellProcRolled = equippedCloak != null && Cloak.HasProcSpell(equippedCloak) && HuntersEchoMath.ShouldRollCloakProc(target.Health.Current, damage, targetPlayer == null ? target.P_HealthFloor : 0u, canReserveEchoAbsorb)
+                    && Cloak.RollSpellProc(target, equippedCloak, cloakProcPercent ?? percent);
+
+                // Hunter's Echo cloak absorb: the Echo is summoned (or renewed) first and takes the bolt as the player
+                // would have, already mitigated; only then is the bolt zeroed here. A failed summon leaves it as it was.
+                if (HuntersEchoMath.ShouldAbsorb(cloakSpellProcRolled, canReserveEchoAbsorb) && Math.Round(damage) > 0
+                    && targetPlayer.TryHuntersEchoAbsorb(ProjectileSource, Spell.DamageType, (uint)Math.Round(damage), equippedCloak))
+                {
+                    damage = 0.0f;
+                    percent = 0.0f;
+                }
+
                 amount = (uint)-target.UpdateVitalDelta(target.Health, (int)-Math.Round(damage));
 
                 // the damage actually applied to the vital, for the Elemental Proficiency Acid DoT sizing
                 LastAppliedDamage = amount;
 
-                target.DamageHistory.Add(ProjectileSource, Spell.DamageType, amount, thrown: (uint)Math.Round(damage));
+                target.DamageHistory.Add(ProjectileSource, Spell.DamageType, amount, thrown: (uint)Math.Round(damage), kind: DamageAttackKind.Magic, isCritical: critical, spellId: Spell.Id);
 
                 // Thorns on a direct spell hit (user ruling 2026-10-07): after the health write, the same slot
                 // the physical hook occupies in Player.TakeDamage, so it fires on a killing bolt and on one
                 // mitigated to 0. ProjectileSource - the caster - is the attacker, never the projectile. The
                 // origin, attacker filter and close-range gate are all inside; a Secondary projectile (proc,
-                // Cascade hop, AOE splash, Echo copy) never triggers it. Health branch only, like the pre-write
-                // mitigations above.
+                // Cascade hop, AOE splash) never triggers it. Health branch only, like the pre-write
+                // mitigations above. (The cloak spell proc was rolled above the health write - see there.)
                 targetPlayer?.ApplyThornsOnMagicHit(ProjectileSource, Spell.DamageType, IncomingDamageOrigin);
 
                 // summon damage feed ("/summondamage"): spell damage is written to the vital directly here,
@@ -1670,8 +1808,8 @@ namespace ACE.Server.WorldObjects
 
                 if (!nonHealth)
                 {
-                    if (equippedCloak != null && Cloak.HasProcSpell(equippedCloak))
-                        Cloak.TryProcSpell(target, ProjectileSource, equippedCloak, cloakProcPercent ?? percent);
+                    if (cloakSpellProcRolled)
+                        Cloak.CompleteSpellProc(target, ProjectileSource, equippedCloak);
 
                     target.EmoteManager.OnDamage(sourcePlayer);
 
@@ -1785,8 +1923,8 @@ namespace ACE.Server.WorldObjects
             sp.Setup(Spell, spellType);
 
             sp.IsClassAbilityAoeChild = true;   // never cascade into further blasts
-            sp.IsClassAbilitySpawned = true;    // general no-cascade guard: neither radiates nor echoes
-            sp.IsEchoCopy = IsEchoCopy;         // a child of an echo is still part of that echo - never echoes
+            sp.IsClassAbilitySpawned = true;    // general no-cascade guard: never radiates further
+            InheritEchoWispMark(sp, this);       // a child of a wisp cast keeps the wisp rules
             sp.SuppressPetAssist = true;         // aimed at neighbor, not what the caster targeted - must not steal pet assist
             sp.FromProc = true;               // never re-fire item procs
             sp.ClassAbilityAoeDamageMultiplier = damageMult;   // secondary blasts land softer

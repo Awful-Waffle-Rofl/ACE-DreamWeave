@@ -26,7 +26,7 @@ namespace ACE.Server.Tests.Pinnacles
 
         public sealed record SpawnCall(string Tag, uint Wcid, PinnaclePoint At, PinnacleHandle Result, PinnacleTier Tier);
 
-        public sealed record HazardCall(string Tag, string Kind, string Pattern, HazardArgs Args, PinnacleHandle Origin);
+        public sealed record HazardCall(string Tag, string Kind, string Pattern, HazardArgs Args, PinnacleHandle Origin, PinnacleHazardOptions Options = null);
 
         public sealed record PropCall(string Tag, PinnacleProp Prop, PinnacleHandle Result);
 
@@ -105,6 +105,11 @@ namespace ACE.Server.Tests.Pinnacles
 
         public List<int> Dispels { get; } = new List<int>();
 
+        public List<(uint SpellId, double Seconds)> OwnerBuffs { get; } = new List<(uint, double)>();
+
+        /// <summary>What GrantOwnerBuff returns.</summary>
+        public bool GrantOwnerBuffResult { get; set; } = true;
+
         public List<PropCall> Props { get; } = new List<PropCall>();
 
         public List<PinnacleHandle> DestroyedProps { get; } = new List<PinnacleHandle>();
@@ -156,6 +161,7 @@ namespace ACE.Server.Tests.Pinnacles
             CancelledTimers.Clear();
             Casts.Clear();
             Dispels.Clear();
+            OwnerBuffs.Clear();
             Props.Clear();
             DestroyedProps.Clear();
             Motions.Clear();
@@ -215,10 +221,54 @@ namespace ACE.Server.Tests.Pinnacles
             Casts.Add((caster, spellId));
         }
 
-        public void StartHazard(string tag, string kind, string pattern, HazardArgs args, PinnacleHandle origin = default)
+        /// <summary>What IsOwnerGrounded returns.</summary>
+        public bool OwnerGrounded { get; set; }
+
+        /// <summary>Every tag DestroyAdds was called with, in order.</summary>
+        public List<string> DestroyedAddTags { get; } = new List<string>();
+
+        /// <summary>What DestroyAdds returns per tag; a tag with no entry returns 0.</summary>
+        public Dictionary<string, int> DestroyAddsResult { get; } = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        /// <summary>Every CastAtOwnerNow call, in order (CastAtOwner calls land in <see cref="Casts"/>).</summary>
+        public List<(PinnacleHandle Caster, uint SpellId)> NowCasts { get; } = new List<(PinnacleHandle, uint)>();
+
+        /// <summary>SetMeleeReach calls, last write wins; a null reach removes the entry.</summary>
+        public Dictionary<PinnacleHandle, float> MeleeReach { get; } = new Dictionary<PinnacleHandle, float>();
+
+        public bool IsOwnerGrounded()
+        {
+            Record(nameof(IsOwnerGrounded));
+            return OwnerGrounded;
+        }
+
+        public int DestroyAdds(string tag)
+        {
+            Record(nameof(DestroyAdds), tag);
+            DestroyedAddTags.Add(tag);
+            return DestroyAddsResult.TryGetValue(tag ?? string.Empty, out var n) ? n : 0;
+        }
+
+        public void CastAtOwnerNow(PinnacleHandle caster, uint spellId)
+        {
+            Record(nameof(CastAtOwnerNow), caster, spellId);
+            NowCasts.Add((caster, spellId));
+        }
+
+        public void SetMeleeReach(PinnacleHandle h, float? metres)
+        {
+            Record(nameof(SetMeleeReach), h, metres);
+
+            if (metres.HasValue)
+                MeleeReach[h] = metres.Value;
+            else
+                MeleeReach.Remove(h);
+        }
+
+        public void StartHazard(string tag, string kind, string pattern, HazardArgs args, PinnacleHandle origin = default, PinnacleHazardOptions options = null)
         {
             Record(nameof(StartHazard), tag, kind, pattern, args, origin);
-            Hazards.Add(new HazardCall(tag, kind, pattern, args, origin));
+            Hazards.Add(new HazardCall(tag, kind, pattern, args, origin, options));
         }
 
         public void StopHazards()
@@ -256,6 +306,13 @@ namespace ACE.Server.Tests.Pinnacles
             Record(nameof(DispelOwnerBuffs), count);
             Dispels.Add(count);
             return DispelResult ?? count;
+        }
+
+        public bool GrantOwnerBuff(uint spellId, double seconds)
+        {
+            Record(nameof(GrantOwnerBuff), spellId, seconds);
+            OwnerBuffs.Add((spellId, seconds));
+            return GrantOwnerBuffResult;
         }
 
         public void Say(string line)

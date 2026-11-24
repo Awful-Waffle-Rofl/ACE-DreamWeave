@@ -66,13 +66,20 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "dispellingedge",   // NOT renamed: the ownership quest key is QuestKeyPrefix + Name
             DisplayName = "Dispelling Dance",
-            Description = "Your landed hits and your damaging spell projectiles have a 10/16/22% chance " +
-                          "(by rank) to strip one of the target's beneficial enchantments and cleanse one " +
-                          "harmful enchantment from you. Higher Item Tinkering increases the chance.",
+            // Live text. Chance ladder is base + (rank - 1) * step (DispellingEdgeAbility.Chance ~104-118; keys read at ~205-206, ~260-261).
+            DescriptionTemplate = "Your hits and damaging spell projectiles can strip one beneficial enchantment from the target and " +
+                          "remove one harmful enchantment from you.",
+            RankTailTemplate = "{ladder:class_ability_dispellingedge_chance_base,class_ability_dispellingedge_chance_step|pct}% " +
+                          "chance",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },   // Spellsword pass 2026-10-24: 2/rank -> 1/rank (ClassAbilityRepricing wave 4)
             Implemented = true,
             AffinitySkill = Skill.ItemTinkering,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "affinity", Bounds = CeilingBounds.Affinity, Source = CeilingSource.Tunable, Key = "class_ability_affinity_chance_cap", Label = "max chance from affinity", Format = "pct" },
+                new ClassAbilityCeiling { Id = "gear", Bounds = CeilingBounds.Gear, Source = CeilingSource.GearStackCap, GearMod = EquipmentModId.DispellingEdge, Label = "max from gear", Format = "pct" },
+            },
         };
 
         /// <summary>
@@ -257,13 +264,20 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
+            return BuildReadout(rank, player.GetClassAbilityAffinityMultiplier(Skill.ItemTinkering), player?.GetEquippedModValue(EquipmentModId.DispellingEdge) ?? 0.0);
+        }
+
+        /// <summary>
+        /// The pure core of <see cref="GetReadout"/>: every live input is a parameter, so a test can pin the readout (and its ceiling readings) without a Player.
+        /// </summary>
+        public ClassAbilityReadout BuildReadout(int rank, double affinityMultiplier, double gearModValue)
+        {
             var chanceBase = PropertyManager.GetDouble("class_ability_dispellingedge_chance_base").Item;
             var chanceStep = PropertyManager.GetDouble("class_ability_dispellingedge_chance_step").Item;
             var affinityCap = PropertyManager.GetDouble("class_ability_affinity_chance_cap").Item;
 
             var skillChance = rank <= 0 ? 0.0 : chanceBase + (rank - 1) * chanceStep;
 
-            var affinityMultiplier = player.GetClassAbilityAffinityMultiplier(Skill.ItemTinkering);
             var rawAdded = skillChance * affinityMultiplier - skillChance;
 
             var clampedAdded = affinityCap > 0.0 ? Math.Min(rawAdded, affinityCap) : rawAdded;
@@ -273,7 +287,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             // Rank-gated like skillChance above - a machinery mod reports nothing without its ability.
             var gearChance = rank <= 0
                 ? 0.0
-                : Math.Max(0.0, player?.GetEquippedModValue(EquipmentModId.DispellingEdge) ?? 0.0);
+                : Math.Max(0.0, gearModValue);
 
             var skill = skillChance * 100.0;
             var affinity = clampedAdded * 100.0;
@@ -292,6 +306,11 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "dispel",
                 Per = null,
                 CapNote = capBit ? "affinity cap" : null,
+                Ceilings = new[]
+                {
+                    ClassAbilityCeilings.Read(Definition, "affinity", rawAdded * 100.0, rank, ClassAbilityText.Live),
+                    ClassAbilityCeilings.Read(Definition, "gear", gear, rank, ClassAbilityText.Live),
+                },
             };
         }
     }

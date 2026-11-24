@@ -34,8 +34,8 @@ namespace ACE.Server.Tests.ThreadDungeons
             foreach (var (from, to) in new[] { (300, 410), (326, 500), (250, 300), (100, 326), (375, 431), (410, 326) })
             {
                 var old = Math.Exp(B * (to - from));
-                Assert.AreEqual(old, DungeonStatCurve.Ratio(DungeonStatAxis.Damage, from, to, 0.5, 0.0, 1.0, P), 1e-12, $"{from}->{to}");
-                Assert.AreEqual(old, DungeonStatCurve.Ratio(DungeonStatAxis.Damage, from, to, 0.5, 0.0, 0.75, 0), 1e-12, $"{from}->{to}: no pivot, no softening");
+                Assert.AreEqual(old, DungeonStatCurve.Ratio(DungeonStatAxis.Damage, from, to, 0.5, 0.0, 1.0, P, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400), 1e-12, $"{from}->{to}");
+                Assert.AreEqual(old, DungeonStatCurve.Ratio(DungeonStatAxis.Damage, from, to, 0.5, 0.0, 0.75, 0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400), 1e-12, $"{from}->{to}: no pivot, no softening");
             }
         }
 
@@ -43,14 +43,14 @@ namespace ACE.Server.Tests.ThreadDungeons
         public void Rate_three_quarters_softens_only_the_stretch_above_the_pivot()
         {
             foreach (var level in Levels)
-                Assert.AreEqual(Math.Exp(0.75 * B * (level - P)), DungeonStatCurve.Ratio(DungeonStatAxis.Damage, P, level, 0.5, 0.0, 0.75, P), 1e-12, $"pivot->{level}");
+                Assert.AreEqual(Math.Exp(0.75 * B * (level - P)), DungeonStatCurve.Ratio(DungeonStatAxis.Damage, P, level, 0.5, 0.0, 0.75, P, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400), 1e-12, $"pivot->{level}");
 
-            Assert.AreEqual(Math.Exp(B * 76), DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 250, 326, 0.5, 0.0, 0.75, P), 1e-12, "at/below the pivot: full slope");
-            Assert.AreEqual(Math.Exp(B * 26 + 0.75 * B * 84), DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 300, 410, 0.5, 0.0, 0.75, P), 1e-12, "split at the pivot");
-            Assert.AreEqual(DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 300, 326, 0.5, 0.0, 0.75, P) * DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 326, 500, 0.5, 0.0, 0.75, P),
-                DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 300, 500, 0.5, 0.0, 0.75, P), 1e-12, "continuous (composes) through the pivot");
-            Assert.AreEqual(1.0 / DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 326, 450, 0.5, 0.0, 0.75, P),
-                DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 450, 326, 0.5, 0.0, 0.75, P), 1e-12, "downward is the inverse");
+            Assert.AreEqual(Math.Exp(B * 76), DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 250, 326, 0.5, 0.0, 0.75, P, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400), 1e-12, "at/below the pivot: full slope");
+            Assert.AreEqual(Math.Exp(B * 26 + 0.75 * B * 84), DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 300, 410, 0.5, 0.0, 0.75, P, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400), 1e-12, "split at the pivot");
+            Assert.AreEqual(DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 300, 326, 0.5, 0.0, 0.75, P, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400) * DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 326, 500, 0.5, 0.0, 0.75, P, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400),
+                DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 300, 500, 0.5, 0.0, 0.75, P, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400), 1e-12, "continuous (composes) through the pivot");
+            Assert.AreEqual(1.0 / DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 326, 450, 0.5, 0.0, 0.75, P, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400),
+                DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 450, 326, 0.5, 0.0, 0.75, P, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400), 1e-12, "downward is the inverse");
 
             // The ruling's own numbers: about -19% at 410 and -36% at 500 against the full slope.
             Assert.AreEqual(0.809, Math.Exp(-0.25 * B * (410 - P)), 0.005);
@@ -65,13 +65,13 @@ namespace ACE.Server.Tests.ThreadDungeons
                 if (axis == DungeonStatAxis.Damage)
                     continue;
 
-                var reference = DungeonStatCurve.Ratio(axis, 300, 500, 0.5, 0.0, 1.0, P);
-                Assert.AreEqual(reference, DungeonStatCurve.Ratio(axis, 300, 500, 0.5, 0.0, 0.75, P), 1e-15, $"{axis}: damage 0.75");
-                Assert.AreEqual(reference, DungeonStatCurve.Ratio(axis, 300, 500, 0.5, 0.0, 0.0, P), 1e-15, $"{axis}: damage 0");
+                var reference = DungeonStatCurve.Ratio(axis, 300, 500, 0.5, 0.0, 1.0, P, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400);
+                Assert.AreEqual(reference, DungeonStatCurve.Ratio(axis, 300, 500, 0.5, 0.0, 0.75, P, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400), 1e-15, $"{axis}: damage 0.75");
+                Assert.AreEqual(reference, DungeonStatCurve.Ratio(axis, 300, 500, 0.5, 0.0, 0.0, P, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400), 1e-15, $"{axis}: damage 0");
             }
 
-            var damage = DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 300, 500, 0.5, 0.0, 0.75, P);
-            Assert.AreEqual(damage, DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 300, 500, 0.0, 1.0, 0.75, P), 1e-15, "defense and magic dials leave damage alone");
+            var damage = DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 300, 500, 0.5, 0.0, 0.75, P, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400);
+            Assert.AreEqual(damage, DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 300, 500, 0.0, 1.0, 0.75, P, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400), 1e-15, "defense and magic dials leave damage alone");
         }
 
         [TestMethod]
@@ -95,7 +95,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         public void Each_of_the_three_rates_reaches_its_own_axis_through_the_anchored_curve()
         {
             // Three distinct rates: a swap of any two arguments moves at least one assertion.
-            var curve = new DungeonStatCurve.Anchored(Anchor(), P, 0.25, 0.5, 0.75);
+            var curve = new DungeonStatCurve.Anchored(Anchor(), P, 0.25, 0.5, 0.75, 1.0, 0.25); // the 400 knee is not this test's subject: pinned to the older rates
             Assert.AreEqual(0.25, curve.DefenseRate);
             Assert.AreEqual(0.5, curve.MagicDefenseRate);
             Assert.AreEqual(0.75, curve.DamageRate);
@@ -112,7 +112,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreEqual(Math.Exp(DungeonStatCurve.StrengthSlope * 110), curve.Ratio(DungeonStatAxis.Strength, 300, 410), 1e-12, "attributes: full slope");
 
             // 1.0 reproduces the pre-dial standard exactly.
-            var old = new DungeonStatCurve.Anchored(Anchor(), P, 0.25, 0.5, 1.0).StandardAt(410);
+            var old = new DungeonStatCurve.Anchored(Anchor(), P, 0.25, 0.5, 1.0, 1.0, 0.25).StandardAt(410);
             Assert.AreEqual(DungeonStatCurve.Scale(844, Math.Exp(B * 84)), old.MaxBodyDamage);
             Assert.AreEqual(old.EffectiveSkillMedianFor(Skill.MeleeDefense), at410.EffectiveSkillMedianFor(Skill.MeleeDefense));
         }
@@ -122,8 +122,8 @@ namespace ACE.Server.Tests.ThreadDungeons
         {
             var axes = new ArchetypeAxes(Anchor(), 1000, 0, 0, 0, 0, 0, 100000, 20, 1.0);
 
-            var soft = DungeonArchetypeStandards.Extrapolate(axes, P, 500, 0.25, 0.5, 0.75);
-            var full = DungeonArchetypeStandards.Extrapolate(axes, P, 500, 0.25, 0.5, 1.0);
+            var soft = DungeonArchetypeStandards.Extrapolate(axes, P, 500, 0.25, 0.5, 0.75, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400);
+            var full = DungeonArchetypeStandards.Extrapolate(axes, P, 500, 0.25, 0.5, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400);
             Assert.AreEqual(1000 * Math.Exp(0.75 * B * 174), soft.EffectiveDamage, 1e-6, "effective damage at 0.75");
             Assert.AreEqual(1000 * Math.Exp(B * 174), full.EffectiveDamage, 1e-6, "1.0 is the old value");
             Assert.AreEqual(DungeonStatCurve.Scale(844, Math.Exp(0.75 * B * 174)), soft.Core.MaxBodyDamage);
@@ -136,8 +136,8 @@ namespace ACE.Server.Tests.ThreadDungeons
         public void The_damage_ceiling_projection_takes_the_run_curve()
         {
             var raw = new CreaturePerHit(300, new PerHitSource(1000, PropertyAttribute.Strength, 400, false), new PerHitSource(800, PropertyAttribute.Coordination, 420, true));
-            var soft = new DungeonStatCurve.Anchored(Anchor(), P, 0.5, 0.0, 0.75);
-            var full = new DungeonStatCurve.Anchored(Anchor(), P, 0.5, 0.0, 1.0);
+            var soft = new DungeonStatCurve.Anchored(Anchor(), P, 0.5, 0.0, 0.75, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400);
+            var full = new DungeonStatCurve.Anchored(Anchor(), P, 0.5, 0.0, 1.0, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400);
 
             var up = raw.ProjectedTo(410, soft.Ratio);
             Assert.AreEqual(1000 * Math.Exp(B * 26 + 0.75 * B * 84), up.Melee.BaseDamage, 1e-9, "damage on the run's softened curve");
@@ -166,7 +166,7 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             double PredictedAt(double damageRate)
             {
-                var plan = new DungeonSpawnPlan { FamilyId = "fam_stamp", StatCurve = new DungeonStatCurve.Anchored(Anchor(), P, 0.5, 0.0, damageRate) };
+                var plan = new DungeonSpawnPlan { FamilyId = "fam_stamp", StatCurve = new DungeonStatCurve.Anchored(Anchor(), P, 0.5, 0.0, damageRate, DungeonStatCurve.DefaultWeaponAttackRateAbove400, DungeonStatCurve.DefaultMeleeDefenseRateAbove400) };
                 return FamilyAbilityPlanner.PredictEntry(plan, entry, raw, upliftAttributes: false).Melee.BaseDamage;
             }
 

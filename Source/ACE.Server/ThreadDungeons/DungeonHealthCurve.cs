@@ -32,7 +32,7 @@ namespace ACE.Server.ThreadDungeons
     ///
     /// ANCHORS ARE THE TWO ENDPOINTS OF THE MEASURED CURVE, not invented numbers: 890 is the measured
     /// cross-family band median at level 185 (the lowest Raw Fragment rung) and 13100 is the measured median
-    /// at level 375 (the gem ceiling, <see cref="DungeonGemSpec.MaxGemLevel"/>). So T(185) and T(375) reproduce
+    /// at level 375 (the gem ceiling until the 2026-11-16 raise to <see cref="DungeonGemSpec.MaxGemLevel"/>). So T(185) and T(375) reproduce
     /// today's two endpoints exactly and everything between them is interpolated rather than sampled.
     ///
     /// THE CURVE OWNS THE WHOLE LADDER 1 to its top level, not just the Raw Fragment rungs, and below 185 it extends
@@ -93,12 +93,13 @@ namespace ACE.Server.ThreadDungeons
 
         /// <summary>
         /// The level <see cref="DefaultAnchorHigh"/> was measured at - the top of the measured data, and the
-        /// LOWEST value the top level (<see cref="SanitizeTopLevel"/>) may take. Equal to
-        /// <see cref="DungeonGemSpec.MaxGemLevel"/>, and that is not a coincidence worth encoding as a
-        /// reference: the two are the same number for different reasons (the gem ceiling is a design choice,
-        /// this is where 13100 was measured), and it stays 375 through the 2026-10-08 run ceiling raise for
+        /// LOWEST value the top level (<see cref="SanitizeTopLevel(long)"/>) may take. Equal to
+        /// the gem ceiling UNTIL the 2026-11-16 raise to <see cref="DungeonGemSpec.MaxGemLevel"/> (500), and
+        /// that was never a coincidence worth encoding as a reference: the two were the same number for
+        /// different reasons (the gem ceiling is a design choice, this is where 13100 was measured), and it
+        /// stays 375 through both the 2026-10-08 run ceiling raise and the 2026-11-16 gem ceiling raise for
         /// exactly that reason - moving it would change which measurement the high anchor is a measurement OF.
-        /// Since that raise the curve no longer clamps here; it extrapolates to the top level instead.
+        /// Since the first raise the curve no longer clamps here; it extrapolates to the top level instead.
         /// </summary>
         public const int AnchorHighLevel = 375;
 
@@ -160,6 +161,20 @@ namespace ACE.Server.ThreadDungeons
         /// misconfiguration.
         /// </summary>
         public static double Target(int level, double anchorLow, double anchorHigh, long topLevel = DefaultTopLevel)
+            => Target(level, anchorLow, anchorHigh, topLevel, DungeonGemSpec.MaxRunLevel);
+
+        /// <summary>
+        /// <see cref="Target(int, double, double, long)"/> with an explicit CEILING on the top level, for a caller that
+        /// plays above the run ceiling (the Allegiance Gauntlet). The top level is sanitized by
+        /// <see cref="SanitizeTopLevel(long, int)"/> into [<see cref="AnchorHighLevel"/>, the sanitized ceiling] rather than
+        /// into [375, <see cref="DungeonGemSpec.MaxRunLevel"/>], and the curve extrapolates on the same ratio g up to it.
+        ///
+        /// A ceiling of <see cref="DungeonGemSpec.MaxRunLevel"/> IS the four-argument form, bit for bit: that form forwards
+        /// here with exactly that ceiling, so there is one body and the Thread values cannot drift from it. Nothing on the
+        /// Thread path passes any other ceiling (<see cref="DungeonPopulationLimits.HealthCurveCeilingLevel"/> defaults to
+        /// the run ceiling and only the Gauntlet's limits adjustment raises it).
+        /// </summary>
+        public static double Target(int level, double anchorLow, double anchorHigh, long topLevel, int ceilingLevel)
         {
             if (level <= 0)
                 return 0.0;
@@ -171,7 +186,7 @@ namespace ACE.Server.ThreadDungeons
                 return low;
 
             // Clamped at the top level, so every level above it reads the top level's value.
-            var at = Math.Min(level, SanitizeTopLevel(topLevel));
+            var at = Math.Min(level, SanitizeTopLevel(topLevel, ceilingLevel));
 
             // EXACTLY the high anchor at its own level, rather than low * g^190, which floating point can land a
             // hair off: a top level of 375 must reproduce the pre-2026-10-08 clamp bit for bit, and T(375) has
@@ -191,7 +206,9 @@ namespace ACE.Server.ThreadDungeons
         /// same answer a non-positive level gives.
         /// </summary>
         public static double Target(int level, DungeonPopulationLimits limits)
-            => limits.HealthCurveEnabled ? Target(level, limits.HealthCurveAnchorLow, limits.HealthCurveAnchorHigh, limits.HealthCurveTopLevel) : 0.0;
+            => limits.HealthCurveEnabled
+                ? Target(level, limits.HealthCurveAnchorLow, limits.HealthCurveAnchorHigh, limits.HealthCurveTopLevel, limits.HealthCurveCeilingLevel)
+                : 0.0;
 
         /// <summary>
         /// Sanitizes dynamic_dungeons_health_curve_top_level into [<see cref="AnchorHighLevel"/>,
@@ -205,7 +222,32 @@ namespace ACE.Server.ThreadDungeons
         /// Pure, on the same contract as <see cref="SanitizeAnchor"/>: the WARN lives in the spawner's reader.
         /// </summary>
         public static int SanitizeTopLevel(long value)
-            => (int)Math.Clamp(value, AnchorHighLevel, DungeonGemSpec.MaxRunLevel);
+            => SanitizeTopLevel(value, DungeonGemSpec.MaxRunLevel);
+
+        /// <summary>
+        /// <see cref="SanitizeTopLevel(long)"/> against an explicit ceiling: clamps into [<see cref="AnchorHighLevel"/>,
+        /// <see cref="SanitizeCeiling"/>(<paramref name="ceiling"/>)]. The single-argument form is this with a ceiling of
+        /// <see cref="DungeonGemSpec.MaxRunLevel"/>, which is the Thread contract unchanged.
+        /// </summary>
+        public static int SanitizeTopLevel(long value, int ceiling)
+            => (int)Math.Clamp(value, AnchorHighLevel, SanitizeCeiling(ceiling));
+
+        /// <summary>
+        /// The highest ceiling any caller may set: a typo guard, not a design value, in the spirit of
+        /// <see cref="MaxAnchorHigh"/>. The curve grows about 1.43% per level, so it overflows a double somewhere near level
+        /// 50000 at the shipped anchors; at this ceiling T is about 2e63, finite, and the health consumers spike 1B traced clamp their
+        /// integer health into [0, int.MaxValue] (or uint.MaxValue). The Gauntlet's own top level ships at 1000.
+        /// </summary>
+        public const int MaxCeilingLevel = 10000;
+
+        /// <summary>
+        /// Sanitizes a health-curve ceiling into [<see cref="AnchorHighLevel"/>, <see cref="MaxCeilingLevel"/>]. Never below
+        /// the high anchor, for the reason <see cref="SanitizeTopLevel(long)"/> gives for its own floor. A
+        /// default(DungeonPopulationLimits) carries 0 here, which reads as 375; its top level of 0 reads as 375 too, so a
+        /// limits struct nobody filled in keeps exactly the clamp it had before the ceiling existed.
+        /// </summary>
+        public static int SanitizeCeiling(long value)
+            => (int)Math.Clamp(value, AnchorHighLevel, MaxCeilingLevel);
 
         /// <summary>
         /// Sanitizes the low anchor: NaN, Infinity or a non-positive value reads as

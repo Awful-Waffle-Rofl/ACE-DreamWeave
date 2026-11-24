@@ -76,6 +76,9 @@ namespace ACE.Server.ThreadDungeons
             {
                 if (entry == null || !pooledLoot || state == ThreadDungeonRunState.Ended) return false;
                 lootLedger.Enqueue(entry);
+
+                // Peddler invariant 1 (ThreadDungeonRun_Peddler.cs): banked rolls only grow. This is the only enqueue site.
+                CountBankedRollsLocked(entry);
                 return true;
             }
         }
@@ -148,6 +151,7 @@ namespace ACE.Server.ThreadDungeons
                 {
                     lootLedger.Dequeue();
                     piece = remaining == head.Rolls ? head : head.Slice(remaining, final: true);
+                    CountClaimedRollsLocked(remaining);
                     return true;
                 }
 
@@ -156,6 +160,7 @@ namespace ACE.Server.ThreadDungeons
 
                 head.RollsRemaining = remaining - maxRolls;
                 piece = head.Slice(maxRolls, final: false);
+                CountClaimedRollsLocked(maxRolls);
                 return true;
             }
         }

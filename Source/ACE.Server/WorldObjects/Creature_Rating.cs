@@ -5,6 +5,7 @@ using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.ClassAbilities;
 using ACE.Server.ClassAbilities.Abilities;
+using ACE.Server.Entity;
 using ACE.Server.KnotLoot;
 using ACE.Server.Managers;
 using ACE.Server.Pvp.Rules;
@@ -213,8 +214,9 @@ namespace ACE.Server.WorldObjects
             var enchantments = EnchantmentManager.GetRating(PropertyInt.DamageRating);
 
             // equipment ratings
-            // less any Tier A weapon mod amount (Bloodthirst) while this player's weapon mods are suppressed
-            var equipment = GetEquippedItemsRatingSum(PropertyInt.GearDamage) - WeaponModSuppression.RatingOffsetFor(this, PropertyInt.GearDamage);
+            // less any Tier A weapon mod amount (Bloodthirst) while this player's weapon mods are suppressed, plus any Paragon gems for it
+            // Summoner casters (Docs/SummonerCasters/DESIGN.md): a focus's Bloodthirst amount goes to the owner's pets and leaves the wielder
+            var equipment = GetEquippedItemsRatingSum(PropertyInt.GearDamage) - WeaponModSuppression.RatingOffsetFor(this, PropertyInt.GearDamage) + WeaponModParagon.RatingAddFor(this, PropertyInt.GearDamage) + SummonerFocus.PetFocusRatingBonus(this, PropertyInt.GearDamage) - SummonerFocus.WielderFocusRatingStrip(this, PropertyInt.GearDamage);
 
             // weakness as negative damage rating?
             // TODO: this should be factored in as a separate weakness rating...
@@ -249,6 +251,12 @@ namespace ACE.Server.WorldObjects
             // Knot loot: Glass Turtle Bracelet wrist trade, signed (a net loss stays negative), Player wielders only
             var knotWrist = this is Player kwp ? kwp.GetKnotWristRating(KnotRatingKind.Damage) : 0;
 
+            // Thread Shrine damage blessing (Docs/Threads/ENCOUNTERS.md "Shrine"): +25 rating at 1.25, only while the
+            // holder stands inside the run that granted it (ThreadBoons.For). Folded into the base term so the final
+            // sum below keeps its shape; one volatile read when no run holds a blessing.
+            if (this is Player tsbPlayer)
+                damageRating += ACE.Server.ThreadDungeons.ThreadBoons.DamageRatingFor(tsbPlayer);
+
             // heritage / weapon type bonus factored in elsewhere?
             return damageRating + equipment + knotWrist + enchantments - weaknessRating + augBonus + lumAugBonus + classAbilityBonus + healBoostConversion + critDamageConversion;
         }
@@ -282,10 +290,25 @@ namespace ACE.Server.WorldObjects
             // Damage Resist Rating class ability (Vanguard T2): +3/6/10 into the same additive pool
             var classAbilityBonus = this is Player drrPlayer ? drrPlayer.GetClassAbilityRating(ClassAbilityId.DamageResistRating) : 0;
 
+            // Crit Resist Rating class ability (Vanguard, owner ruling 2026-11-08, moved here from Damage Rating):
+            // adds 30/60/100% (by rank) of the player's TOTAL Critical Resist Rating. The rank is recovered from the
+            // grant (read through GetClassAbilityRating, so PK-facet / PvP-arena suppression zeroes it and the
+            // conversion is PvE only exactly as the grant is), and GetCritResistRating, which never reads the damage
+            // resist rating, is only computed when there is a grant to convert with.
+            var critResistGrant = this is Player crrConvPlayer ? crrConvPlayer.GetClassAbilityRating(ClassAbilityId.CritResistRating) : 0;
+            var critResistConversion = critResistGrant > 0
+                ? RatingAbility.CritResistRatingDamageConversion(critResistGrant, GetCritResistRating())
+                : 0;
+
             // Knot loot: Glass Turtle Bracelet wrist trade, signed (a net loss stays negative), Player wielders only
             var knotWrist = this is Player kwp ? kwp.GetKnotWristRating(KnotRatingKind.DamageResist) : 0;
 
-            return damageResistRating + equipment + knotWrist + enchantments - netherDotDamageRating + augBonus + lumAugBonus + specBonus + classAbilityBonus;
+            // Thread Shrine mitigation blessing: +25 damage resist rating at 1.25 (20% less damage taken), only while the
+            // holder stands inside the run that granted it. Folded into the base term, as in GetDamageRating.
+            if (this is Player tsbPlayer)
+                damageResistRating += ACE.Server.ThreadDungeons.ThreadBoons.DamageResistRatingFor(tsbPlayer);
+
+            return damageResistRating + equipment + knotWrist + enchantments - netherDotDamageRating + augBonus + lumAugBonus + specBonus + classAbilityBonus + critResistConversion;
         }
 
         public float GetDamageResistRatingMod(CombatType? combatType = null, bool directDamage = true, WorldObject attacker = null)
@@ -369,8 +392,9 @@ namespace ACE.Server.WorldObjects
             var enchantments = EnchantmentManager.GetRating(PropertyInt.CritRating);
 
             // equipment ratings
-            // less any Tier A weapon mod amount (Weak Point) while this player's weapon mods are suppressed
-            var equipment = GetEquippedItemsRatingSum(PropertyInt.GearCrit) - WeaponModSuppression.RatingOffsetFor(this, PropertyInt.GearCrit);
+            // less any Tier A weapon mod amount (Weak Point) while this player's weapon mods are suppressed, plus any Paragon gems for it
+            // Summoner casters (Docs/SummonerCasters/DESIGN.md): a focus's Weak Point amount goes to the owner's pets and leaves the wielder
+            var equipment = GetEquippedItemsRatingSum(PropertyInt.GearCrit) - WeaponModSuppression.RatingOffsetFor(this, PropertyInt.GearCrit) + WeaponModParagon.RatingAddFor(this, PropertyInt.GearCrit) + SummonerFocus.PetFocusRatingBonus(this, PropertyInt.GearCrit) - SummonerFocus.WielderFocusRatingStrip(this, PropertyInt.GearCrit);
 
             // augmentations
             var augBonus = 0;
@@ -393,8 +417,9 @@ namespace ACE.Server.WorldObjects
             var enchantments = EnchantmentManager.GetRating(PropertyInt.CritDamageRating);
 
             // equipment ratings
-            // less any Tier A weapon mod amount (Devastation) while this player's weapon mods are suppressed
-            var equipment = GetEquippedItemsRatingSum(PropertyInt.GearCritDamage) - WeaponModSuppression.RatingOffsetFor(this, PropertyInt.GearCritDamage);
+            // less any Tier A weapon mod amount (Devastation) while this player's weapon mods are suppressed, plus any Paragon gems for it
+            // Summoner casters (Docs/SummonerCasters/DESIGN.md): a focus's Devastation amount goes to the owner's pets and leaves the wielder
+            var equipment = GetEquippedItemsRatingSum(PropertyInt.GearCritDamage) - WeaponModSuppression.RatingOffsetFor(this, PropertyInt.GearCritDamage) + WeaponModParagon.RatingAddFor(this, PropertyInt.GearCritDamage) + SummonerFocus.PetFocusRatingBonus(this, PropertyInt.GearCritDamage) - SummonerFocus.WielderFocusRatingStrip(this, PropertyInt.GearCritDamage);
 
             // augmentations
             var augBonus = 0;

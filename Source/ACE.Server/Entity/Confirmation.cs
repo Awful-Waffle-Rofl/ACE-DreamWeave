@@ -1,7 +1,9 @@
 using System;
 using ACE.Entity;
 using ACE.Entity.Enum;
+using ACE.Server.Entity.Actions;
 using ACE.Server.Managers;
+using ACE.Server.ThreadDungeons;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.Entity
@@ -184,6 +186,103 @@ namespace ACE.Server.Entity
         }
     }
 
+    /// <summary>Confirmation for applying a Cloak Mantle / Proc Amplifier gem; re-verifies from scratch on the yes.</summary>
+    public class Confirmation_CloakMantle : Confirmation
+    {
+        public ObjectGuid SourceGuid;
+        public ObjectGuid TargetGuid;
+
+        public Confirmation_CloakMantle(ObjectGuid playerGuid, ObjectGuid sourceGuid, ObjectGuid targetGuid)
+            : base(playerGuid, ConfirmationType.CraftInteraction)
+        {
+            SourceGuid = sourceGuid;
+            TargetGuid = targetGuid;
+        }
+
+        public override void ProcessConfirmation(bool response, bool timeout = false)
+        {
+            var player = Player;
+            if (player == null) return;
+
+            if (!response)
+            {
+                player.SendWeenieError(WeenieError.YouChickenOut);
+                return;
+            }
+
+            var source = player.FindObject(SourceGuid.Full, Player.SearchLocations.LocationsICanMove);
+            var target = player.FindObject(TargetGuid.Full, Player.SearchLocations.LocationsICanMove);
+
+            if (source == null || target == null) return;
+
+            CloakMantleApplicator.UseObjectOnTarget(player, source, target, true);
+        }
+    }
+
+    /// <summary>
+    /// Confirmation for a Paragon gem that would push a mod past a perfect roll. Copied from
+    /// Confirmation_CloakMantle: No or timeout does nothing, Yes re-enters the manager, which re-verifies from scratch.
+    /// </summary>
+    public class Confirmation_ParagonOverflow : Confirmation
+    {
+        public ObjectGuid SourceGuid;
+        public ObjectGuid TargetGuid;
+
+        public Confirmation_ParagonOverflow(ObjectGuid playerGuid, ObjectGuid sourceGuid, ObjectGuid targetGuid)
+            : base(playerGuid, ConfirmationType.CraftInteraction)
+        {
+            SourceGuid = sourceGuid;
+            TargetGuid = targetGuid;
+        }
+
+        public override void ProcessConfirmation(bool response, bool timeout = false)
+        {
+            var player = Player;
+            if (player == null) return;
+
+            if (!response)
+            {
+                player.SendWeenieError(WeenieError.YouChickenOut);
+                return;
+            }
+
+            ACE.Server.WeaponMods.ParagonModManager.OnOverflowConfirmed(player, SourceGuid, TargetGuid);
+        }
+    }
+
+    /// <summary>Confirmation for applying a Jewelers Aspect Gem; re-verifies from scratch on the yes.</summary>
+    public class Confirmation_JewelryAspect : Confirmation
+    {
+        public ObjectGuid SourceGuid;
+        public ObjectGuid TargetGuid;
+
+        public Confirmation_JewelryAspect(ObjectGuid playerGuid, ObjectGuid sourceGuid, ObjectGuid targetGuid)
+            : base(playerGuid, ConfirmationType.CraftInteraction)
+        {
+            SourceGuid = sourceGuid;
+            TargetGuid = targetGuid;
+        }
+
+        public override void ProcessConfirmation(bool response, bool timeout = false)
+        {
+            var player = Player;
+            if (player == null) return;
+
+            if (!response)
+            {
+                player.SendWeenieError(WeenieError.YouChickenOut);
+                return;
+            }
+
+            var source = player.FindObject(SourceGuid.Full, Player.SearchLocations.LocationsICanMove);
+            var target = player.FindObject(TargetGuid.Full, Player.SearchLocations.LocationsICanMove);
+
+            if (source == null || target == null) return;
+
+            JewelryAspectApplicator.UseObjectOnTarget(player, source, target, true);
+        }
+    }
+
     public class Confirmation_Fellowship : Confirmation
     {
         public ObjectGuid InviterGuid;
@@ -267,6 +366,85 @@ namespace ACE.Server.Entity
 
             if (source != null)
                 source.EmoteManager.ExecuteEmoteSet(response ? EmoteCategory.TestSuccess : EmoteCategory.TestFailure, Quest, player);
+        }
+    }
+
+    /// <summary>How a <see cref="Confirmation_Choice"/> answer was read.</summary>
+    public enum ConfirmationChoiceAnswer
+    {
+        /// <summary>A timeout, or a late answer (Confirmation_ThreadGroupStart.IsLate): nothing runs.</summary>
+        Ignored,
+
+        /// <summary>An explicit Yes: the Yes action runs.</summary>
+        Yes,
+
+        /// <summary>An explicit No: the No action runs (when there is one).</summary>
+        No,
+    }
+
+    /// <summary>
+    /// A Yes/No confirmation whose Yes AND explicit No each run an action, and whose timeout runs nothing
+    /// (Confirmation_Custom runs only its Yes). Timeout: for Yes_No, ConfirmationManager's 30 s abort only says "You
+    /// waited too long" and leaves the entry, and the client's automatic reply then arrives as a plain No. So an answer
+    /// flagged as a timeout, or late by Confirmation_ThreadGroupStart.IsLate (the same 29.5 s rule), is
+    /// <see cref="ConfirmationChoiceAnswer.Ignored"/>. The answer is read when it arrives; the action then runs on the
+    /// PLAYER's own action queue (the Confirmation_ThreadGroupStart hop), so it may read the player's position and open
+    /// another confirmation there.
+    /// </summary>
+    public class Confirmation_Choice : Confirmation
+    {
+        public Action OnYes { get; }
+
+        /// <summary>Runs on an explicit No. Null: an explicit No does nothing.</summary>
+        public Action OnNo { get; }
+
+        public DateTime SentUtc { get; }
+
+        public Confirmation_Choice(ObjectGuid playerGuid, Action onYes, Action onNo, DateTime sentUtc)
+            : base(playerGuid, ConfirmationType.Yes_No)
+        {
+            OnYes = onYes;
+            OnNo = onNo;
+            SentUtc = sentUtc;
+        }
+
+        public override void ProcessConfirmation(bool response, bool timeout = false)
+        {
+            var player = Player;
+            if (player == null)
+                return;
+
+            var answer = Classify(response, timeout, SentUtc, DateTime.UtcNow);
+
+            if (answer == ConfirmationChoiceAnswer.Ignored)
+                return;
+
+            player.EnqueueAction(new ActionEventDelegate(() => Run(answer)));
+        }
+
+        /// <summary>The answer rule (<see cref="Classify"/>), then the matching action inline. Player-free, for the unit tests.</summary>
+        internal ConfirmationChoiceAnswer Dispatch(bool response, bool timeout, DateTime nowUtc)
+        {
+            var answer = Classify(response, timeout, SentUtc, nowUtc);
+            Run(answer);
+            return answer;
+        }
+
+        private void Run(ConfirmationChoiceAnswer answer)
+        {
+            if (answer == ConfirmationChoiceAnswer.Yes)
+                OnYes?.Invoke();
+            else if (answer == ConfirmationChoiceAnswer.No)
+                OnNo?.Invoke();
+        }
+
+        /// <summary>A timeout or a late answer (Confirmation_ThreadGroupStart.IsLate) is Ignored; otherwise Yes or No as answered. Pure.</summary>
+        internal static ConfirmationChoiceAnswer Classify(bool response, bool timeout, DateTime sentUtc, DateTime nowUtc)
+        {
+            if (Confirmation_ThreadGroupStart.IsLate(sentUtc, nowUtc, timeout))
+                return ConfirmationChoiceAnswer.Ignored;
+
+            return response ? ConfirmationChoiceAnswer.Yes : ConfirmationChoiceAnswer.No;
         }
     }
 

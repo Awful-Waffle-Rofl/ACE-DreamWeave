@@ -333,13 +333,13 @@ namespace ACE.Server.Tests
         {
             var baseFraction = D("class_ability_souljump_restore_fraction");
 
-            Assert.AreEqual(0.10, baseFraction, 1e-9);
+            Assert.AreEqual(0.20, baseFraction, 1e-9);
 
             Assert.AreEqual(baseFraction, SoulJumpMath.RestoreFraction(baseFraction, 1.0), 1e-12,
                 "at zero effective Jump the restore must be bit-identical to the bare tunable");
 
-            Assert.AreEqual(0.114, SoulJumpMath.RestoreFraction(baseFraction, 1.14), 1e-9);
-            Assert.AreEqual(0.11, SoulJumpMath.RestoreFraction(baseFraction, 1.10), 1e-9);
+            Assert.AreEqual(0.228, SoulJumpMath.RestoreFraction(baseFraction, 1.14), 1e-9);
+            Assert.AreEqual(0.22, SoulJumpMath.RestoreFraction(baseFraction, 1.10), 1e-9);
         }
 
         /// <summary>

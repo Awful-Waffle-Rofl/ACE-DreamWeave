@@ -178,6 +178,8 @@ namespace ACE.Server.Tests
 
             public WorldObject CreateNewWorldObject(uint weenieClassId) => inner.CreateNewWorldObject(weenieClassId);
 
+            public uint NewDisplayAliasGuid() => inner.NewDisplayAliasGuid();
+
             public VaultContainerLoad LoadContainer(uint containerGuid, out Container container) => inner.LoadContainer(containerGuid, out container);
 
             public bool IsPristine(WorldObject item) => inner.IsPristine(item);

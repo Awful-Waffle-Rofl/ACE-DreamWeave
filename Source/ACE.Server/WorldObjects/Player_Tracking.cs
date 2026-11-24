@@ -160,6 +160,12 @@ namespace ACE.Server.WorldObjects
             if (worldObject == null || worldObject.Guid == Guid)
                 return;
 
+            // Allegiance Avatar fighter visibility probe (one type test for every other object): logs which gate, if any,
+            // stopped this client's create. See AvatarFighterProbe.
+            if (worldObject is ACE.Server.Avatars.Gauntlet.GauntletAvatarFighter probedFighter)
+                ACE.Server.Avatars.Gauntlet.AvatarFighterProbe.OnClientCreate(this, probedFighter, delay,
+                    probedFighter.Visibility && !Adminvision ? "Visibility" : probedFighter.IsSkyDecor && !ShouldSendToClient(probedFighter, HideSkyDecor) ? "sky decor" : null);
+
             // If Visibility is true, do not send object to client, object is meant for server side only, unless Adminvision is true.
             if (worldObject.Visibility && !Adminvision)
                 return;
@@ -232,6 +238,9 @@ namespace ACE.Server.WorldObjects
             }
             else
                 Session.Network.EnqueueSend(sharedDelete ?? new GameMessageDeleteObject(wo));
+
+            if (wo is ACE.Server.Avatars.Gauntlet.GauntletAvatarFighter probedFighter)
+                ACE.Server.Avatars.Gauntlet.AvatarFighterProbe.OnClientDelete(this, probedFighter, fromPickup);
 
             // The client drops this object's emitters when it destroys the object, so allow a re-send
             // the next time it comes into view.

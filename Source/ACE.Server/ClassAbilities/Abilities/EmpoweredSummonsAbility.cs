@@ -66,14 +66,19 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "empoweredsummons",
             DisplayName = "Empowered Summons",
-            Description = "Your combat pets are stronger - more health, damage, and defenses per rank. " +
-                          "Higher Leadership increases the bonus. Higher Loyalty makes them last longer.",
+            DescriptionTemplate = "Your combat pets get more health, damage and defense.",
             MaxRank = 3,
             CostPerRank = new[] { 2, 2, 2 },   // premium reprice 2026-09-13: 1/rank -> 2/rank
             Implemented = true,
             // TWO riders: Leadership is the headline one (pet stats), Loyalty rides the duration half.
             AffinitySkill = Skill.Leadership,
             AdditionalAffinitySkills = new[] { Skill.Loyalty },
+            // The duration half's Loyalty rider is the legacy additive shape with its own per-skill-point keys.
+            AffinityRate = AffinityRateSpec.LegacyAdditive("class_ability_empoweredsummons_loyalty_per_trained", "class_ability_empoweredsummons_loyalty_per_spec", Skill.Loyalty, "pet duration"),
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "total", Bounds = CeilingBounds.Total, Source = CeilingSource.Tunable, Key = "class_ability_empoweredsummons_max_duration_bonus", Label = "max pet duration bonus", Format = "pct", ZeroIsLimit = true },
+            },
         };
 
         /// <summary>
@@ -227,6 +232,8 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Per = null,
                 CapNote = null,
                 Secondary = secondaries,
+                // The raw (pre-clamp) Loyalty fraction, which is what DurationMultiplier clamps at the cap.
+                Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "total", player.GetEmpoweredSummonsDurationBonusRaw() * 100.0, rank, ClassAbilityText.Live) },
             };
         }
 

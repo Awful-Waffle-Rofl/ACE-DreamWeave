@@ -69,6 +69,10 @@ namespace ACE.Server.WeaponMods
     /// change, and until that pass lands the fourth special is unreachable because
     /// weapon_mod_special_chance_4 defaults to 0.
     ///
+    /// EXCEPTION, owner ruling 2026-11-15: Paragon modifiers (weapon levels 51-55) ARE player-chosen. They live in
+    /// their own slots outside MaxSpecials, are never rerolled, and were accepted without a power re-check. See
+    /// Docs/WeaponMods/DESIGN.md section 20 and WeaponModParagon.cs. The rule above still governs every rolled special.
+    ///
     /// TIER B (v2) IS THE SECOND HALF OF THIS TABLE, and it is shaped differently on purpose. Every Tier B row
     /// writes NO native property: its record holds a plain FRACTION and a hand-wired hook in
     /// Player_WeaponMods.cs reads it live at combat time. See <see cref="WeaponModDefinition"/> for the storage
@@ -178,7 +182,7 @@ namespace ACE.Server.WeaponMods
 
         /// <summary>
         /// Inclusive lower bound of the v3 TIER B CATALOG EXPANSION band (2026-08-06) - Heft, Tension,
-        /// Leverage, Attunement, Focus and Execution. Deliberately a SECOND, disjoint band rather than an
+        /// Leverage, Attunement, Precision and Execution. Deliberately a SECOND, disjoint band rather than an
         /// extension of <see cref="TierBPropertyBandEnd"/>: the original 8130-8149 system was filled edge to
         /// edge (6 Tier A active + 5 retired + 7 Tier B active + 2 Tier B reserved = 20 ids), so this
         /// expansion sits at 8021-8026, right after the multishot prototype pair. A Tier B record is now
@@ -193,7 +197,7 @@ namespace ACE.Server.WeaponMods
         /// in WeaponModInteractionTests.Registry_NoSpecialSharesANativePropertyWithALayerOneMaterial exists
         /// specifically to refuse: <see cref="WeaponModManager.ApplyReroll"/> reverses the whole layer 1
         /// composition and THEN clears the specials, so a shared native would be subtracted twice from a
-        /// value only one of them contributed. Focus and Execution were blocked in that same draft by the
+        /// value only one of them contributed. Precision and Execution were blocked in that same draft by the
         /// crit invariant below. Tier B resolves both at once, because a Tier B row writes no native at all.
         /// </summary>
         public const int TierBExpansionBandStart = 8021;
@@ -442,6 +446,8 @@ namespace ACE.Server.WeaponMods
                 Record = PropertyFloat.WeaponModSecondWind,
                 // HOOK: Player.ApplyWeaponModCreatureDeath, off Creature.OnDeath beside
                 // ApplyCreatureDeathClassAbilities. NetherBloomAbility is the precedent for that site.
+                // Summoner focus (Shared route, SummonerFocus.PetRoute): a combat pet's killing blow also restores the
+                // PET's health, in SummonerFocus.ApplyPetKillUtility on the pet's own queue.
                 //
                 // The magnitude is a fraction of MAXIMUM health, stamina and mana, restored on a killing blow.
                 MaxRoll = 0.12,
@@ -458,7 +464,7 @@ namespace ACE.Server.WeaponMods
              * reworked after an adversarial review found two structural collisions - see the PropertyFloat.cs
              * 8021-8026 comment block and WeaponModId.cs class remarks for the full account. In short:
              * Heft/Tension/Leverage/Attunement would each have written a native property a layer 1 tinker
-             * material also owns, and Focus/Execution would have written the retail crit properties this
+             * material also owns, and Precision/Execution would have written the retail crit properties this
              * system routes around via the Gear* ratings. Tier B sidesteps both - no native property, no
              * collision.
              *
@@ -466,7 +472,8 @@ namespace ACE.Server.WeaponMods
              * formula rather than composing additively at an outer call site, so each reads
              * WeaponModCombat.ReadWeaponOnly(weapon, ...) directly off the weapon parameter already in scope
              * at its hook site - no Player accessor needed, and the hook fires for a monster wielder exactly
-             * as harmlessly as for a player one (ReadWeaponOnly returns 0 on a weapon with no record).
+             * as harmlessly as for a player one (ReadWeaponOnly returns 0 on a weapon with neither a record nor
+             * a Paragon gem for the modifier).
              *
              *   Heft       - Source/ACE.Server/Entity/BaseDamageMod.cs, the (BaseDamage, Creature, WorldObject)
              *                constructor: added into DamageBonus, alongside the existing
@@ -476,18 +483,18 @@ namespace ACE.Server.WeaponMods
              *                at ROLL time, so reading both unconditionally here is harmless.
              *   Attunement - WorldObject_Weapon.GetCasterElementalDamageModifier, added into the
              *                wielderEnchantments + weaponEnchantments sum before the PvP halving.
-             *   Focus      - WorldObject_Weapon.GetWeaponCriticalChance AND GetWeaponMagicCritFrequency
+             *   Precision  - WorldObject_Weapon.GetWeaponCriticalChance AND GetWeaponMagicCritFrequency
              *                (physical and magic crit chance), added AFTER the Math.Max against the Critical
              *                Strike imbue, alongside the existing GetCritRating() * 0.01f term. Wired into
-             *                BOTH functions - not just the one the original spec named - because Focus is
+             *                BOTH functions - not just the one the original spec named - because Precision is
              *                Caster-eligible and GetWeaponCriticalChance is never reached by a spell cast;
-             *                leaving GetWeaponMagicCritFrequency unwired would make Focus silently dead on
+             *                leaving GetWeaponMagicCritFrequency unwired would make Precision silently dead on
              *                every caster who rolls it, the same class of bug the Tier A rework itself was
              *                triggered by.
              *   Execution  - Entity/DamageEvent.cs, multiplies CriticalDamageMod by (1 + magnitude) right
              *                after GetWeaponCritDamageMod returns (physical crit damage); AND
              *                WorldObject_Weapon's weaponCritDamageMod in SpellProjectile.cs, at both call
-             *                sites (life magic and war/void), for the same Caster-eligibility reason as Focus.
+             *                sites (life magic and war/void), for the same Caster-eligibility reason as Precision.
              *
              * THIS IS WHY BaseDamageMod.cs AND WorldObject_Weapon.cs NOW DIVERGE FROM UPSTREAM 08471633e -
              * BaseDamageMod.cs for the first time, WorldObject_Weapon.cs on top of its pre-existing multi-shot
@@ -556,7 +563,7 @@ namespace ACE.Server.WeaponMods
             {
                 Id = WeaponModId.Focus,
                 Tier = WeaponModTier.B,
-                DisplayName = "Focus",
+                DisplayName = "Precision", // formerly "Focus"; renamed to stop colliding with the Focus attribute. Id/property names unchanged.
                 Record = PropertyFloat.WeaponModFocus,
                 // HOOKS: WorldObject_Weapon.GetWeaponCriticalChance (physical) and GetWeaponMagicCritFrequency
                 // (magic), both added AFTER their Math.Max against the Critical Strike imbue, alongside the
@@ -665,7 +672,9 @@ namespace ACE.Server.WeaponMods
                 // HOOK: Player.ApplyWeaponModCleanse, called from ApplyWeaponModCreatureDeath alongside Second
                 // Wind and Mana Well - a sibling, not conditional on Second Wind. Rolls the magnitude as a
                 // probability and strips one HARMFUL enchantment (no EnchantmentTypeFlags.Beneficial) off the
-                // wielder via DispellingEdgeAbility.SelectDispellable.
+                // wielder via DispellingEdgeAbility.SelectDispellable. Summoner focus (Shared route): a combat pet's
+                // killing blow also rolls it on the PET, in SummonerFocus.ApplyPetKillUtility on the pet's own queue
+                // (Creature.CleanseOneHarmfulEnchantmentNoPvpLock).
                 MaxRoll = 1.00,
                 NativeDefault = 0,
                 AffectsSingleTargetDamage = false,
@@ -699,7 +708,9 @@ namespace ACE.Server.WeaponMods
                 // HOOK: Player.ApplyWeaponModOutgoingDamage (physical) and Player.ApplyWeaponModSpellHit (spell)
                 // both funnel into the shared Player.TryWeaponModSiphon helper, which strips one BENEFICIAL
                 // enchantment off the target via DispellingEdgeAbility.SelectDispellable and re-applies it to
-                // the wielder at the spell's own full duration.
+                // the wielder at the spell's own full duration. The body is Creature.SiphonOneBeneficialEnchantment.
+                // Summoner focus (Shared route): a combat pet's landed hit rolls it too, onto the PET, through
+                // SummonerFocus.TryPetSiphon from Creature.TakeDamage (DirectHit) and SpellProjectile.
                 MaxRoll = 0.10,
                 NativeDefault = 0,
                 AffectsSingleTargetDamage = false,
@@ -743,6 +754,9 @@ namespace ACE.Server.WeaponMods
                 //    still requires an equipped shield, so with no shield this enables neither Thorns nor
                 //    Shield Block.
                 // Frontal (180 degree cone) physical only, like a shield.
+                //  - Summoner focus (Shared route): the owner's combat pets take the focus's level too, at both
+                //    GetShieldMod branches through SummonerFocus.PetDefensiveWeaponLevel (stance-bound, no Thorns),
+                //    mirrored in the simulator's MonsterDefenderProfile shield rows.
                 //
                 // MaxRoll corrected from 50 to 40, then revised again to 25 (repo-owner correction, 2026-08-17).
                 // RAISED FROM 25 TO 200 on 2026-10-25 (owner ruling), with a PER-ITEM ceiling: a one-handed

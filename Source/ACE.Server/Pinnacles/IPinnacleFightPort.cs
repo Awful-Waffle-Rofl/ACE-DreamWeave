@@ -49,7 +49,25 @@ namespace ACE.Server.Pinnacles
         /// Starts a hazard run under <paramref name="tag"/>. origin fills cx/cy from that object's position. The
         /// script sees exactly one HazardEnded(tag) per call, carrying the FINAL outcome after the core's one retry.
         /// </summary>
-        void StartHazard(string tag, string kind, string pattern, HazardArgs args, PinnacleHandle origin = default);
+        void StartHazard(string tag, string kind, string pattern, HazardArgs args, PinnacleHandle origin = default, PinnacleHazardOptions options = null);
+
+        /// <summary>True when the owner is standing on the ground (not airborne or teleporting). False once the fight has ended.</summary>
+        bool IsOwnerGrounded();
+
+        /// <summary>
+        /// Destroys and forgets every add spawned under exactly <paramref name="tag"/>. Never delivers AddDied. Returns
+        /// how many were destroyed; 0 once the fight has ended.
+        /// </summary>
+        int DestroyAdds(string tag);
+
+        /// <summary>
+        /// Casts at the owner with no turn and no nod: when the fight is Running and the caster is alive, the cast happens
+        /// now; otherwise it is dropped.
+        /// </summary>
+        void CastAtOwnerNow(PinnacleHandle caster, uint spellId);
+
+        /// <summary>Sets <paramref name="h"/>'s melee reach in metres; null restores its own.</summary>
+        void SetMeleeReach(PinnacleHandle h, float? metres);
 
         /// <summary>Stops every hazard run of this fight. No HazardEnded is delivered for runs stopped this way.</summary>
         void StopHazards();
@@ -67,6 +85,12 @@ namespace ACE.Server.Pinnacles
 
         /// <summary>Strips up to <paramref name="count"/> random beneficial enchantments from the owner; returns how many.</summary>
         int DispelOwnerBuffs(int count);
+
+        /// <summary>
+        /// Gives the owner <paramref name="spellId"/> for <paramref name="seconds"/>, cast by the head (IPinnacleWorld.GrantOwnerBuff).
+        /// Dropped (false) unless the fight is Running, the head is alive and <paramref name="seconds"/> is a positive number.
+        /// </summary>
+        bool GrantOwnerBuff(uint spellId, double seconds);
 
         void Say(string line);
 

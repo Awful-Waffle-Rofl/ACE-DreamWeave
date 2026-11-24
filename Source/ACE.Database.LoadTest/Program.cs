@@ -438,7 +438,7 @@ namespace ACE.Database.LoadTest
                 var reportPath = Path.Combine(runDir, $"run{run}.json");
 
                 Console.WriteLine($"=== run {run}/{runs}: reset-baseline ===");
-                if (!RunChild("powershell.exe", new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", resetScript }))
+                if (!RunChild(OperatingSystem.IsWindows() ? "powershell.exe" : "pwsh", new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", resetScript }))
                 {
                     Console.WriteLine("reset-baseline.ps1 failed - aborting calibration.");
                     return 1;
@@ -568,10 +568,18 @@ namespace ACE.Database.LoadTest
             foreach (var argument in arguments)
                 startInfo.ArgumentList.Add(argument);
 
-            using var process = Process.Start(startInfo);
-            process.WaitForExit();
+            try
+            {
+                using var process = Process.Start(startInfo);
+                process.WaitForExit();
 
-            return process.ExitCode == 0;
+                return process.ExitCode == 0;
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                Console.WriteLine($"{fileName} not found on PATH");
+                return false;
+            }
         }
 
         private static bool ConfirmDestructive()

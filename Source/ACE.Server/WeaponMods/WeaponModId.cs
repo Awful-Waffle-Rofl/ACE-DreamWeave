@@ -60,7 +60,7 @@ namespace ACE.Server.WeaponMods
     /// would each have shared a native property with an existing layer 1 tinker material (Iron, Mahogany,
     /// Mahogany, Green Garnet respectively), which the pre-existing
     /// Registry_NoSpecialSharesANativePropertyWithALayerOneMaterial test exists specifically to catch; and
-    /// Focus/Execution, proposed to write PropertyFloat.CriticalFrequency 147 / CriticalMultiplier 136
+    /// Precision/Execution, proposed to write PropertyFloat.CriticalFrequency 147 / CriticalMultiplier 136
     /// directly, would have collided with the HARD "crit routes through ratings, never the retail properties"
     /// invariant a few lines below. Routing all six through Tier B - reading their magnitude live rather than
     /// writing a native property at all - resolves both collisions at once.

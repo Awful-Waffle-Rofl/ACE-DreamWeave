@@ -23,7 +23,7 @@ namespace ACE.Server.Tests
                 Assert.AreEqual(skill.Name, skill.Name.ToLowerInvariant(), $"{skill.Id}: Name must be lowercase");
                 Assert.IsFalse(skill.Name.Contains(' '), $"{skill.Id}: Name must be a single token (used in /abilities commands)");
                 Assert.IsFalse(string.IsNullOrWhiteSpace(skill.DisplayName), $"{skill.Id}: DisplayName is empty");
-                Assert.IsFalse(string.IsNullOrWhiteSpace(skill.Description), $"{skill.Id}: Description is empty");
+                Assert.IsFalse(string.IsNullOrWhiteSpace(ClassAbilityText.Describe(skill, ClassAbilityText.Defaults)), $"{skill.Id}: Description is empty");
 
                 Assert.IsTrue(skill.MaxRank >= 1, $"{skill.Id}: MaxRank must be >= 1");
                 Assert.IsNotNull(skill.CostPerRank, $"{skill.Id}: CostPerRank is null");

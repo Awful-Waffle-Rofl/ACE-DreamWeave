@@ -474,8 +474,35 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public virtual Skill GetCurrentWeaponSkill()
         {
-            var weapon = GetEquippedWeapon();
+            return ResolveNonPlayerWeaponSkill(GetEquippedWeapon());
+        }
 
+        /// <summary>
+        /// The weapon skill a non-player creature rolls for a MELEE-delivered hit: its melee weapon's skill, or
+        /// unarmed (post-MoA converted, as <see cref="GetCurrentWeaponSkill()"/>) when it wields none. Never a wielded
+        /// launcher's or thrown weapon's skill: <see cref="GetCurrentWeaponSkill()"/> falls back to the missile weapon
+        /// through GetEquippedWeapon, so an archer still holding its bow (a riposte counter, or a melee swing before the
+        /// bow is destroyed) rolled its Missile Weapons skill for a strike the player defends with Melee Defense.
+        /// Owner ruling 2026-11-21 (Discord "Missle mobs when melee still hit as if they are useing missiles"): every
+        /// melee-delivered hit rolls the monster's melee attack skill against the player's melee defense.
+        /// </summary>
+        public Skill GetCurrentMeleeWeaponSkill()
+        {
+            return ResolveNonPlayerWeaponSkill(GetEquippedMeleeWeapon());
+        }
+
+        /// <summary>
+        /// The weapon skill for a hit delivered as <paramref name="deliveredAs"/>. A Player answers with its own
+        /// GetCurrentWeaponSkill unchanged (it cannot swing a launcher). A non-player creature's melee hit reads
+        /// <see cref="GetCurrentMeleeWeaponSkill"/>; every other hit reads <see cref="GetCurrentWeaponSkill()"/>.
+        /// </summary>
+        public Skill GetWeaponSkillForHit(CombatType deliveredAs)
+        {
+            return deliveredAs == CombatType.Melee && !(this is Player) ? GetCurrentMeleeWeaponSkill() : GetCurrentWeaponSkill();
+        }
+
+        private Skill ResolveNonPlayerWeaponSkill(WorldObject weapon)
+        {
             var skill = weapon != null ? weapon.WeaponSkill : Skill.UnarmedCombat;
 
             var creatureSkill = GetCreatureSkill(skill);
@@ -504,7 +531,26 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public virtual uint GetEffectiveAttackSkill()
         {
-            var attackSkill = GetCreatureSkill(GetCurrentAttackSkill()).Current;
+            return EffectiveNonPlayerAttackSkill(GetCurrentAttackSkill());
+        }
+
+        /// <summary>
+        /// The effective attack skill for a hit delivered as <paramref name="deliveredAs"/>, read by the evade roll
+        /// (DamageEvent.GetEvadeChance). A Player, and every non-melee hit, answer exactly as
+        /// <see cref="GetEffectiveAttackSkill()"/>; a non-player creature's melee hit rolls its melee attack skill
+        /// (<see cref="GetCurrentMeleeWeaponSkill"/>), never a wielded launcher's.
+        /// </summary>
+        public uint GetEffectiveAttackSkillForHit(CombatType deliveredAs)
+        {
+            if (this is Player || deliveredAs != CombatType.Melee)
+                return GetEffectiveAttackSkill();
+
+            return EffectiveNonPlayerAttackSkill(GetCurrentMeleeWeaponSkill());
+        }
+
+        private uint EffectiveNonPlayerAttackSkill(Skill skill)
+        {
+            var attackSkill = GetCreatureSkill(skill).Current;
 
             // TODO: don't use for bow?
             // https://asheron.fandom.com/wiki/Developer_Chat_-_2002/09/23
@@ -517,23 +563,33 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// Returns the effective defense skill for a player or creature,
-        /// ie. with Defender bonus and imbues
+        /// ie. with Defender bonus and imbues.
+        /// <paramref name="stance"/> null reads the live CombatMode (every combat caller); a value answers as if this
+        /// creature were in that stance, writing nothing (Character Details).
         /// </summary>
-        public uint GetEffectiveDefenseSkill(CombatType combatType)
+        public uint GetEffectiveDefenseSkill(CombatType combatType, CombatMode? stance = null)
         {
             var defenseSkill = combatType == CombatType.Missile ? Skill.MissileDefense : Skill.MeleeDefense;
-            var defenseMod = defenseSkill == Skill.MissileDefense ? GetWeaponMissileDefenseModifier(this) : GetWeaponMeleeDefenseModifier(this);
+            var defenseMod = defenseSkill == Skill.MissileDefense ? GetWeaponMissileDefenseModifier(this, stance) : GetWeaponMeleeDefenseModifier(this, stance);
             var burdenMod = GetBurdenMod();
 
             var imbuedEffectType = defenseSkill == Skill.MissileDefense ? ImbuedEffectType.MissileDefense : ImbuedEffectType.MeleeDefense;
             var defenseImbues = GetDefenseImbues(imbuedEffectType);
 
-            var stanceMod = this is Player player ? player.GetDefenseStanceMod() : 1.0f;
+            var stanceMod = this is Player player ? player.GetDefenseStanceMod(stance) : 1.0f;
 
             //if (this is Player)
                 //Console.WriteLine($"StanceMod: {stanceMod}");
 
-            var effectiveDefense = (uint)Math.Round(GetCreatureSkill(defenseSkill).Current * defenseMod * burdenMod * stanceMod + defenseImbues);
+            var current = GetCreatureSkill(defenseSkill).Current;
+
+            var effectiveDefense = (uint)Math.Round(current * defenseMod * burdenMod * stanceMod + defenseImbues);
+
+            // Threads melee defense ceiling / band cap: the wielded weapon's melee defense modifier (WeaponDefense plus
+            // Defender style auras) must not lift a Thread creature above max(Current, ceiling ?? band cap). No bound (every
+            // creature outside a Thread run, and every Player) leaves the value untouched.
+            if (defenseSkill == Skill.MeleeDefense && this is not Player)
+                effectiveDefense = ACE.Server.ThreadDungeons.DungeonCombatNormalizer.BoundWeaponLiftedDefense(effectiveDefense, current, GetMeleeDefenseWeaponBound());
 
             if (IsExhausted) effectiveDefense = 0;
 
@@ -571,7 +627,13 @@ namespace ACE.Server.WorldObjects
             // belongs here. The /abilities readouts call the one-argument overload and never see it - see
             // Player_WeaponMods.GetWeaponModAttackSpeedMod for why a positional term must not reach them.
             if (this is Player player)
+            {
                 animSpeed = player.ApplyClassAbilityAttackSpeed(animSpeed, includeConditional: true);
+
+                // Pinnacle hazard hit slow (Player_PinnacleHitSlow): AFTER the class-ability ceiling, so a slowed player
+                // is slowed relative to their own capped speed. Exactly 1 unless a hit slow is live on this player.
+                animSpeed = (float)(animSpeed * player.GetPinnacleAttackSlowFactor());
+            }
             else
             {
                 // monster combat effects: the monster half of the same ceiling, composed and clamped by
@@ -731,6 +793,12 @@ namespace ACE.Server.WorldObjects
             if (CombatMode == CombatMode.NonCombat && !ShieldAppliesInNonCombat)
                 return 1.0f;
 
+            // Rear arc (outside the 180 degree frontal cone every shield and virtual shield below uses): nothing
+            // below ever reduces a rear hit, so it is decided here. Only a Player can wear a Mantle cloak (cloak
+            // rear guard); everyone else, and a Player without one, stays at exactly 1.0.
+            if (this is Player rearPlayer && Math.Abs(GetAngle(facing)) > 90.0f)
+                return rearPlayer.GetCloakRearGuardMod(attacker, weapon);
+
             // does the player have a shield equipped?
             var shield = GetEquippedShield();
             if (shield == null)
@@ -748,10 +816,12 @@ namespace ACE.Server.WorldObjects
                 // Creature-level. shield_applies_in_noncombat lets an equipped SHIELD count in peace mode;
                 // Defensive Weapon stays stance-bound, so it reads nothing for a NonCombat defender (see
                 // Player.GetDefensiveWeaponShieldLevel, which also resolves the ONE carrier and sanitizes).
-                var defensiveWeapon = this is Player defensivePlayer ? defensivePlayer.GetDefensiveWeaponShieldLevel() : 0.0;
+                // Summoner casters: a combat pet takes its owner's focus Defensive Weapon the same way (SummonerFocus.PetDefensiveWeaponLevel)
+                var defensiveWeapon = this is Player defensivePlayer ? defensivePlayer.GetDefensiveWeaponShieldLevel() : SummonerFocus.PetDefensiveWeaponLevel(this, attacker);
 
                 // the two flat levels ride ONE virtual shield; neither present means no shield at all
-                var virtualShieldLevel = defensiveWeapon + wardShieldLevel;
+                var manaBarrierShieldLevel = this is Player barrierPlayer ? barrierPlayer.GetManaBarrierShieldLevel(attacker) : 0.0;
+                var virtualShieldLevel = ManaBarrierShieldMath.VirtualShieldLevel(defensiveWeapon, wardShieldLevel, manaBarrierShieldLevel);
 
                 if (virtualShieldLevel <= 0.0)
                     return 1.0f;
@@ -847,7 +917,9 @@ namespace ACE.Server.WorldObjects
             // SUM, as on the no-shield path. The ward is 0 unless a ward is up against a PvE attacker; Defensive
             // Weapon is 0 in NonCombat (stance-bound) or without the record.
             if (this is Player wardShieldPlayer)
-                effectiveLevel = (float)DefensiveWeaponMath.AfterShieldCap(effectiveLevel, wardShieldPlayer.GetDefensiveWeaponShieldLevel(), wardShieldPlayer.GetWardShieldLevel(attacker, facing));
+                effectiveLevel = (float)DefensiveWeaponMath.AfterShieldCap(effectiveLevel, wardShieldPlayer.GetDefensiveWeaponShieldLevel(), wardShieldPlayer.GetWardShieldLevel(attacker, facing), wardShieldPlayer.GetManaBarrierShieldLevel(attacker));
+            else if (this is CombatPet)
+                effectiveLevel = (float)DefensiveWeaponMath.AfterShieldCap(effectiveLevel, SummonerFocus.PetDefensiveWeaponLevel(this, attacker), 0.0);
 
             var ignoreShieldMod = attacker.GetIgnoreShieldMod(weapon);
             //Console.WriteLine($"IgnoreShieldMod: {ignoreShieldMod}");
@@ -1225,6 +1297,13 @@ namespace ACE.Server.WorldObjects
         {
             if (target is Player)
             {
+                // WaffleACE fork: a combat pet never damages a player. Pets only ever target monsters
+                // (ObjectMaint AttackTargets), so the only way a pet's attack reaches a player is incidental: a
+                // ring, blast, volley or splash projectile that collides with whoever stands in its path. Without
+                // this, a caster pet's area spells hit its owner and the owner's allies.
+                if (this is CombatPet)
+                    return false;
+
                 // monster attacking player
                 return true;    // other checks handled elsewhere
             }

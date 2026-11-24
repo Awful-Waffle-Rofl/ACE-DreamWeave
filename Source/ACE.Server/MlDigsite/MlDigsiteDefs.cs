@@ -33,6 +33,43 @@ namespace ACE.Server.MlDigsite
     }
 
     /// <summary>
+    /// Which admission gate a completed dig passed or hit, from <see cref="MlDigsiteRules.Admit"/>, in the
+    /// order the gates are checked. <see cref="MlDigsiteRules.KeepsMapOnRefusal"/> decides which refusals
+    /// leave the map in the digger's pack.
+    /// </summary>
+    public enum MlDigsiteAdmission
+    {
+        Admitted,
+        Disabled,
+        DiggerAlreadyRunning,
+        TooCloseToLiveEncounter,
+        CapFull,
+    }
+
+    /// <summary>
+    /// What MlDigsiteManager.TryStart did with one completed dig, so TreasureMapHandler.FinishDig can tell
+    /// a refusal that kept the map from one that consumed it.
+    /// </summary>
+    public enum MlDigsiteStartOutcome
+    {
+        /// <summary>The commit ran (payout and map consumed) and the encounter was registered and opened.</summary>
+        Started,
+
+        /// <summary>
+        /// Refused BEFORE the commit ran: nothing was paid, the map was not consumed, nothing was registered.
+        /// Today only <see cref="MlDigsiteAdmission.TooCloseToLiveEncounter"/> refuses this way, which covers
+        /// the digger's own live encounter inside the radius as well as another player's.
+        /// </summary>
+        RefusedMapKept,
+
+        /// <summary>Admission passed, but the commit itself declined (a full pack); nothing was registered.</summary>
+        CommitDeclined,
+
+        /// <summary>Refused AFTER the commit ran, exactly as every refusal did before: the map is consumed.</summary>
+        Refused,
+    }
+
+    /// <summary>
     /// How an encounter finished, which is the only input to the payout tier. Partial and Failed pay the
     /// same reduced fraction (ml_digsite_partial_payout_fraction) and are kept distinct only so the log
     /// line and the player-facing wording can tell a timed-out clear from a lost one.

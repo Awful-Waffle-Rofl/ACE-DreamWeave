@@ -78,8 +78,20 @@ namespace ACE.Server.WeaponMods
         /// True iff <paramref name="script"/> is one of the quality-tier auras on the Ladder. Tailoring
         /// uses this to tell an earned, weapon-owned aura from a look-owned effect.
         /// </summary>
-        public static bool IsTierScript(uint? script) =>
-            script.HasValue && Ladder.Any(t => t.VisualEffectScript == script);
+        public static bool IsTierScript(uint? script)
+        {
+            if (!script.HasValue)
+                return false;
+
+            // A plain loop, not Ladder.Any(closure): this runs behind every CreateObject that carries a script.
+            foreach (var t in Ladder)
+            {
+                if (t.VisualEffectScript == script)
+                    return true;
+            }
+
+            return false;
+        }
 
         /// <summary>
         /// Sum of every special's intensity percentage. 0 for a weapon with no specials.

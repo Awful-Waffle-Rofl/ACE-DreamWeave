@@ -34,7 +34,7 @@ namespace ACE.Server.Managers
     /// THREADING, and the precedent for it. This runs on its own background thread, exactly as
     /// <see cref="AccountVaultBarrelReaper"/> does, and reaches the vault through the same door: the
     /// store's mutation queue, via AccountVaultStore.Enqueue. The reaper already destroys vault biotas
-    /// off the world loop that way (AccountVaultBarrelReaper.cs:160 -> AccountVaultStore.TryPurgeFromBarrel
+    /// off the world loop that way (AccountVaultBarrelReaper.TryPurgeRow -> AccountVaultStore.TryPurgeFromBarrel
     /// -> IAccountVaultWorldSource.DestroyItem -> WorldObject.Destroy), so this is not new ground; see
     /// AccountVaultStore.FoldSomeStoredItemsOnQueue's remarks for the branch-by-branch reason
     /// WorldObject.Destroy is inert for a vault item and for the doc comment this corrected.

@@ -569,8 +569,9 @@ namespace ACE.Server.Tests
 
             foreach (var bundle in ClassAbilityRegistry.StatBundleAbilities)
             {
-                var expectedList = string.Join(", ", bundle.BundledSkills.Select(s => s.ToSentence()));
-                var expectedFragment = $"Raises all of these base skills at once: {expectedList}.";
+                var names = bundle.BundledSkills.Select(s => s.ToSentence()).ToList();
+                var expectedList = names.Count <= 1 ? string.Concat(names) : string.Join(", ", names.Take(names.Count - 1)) + " and " + names[names.Count - 1];
+                var expectedFragment = $"Raises your base {expectedList}.";
 
                 foreach (var offering in ClassAbilityTokenCatalog.AllOfferings().Where(o => o.SkillId == bundle.Definition.Id))
                 {
@@ -582,7 +583,7 @@ namespace ACE.Server.Tests
 
                     if (!text.Contains(expectedFragment))
                     {
-                        var foundMatch = Regex.Match(text, @"Raises all of these base skills at once: ([^.]*)\.");
+                        var foundMatch = Regex.Match(text, @"Raises your base ([^.]*)\.");
                         var found = foundMatch.Success ? foundMatch.Groups[1].Value : "<no matching LongDesc fragment found>";
 
                         mismatches.Add($"{name}: expected skill list [{expectedList}], found [{found}]");
@@ -793,56 +794,71 @@ namespace ACE.Server.Tests
 
                 var def = offering.Definition;
                 var handler = ClassAbilityRegistry.GetHandler(offering.SkillId);
-                var isGeneratedFamily = handler is BundleStatAbility || handler is RatingAbility || handler is EnhancedStatAbility;
 
                 var longDesc = ParseLongDesc(File.ReadAllText(f), wcid, name);
+                var lead = $"{def.DisplayName} - {ClassAbilityText.Describe(def, ClassAbilityText.Defaults)}{AffinitySentence(def)}";
 
                 if (def.MaxRank == 1)
                 {
-                    var expected = $"{def.DisplayName} - {def.Description}";
-                    if (longDesc != expected)
-                        problems.Add($"{name}: expected LongDesc exactly [{expected}], found [{longDesc}]");
+                    if (longDesc != lead)
+                        problems.Add($"{name}: expected LongDesc exactly [{lead}], found [{longDesc}]");
                     continue;
                 }
 
-                if (!isGeneratedFamily && !def.Description.EndsWith("."))
+                if (!ClassAbilityText.Describe(def, ClassAbilityText.Defaults).EndsWith("."))
                 {
                     noPeriodDescriptions.Add($"{name}: {offering.SkillId}'s Description does not end in a period - joiner cannot be inferred, skipped");
                     continue;
                 }
 
-                var requiredLead = isGeneratedFamily ? $"{def.DisplayName} - " : $"{def.DisplayName} - {def.Description}";
-                if (!longDesc.StartsWith(requiredLead, StringComparison.Ordinal))
+                // Every ability, generated families included, leads with the registry description and the affinity sentence,
+                // then names the rank. The whole line is pinned by CommittedTokenContent_LiveRenderedTokenText_MatchesSqlAtDefaults.
+                var tag = $"{lead} This token teaches rank {offering.Tier}";
+                if (!longDesc.StartsWith(tag, StringComparison.Ordinal))
                 {
-                    problems.Add($"{name}: expected LongDesc to start with [{requiredLead}], found [{longDesc}]");
+                    problems.Add($"{name}: expected LongDesc to start with [{tag}], found [{longDesc}]");
                     continue;
                 }
 
-                var tag = isGeneratedFamily ? $" This token teaches rank {offering.Tier}: " : $"{requiredLead} This token teaches rank {offering.Tier}: ";
-                var tagIndex = isGeneratedFamily ? longDesc.IndexOf(tag, StringComparison.Ordinal) : (longDesc.StartsWith(tag, StringComparison.Ordinal) ? 0 : -1);
-
-                if (tagIndex < 0)
+                // A Rating token's description may carry a rider after its first sentence (Crit Resist Rating's "It also adds
+                // ... to your Damage Resist Rating."). Require that suffix verbatim in the committed LongDesc, so a retargeted
+                // suffix cannot leave the token SQL behind. (The full lead above already contains it; this names the failure.)
+                if (handler is RatingAbility)
                 {
-                    problems.Add($"{name}: expected LongDesc to contain [{tag}], found [{longDesc}]");
+                    var described = ClassAbilityText.Describe(def, ClassAbilityText.Defaults);
+                    var firstSentenceEnd = described.IndexOf(". ", StringComparison.Ordinal);
+
+                    if (firstSentenceEnd >= 0)
+                    {
+                        var suffixText = described.Substring(firstSentenceEnd + 2);
+                        if (!longDesc.Contains(suffixText, StringComparison.Ordinal))
+                            problems.Add($"{name}: expected LongDesc to contain the registry description suffix [{suffixText}], found [{longDesc}]");
+                    }
+                }
+
+                var rest = longDesc.Substring(tag.Length);
+                if (def.RankTailTemplate == null)
+                {
+                    if (rest != ".")
+                        problems.Add($"{name}: no tail template, so the line must end right after the rank; found [{rest}]");
                     continue;
                 }
 
-                var tail = longDesc.Substring(tagIndex + tag.Length);
-                if (tail.Length < 2 || !tail.EndsWith("."))
+                if (!rest.StartsWith(": ") || rest.Length < 4 || !rest.EndsWith("."))
                 {
-                    problems.Add($"{name}: tail [{tail}] must be non-empty and end with a period");
+                    problems.Add($"{name}: tail [{rest}] must be ': <tail>.'");
                     continue;
                 }
 
+                // Rating and Enhanced-stat tails open with the grant read from the same constants that generate the bonus
+                // (RatingAbility.RatingBonus / EnhancedStatAbility.TierBonus), so a change to either array is caught here.
                 if (handler is RatingAbility || handler is EnhancedStatAbility)
                 {
                     var bonusByRank = handler is RatingAbility ? RatingAbility.RatingBonus : EnhancedStatAbility.TierBonus;
-                    var delta = bonusByRank[offering.Tier] - bonusByRank[offering.Tier - 1];
-                    var cumulative = bonusByRank[offering.Tier];
-                    var expectedTail = $"+{delta} (for +{cumulative} total).";
+                    var expectedHead = $": +{bonusByRank[offering.Tier]}";
 
-                    if (tail != expectedTail)
-                        problems.Add($"{name}: expected tail [{expectedTail}] (derived from {(handler is RatingAbility ? "RatingAbility.RatingBonus" : "EnhancedStatAbility.TierBonus")}), found [{tail}]");
+                    if (!rest.StartsWith(expectedHead, StringComparison.Ordinal))
+                        problems.Add($"{name}: expected tail to open with [{expectedHead.Substring(2)}] (derived from {(handler is RatingAbility ? "RatingAbility.RatingBonus" : "EnhancedStatAbility.TierBonus")}), found [{rest}]");
                 }
             }
 
@@ -850,6 +866,95 @@ namespace ACE.Server.Tests
                 "token LongDesc lead diverges from the registry Description:\n" +
                 string.Join("\n", problems) +
                 (noPeriodDescriptions.Count > 0 ? "\nDescriptions with no trailing period (joiner not inferred):\n" + string.Join("\n", noPeriodDescriptions) : ""));
+        }
+
+        private const string TokenRegenEnvironmentVariable = "CA_TOKEN_REGEN";
+
+        // The two spellings the committed comment has had; both become "total".
+        private static readonly (string Stale, string Fresh)[] StaleLongDescComments =
+        {
+            ("this rank's increment", "this rank's total"),
+            ("this rank increment", "this rank total"),
+        };
+
+        /// <summary>
+        /// EVERY committed class ability token (bespoke abilities, abilities with no tail template, and the
+        /// generated Training / Rating / Enhanced families alike) must have SQL LongDesc text exactly equal to
+        /// ClassAbilityText.TokenLongDesc rendered at the code defaults: the central templates are the only
+        /// source of token text, and nothing is skipped.
+        ///
+        /// REGENERATING. Set CA_TOKEN_REGEN=1 and run this test: it rewrites string 16 inside each token's
+        /// SQL file (only the quoted literal; the trailing comment and every other byte stay as they were) and
+        /// reports Inconclusive instead of asserting. Mirrors CA_PLANNER_REGEN.
+        /// </summary>
+        [TestMethod]
+        public void CommittedTokenContent_LiveRenderedTokenText_MatchesSqlAtDefaults()
+        {
+            var sqlDir = FindTokenSqlDir();
+            var regen = string.Equals(Environment.GetEnvironmentVariable(TokenRegenEnvironmentVariable), "1", StringComparison.Ordinal);
+            var problems = new List<string>();
+            var rewritten = 0;
+            var checkedCount = 0;
+
+            foreach (var file in Directory.GetFiles(sqlDir, "*_classskilltoken_*.sql"))
+            {
+                var name = Path.GetFileName(file);
+                var wcid = uint.Parse(name.Split('_')[0]);
+
+                var offering = ClassAbilityTokenCatalog.AllOfferings().FirstOrDefault(o => o.Wcid == wcid);
+                Assert.IsNotNull(offering, $"{name}: wcid {wcid} is not a catalog offering, so no central text covers it");
+                var expected = ClassAbilityText.TokenLongDesc(offering.Definition, offering.Tier, ClassAbilityText.Defaults);
+                Assert.IsNotNull(expected, $"{name}: no token text rendered (the ability has no description template)");
+                checkedCount++;
+
+                var raw = File.ReadAllText(file);
+                var m = Regex.Match(raw, $@"(\(\s*{wcid}\s*,\s*16\s*,\s*')((?:[^']|'')*)('\))");
+                Assert.IsTrue(m.Success, $"{name}: no PropertyString 16 (LongDesc) row found");
+
+                var committed = m.Groups[2].Value.Replace("''", "'");
+
+                // The trailing SQL comment describes the line: a rank's TOTAL now, no longer an increment.
+                var staleComment = StaleLongDescComments.Any(c => raw.Contains(c.Stale, StringComparison.Ordinal));
+                if (committed == expected && !staleComment)
+                    continue;
+
+                if (regen)
+                {
+                    var escaped = expected.Replace("'", "''");
+                    var updated = raw.Substring(0, m.Groups[2].Index) + escaped + raw.Substring(m.Groups[2].Index + m.Groups[2].Length);
+                    foreach (var (stale, fresh) in StaleLongDescComments)
+                        updated = updated.Replace(stale, fresh, StringComparison.Ordinal);
+                    File.WriteAllText(file, updated, new System.Text.UTF8Encoding(false));
+                    rewritten++;
+                }
+                else if (committed != expected)
+                {
+                    problems.Add($"{name}: committed [{committed}] != rendered at defaults [{expected}]");
+                }
+                else
+                {
+                    problems.Add($"{name}: the trailing LongDesc comment still says an \"increment\"; the line is a rank's total now (regenerate with {TokenRegenEnvironmentVariable}=1)");
+                }
+            }
+
+            Assert.AreEqual(Directory.GetFiles(sqlDir, "*_classskilltoken_*.sql").Length, checkedCount, "every committed token file must be checked");
+            Assert.IsTrue(checkedCount >= 323, "expected the full token set (323 files at the time of writing) to be covered");
+
+            if (regen)
+                Assert.Inconclusive($"{TokenRegenEnvironmentVariable}=1: rewrote {rewritten} token file(s) of {checkedCount}. Unset it and re-run to validate, then commit.");
+
+            Assert.IsTrue(problems.Count == 0,
+                $"token LongDesc drifted from the live-rendered text; regenerate with {TokenRegenEnvironmentVariable}=1:\n" + string.Join("\n", problems));
+        }
+
+        /// <summary>
+        /// The affinity sentence a token's LongDesc carries between the description and the "This token teaches"
+        /// tag: " Affinity: Run." (a leading space), or nothing when the ability has no affinity.
+        /// </summary>
+        private static string AffinitySentence(ClassAbilityDefinition def)
+        {
+            var line = ClassAbilityText.AffinityLine(def);
+            return line == null ? string.Empty : $" {line}.";
         }
 
         private static string ParseLongDesc(string sql, uint wcid, string fileNameForAssert)
@@ -877,10 +982,10 @@ namespace ACE.Server.Tests
             foreach (var handler in ClassAbilityRegistry.Handlers)
             {
                 var def = handler.Definition;
-                if (def.Description == null)
+                if (ClassAbilityText.Describe(def, ClassAbilityText.Defaults) == null)
                     continue;
 
-                foreach (var c in def.Description)
+                foreach (var c in ClassAbilityText.Describe(def, ClassAbilityText.Defaults))
                 {
                     if (c > 127)
                     {
@@ -898,9 +1003,17 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void Catalog_TryResolve_RejectsOutOfRangeTier()
         {
+            // Battle Hardened gained ranks 2-3 on 2026-11-06 (Vanguard pass): tier 3 resolves, tier 4 does not
             Assert.IsTrue(ClassAbilityTokenCatalog.TryResolve(ClassAbilityId.BattleHardened, 1, out _));
-            // Battle Hardened is a single-rank skill - there is no tier 2 token
-            Assert.IsFalse(ClassAbilityTokenCatalog.TryResolve(ClassAbilityId.BattleHardened, 2, out _));
+            Assert.IsTrue(ClassAbilityTokenCatalog.TryResolve(ClassAbilityId.BattleHardened, 3, out _));
+            Assert.IsFalse(ClassAbilityTokenCatalog.TryResolve(ClassAbilityId.BattleHardened, 4, out _));
+            // Cloaked in Power likewise
+            Assert.IsTrue(ClassAbilityTokenCatalog.TryResolve(ClassAbilityId.CloakedInPower, 3, out _));
+            Assert.IsFalse(ClassAbilityTokenCatalog.TryResolve(ClassAbilityId.CloakedInPower, 4, out _));
+            Assert.AreEqual(1000531u, ClassAbilityTokenCatalog.WcidFor(ClassAbilityId.BattleHardened, 2));
+            Assert.AreEqual(1000532u, ClassAbilityTokenCatalog.WcidFor(ClassAbilityId.BattleHardened, 3));
+            Assert.AreEqual(1002169u, ClassAbilityTokenCatalog.WcidFor(ClassAbilityId.CloakedInPower, 2));
+            Assert.AreEqual(1002170u, ClassAbilityTokenCatalog.WcidFor(ClassAbilityId.CloakedInPower, 3));
             // Taunt is three ranks (2026-10-17): a tier 3 token resolves, a tier 4 one does not
             Assert.IsTrue(ClassAbilityTokenCatalog.TryResolve(ClassAbilityId.Taunt, 3, out _));
             Assert.IsFalse(ClassAbilityTokenCatalog.TryResolve(ClassAbilityId.Taunt, 4, out _));

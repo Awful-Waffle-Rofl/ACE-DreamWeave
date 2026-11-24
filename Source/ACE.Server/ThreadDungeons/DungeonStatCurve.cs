@@ -24,19 +24,27 @@ namespace ACE.Server.ThreadDungeons
         Focus,
         Self,
 
-        /// <summary>EFFECTIVE weapon attack skill (attribute term + InitLevel), every non-magic attack skill.</summary>
+        /// <summary>
+        /// EFFECTIVE weapon attack skill (attribute term + InitLevel), every non-magic attack skill. Above
+        /// <see cref="DungeonStatCurve.MeleeSoftenLevel"/> (400) its slope is multiplied by
+        /// dynamic_dungeons_weapon_attack_curve_rate_above_400 (default 0.33).
+        /// </summary>
         WeaponAttack,
 
         /// <summary>
         /// EFFECTIVE magic attack skill: War, Life, Void and Creature Enchantment. The curve itself grows unsoftened, but a
-        /// Thread run creature's pre-enchantment skill is held at dynamic_dungeons_magic_attack_skill_cap (default 508) at
-        /// runtime (owner ruling 2026-10-30: a top player, about 530 magic defense, resists about 66% of monster spells;
+        /// Thread run creature's pre-enchantment skill is held at dynamic_dungeons_magic_attack_skill_cap (default 490) at
+        /// runtime (owner ruling 2026-11-10: a top player, about 530 magic defense, resists about 77% of monster spells;
         /// see Creature.MagicAttackSkillCeiling). The ceiling never changes this axis' standards, only what the creature
         /// reads back.
         /// </summary>
         MagicAttack,
 
-        /// <summary>EFFECTIVE melee defense. Softened above <see cref="DungeonStatCurve.DefenseSoftenLevel"/>.</summary>
+        /// <summary>
+        /// EFFECTIVE melee defense. Softened above <see cref="DungeonStatCurve.DefenseSoftenLevel"/>, and above
+        /// <see cref="DungeonStatCurve.MeleeSoftenLevel"/> (400) it takes dynamic_dungeons_melee_defense_curve_rate_above_400
+        /// (default 0.19) of its full slope instead of the defense rate.
+        /// </summary>
         MeleeDefense,
 
         /// <summary>EFFECTIVE missile defense. Softened above <see cref="DungeonStatCurve.DefenseSoftenLevel"/>.</summary>
@@ -119,6 +127,18 @@ namespace ACE.Server.ThreadDungeons
     /// attribute term over the curve-raised attributes - otherwise the attributes' own slope would silently
     /// restore the full rate. <see cref="Extrapolate"/> does exactly that for the InitLevel medians.
     ///
+    /// THE 400 KNEE (owner ruling 2026-11-17: "after 400 we need to further soften the slope of melee attack and
+    /// defense ... roughly 15pts total for each of them between 400 and 500"). Above MONSTER level 400
+    /// (<see cref="MeleeSoftenLevel"/>) two axes change, continuously at 400 and never falling:
+    ///   WeaponAttack: per-level slope = WeaponAttackSlope * dynamic_dungeons_weapon_attack_curve_rate_above_400 (0.33);
+    ///   MeleeDefense: per-level slope = MeleeDefenseSlope * dynamic_dungeons_melee_defense_curve_rate_above_400 (0.19),
+    ///                 a fraction of the FULL slope that REPLACES the 0.5 defense rate for the stretch above 400.
+    /// Missile defense and magic defense have no 400 knee. At the level-326 standards (attack 810, melee defense 820) the
+    /// defaults raise attack from about 842 at 400 to about 857 at 500 and melee defense from about 849 to about 864,
+    /// +15 each; the old curve gained about +46 attack and +41 melee defense. A rate of 0 is flat above 400, 1 on weapon attack is the unsoftened
+    /// attack curve. The standard at level L is Standard(pivot) * Ratio(pivot, L), so both axes are
+    /// exp(slope * (full + 0.5 * mid + rate400 * top)) with full/mid/top the path lengths below 300, 300-400 and above 400.
+    ///
     /// THE DAMAGE SOFTENING (owner ruling 2026-10-29). Above the PIVOT (not 300: the curve only extrapolates
     /// damage past the pivot) the Damage axis - best body-part DVal and a wielded weapon's Damage, nothing else:
     /// no attribute, rating or spell - grows at dynamic_dungeons_damage_curve_rate_above_pivot (default 0.75) of
@@ -128,8 +148,9 @@ namespace ACE.Server.ThreadDungeons
     /// argument; the damage ceiling's prediction must pass the same rate and pivot as the live stamp, or its
     /// median drifts from the creatures it caps.
     ///
-    /// SCOPE. Threads only. World Events never construct one of these (nor call WithRetailMagicDefense), and DungeonBandStandard.Compute,
-    /// BandUplift.Apply and the DungeonRosterSelector code they share are unchanged.
+    /// SCOPE. Threads, and World Events with world_events_stat_curve on: WorldEventBandMemo.CurveStandardFor builds an
+    /// <see cref="Anchored"/> the Threads way (at the Threads compiled default rates) and calls WithRetailMagicDefense from 301 up.
+    /// DungeonBandStandard.Compute, BandUplift.Apply and the DungeonRosterSelector code they share are unchanged.
     ///
     /// PURE: no PropertyManager, no Creature, no logging. The one engine read is the skill formula table, and
     /// it arrives through a delegate (production: DungeonBandStandard.DefaultFormulaOf) so a test can supply
@@ -210,6 +231,28 @@ namespace ACE.Server.ThreadDungeons
         /// axis grows at 0.75 of its fitted slope above the pivot. 1.0 reproduces the curve before the dial existed.
         /// </summary>
         public const double DefaultDamageRateAbovePivot = 0.75;
+
+        /// <summary>
+        /// The MONSTER level above which WEAPON ATTACK and MELEE DEFENSE take their own, much flatter rate (owner
+        /// ruling 2026-11-17: "after 400 we need to further soften the slope of melee attack and defense ... roughly
+        /// 15 points total for each of them between 400 and 500"). Below it nothing differs from the 300 / pivot
+        /// curve; MISSILE defense and MAGIC defense never use this knee.
+        /// </summary>
+        public const int MeleeSoftenLevel = 400;
+
+        /// <summary>
+        /// The compiled default of dynamic_dungeons_weapon_attack_curve_rate_above_400: the WeaponAttack axis grows at
+        /// 0.33 of its fitted slope above <see cref="MeleeSoftenLevel"/>, which lifts the level-400 standard about 15
+        /// points by level 500 (ln(857/842) / (0.00053 * 100) = 0.333). 1.0 is the unsoftened weapon attack curve.
+        /// </summary>
+        public const double DefaultWeaponAttackRateAbove400 = 0.33;
+
+        /// <summary>
+        /// The compiled default of dynamic_dungeons_melee_defense_curve_rate_above_400: the MeleeDefense axis grows at
+        /// 0.19 of its FULL fitted slope above <see cref="MeleeSoftenLevel"/> (it replaces the 0.5 defense rate for that
+        /// stretch, it is not multiplied by it), about 15 points from 400 to 500 (ln(864/849) / (0.00094 * 100) = 0.186).
+        /// </summary>
+        public const double DefaultMeleeDefenseRateAbove400 = 0.19;
 
         /// <summary>The fitted slope for <paramref name="axis"/>, before any softening.</summary>
         /// <remarks>
@@ -294,6 +337,34 @@ namespace ACE.Server.ThreadDungeons
         }
 
         /// <summary>
+        /// The same [0, 1] rule for the WEAPON ATTACK dial above <see cref="MeleeSoftenLevel"/>: NaN or Infinity reads as
+        /// <see cref="DefaultWeaponAttackRateAbove400"/>, a negative value as 0 (flat above 400), above 1 as 1.
+        /// </summary>
+        public static double SanitizeWeaponAttackRate(double value)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value))
+                return DefaultWeaponAttackRateAbove400;
+
+            return Math.Clamp(value, 0.0, 1.0);
+        }
+
+        /// <summary>
+        /// The same [0, 1] rule for the MELEE DEFENSE dial above <see cref="MeleeSoftenLevel"/>: NaN or Infinity reads as
+        /// <see cref="DefaultMeleeDefenseRateAbove400"/>, a negative value as 0 (flat above 400), above 1 as 1.
+        /// </summary>
+        public static double SanitizeMeleeDefenseRate(double value)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value))
+                return DefaultMeleeDefenseRateAbove400;
+
+            return Math.Clamp(value, 0.0, 1.0);
+        }
+
+        /// <summary>The length of [lo, hi] that lies inside [from, to] (to may be int.MaxValue for "no upper bound").</summary>
+        private static int Overlap(int lo, int hi, int from, int to)
+            => Math.Max(0, Math.Min(hi, to) - Math.Max(lo, from));
+
+        /// <summary>
         /// The same [0, 1] rule for the DAMAGE dial: NaN or Infinity reads as <see cref="DefaultDamageRateAbovePivot"/>,
         /// a negative value as 0 (damage frozen at the pivot), above 1 as 1 (the unsoftened curve).
         /// </summary>
@@ -319,11 +390,16 @@ namespace ACE.Server.ThreadDungeons
         /// The magic defense axis is the ratio of two <see cref="RetailMagicDefense"/> values at
         /// <paramref name="magicDefenseRate"/>. The Damage axis's slope is multiplied by <paramref name="damageRate"/>
         /// wherever the path lies above <paramref name="damagePivot"/> (the run's stat-curve pivot; 0 or less means no
-        /// pivot, so no damage softening). Every rate is required so no caller can hand one axis's dial to another by
-        /// omission.
+        /// pivot, so no damage softening). The WeaponAttack axis's slope is multiplied by
+        /// <paramref name="weaponAttackRateAbove400"/> wherever the path lies above <see cref="MeleeSoftenLevel"/>, and the
+        /// MeleeDefense axis's slope is multiplied by <paramref name="meleeDefenseRateAbove400"/> there INSTEAD of
+        /// <paramref name="defenseRate"/> (missile and magic defense never use the 400 knee). Every rate is required so no
+        /// caller can hand one axis's dial to another by omission: a World Events caller that forgot the 400 rates would
+        /// silently get the Threads knee. World Events keeps its pre-knee curve by passing 1.0 for weapon attack (the
+        /// unsoftened slope) and its own defense rate (0.5) for melee defense, so its output above 400 is unchanged.
         /// </summary>
         public static double Ratio(DungeonStatAxis axis, int fromLevel, int toLevel, double defenseRate, double magicDefenseRate,
-            double damageRate, int damagePivot)
+            double damageRate, int damagePivot, double weaponAttackRateAbove400, double meleeDefenseRateAbove400)
         {
             if (fromLevel == toLevel)
                 return 1.0;
@@ -342,11 +418,27 @@ namespace ACE.Server.ThreadDungeons
             var slope = Slope(axis);
             double exponent;
 
-            if (IsDefense(axis))
+            if (axis == DungeonStatAxis.MeleeDefense)
+            {
+                var rate = SanitizeDefenseRate(defenseRate);
+                var rate400 = SanitizeMeleeDefenseRate(meleeDefenseRateAbove400);
+                var full = Overlap(lo, hi, int.MinValue, DefenseSoftenLevel);
+                var mid = Overlap(lo, hi, DefenseSoftenLevel, MeleeSoftenLevel);
+                var top = Overlap(lo, hi, MeleeSoftenLevel, int.MaxValue);
+                exponent = slope * (full + rate * mid + rate400 * top);
+            }
+            else if (IsDefense(axis))
             {
                 var rate = SanitizeDefenseRate(defenseRate);
                 var below = Math.Max(0, Math.Min(hi, DefenseSoftenLevel) - lo);
                 var above = Math.Max(0, hi - Math.Max(lo, DefenseSoftenLevel));
+                exponent = slope * (below + rate * above);
+            }
+            else if (axis == DungeonStatAxis.WeaponAttack)
+            {
+                var rate = SanitizeWeaponAttackRate(weaponAttackRateAbove400);
+                var below = Overlap(lo, hi, int.MinValue, MeleeSoftenLevel);
+                var above = Overlap(lo, hi, MeleeSoftenLevel, int.MaxValue);
                 exponent = slope * (below + rate * above);
             }
             else if (axis == DungeonStatAxis.Damage && damagePivot > 0)
@@ -441,14 +533,33 @@ namespace ACE.Server.ThreadDungeons
         /// attribute term and is scaled as InitLevel alone.
         /// </summary>
         public static DungeonBandStandard Extrapolate(DungeonBandStandard anchor, int pivot, int level, double defenseRate,
-            double magicDefenseRate, double damageRate, Func<Skill, SkillFormula> formulaOf = null)
+            double magicDefenseRate, double damageRate, double weaponAttackRateAbove400, double meleeDefenseRateAbove400,
+            Func<Skill, SkillFormula> formulaOf = null)
+            => anchor == null || anchor.IsEmpty || pivot <= 0 || level <= pivot
+                ? anchor ?? DungeonBandStandard.Empty
+                : Carry(anchor, pivot, level, pivot, defenseRate, magicDefenseRate, damageRate, weaponAttackRateAbove400,
+                    meleeDefenseRateAbove400, formulaOf);
+
+        /// <summary>
+        /// <paramref name="from"/> (a band standard measured or carried at <paramref name="fromLevel"/>) carried to
+        /// <paramref name="toLevel"/> by the same per-field rules as <see cref="Extrapolate"/>, which is the special case
+        /// fromLevel == damagePivot. <paramref name="damagePivot"/> is where the damage curve's slope changes (see
+        /// <see cref="Ratio"/>); a carry that starts below it (fromLevel &lt; damagePivot) is therefore allowed. Returns
+        /// <paramref name="from"/> (or Empty) for a null or empty input, fromLevel == toLevel, or either level &lt;= 0.
+        /// </summary>
+        public static DungeonBandStandard Carry(DungeonBandStandard from, int fromLevel, int toLevel, int damagePivot, double defenseRate,
+            double magicDefenseRate, double damageRate, double weaponAttackRateAbove400, double meleeDefenseRateAbove400,
+            Func<Skill, SkillFormula> formulaOf = null)
         {
-            if (anchor == null || anchor.IsEmpty || pivot <= 0 || level <= pivot)
+            var anchor = from;
+
+            if (anchor == null || anchor.IsEmpty || fromLevel == toLevel || fromLevel <= 0 || toLevel <= 0)
                 return anchor ?? DungeonBandStandard.Empty;
 
-            double R(DungeonStatAxis axis) => Ratio(axis, pivot, level, defenseRate, magicDefenseRate, damageRate, pivot);
+            double R(DungeonStatAxis axis) => Ratio(axis, fromLevel, toLevel, defenseRate, magicDefenseRate, damageRate, damagePivot,
+                weaponAttackRateAbove400, meleeDefenseRateAbove400);
 
-            var retailMagic = level > DefenseSoftenLevel;
+            var retailMagic = toLevel > DefenseSoftenLevel;
 
             var attributes = new Dictionary<PropertyAttribute, uint>(anchor.AttributeMedians.Count);
 
@@ -467,7 +578,7 @@ namespace ACE.Server.ThreadDungeons
                 // Magic defense above the soften level is the ABSOLUTE retail curve, not anchor x ratio. "0 = no
                 // data" stays 0: an anchor with no magic defense median gets none.
                 if (kvp.Key == Skill.MagicDefense && kvp.Value != 0 && retailMagic)
-                    effective[kvp.Key] = RetailMagicDefenseRounded(level, magicDefenseRate);
+                    effective[kvp.Key] = RetailMagicDefenseRounded(toLevel, magicDefenseRate);
                 else
                     effective[kvp.Key] = axis.HasValue ? Scale(kvp.Value, R(axis.Value)) : kvp.Value;
             }
@@ -492,7 +603,7 @@ namespace ACE.Server.ThreadDungeons
 
                 if (kvp.Key == Skill.MagicDefense && retailMagic)
                 {
-                    inits[kvp.Key] = InitFor(RetailMagicDefenseRounded(level, magicDefenseRate), AttributeTerm(kvp.Key, attributes));
+                    inits[kvp.Key] = InitFor(RetailMagicDefenseRounded(toLevel, magicDefenseRate), AttributeTerm(kvp.Key, attributes));
                     continue;
                 }
 
@@ -505,7 +616,7 @@ namespace ACE.Server.ThreadDungeons
             return DungeonBandStandard.Create(inits,
                 Scale(anchor.MaxBodyDamage, R(DungeonStatAxis.Damage)),
                 Scale(anchor.MaxBaseArmor, R(DungeonStatAxis.Armor)),
-                anchor.SpellTier, anchor.SampleCount, anchor.SampleLowRatio, anchor.HealthRate, attributes, effective);
+                anchor.SpellTier, anchor.SampleCount, anchor.SampleLowRatio, anchor.HealthRate, attributes, effective, anchor.CritResistRatingMedian);
         }
 
         /// <summary>
@@ -552,7 +663,7 @@ namespace ACE.Server.ThreadDungeons
             }
 
             return DungeonBandStandard.Create(inits, standard.MaxBodyDamage, standard.MaxBaseArmor, standard.SpellTier,
-                standard.SampleCount, standard.SampleLowRatio, standard.HealthRate, standard.AttributeMedians, effective);
+                standard.SampleCount, standard.SampleLowRatio, standard.HealthRate, standard.AttributeMedians, effective, standard.CritResistRatingMedian);
         }
 
         /// <summary>
@@ -571,13 +682,15 @@ namespace ACE.Server.ThreadDungeons
             private readonly Dictionary<int, DungeonBandStandard> memo = new Dictionary<int, DungeonBandStandard>();
 
             public Anchored(DungeonBandStandard anchor, int pivot, double defenseRate, double magicDefenseRate, double damageRate,
-                Func<Skill, SkillFormula> formulaOf = null)
+                double weaponAttackRateAbove400, double meleeDefenseRateAbove400, Func<Skill, SkillFormula> formulaOf = null)
             {
                 Anchor = anchor ?? DungeonBandStandard.Empty;
                 Pivot = pivot;
                 DefenseRate = SanitizeDefenseRate(defenseRate);
                 MagicDefenseRate = SanitizeMagicDefenseRate(magicDefenseRate);
                 DamageRate = SanitizeDamageRate(damageRate);
+                WeaponAttackRateAbove400 = SanitizeWeaponAttackRate(weaponAttackRateAbove400);
+                MeleeDefenseRateAbove400 = SanitizeMeleeDefenseRate(meleeDefenseRateAbove400);
                 this.formulaOf = formulaOf;
             }
 
@@ -595,6 +708,12 @@ namespace ACE.Server.ThreadDungeons
             /// <summary>The sanitized damage rate above <see cref="Pivot"/> in force for this run (1 = unsoftened).</summary>
             public double DamageRate { get; }
 
+            /// <summary>The sanitized weapon attack rate above <see cref="MeleeSoftenLevel"/> in force for this run.</summary>
+            public double WeaponAttackRateAbove400 { get; }
+
+            /// <summary>The sanitized melee defense rate above <see cref="MeleeSoftenLevel"/> in force for this run.</summary>
+            public double MeleeDefenseRateAbove400 { get; }
+
             /// <summary>
             /// The curve standard at <paramref name="level"/>; at or below the pivot the anchor, with its magic
             /// defense replaced by the retail curve when the level is above <see cref="DefenseSoftenLevel"/>.
@@ -608,15 +727,17 @@ namespace ACE.Server.ThreadDungeons
 
                     var value = level <= Pivot
                         ? WithRetailMagicDefense(Anchor, level, MagicDefenseRate, formulaOf)
-                        : Extrapolate(Anchor, Pivot, level, DefenseRate, MagicDefenseRate, DamageRate, formulaOf);
+                        : Extrapolate(Anchor, Pivot, level, DefenseRate, MagicDefenseRate, DamageRate,
+                            WeaponAttackRateAbove400, MeleeDefenseRateAbove400, formulaOf);
                     memo[level] = value;
                     return value;
                 }
             }
 
-            /// <summary><see cref="DungeonStatCurve.Ratio"/> at this run's three rates, damage split at this run's pivot.</summary>
+            /// <summary><see cref="DungeonStatCurve.Ratio"/> at this run's five rates, damage split at this run's pivot.</summary>
             public double Ratio(DungeonStatAxis axis, int fromLevel, int toLevel)
-                => DungeonStatCurve.Ratio(axis, fromLevel, toLevel, DefenseRate, MagicDefenseRate, DamageRate, Pivot);
+                => DungeonStatCurve.Ratio(axis, fromLevel, toLevel, DefenseRate, MagicDefenseRate, DamageRate, Pivot,
+                    WeaponAttackRateAbove400, MeleeDefenseRateAbove400);
         }
     }
 }

@@ -103,8 +103,7 @@ namespace ACE.Server.WorldObjects
             if (!TryGetClassAbility(ClassAbilityId.VolatileWall, out var rank))
                 return 1.0f;
 
-            var bonus = VolatileWallAbility.PerProjectileBonus(rank,
-                PropertyManager.GetDouble(VolatileWallAbility.BonusKey(rank)).Item,
+            var bonus = VolatileWallAbility.PerProjectileBonus(ClassAbilityText.Live, rank,
                 GetClassAbilityAffinityMultiplier(Skill.WarMagic));
 
             return VolatileWallAbility.DamageMultiplier(prior, bonus);

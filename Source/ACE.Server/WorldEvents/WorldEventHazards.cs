@@ -9,6 +9,7 @@ using ACE.Server.Entity;
 using ACE.Server.HazardMechanics;
 using ACE.Server.Managers;
 using ACE.Server.WorldEvents.Defs;
+using ACE.Server.WorldObjects;
 
 using log4net;
 
@@ -25,9 +26,9 @@ namespace ACE.Server.WorldEvents
         public const int DefaultCountLow = 4;
         public const int DefaultCountHigh = 10;
         public const double DefaultPct = 0.30;
-        public const string DefaultWisps = "move=3.5 hold=3 burst=1.5 rest=2.5 pillar_radius=3 mark_dest=1";
+        public const string DefaultWisps = "burst=1.5 follow=1 follow_lag=2.4 follow_target=random hold=3 mark_dest=1 move=3.5 pct=0.23 pillar_radius=5 rest=2.5";
         public const string DefaultBalls = "speed=2.5 lead=4 wave_every=6 waves=50";
-        public const string DefaultRain = "speed=7 lead=0.2 burst_radius=3 duration=300";
+        public const string DefaultRain = "burst_radius=3 duration=300 lead=0.2 speed=7 target_share=0.3 target_spread=8";
         public const double DefaultRainHeight = 30.0;
 
         public static readonly WorldEventHazardSettings Defaults = new WorldEventHazardSettings(
@@ -101,6 +102,13 @@ namespace ACE.Server.WorldEvents
 
         /// <summary>True: each started run picks rolling balls or rain (a source or "random" that resolved to balls). False: every run is <see cref="Kind"/>.</summary>
         public bool BallsAlternateWithRain { get; init; }
+
+        /// <summary>
+        /// The kinds a run is picked from, uniformly per run, when the source lists several (hazard.kinds) and the caller did not
+        /// name one. Empty: every run is <see cref="Kind"/> (or balls/rain when <see cref="BallsAlternateWithRain"/>). A picked
+        /// balls still alternates with rain when <see cref="BallsAlternateWithRain"/> is set. <see cref="Kind"/> is the first entry.
+        /// </summary>
+        public IReadOnlyList<string> KindChoices { get; init; } = Array.Empty<string>();
 
         public WorldEventHazardElement? FixedElement { get; init; }
 
@@ -297,8 +305,15 @@ namespace ACE.Server.WorldEvents
             }
 
             var kind = word;
+            var choices = new List<string>();
 
-            if (word == KindRandom)
+            if (!explicitRequest && source?.Hazard?.Kinds != null && source.Hazard.Kinds.Count > 0)
+            {
+                // The source lists several kinds: one is picked per run (NextRunKind); the first stands for the plan.
+                choices.AddRange(source.Hazard.Kinds);
+                kind = choices[0];
+            }
+            else if (word == KindRandom)
                 kind = RandomKinds[rng.Next(RandomKinds.Length)];
             else if (word != KindWisps && word != KindBalls && word != KindRain)
             {
@@ -330,18 +345,25 @@ namespace ACE.Server.WorldEvents
             var alternates = false;
 
             // "balls" from a source default or "random" picks rolling or rain per run; a request that names balls pins rolling.
-            if (kind == KindBalls)
+            if (kind == KindBalls || choices.Contains(KindBalls))
             {
-                pool = BallPatternPool(region, HazardArgs.Merge(CommonArgs(pct, WorldEventHazardElement.Fire), ballsLayer), high);
+                pool = BallPatternPool(region, HazardArgs.Merge(CommonArgs(pct, WorldEventHazardElement.Fire, ballsLayer), ballsLayer), high);
 
                 if (pool.Count == 0)
                 {
+                    // No pattern fits: a picked balls becomes rain, as a lone balls kind does.
                     note = $"no ball pattern fits a wave of {high} balls; rain only";
-                    kind = KindRain;
+                    choices = choices.Select(c => c == KindBalls ? KindRain : c).Distinct().ToList();
+
+                    if (kind == KindBalls)
+                        kind = KindRain;
                 }
                 else
                     alternates = !(explicitRequest && word == KindBalls);
             }
+
+            if (choices.Count == 1)
+                choices.Clear(); // a single choice is just the kind
 
             WorldEventHazardElement? fixedElement = null;
 
@@ -352,6 +374,7 @@ namespace ACE.Server.WorldEvents
             {
                 Kind = kind,
                 BallsAlternateWithRain = alternates,
+                KindChoices = choices,
                 FixedElement = fixedElement,
                 StyleElements = source?.Hazard?.StyleElements,
                 RainDropHeight = RainHeightFor(source, settings),
@@ -455,20 +478,29 @@ namespace ACE.Server.WorldEvents
             return all[(rng ?? Random.Shared).Next(all.Length)];
         }
 
-        /// <summary>The kind of the next run: the plan's kind, except that an alternating balls plan picks rolling or rain (pure given rng).</summary>
+        /// <summary>
+        /// The kind of the next run (pure given rng): one of the plan's KindChoices uniformly when it has several, else the plan's
+        /// kind; a balls pick (or an alternating balls plan) then picks rolling or rain.
+        /// </summary>
         public static string NextRunKind(WorldEventHazardPlan plan, Random rng)
         {
-            if (plan.BallsAlternateWithRain)
-                return (rng ?? Random.Shared).Next(2) == 0 ? KindBalls : KindRain;
+            rng ??= Random.Shared;
+            var kind = plan.Kind;
 
-            return plan.Kind;
+            if (plan.KindChoices != null && plan.KindChoices.Count > 1)
+                kind = plan.KindChoices[rng.Next(plan.KindChoices.Count)];
+
+            if (plan.BallsAlternateWithRain && kind == KindBalls)
+                return rng.Next(2) == 0 ? KindBalls : KindRain;
+
+            return kind;
         }
 
         // ---- the start ----------------------------------------------------------------------------------------------
 
         /// <summary>
         /// Everything for one HazardManager.Start (pure given rng). Args emitted per kind:
-        ///   all    damage_type, hit_verb, pct
+        ///   all    damage_type, hit_verb, pct (pct only when the kind's settings layer has no pct of its own)
         ///   wisps  wisp_wcid, script, mark_script, cycles   (pattern "mixed")
         ///   balls  ball_wcid, marker_script                 (pattern: a member of the plan's pool)
         ///   rain   ball_wcid, marker_script, burst_script, drop_z
@@ -478,7 +510,7 @@ namespace ACE.Server.WorldEvents
             float anchorZ, Random rng, IHazardHost host)
         {
             var visuals = WorldEventHazardElements.For(element);
-            var args = CommonArgs(plan.Pct, element);
+            var args = CommonArgs(plan.Pct, element, LayerOf(plan, runKind));
             HazardArgs layer;
             string pattern = null;
 
@@ -530,14 +562,34 @@ namespace ACE.Server.WorldEvents
             };
         }
 
-        private static HazardArgs CommonArgs(double pct, WorldEventHazardElement element)
+        /// <summary>
+        /// damage_type, hit_verb and pct. The pct is OMITTED when <paramref name="layer"/> (the kind's world_events_hazard_&lt;kind&gt;
+        /// string) carries its own: HazardManager.Start merges the caller's args OVER the settings layer, so an emitted pct would
+        /// always beat the layer's and a per-kind pct= would be dead.
+        /// </summary>
+        private static HazardArgs CommonArgs(double pct, WorldEventHazardElement element, HazardArgs layer)
         {
             var visuals = WorldEventHazardElements.For(element);
 
-            return HazardArgs.Empty
+            var args = HazardArgs.Empty
                 .With(HazardDefaults.DamageTypeKey, DamageWord(visuals.DamageType))
-                .With(HazardDefaults.HitVerbKey, visuals.HitVerb)
-                .With(HazardDefaults.PctKey, pct.ToString("0.####", CultureInfo.InvariantCulture));
+                .With(HazardDefaults.HitVerbKey, visuals.HitVerb);
+
+            if (layer != null && layer.Has(HazardDefaults.PctKey))
+                return args;
+
+            return args.With(HazardDefaults.PctKey, pct.ToString("0.####", CultureInfo.InvariantCulture));
+        }
+
+        private static HazardArgs LayerOf(WorldEventHazardPlan plan, string runKind)
+        {
+            switch (runKind)
+            {
+                case KindWisps: return plan.WispsLayer;
+                case KindBalls: return plan.BallsLayer;
+                case KindRain: return plan.RainLayer;
+                default: return null;
+            }
         }
 
         /// <summary>The damage_type arg word of a damage type (fire|acid|cold|electric|bludgeon).</summary>
@@ -564,6 +616,85 @@ namespace ACE.Server.WorldEvents
         private readonly ConcurrentQueue<(object Key, HazardOutcome Outcome)> ended = new ConcurrentQueue<(object, HazardOutcome)>();
 
         public bool PlayerFacing => true;
+
+        // ---- per-run hit tally (telemetry only) ---------------------------------------------------------------------
+
+        private readonly object tallyLock = new object();
+        private readonly Dictionary<object, HitTally> tallies = new Dictionary<object, HitTally>();
+
+        /// <summary>Runs whose tally was taken (their summary is written): a hit that lands after that is dropped, so no orphan entry is left behind.</summary>
+        private readonly HashSet<object> closedRuns = new HashSet<object>(ReferenceEqualityComparer.Instance);
+
+        /// <summary>Open tally entries. Test seam.</summary>
+        internal int OpenTallyCount { get { lock (tallyLock) return tallies.Count; } }
+
+        private sealed class HitTally
+        {
+            public int Hits;
+            public readonly HashSet<uint> Victims = new HashSet<uint>();
+            public double PctSum;
+        }
+
+        void IHazardHost.OnPlayerHit(HazardRun run, Player player, int amount)
+        {
+            if (run == null || player == null)
+                return;
+
+            RecordHit(run, player.Guid.Full, amount, player.Health.MaxValue);
+        }
+
+        /// <summary>
+        /// Tallies one hit under <paramref name="key"/> (the run). Any thread (hits arrive on the landblock thread). Damage is
+        /// recorded as a percent of the victim's max health. Also how a test reports a hit on a fake run.
+        /// </summary>
+        public void RecordHit(object key, uint playerGuid, int amount, uint maxHealth)
+        {
+            if (key == null || amount <= 0)
+                return;
+
+            lock (tallyLock)
+            {
+                if (closedRuns.Contains(key))
+                    return;
+
+                if (!tallies.TryGetValue(key, out var t))
+                    tallies[key] = t = new HitTally();
+
+                t.Hits++;
+                t.Victims.Add(playerGuid);
+
+                if (maxHealth > 0)
+                    t.PctSum += 100.0 * amount / maxHealth;
+            }
+        }
+
+        /// <summary>Removes and returns the tally of <paramref name="key"/> (zeros when it was never hit). Any thread.</summary>
+        public (int Hits, int PlayersHit, double DamagePctSum) TakeTally(object key)
+        {
+            lock (tallyLock)
+            {
+                if (key != null)
+                    closedRuns.Add(key);
+
+                if (key == null || !tallies.Remove(key, out var t))
+                    return (0, 0, 0.0);
+
+                return (t.Hits, t.Victims.Count, t.PctSum);
+            }
+        }
+
+        /// <summary>
+        /// The one-line summary of a finished hazard run (pure). <paramref name="pattern"/> null or blank prints as "-";
+        /// <paramref name="players"/> is the in-region player count when the run ended.
+        /// </summary>
+        public static string FormatSummary(uint eventRunId, string kind, string pattern, double seconds, int players,
+            (int Hits, int PlayersHit, double DamagePctSum) tally)
+        {
+            return string.Format(CultureInfo.InvariantCulture,
+                "[WORLDEVENT] run={0} hazard summary kind={1} pattern={2} seconds={3:0} players={4} hits={5} players_hit={6} dmg_pct_sum={7:0.0}",
+                eventRunId, kind, string.IsNullOrWhiteSpace(pattern) ? "-" : pattern, Math.Max(0.0, seconds), players,
+                tally.Hits, tally.PlayersHit, tally.DamagePctSum);
+        }
 
         void IHazardHost.OnEnded(HazardRun run, HazardOutcome outcome) => NotifyEnded(run, outcome);
 

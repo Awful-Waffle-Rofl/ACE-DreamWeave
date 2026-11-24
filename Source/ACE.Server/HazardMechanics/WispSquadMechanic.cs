@@ -121,7 +121,7 @@ namespace ACE.Server.HazardMechanics
         public string Reveal(HazardContext ctx) => null;
 
         /// <summary>The director's world: one HazardContext.</summary>
-        private sealed class ContextPort : IWispPort<HazardHandle>
+        internal sealed class ContextPort : IWispPort<HazardHandle>
         {
             private readonly HazardContext ctx;
             private readonly WispSettings s;
@@ -179,6 +179,16 @@ namespace ACE.Server.HazardMechanics
                 return true;
             }
 
+            public IReadOnlyList<(Vector3 Position, uint Id)> FollowCandidates()
+            {
+                var result = new List<(Vector3, uint)>();
+
+                foreach (var (player, position) in ctx.PlayersInRegion())
+                    result.Add((position, player.Guid.Full));
+
+                return result;
+            }
+
             public HazardHandle SpawnPillar(Vector3 point, double seconds)
                 => ctx.SpawnTimedEffect(point, s.Script, Quaternion.Identity, seconds, 1f, "pillar");
 
@@ -197,8 +207,10 @@ namespace ACE.Server.HazardMechanics
 
                 // the host hangs just under the ceiling and the mesh falls from it (identity orientation). Scale 1: a
                 // particle effect ignores the host's scale (owner, 2026-10-24), so the beam is a cue from the ceiling,
-                // not a column that must reach the floor
-                var host = MemoryLayout.CeilingBeamPoint(new Vector2(pillar.X, pillar.Y), ceilingZ.Value);
+                // not a column that must reach the floor. beam_height > 0 lowers the host to that height over the
+                // pillar's ground, so the 5 m mesh still reaches the pillar in a tall room (WispRules.CeilingBeamHost)
+                var groundZ = s.BeamHeight > 0.0 ? ctx.GroundZ(pillar.X, pillar.Y) : float.NaN;
+                var host = WispRules.CeilingBeamHost(new Vector2(pillar.X, pillar.Y), ceilingZ.Value, groundZ, s.BeamHeight);
 
                 return ctx.SpawnTimedEffect(host, s.BeamScript, MemoryLayout.BeamOrientation(false), seconds, 1f, "ceiling-beam", false);
             }
@@ -217,8 +229,10 @@ namespace ACE.Server.HazardMechanics
 
             public Vector3 RestOf(HazardHandle handle) => handle.Rest;
 
-            public int Strike(HazardHandle source, Vector3 centre, float radius, double window)
-                => ctx.HitPlayers(source, centre, radius, window, damageType: ctx.DamageType);
+            public int Strike(HazardHandle source, Vector3 centre, float radius, double window, int volley)
+                => ctx.HitPlayers(source, centre, radius, window, damageType: ctx.DamageType, hitGroup: volley == 0 ? (int?)null : volley);
+
+            public int NewHitGroup() => ctx.NewHitGroup();
 
             public void Say(string line) => ctx.Say($"[hazard #{ctx.Run.Id}] {line}");
 

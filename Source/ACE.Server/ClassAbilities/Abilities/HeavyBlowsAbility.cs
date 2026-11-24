@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 using ACE.Entity.Enum;
 using ACE.Server.Entity;
@@ -28,6 +29,12 @@ namespace ACE.Server.ClassAbilities.Abilities
     {
         public const string StretchKey = "class_ability_heavyblows_stretch_per_rank";
 
+        /// <summary>
+        /// Retail's melee power mod at a FULL power bar: 0.5 + PowerLevel 1.0. The readout and the live text both
+        /// evaluate the stretch at this swing.
+        /// </summary>
+        public const double FullPowerRetailMod = 1.5;
+
         public ClassAbilityDefinition Definition { get; } = new ClassAbilityDefinition
         {
             Id = ClassAbilityId.HeavyBlows,
@@ -35,9 +42,22 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "heavy_blows",
             DisplayName = "Heavy Blows",
-            Description = "Your power bar hits harder in melee. A full-power swing normally deals 150% damage; Heavy " +
-                          "Blows raises that to 175% / 200% / 225% at ranks 1 / 2 / 3. Lower power settings gain " +
-                          "less, and a zero-power swing is unchanged. Higher Weapon Tinkering increases the bonus.",
+            // Live text: full_power is the damage a full-power swing deals, in percent of base damage: PowerRatio at the full-power
+            // retail power mod (FullPowerRetailMod, 1.5) at the neutral affinity, times that retail mod - the ratio ModifyOutgoingDamage
+            // and GetReadout apply. The "150%" is that retail mod (0.5 + a full power bar of 1.0), a code constant with no tunable.
+            DescriptionTemplate = "Your power bar hits harder in melee. A full-power swing normally deals 150% damage, and Heavy " +
+                          "Blows raises that. Lower power settings gain less, and a zero-power swing is unchanged.",
+            RankTailTemplate = "full power deals {fn:full_power|pct}%",
+            TextFormulas = new Dictionary<string, TextFormula>
+            {
+                ["full_power"] = new TextFormula(
+                    (values, rank) => PowerRatio(values, FullPowerRetailMod, rank, 1.0) * FullPowerRetailMod,
+                    StretchKey),
+            },
+            AllowedLiterals = new[]
+            {
+                ("normally deals 150% damage", "the retail full-power melee mod, 0.5 + a full power bar of 1.0 (HeavyBlowsAbility.FullPowerRetailMod); a code constant, not a tunable"),
+            },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
@@ -60,13 +80,20 @@ namespace ACE.Server.ClassAbilities.Abilities
             return stretched / retailPowerMod;
         }
 
+        /// <summary>
+        /// <see cref="PowerRatio(double, int, double, double)"/> with the class_ability_heavyblows_stretch_per_rank tunable read
+        /// through <paramref name="values"/>. ModifyOutgoingDamage and GetReadout call this with
+        /// <see cref="ClassAbilityText.Live"/>; the live text's full_power formula calls it at the full-power retail mod.
+        /// </summary>
+        public static double PowerRatio(ITunableValues values, double retailPowerMod, int rank, double affinity) =>
+            PowerRatio(retailPowerMod, rank, values.GetDouble(StretchKey), affinity);
+
         public void ModifyOutgoingDamage(Player attacker, int rank, Creature target, DamageEvent damageEvent)
         {
             if (attacker == null || damageEvent.CombatType != CombatType.Melee)
                 return;
 
-            var ratio = PowerRatio(damageEvent.PowerMod, rank,
-                PropertyManager.GetDouble(StretchKey).Item,
+            var ratio = PowerRatio(ClassAbilityText.Live, damageEvent.PowerMod, rank,
                 attacker.GetClassAbilityAffinityMultiplier(Skill.WeaponTinkering));
 
             var gearMod = attacker.GetEquippedModValue(EquipmentModId.SavageBlows);
@@ -86,11 +113,10 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
-            var stretch = PropertyManager.GetDouble(StretchKey).Item;
             var multiplier = player.GetClassAbilityAffinityMultiplier(Skill.WeaponTinkering);
 
-            var skill = (PowerRatio(1.5, rank, stretch, 1.0) - 1.0) * 100.0;
-            var withAffinity = (PowerRatio(1.5, rank, stretch, multiplier) - 1.0) * 100.0;
+            var skill = (PowerRatio(ClassAbilityText.Live, FullPowerRetailMod, rank, 1.0) - 1.0) * 100.0;
+            var withAffinity = (PowerRatio(ClassAbilityText.Live, FullPowerRetailMod, rank, multiplier) - 1.0) * 100.0;
             var affinity = withAffinity - skill;
             var gear = player.GetEquippedModValue(EquipmentModId.SavageBlows) * 100.0;
 

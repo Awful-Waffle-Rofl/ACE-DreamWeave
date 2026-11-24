@@ -107,11 +107,20 @@ namespace ACE.Server.ThreadDungeons
 
         /// <summary>
         /// The level at and above which the health curve clamps (dynamic_dungeons_health_curve_top_level),
-        /// sanitized by <see cref="DungeonHealthCurve.SanitizeTopLevel"/> into [375, 500]. 500 (the default, the
+        /// sanitized by <see cref="DungeonHealthCurve.SanitizeTopLevel(long, int)"/> into [375, <see cref="HealthCurveCeilingLevel"/>] ([375, 500] on every Thread path). 500 (the default, the
         /// run ceiling) extrapolates the curve over every playable run level; 375 restores the pre-2026-10-08
         /// clamp exactly. See DungeonHealthCurve's class comment for the owner ruling behind the extrapolation.
         /// </summary>
         public readonly int HealthCurveTopLevel;
+
+        /// <summary>
+        /// The highest value <see cref="HealthCurveTopLevel"/> may take (Allegiance Gauntlet, 2026-11-21). Defaults to
+        /// <see cref="DefaultHealthCurveCeilingLevel"/>, the run ceiling, so the Thread reader, which never sets it, keeps the
+        /// [375, 500] top level and every Thread value is unchanged. Only <see cref="WithHealthCurveTopLevel"/> raises it, and
+        /// only the Gauntlet calls that (through the BuildLivePlan limits adjustment). Sanitized by
+        /// <see cref="DungeonHealthCurve.SanitizeCeiling"/> where it is read.
+        /// </summary>
+        public readonly int HealthCurveCeilingLevel;
 
         /// <summary>
         /// Master switch for reach-up (dynamic_dungeons_reach_up, owner ruling 2026-10-08). Above the pivot P =
@@ -122,6 +131,12 @@ namespace ACE.Server.ThreadDungeons
         /// to the builder before reach-up existed. At and below the pivot k is 1 either way.
         /// </summary>
         public readonly bool ReachUp;
+
+        /// <summary>
+        /// dynamic_dungeons_family_stretch: a family whose authored trash tops out below the run's band is stretched up to it.
+        /// False is the native-only family pool, byte-identical to the builder before the stretch existed.
+        /// </summary>
+        public readonly bool FamilyStretch;
 
         /// <summary>
         /// Master switch for the stat curve (dynamic_dungeons_stat_curve, owner ruling 2026-10-08): above the
@@ -159,6 +174,22 @@ namespace ACE.Server.ThreadDungeons
         public readonly double DamageCurveRateAbovePivot;
 
         /// <summary>
+        /// The weapon attack growth rate above monster level 400 (dynamic_dungeons_weapon_attack_curve_rate_above_400, owner
+        /// ruling 2026-11-17): above <see cref="DungeonStatCurve.MeleeSoftenLevel"/> the WeaponAttack axis grows at this fraction
+        /// of its fitted slope. 0.33 by default (about +15 points from 400 to 500); 1.0 is the unsoftened curve. Sanitized to
+        /// [0, 1] by <see cref="DungeonStatCurve.SanitizeWeaponAttackRate"/>. The constructor defaults to the shipped value.
+        /// </summary>
+        public readonly double WeaponAttackCurveRateAbove400;
+
+        /// <summary>
+        /// The melee defense growth rate above monster level 400 (dynamic_dungeons_melee_defense_curve_rate_above_400, owner
+        /// ruling 2026-11-17): above 400 the MeleeDefense axis grows at this fraction of its FULL fitted slope, replacing
+        /// <see cref="DefenseCurveRateAbove375"/> for that stretch. 0.19 by default (about +15 points from 400 to 500).
+        /// Sanitized to [0, 1] by <see cref="DungeonStatCurve.SanitizeMeleeDefenseRate"/>. The constructor defaults to the shipped value.
+        /// </summary>
+        public readonly double MeleeDefenseCurveRateAbove400;
+
+        /// <summary>
         /// The Threads ceiling on a monster's MAGIC ATTACK skill (dynamic_dungeons_magic_attack_skill_cap, owner ruling
         /// 2026-10-30): the pre-enchantment War, Life, Void and Creature Enchantment skill of every Thread run creature is
         /// held at this value (see <see cref="Creature.MagicAttackSkillCeiling"/>). 0 disables it. Sanitized by
@@ -166,6 +197,15 @@ namespace ACE.Server.ThreadDungeons
         /// constructor defaults to the shipped value.
         /// </summary>
         public readonly double MagicAttackSkillCap;
+
+        /// <summary>
+        /// The Threads ceiling on a monster's MISSILE DEFENSE skill (dynamic_dungeons_missile_defense_skill_cap): the
+        /// pre-enchantment Missile Defense of every Thread run creature is held at this value (see
+        /// <see cref="Creature.MissileDefenseSkillCeiling"/>), so a fixed archer skill keeps a predictable hit rate at top
+        /// Threads. 0 disables it. Sanitized by <see cref="DungeonCombatNormalizer.SanitizeMissileDefenseSkillCap"/>. A
+        /// default(...) struct reads 0 (off); the constructor defaults to the shipped value.
+        /// </summary>
+        public readonly double MissileDefenseSkillCap;
 
         /// <summary>
         /// Master switch for the archetype uplift (dynamic_dungeons_archetype_uplift, design steps 8-9, 2026-10-23): an
@@ -285,7 +325,7 @@ namespace ACE.Server.ThreadDungeons
         /// the right anchor for a 375 ceiling is a TUNING question, not a correctness one, and it is the
         /// repo owner's call - it is a live tunable either way. The 2026-10-08 run ceiling
         /// (<see cref="DungeonGemSpec.MaxRunLevel"/>, 500) rides the same uncapped curve: a pressed 410 run
-        /// reads (410 / 300)^2.87, about 2.45, with no edit here.
+        /// reads (410 / 300)^2, about 1.87, with no edit here.
         /// </summary>
         public readonly double RewardScaleAnchor;
 
@@ -518,28 +558,42 @@ namespace ACE.Server.ThreadDungeons
         public const double DefaultHealthCurveAnchorHigh = DungeonHealthCurve.DefaultAnchorHigh;
         public const int DefaultHealthCurveTopLevel = DungeonHealthCurve.DefaultTopLevel;
 
+        /// <summary>The compiled default of <see cref="HealthCurveCeilingLevel"/>: the run ceiling, the Thread contract.</summary>
+        public const int DefaultHealthCurveCeilingLevel = DungeonGemSpec.MaxRunLevel;
+
         /// <summary>
         /// The compiled defaults for the 2026-10-08 run-ceiling raise. Every one SHIPS ON (the fork convention
         /// that a new server setting defaults enabled), and each references its owning type's constant so the
         /// PropertyManager registration, this struct and the code are provably one value each.
         /// </summary>
         public const bool DefaultReachUp = true;
+        /// <summary>Compiled default of dynamic_dungeons_family_stretch. Ships ON; see the constructor note on why code-built limits default OFF.</summary>
+        public const bool DefaultFamilyStretch = true;
         public const bool DefaultStatCurve = true;
         public const double DefaultDefenseCurveRateAbove375 = DungeonStatCurve.DefaultDefenseRateAbove375;
         public const double DefaultMagicDefenseCurveRateAbove300 = DungeonStatCurve.DefaultMagicDefenseRateAbove300;
         public const double DefaultDamageCurveRateAbovePivot = DungeonStatCurve.DefaultDamageRateAbovePivot;
+        public const double DefaultWeaponAttackCurveRateAbove400 = DungeonStatCurve.DefaultWeaponAttackRateAbove400;
+        public const double DefaultMeleeDefenseCurveRateAbove400 = DungeonStatCurve.DefaultMeleeDefenseRateAbove400;
 
         /// <summary>
-        /// Owner ruling 2026-10-30: a top player (about 530 magic defense) resists about 66% of monster spells at top Threads.
-        /// Resist = 1/(1 + e^(0.03 * (A - D))) (WorldObject.MagicDefenseCheck, factor 0.03), so for resist 0.66 at D = 530,
-        /// A = 530 + ln(0.34 / 0.66) / 0.03 = 507.9, which rounds to 508.
+        /// Owner ruling 2026-11-10: a top player (about 530 magic defense) resists about 77% of monster spells at top Threads
+        /// (the 2026-10-30 ruling set 508 for 66%).
+        /// Resist = 1/(1 + e^(0.03 * (A - D))) (WorldObject.MagicDefenseCheck, factor 0.03), so for resist 0.77 at D = 530,
+        /// A = 530 + ln(0.23 / 0.77) / 0.03 = 489.7, which rounds to 490.
         /// </summary>
-        public const double DefaultMagicAttackSkillCap = 508.0;
+        public const double DefaultMagicAttackSkillCap = 490.0;
+
+        /// <summary>
+        /// Owner-approved fixed missile-defense ceiling for Thread monsters: sized so a rank-3 Fast Aim archer (spec Run 580)
+        /// hits about 90% at mid-bar against a 410 Thread. 0 disables it.
+        /// </summary>
+        public const double DefaultMissileDefenseSkillCap = 720.0;
         public const int DefaultBossDamageRatingFloor = 30;
         public const int DefaultBossDamageResistFloor = 15;
         public const double DefaultBossLevelMargin = 1.10;
-        public const double DefaultXpScale = 2.0;
-        public const double DefaultLumScale = 2.0;
+        public const double DefaultXpScale = 2.7;
+        public const double DefaultLumScale = 2.7;
 
         /// <summary>
         /// The compiled defaults for the roster band edges, referencing DungeonRosterSelector's own constants
@@ -612,7 +666,7 @@ namespace ACE.Server.ThreadDungeons
         /// <summary>The compiled defaults for the gem-level reward scaling curve, same shared-constant contract.</summary>
         public const bool DefaultRewardScalingEnabled = true;
         public const double DefaultRewardScaleAnchor = 300.0;
-        public const double DefaultRewardScaleExponent = 2.87;
+        public const double DefaultRewardScaleExponent = 2.0;
         public const double DefaultRewardScaleFloor = 0.10;
         public const double DefaultRewardScaleCap = 0.0;
 
@@ -750,8 +804,21 @@ namespace ACE.Server.ThreadDungeons
             bool upliftResistFloor = DefaultUpliftResistFloor,
             double magicDefenseCurveRateAbove300 = DefaultMagicDefenseCurveRateAbove300,
             double damageCurveRateAbovePivot = DefaultDamageCurveRateAbovePivot,
-            double magicAttackSkillCap = DefaultMagicAttackSkillCap)
+            double magicAttackSkillCap = DefaultMagicAttackSkillCap,
+            double missileDefenseSkillCap = DefaultMissileDefenseSkillCap,
+            double weaponAttackCurveRateAbove400 = DefaultWeaponAttackCurveRateAbove400,
+            double meleeDefenseCurveRateAbove400 = DefaultMeleeDefenseCurveRateAbove400,
+            // Deliberately false, NOT DefaultFamilyStretch: about 41 test files build limits in code and the exact-hash pins
+            // (FamilyStretchGoldenTests, ThreadsRunCeilingTests.MasterHashes) must not move. Production gets the tunable's
+            // value because ReadLimits passes it explicitly. This breaks the ctor-default = Default-constant convention on purpose.
+            bool familyStretch = false,
+            int healthCurveCeilingLevel = DefaultHealthCurveCeilingLevel)
         {
+            HealthCurveCeilingLevel = healthCurveCeilingLevel;
+            FamilyStretch = familyStretch;
+            WeaponAttackCurveRateAbove400 = weaponAttackCurveRateAbove400;
+            MeleeDefenseCurveRateAbove400 = meleeDefenseCurveRateAbove400;
+            MissileDefenseSkillCap = missileDefenseSkillCap;
             MagicAttackSkillCap = magicAttackSkillCap;
             MagicDefenseCurveRateAbove300 = magicDefenseCurveRateAbove300;
             DamageCurveRateAbovePivot = damageCurveRateAbovePivot;
@@ -836,6 +903,23 @@ namespace ACE.Server.ThreadDungeons
         /// </summary>
         public DungeonPopulationLimits WithMonsterCounts(int min, int max) => new DungeonPopulationLimits(this, min, max);
 
+        /// <summary>Copy constructor behind <see cref="WithHealthCurveTopLevel"/>; same struct-assignment rule as above.</summary>
+        private DungeonPopulationLimits(DungeonPopulationLimits source, (int TopLevel, int CeilingLevel) healthCurve)
+        {
+            this = source;
+            HealthCurveCeilingLevel = DungeonHealthCurve.SanitizeCeiling(healthCurve.CeilingLevel);
+            HealthCurveTopLevel = DungeonHealthCurve.SanitizeTopLevel(healthCurve.TopLevel, HealthCurveCeilingLevel);
+        }
+
+        /// <summary>
+        /// A copy of these limits with ONLY <see cref="HealthCurveTopLevel"/> and <see cref="HealthCurveCeilingLevel"/>
+        /// replaced, both sanitized (<see cref="DungeonHealthCurve.SanitizeCeiling"/>, then
+        /// <see cref="DungeonHealthCurve.SanitizeTopLevel(long, int)"/> against that ceiling). Allegiance Gauntlet only:
+        /// it sets both to allegiance_gauntlet_health_curve_top_level so the curve keeps growing past the run ceiling.
+        /// </summary>
+        public DungeonPopulationLimits WithHealthCurveTopLevel(int topLevel, int ceilingLevel)
+            => new DungeonPopulationLimits(this, (topLevel, ceilingLevel));
+
         /// <summary>Copy constructor behind <see cref="WithForcedFamilyWidening"/>; same struct-assignment rule as above.</summary>
         private DungeonPopulationLimits(DungeonPopulationLimits source, bool widenForForcedFamily)
         {
@@ -901,19 +985,31 @@ namespace ACE.Server.ThreadDungeons
         public int StampLevel { get; }
 
         /// <summary>
+        /// True for a creature the family stretch pulled in from outside the natural band and mapped to a level
+        /// inside it. Always carries <see cref="UpliftLevel"/> (the mapped level), never a stamp, and is never the
+        /// boss. A copy of an entry must pass this through, or a retried creature silently loses its stretch.
+        /// </summary>
+        public bool Stretched { get; }
+
+        /// <summary>
         /// <paramref name="upliftLevel"/> and <paramref name="stampLevel"/> are optional-defaulted to 0 so every
         /// pre-existing construction site and test keeps compiling and keeps meaning "not uplifted, not
-        /// stamped", which is what they all were. Every construction site that copies an entry - the builder's
-        /// boss-duplicate swap and the spawner's placement-fallback retry - must pass both through, or a retried
-        /// creature silently fights at its authored level.
+        /// stamped", which is what they all were. Every construction site that copies an entry - the spawner's
+        /// placement-fallback retry, the speed-course placements and the encounter trash draw - must pass uplift,
+        /// stamp AND <see cref="Stretched"/> through, or a retried creature silently fights at its authored level
+        /// (or silently loses its stretch).
         /// </summary>
-        public DungeonSpawnPlanEntry(uint wcid, DungeonRole role, DungeonSpawnPointDef point, int upliftLevel = 0, int stampLevel = 0)
+        public DungeonSpawnPlanEntry(uint wcid, DungeonRole role, DungeonSpawnPointDef point, int upliftLevel = 0, int stampLevel = 0, bool stretched = false)
         {
+            if (stretched && (upliftLevel <= 0 || stampLevel != 0 || role == DungeonRole.Boss))
+                throw new ArgumentException("A stretched entry needs upliftLevel > 0, stampLevel == 0 and a non-boss role.", nameof(stretched));
+
             Wcid = wcid;
             Role = role;
             Point = point;
             UpliftLevel = upliftLevel;
             StampLevel = stampLevel;
+            Stretched = stretched;
         }
 
         /// <summary>
@@ -921,6 +1017,46 @@ namespace ACE.Server.ThreadDungeons
         /// reward and level-stamp sites read this rather than either field alone.
         /// </summary>
         public int RaisedLevel => Math.Max(UpliftLevel, StampLevel);
+    }
+
+    /// <summary>
+    /// The family stretch's per-run record: which family stretched, the natural band edges it was mapped into, how
+    /// many pool members it holds, the overscale applied, and the standards at every mapped level so the spawner
+    /// never recomputes a curve.
+    /// </summary>
+    public sealed class StretchPlan
+    {
+        public string FamilyId { get; }
+        public int LowEdge { get; }
+        public int HighEdge { get; }
+        public int MappedLow { get; }
+        public int MappedHigh { get; }
+        public int PoolCount { get; }
+        public double Overscale { get; }
+        public IReadOnlyDictionary<int, DungeonBandStandard> Standards { get; }
+        public IReadOnlyDictionary<int, double> HealthStandards { get; }
+
+        public StretchPlan(string familyId, int lowEdge, int highEdge, int mappedLow, int mappedHigh, int poolCount, double overscale,
+            IReadOnlyDictionary<int, DungeonBandStandard> standards, IReadOnlyDictionary<int, double> healthStandards)
+        {
+            FamilyId = familyId;
+            LowEdge = lowEdge;
+            HighEdge = highEdge;
+            MappedLow = mappedLow;
+            MappedHigh = mappedHigh;
+            PoolCount = poolCount;
+            Overscale = overscale;
+            Standards = standards;
+            HealthStandards = healthStandards;
+        }
+
+        /// <summary>The band standard at a mapped level, or null when this plan holds none for it.</summary>
+        public DungeonBandStandard StandardAt(int level)
+            => Standards != null && Standards.TryGetValue(level, out var s) ? s : null;
+
+        /// <summary>The health standard at a mapped level, or 0 when this plan holds none for it.</summary>
+        public double HealthStandardAt(int level)
+            => HealthStandards != null && HealthStandards.TryGetValue(level, out var h) ? h : 0;
     }
 
     /// <summary>
@@ -951,6 +1087,9 @@ namespace ACE.Server.ThreadDungeons
         public List<DungeonSpawnPlanEntry> Entries { get; } = new List<DungeonSpawnPlanEntry>();
         public uint BossWcid { get; set; }
         public string FamilyId { get; set; }
+
+        /// <summary>The run's family stretch, or null when none applied (switch off, no eligible stretch, speed course).</summary>
+        public StretchPlan Stretch { get; set; }
 
         /// <summary>
         /// The run's weak point (<see cref="DungeonWeakPoint"/>), or NULL - which the spawner reads as "no weak
@@ -1289,6 +1428,12 @@ namespace ACE.Server.ThreadDungeons
         /// </summary>
         public double MagicAttackSkillCap { get; set; }
 
+        /// <summary>
+        /// DungeonPopulationLimits.MissileDefenseSkillCap, as it applied to this plan (0 = off). Defaults to 0 so a hand-built
+        /// plan carries no ceiling; the builder copies the limits value in.
+        /// </summary>
+        public double MissileDefenseSkillCap { get; set; }
+
         /// <summary>DungeonPopulationLimits.UpliftResistFloor, as it applied to this plan (the spawner's per-creature resist floor gate).</summary>
         public bool UpliftResistFloor { get; set; }
     }
@@ -1456,8 +1601,9 @@ namespace ACE.Server.ThreadDungeons
             // plan is byte-identical to the builder before reach-up existed. The pivot is measured whenever
             // either reach-up or the stat curve needs it; the stat curve uses the same pivot as its anchor.
             //
-            // The WORLD EVENTS paths are untouched: DungeonRosterSelector, BandUplift and
-            // DungeonBandStandard.Compute are called with a projected delegate, never changed.
+            // The shared code is untouched: DungeonRosterSelector, BandUplift and DungeonBandStandard.Compute are
+            // called with a projected delegate, never changed. World Events never projects (no reach-up); with
+            // world_events_stat_curve on it reuses ReachUpPivot/AuthoredTopLevel for its own curve's pivot only.
             var pivot = limits.ReachUp || limits.StatCurve
                 ? ReachUpPivot(AuthoredTopLevel(species, levelOf), band.High)
                 : 0;
@@ -1491,8 +1637,16 @@ namespace ACE.Server.ThreadDungeons
             // scale into the memo's key: the same (tables, level, band) at a different k is a different roster,
             // and a key without k would serve a switched-off run the entries a reach-up run stored, or the
             // reverse, the moment an admin toggled dynamic_dungeons_reach_up.
-            DungeonRosterBand EligibilityBandOf(IReadOnlyDictionary<string, SpeciesTableDef> tables, DungeonRosterBand natural)
+            //
+            // stretchedCount (family stretch, plan decision 6): the number of stretched families that join the draw. When the
+            // natives in the NATURAL band plus those reach MinEligibleFamilies, the natural band is returned and the ladder never
+            // runs; otherwise the ladder runs exactly as before, over the tables as before. 0 (switch off, nothing stretches,
+            // the fail-open guard) is the old function byte for byte.
+            DungeonRosterBand EligibilityBandOf(IReadOnlyDictionary<string, SpeciesTableDef> tables, DungeonRosterBand natural, int stretchedCount = 0)
             {
+                if (stretchedCount > 0 && EligibleFamiliesAt(tables, natural) + stretchedCount >= limits.MinEligibleFamilies)
+                    return natural;
+
                 var resolved = memo != null
                     ? memo.ResolveEligibilityBand(tables, spec.Level, projLevelOf, natural, lowFloor, limits.MinEligibleFamilies, reachScale)
                     : DungeonRosterSelector.ResolveEligibilityBand(tables, spec.Level, projLevelOf, natural, lowFloor, limits.MinEligibleFamilies);
@@ -1519,15 +1673,8 @@ namespace ACE.Server.ThreadDungeons
                     ? memo.BandMedianHealth(species, spec.Level, projLevelOf, healthOf, at, reachScale)
                     : DungeonRosterSelector.BandMedianHealth(species, spec.Level, projLevelOf, healthOf, at);
 
-            // The measured standard at ANY level and scale - the run's own (projected) one, or the stat curve's
-            // anchor at the pivot, where k is 1 by definition.
-            DungeonBandStandard MeasuredStandardAt(int level, double scale, Func<uint, DungeonStatProfile> profiles, DungeonRosterBand natural)
-                => memo != null
-                    ? memo.BandStandard(species, level, profiles, natural, lowFloor, scale)
-                    : DungeonBandStandard.Compute(species, level, profiles, natural, lowFloor);
-
-            DungeonBandStandard BandStandardAt(DungeonRosterBand natural)
-                => MeasuredStandardAt(spec.Level, reachScale, projProfileOf, natural);
+            // The measured band standard (the run's own projected one, or the stat curve's anchor at the pivot) is
+            // ThreadsStandardCore's, resolved in the band-standard step below.
 
             // ---- physical fit projection (DungeonFitFilter) ----
             // Done ONCE, here, before anything reads the roster: every eligibility test, every band-widening
@@ -1588,6 +1735,23 @@ namespace ACE.Server.ThreadDungeons
                                        (projection.EmptiedFamilies > 0 ? $"; {projection.EmptiedFamilies} family/families left with no members" : ""));
                 }
             }
+
+            // ---- family stretch (dynamic_dungeons_family_stretch) ----
+            // The families with NO trash member in the natural band (judged on the RAW table at the global projection) that
+            // stretch: each one's top trash members, taken from the fit-filtered table, mapped by rank onto [L, 1.15L]
+            // (FamilyStretch). Empty when the switch is off or for a speed course (WidenForForcedFamily), and then every
+            // line below that reads it is the pre-stretch code. Never memoized: it is cheap, and keeping it out of the plan
+            // cache means a warm memo cannot carry it across switch states.
+            var stretched = FamilyStretch.Active(limits)
+                ? FamilyStretch.ResolveAll(species, speciesForSelection, spec.Level, levelOf, projLevelOf, band, limits.MinFamilyPool)
+                : (IReadOnlyList<StretchedFamily>)Array.Empty<StretchedFamily>();
+            var stretchedById = stretched.ToDictionary(f => f.Family.Id, StringComparer.Ordinal);
+
+            // The draw's extra candidates are the SELECTION tables (the fit projection), like every native candidate, so the
+            // drawn table object is always one of speciesForSelection's; only its Id is read on the stretched path.
+            var stretchedCandidates = stretched
+                .Select(f => speciesForSelection.TryGetValue(f.Family.Id, out var sel) && sel != null ? sel : f.Family)
+                .ToList();
 
             plan.UpliftRename = limits.UpliftRename;
 
@@ -1754,8 +1918,15 @@ namespace ACE.Server.ThreadDungeons
             //   - everything else carries neither and is untouched by both features.
             // When nothing widened, no pick can be below that edge by construction, so an unwidened run at or
             // below the pivot tags nothing at all.
+            //
+            // A STRETCHED family's non-boss pick is the one exception: it carries its rank-mapped level as its uplift target
+            // and the Stretched tag (never a stamp). Its boss goes through TagEntry like any promoted boss (plan decision 9).
+            StretchedFamily stretchedFamily = null;
+
             DungeonSpawnPlanEntry EntryFor(uint wcid, DungeonRole role, DungeonSpawnPointDef point)
-                => TagEntry(wcid, role, point, projLevelOf(wcid), () => levelOf(wcid), plan.NaturalBandLow, spec.Level);
+                => stretchedFamily != null && role != DungeonRole.Boss
+                    ? new DungeonSpawnPlanEntry(wcid, role, point, stretchedFamily.MappedLevelOf(wcid, role), 0, true)
+                    : TagEntry(wcid, role, point, projLevelOf(wcid), () => levelOf(wcid), plan.NaturalBandLow, spec.Level);
 
             // ---- family ----
             SpeciesTableDef family = null;
@@ -1773,7 +1944,7 @@ namespace ACE.Server.ThreadDungeons
             // Family-eligibility widening. Returns the natural band untouched when the band already fields
             // MinEligibleFamilies tables, when the threshold is disabled, or when the floor is 1.0 - so this
             // call is what makes I-A and I-E true at the source rather than by a branch further down.
-            var eligibilityBand = EligibilityBandOf(speciesForSelection, band);
+            var eligibilityBand = EligibilityBandOf(speciesForSelection, band, stretched.Count);
 
             if (limits.WidenForForcedFamily && eligibilityBand.Low < band.Low && EligibleFamiliesAt(speciesForSelection, band) >= limits.MinEligibleFamilies)
                 plan.Notes.Add($"band: forced family '{spec.Family}' has no trash member in the natural band; low edge widened from " +
@@ -1787,17 +1958,23 @@ namespace ACE.Server.ThreadDungeons
             // whose eligibility band WIDENED, for a free (not forced) family at an indoor dungeon, with the dial on and an
             // archetype profile delegate; every condition is checked before the delegate is read, so any other run never
             // touches it and draws exactly as before. The roster it classifies with is handed to the archetype context
-            // below, so the two cannot classify a wcid differently.
+            // below, so the two cannot classify a wcid differently. Skipped whenever any family stretches (plan decision 6,
+            // the accepted side effect): the weighting has no share for a stretched family.
             RosterArchetypes weightingRoster = null;
 
             var familyForced = !string.IsNullOrEmpty(spec.Family) && spec.Family != DungeonGemSpec.Any;
             var weightingDial = double.IsNaN(limits.FamilyArchetypeWeighting) ? 0.0 : Math.Min(limits.FamilyArchetypeWeighting, DungeonPopulationLimits.MaxFamilyArchetypeWeighting);
 
+            // The family has its OWN salted stream (see DungeonRosterSelector.FamilyRngFor); the main rng is only burned by the
+            // same single call the old draw took, so every later draw of the run is unchanged.
+            var familyRng = DungeonRosterSelector.FamilyRngFor(spec.Seed);
+
             try
             {
                 FamilyWeightingDraw weighted = null;
 
-                if (weightingDial > 0 && archetypeProfileOf != null && eligibilityBand.Low < band.Low && !familyForced && !dungeon.IsOutdoor)
+                if (weightingDial > 0 && archetypeProfileOf != null && eligibilityBand.Low < band.Low && !familyForced && !dungeon.IsOutdoor
+                    && stretched.Count == 0)
                 {
                     weightingRoster = memo != null && memo.HasArchetypeProfiles
                         ? memo.Roster(species, band, lowFloor, archetypeProfileOf)
@@ -1809,7 +1986,7 @@ namespace ACE.Server.ThreadDungeons
 
                 if (weighted != null)
                 {
-                    family = DungeonRosterSelector.PickFamilyWeighted(weighted.Families, weighted.Shares, rng);
+                    family = DungeonRosterSelector.PickFamilyWeighted(weighted.Families, weighted.Shares, familyRng, rng);
 
                     var drawn = weighted.Families.ToList().IndexOf(family);
                     plan.Notes.Add($"family: archetype-weighted draw x{weightingDial:0.##} over {weighted.Families.Count} eligible famil{(weighted.Families.Count == 1 ? "y" : "ies")} " +
@@ -1819,8 +1996,8 @@ namespace ACE.Server.ThreadDungeons
                 else
                 {
                     // Open World Threads (F11): an outdoor site draws only its themed tables when any is eligible.
-                    family = DungeonRosterSelector.PickFamily(speciesForSelection, spec.Family, dungeon.Families, dungeon.CreatureTypes, spec.Level, projLevelOf, rng, eligibilityBand,
-                        themedOnly: dungeon.IsOutdoor);
+                    family = DungeonRosterSelector.PickFamily(speciesForSelection, spec.Family, dungeon.Families, dungeon.CreatureTypes, spec.Level, projLevelOf, familyRng, eligibilityBand,
+                        themedOnly: dungeon.IsOutdoor, burnRng: rng, extraEligible: stretchedCandidates.Count > 0 ? stretchedCandidates : null);
                 }
             }
             catch (ArgumentException ex)
@@ -1861,25 +2038,40 @@ namespace ACE.Server.ThreadDungeons
                     plan.WeakPoint = new WeakPointPlan { TrashHeight = trashHeight, BossHeight = bossHeight, ArmorCut = limits.WeakPointArmorCut };
                 }
 
-                // Per-family widening, starting from the band the family was SELECTED at rather than from the
-                // natural band - a family that only became eligible through the widening above may have no
-                // in-band member at all at the natural band, and restarting the search there could hand back
-                // an empty pool and open the run with no trash.
-                trashBand = DungeonRosterSelector.ResolveFamilyTrashBand(family, spec.Level, projLevelOf, eligibilityBand, lowFloor, limits.MinFamilyPool);
-                eliteBand = DungeonRosterSelector.ResolveFamilyEliteBand(family, spec.Level, projLevelOf, eligibilityBand, lowFloor);
+                if (stretchedById.TryGetValue(family.Id, out var drawnStretch))
+                {
+                    // A STRETCHED family: its rank-mapped pools ARE the run's pools, at the natural band, with no
+                    // per-family widening and no widening note (design 2). An empty elite pool takes PickPopulation's
+                    // existing trash fallback, exactly as for a native family with no elite.
+                    stretchedFamily = drawnStretch;
+                    trashBand = band;
+                    eliteBand = band;
+                    trashPool = drawnStretch.TrashPool.ToList();
+                    elitePool = drawnStretch.ElitePool.ToList();
+                    plan.EffectiveBandLow = plan.NaturalBandLow;
+                }
+                else
+                {
+                    // Per-family widening, starting from the band the family was SELECTED at rather than from the
+                    // natural band - a family that only became eligible through the widening above may have no
+                    // in-band member at all at the natural band, and restarting the search there could hand back
+                    // an empty pool and open the run with no trash.
+                    trashBand = DungeonRosterSelector.ResolveFamilyTrashBand(family, spec.Level, projLevelOf, eligibilityBand, lowFloor, limits.MinFamilyPool);
+                    eliteBand = DungeonRosterSelector.ResolveFamilyEliteBand(family, spec.Level, projLevelOf, eligibilityBand, lowFloor);
 
-                trashPool = DungeonRosterSelector.PoolFor(family, spec.Level, DungeonRole.Trash, projLevelOf, trashBand);
+                    trashPool = DungeonRosterSelector.PoolFor(family, spec.Level, DungeonRole.Trash, projLevelOf, trashBand);
 
-                // ElitePoolFor, NOT PoolFor: the empty-elite fallback has to land on the TRASH band's pool,
-                // and PoolFor would take it against the ELITE band's trash members instead - which for a
-                // family with no elite at any width is the widest band the floor allows, so the elite slots
-                // would draw from a deeper pool than the trash slots in the same run. Every consumer below
-                // spells the fallback out against trashPool for that reason.
-                elitePool = DungeonRosterSelector.ElitePoolFor(family, spec.Level, projLevelOf, eliteBand);
+                    // ElitePoolFor, NOT PoolFor: the empty-elite fallback has to land on the TRASH band's pool,
+                    // and PoolFor would take it against the ELITE band's trash members instead - which for a
+                    // family with no elite at any width is the widest band the floor allows, so the elite slots
+                    // would draw from a deeper pool than the trash slots in the same run. Every consumer below
+                    // spells the fallback out against trashPool for that reason.
+                    elitePool = DungeonRosterSelector.ElitePoolFor(family, spec.Level, projLevelOf, eliteBand);
 
-                plan.EffectiveBandLow = DungeonRosterSelector.TrashBand(spec.Level, trashBand).Low;
+                    plan.EffectiveBandLow = DungeonRosterSelector.TrashBand(spec.Level, trashBand).Low;
+                }
 
-                if (trashBand.Low < eligibilityBand.Low)
+                if (stretchedFamily == null && trashBand.Low < eligibilityBand.Low)
                     plan.Notes.Add($"band: family {family.Id} had {DungeonRosterSelector.PoolFor(family, spec.Level, DungeonRole.Trash, projLevelOf, eligibilityBand).Count} " +
                                    $"distinct trash wcid(s) at x{eligibilityBand.Low:0.##}; low edge widened to x{trashBand.Low:0.##} " +
                                    $"(want {limits.MinFamilyPool}, got {trashPool.Count})");
@@ -1922,7 +2114,7 @@ namespace ACE.Server.ThreadDungeons
                     plan.GroupCountActual = GroupScaling.CountActualFor(soloSlots, slots);
                 }
 
-                if (eliteBand.Low < eligibilityBand.Low)
+                if (stretchedFamily == null && eliteBand.Low < eligibilityBand.Low)
                     plan.Notes.Add($"band: family {family.Id} had no elite in the x{eligibilityBand.Low:0.##} band; " +
                                    $"elite low edge widened to x{eliteBand.Low:0.##} ({elitePool.Count} in pool)");
 
@@ -1986,6 +2178,7 @@ namespace ACE.Server.ThreadDungeons
             plan.BossDefenseBandRatio = NonNegativeOrZero(limits.BossDefenseBandRatio);
             plan.StripCombatTraits = limits.StripCombatTraits;
             plan.MagicAttackSkillCap = DungeonCombatNormalizer.SanitizeMagicAttackSkillCap(limits.MagicAttackSkillCap);
+            plan.MissileDefenseSkillCap = DungeonCombatNormalizer.SanitizeMissileDefenseSkillCap(limits.MissileDefenseSkillCap);
             plan.CategoryResistFloor = NonNegativeOrZero(limits.CategoryResistFloor);
             plan.CategoryArmorModCeiling = NonNegativeOrZero(limits.CategoryArmorModCeiling);
             plan.UpliftResistFloor = limits.UpliftResistFloor;
@@ -2006,7 +2199,14 @@ namespace ACE.Server.ThreadDungeons
             {
                 foreach (var wcid in trashPool.Concat(elitePool).Distinct())
                 {
-                    var nonBossBase = (uint)ThreadDungeonSpawner.NonBossHealthTarget(healthOf(wcid), plan.HealthNormalizeRatio, 1.0, plan.TrashHealthFloor);
+                    // A stretched pick prices at its MAPPED level: the floor is the health standard there (plan decision 8)
+                    // and the multiplier is the family's overscale, which is how an overscaled pack reaches the boss's
+                    // pack term (plan decision 9). A native pick is the pre-stretch line exactly.
+                    var nonBossBase = stretchedFamily == null
+                        ? (uint)ThreadDungeonSpawner.NonBossHealthTarget(healthOf(wcid), plan.HealthNormalizeRatio, 1.0, plan.TrashHealthFloor)
+                        : (uint)ThreadDungeonSpawner.NonBossHealthTarget(healthOf(wcid), plan.HealthNormalizeRatio, stretchedFamily.Overscale,
+                            StretchHealthFloor(plan.TrashHealthFloor, DungeonHealthCurve.Target(
+                                stretchedFamily.MappedLevelOf(wcid, elitePool.Contains(wcid) ? DungeonRole.Elite : DungeonRole.Trash), limits)));
 
                     if (nonBossBase > plan.PoolMaxBase)
                         plan.PoolMaxBase = nonBossBase;
@@ -2067,8 +2267,10 @@ namespace ACE.Server.ThreadDungeons
                 // no elite in band at any width. A promoted candidate below the natural low edge is tagged
                 // for uplift like any other entry (I-G): the normalization and the boss uplift both apply,
                 // and the boss level stamp's own four floors are unchanged.
+                // A stretched family ranks its candidates by MAPPED level (the elite mapping, which falls back to the trash
+                // one), so the strongest of the stretched pool is still the one promoted.
                 var candidate = DungeonRosterSelector.PickBossCandidate(elitePool.Count > 0 ? elitePool : trashPool,
-                    projLevelOf, rng, drawn);
+                    stretchedFamily != null ? (Func<uint, int>)(w => stretchedFamily.MappedLevelOf(w, DungeonRole.Elite)) : projLevelOf, rng, drawn);
 
                 if (candidate != 0)
                 {
@@ -2131,6 +2333,14 @@ namespace ACE.Server.ThreadDungeons
                         var source = e.Role == DungeonRole.Trash ? trashPool : (elitePool.Count > 0 ? elitePool : trashPool);
                         var pool = source.Where(w => w != plan.BossWcid).ToList();
 
+                        // A STRETCHED family's elite pool holds at most one wcid, which is the promoted boss whenever no
+                        // curated row fits. The slot then falls back to the trash pool, keeping its Elite role: the same
+                        // trash fallback PickPopulation uses for an empty elite pool, and EntryFor re-tags it Stretched at
+                        // that wcid's mapped level (MappedLevelOf's elite lookup falls back to the trash map). Stretched
+                        // families only, so a native plan cannot move. A one-member family still has nowhere to go.
+                        if (pool.Count == 0 && stretchedFamily != null && e.Role != DungeonRole.Trash)
+                            pool = trashPool.Where(w => w != plan.BossWcid).ToList();
+
                         if (pool.Count == 0)
                             continue;
 
@@ -2152,7 +2362,8 @@ namespace ACE.Server.ThreadDungeons
                 // The pack term reads the PROJECTED level, which for a reach-up pick is exactly its StampLevel,
                 // so the boss outranks every stamp in its own room as well as every authored level: a 375 gem
                 // whose pack stamps up to 431 stamps its boss at 432, not at ceil(375 x 1.10) = 413.
-                var packLevel = plan.Entries.Where(e => e.Role != DungeonRole.Boss).Select(e => projLevelOf(e.Wcid)).DefaultIfEmpty(0).Max();
+                // A stretched entry's level is its MAPPED level (UpliftLevel), so the boss outranks the strongest stretched pick.
+                var packLevel = plan.Entries.Where(e => e.Role != DungeonRole.Boss).Select(e => e.Stretched ? e.UpliftLevel : projLevelOf(e.Wcid)).DefaultIfEmpty(0).Max();
                 var margin = double.IsNaN(limits.BossLevelMargin) || limits.BossLevelMargin < 1.0 ? 1.0 : limits.BossLevelMargin;
 
                 // While NORMALIZING the first term is dropped: the boss's stats are re-set onto the gem's band,
@@ -2242,8 +2453,12 @@ namespace ACE.Server.ThreadDungeons
             var curveApplies = limits.StatCurve && pivot > 0 && spec.Level > pivot;
             var standardForStamps = curveApplies && plan.Entries.Any(e => e.StampLevel > 0);
 
+            var bandStandardResolved = false;
+
             if (profileOf != null && (anyUplift || standardForBoss || standardForDefenseCap || standardForStamps))
             {
+                bandStandardResolved = true;
+
                 // THE RAW DICTIONARY, for the same reason BandMedianHealth uses it: the band standard is what
                 // a level-N creature in this band typically carries, a property of the BAND and not of who can
                 // be placed in this dungeon. A dungeon-dependent standard would normalize the identical
@@ -2256,29 +2471,61 @@ namespace ACE.Server.ThreadDungeons
                 // anchor, so a roster edit moves the anchor with it. Otherwise it is the run's own measured
                 // standard, over the PROJECTED sample when reach-up is on - which above the pivot is the pivot's
                 // own sample again, i.e. the flat standard the curve exists to replace.
-                if (curveApplies)
-                {
-                    plan.StatCurve = new DungeonStatCurve.Anchored(MeasuredStandardAt(pivot, 1.0, profileOf, band), pivot, limits.DefenseCurveRateAbove375,
-                        limits.MagicDefenseCurveRateAbove300, limits.DamageCurveRateAbovePivot);
-                    plan.BandStandard = plan.StatCurve.StandardAt(spec.Level);
-                }
-                else
-                {
-                    // Owner ruling 2026-10-22: monster magic defense follows the RETAIL curve from level 301 up,
-                    // replacing the measured magic defense standard, including at 301..pivot where the curve
-                    // above does not apply. Same stat-curve switch; a no-op at or below 300.
-                    plan.BandStandard = limits.StatCurve
-                        ? DungeonStatCurve.WithRetailMagicDefense(BandStandardAt(band), spec.Level, limits.MagicDefenseCurveRateAbove300)
-                        : BandStandardAt(band);
-                }
+                // ONE derivation (ThreadsStandardCore), shared with the Character Details baseline
+                // (ThreadBaseline), so the "average Thread monster" a player is shown is the plan's own standard.
+                plan.BandStandard = ThreadsStandardCore(spec.Level, pivot, reachScale, band, lowFloor, limits, species, profileOf, projProfileOf,
+                    memo, out var curve);
+
+                if (curve != null)
+                    plan.StatCurve = curve;
 
                 // The uplift note reports the UPLIFT, so it is written only when something was tagged; a standard
-                // computed purely for the boss or the defense cap must not claim "0 entry/entries normalized".
-                if (anyUplift)
+                // computed purely for the boss or the defense cap must not claim "0 entry/entries normalized". A
+                // stretched entry is not counted and adds no note of its own (plan decision 10): with no stretched
+                // entry this count is the old one and the note is unchanged.
+                var upliftCount = plan.Entries.Count(e => e.UpliftLevel > 0 && !e.Stretched);
+
+                if (upliftCount > 0)
                     plan.Notes.Add(plan.BandStandard.IsEmpty
-                        ? $"uplift: {plan.Entries.Count(e => e.UpliftLevel > 0)} entry/entries tagged for level {spec.Level} but the band sample had no usable data; only the level is normalized"
-                        : $"uplift: {plan.Entries.Count(e => e.UpliftLevel > 0)} entry/entries normalized to level {spec.Level} against a {plan.BandStandard.SampleCount}-member band standard " +
+                        ? $"uplift: {upliftCount} entry/entries tagged for level {spec.Level} but the band sample had no usable data; only the level is normalized"
+                        : $"uplift: {upliftCount} entry/entries normalized to level {spec.Level} against a {plan.BandStandard.SampleCount}-member band standard " +
                           $"(sample low x{plan.BandStandard.SampleLowRatio:0.##}, dmg {plan.BandStandard.MaxBodyDamage}, armor {plan.BandStandard.MaxBaseArmor}, {plan.BandStandard.SkillMedians.Count} skill(s))");
+            }
+
+            // ---- family stretch standards (plan decision 7) ----
+            // One band standard and one health standard per distinct MAPPED level the entries actually use, so the spawner
+            // never re-derives a curve. Standards come from the stat curve when the run has one, else the run's band standard
+            // carried along the curve's slopes (its backward extension below the pivot), else the flat band standard - the
+            // stamp's own fallback. Empty when the band standard step never ran. Native samples are never touched here.
+            if (stretchedFamily != null)
+            {
+                var mappedLevels = plan.Entries.Where(e => e.Stretched).Select(e => e.UpliftLevel).Distinct().OrderBy(l => l).ToList();
+                var standards = new Dictionary<int, DungeonBandStandard>();
+                var healthStandards = new Dictionary<int, double>();
+
+                foreach (var m in mappedLevels)
+                {
+                    healthStandards[m] = DungeonHealthCurve.Target(m, limits);
+
+                    if (!bandStandardResolved)
+                        continue;
+
+                    if (plan.StatCurve != null)
+                        standards[m] = plan.StatCurve.StandardAt(m);
+                    else if (limits.StatCurve && pivot > 0)
+                        standards[m] = DungeonStatCurve.Carry(plan.BandStandard, spec.Level, m, pivot,
+                            DungeonStatCurve.SanitizeDefenseRate(limits.DefenseCurveRateAbove375),
+                            DungeonStatCurve.SanitizeMagicDefenseRate(limits.MagicDefenseCurveRateAbove300),
+                            DungeonStatCurve.SanitizeDamageRate(limits.DamageCurveRateAbovePivot),
+                            DungeonStatCurve.SanitizeWeaponAttackRate(limits.WeaponAttackCurveRateAbove400),
+                            DungeonStatCurve.SanitizeMeleeDefenseRate(limits.MeleeDefenseCurveRateAbove400));
+                    else
+                        standards[m] = plan.BandStandard;
+                }
+
+                plan.Stretch = new StretchPlan(stretchedFamily.Family.Id, stretchedFamily.LowEdge, stretchedFamily.HighEdge,
+                    stretchedFamily.MappedLow, stretchedFamily.MappedHigh, stretchedFamily.TrashPool.Count, stretchedFamily.Overscale,
+                    standards, healthStandards);
             }
 
             // ---- archetype uplift (dynamic_dungeons_archetype_uplift, design steps 8-9) ----
@@ -2289,8 +2536,11 @@ namespace ACE.Server.ThreadDungeons
             {
                 plan.ArchetypeUplift = BuildArchetypeContext(spec, species, limits, plan, archetypeProfileOf, memo, weightingRoster);
 
-                var resolved = plan.Entries.Where(e => e.UpliftLevel > 0 && e.Role != DungeonRole.Boss).Select(e => e.Wcid).Distinct()
-                    .Select(w => plan.ArchetypeUplift.For(w)).ToList();
+                // A stretched entry resolves at its MAPPED level (ForAt); every other entry exactly as before. Distinct per
+                // (wcid, level), which for a run with no stretched entry is distinct per wcid, as it was.
+                var resolved = plan.Entries.Where(e => e.UpliftLevel > 0 && e.Role != DungeonRole.Boss)
+                    .Select(e => (e.Wcid, Level: e.Stretched ? e.UpliftLevel : 0)).Distinct()
+                    .Select(x => x.Level > 0 ? plan.ArchetypeUplift.ForAt(x.Wcid, x.Level) : plan.ArchetypeUplift.For(x.Wcid)).ToList();
 
                 plan.Notes.Add($"archetype uplift: {resolved.Count(i => i != null)} of {resolved.Count} uplifted wcid(s) resolved " +
                                $"({string.Join(", ", resolved.Where(i => i != null).GroupBy(i => i.Archetype).OrderBy(g => g.Key).Select(g => $"{g.Key} {g.Count()}"))}); " +
@@ -2453,12 +2703,14 @@ namespace ACE.Server.ThreadDungeons
             var runMeasured = MeasureAt(runSample.Level, runSample.Profiles, runSample.Scale, NaturalBandOnly);
 
             return new ArchetypeUpliftContext(spec.Level, referenceLevel, curveApplies, limits.DefenseCurveRateAbove375,
-                limits.MagicDefenseCurveRateAbove300, limits.DamageCurveRateAbovePivot, limits.StatCurve, runMeasured,
+                limits.MagicDefenseCurveRateAbove300, limits.DamageCurveRateAbovePivot,
+                limits.WeaponAttackCurveRateAbove400, limits.MeleeDefenseCurveRateAbove400, limits.StatCurve, runMeasured,
                 level => ownMemo.GetOrAdd(level, l => MeasureAt(l, archetypeProfileOf, 1.0, lowFloor)), roster,
                 level => DungeonHealthCurve.Target(level, limits), NonNegativeOrZero(limits.UpliftOffenseRatio),
                 NonNegativeOrZero(limits.UpliftDefenseRatio), NonNegativeOrZero(limits.UpliftArchetypeCap),
                 defenseCapRatio: NonNegativeOrZero(limits.UpliftDefenseCap),
-                measureRunReference: level => runReferenceMemo.GetOrAdd(level, l => MeasureAt(l, archetypeProfileOf, 1.0, NaturalBandOnly)));
+                measureRunReference: level => runReferenceMemo.GetOrAdd(level, l => MeasureAt(l, archetypeProfileOf, 1.0, NaturalBandOnly)),
+                curvePivot: limits.StatCurve ? pivot : 0);
         }
 
         /// <summary>The low-floor ratio that keeps a sample walk inside the natural band (no downward widening).</summary>
@@ -2543,7 +2795,8 @@ namespace ACE.Server.ThreadDungeons
 
                 if (curveApplies)
                     return standard = new DungeonStatCurve.Anchored(Measured(pivot, 1.0, profileOf), pivot, limits.DefenseCurveRateAbove375,
-                        limits.MagicDefenseCurveRateAbove300, limits.DamageCurveRateAbovePivot).StandardAt(spec.Level);
+                        limits.MagicDefenseCurveRateAbove300, limits.DamageCurveRateAbovePivot,
+                        limits.WeaponAttackCurveRateAbove400, limits.MeleeDefenseCurveRateAbove400).StandardAt(spec.Level);
 
                 Func<uint, DungeonStatProfile> projProfileOf = reachScale == 1.0
                     ? profileOf
@@ -2580,10 +2833,73 @@ namespace ACE.Server.ThreadDungeons
             // the pivot), so the ceiling's median is taken over the damage the spawner really fields.
             double StampRatio(DungeonStatAxis axis, int fromLevel, int toLevel)
                 => DungeonStatCurve.Ratio(axis, fromLevel, toLevel, limits.DefenseCurveRateAbove375, limits.MagicDefenseCurveRateAbove300,
-                    limits.DamageCurveRateAbovePivot, pivot);
+                    limits.DamageCurveRateAbovePivot, pivot, limits.WeaponAttackCurveRateAbove400, limits.MeleeDefenseCurveRateAbove400);
 
             return DamageCeilingStandard.Compute(pool, perHitOf, projLevelOf, levelOf, DungeonRosterSelector.NaturalLowEdge(spec.Level, band), spec.Level,
                 curveApplies && profileOf != null ? StampRatio : (Func<DungeonStatAxis, int, int, double>)null, Uplift);
+        }
+
+        /// <summary>
+        /// The Threads band standard at <paramref name="level"/>, exactly as a SOLO run's plan derives it, from the raw
+        /// inputs: the pivot and reach-up scale are resolved here the way Build resolves them, then
+        /// <see cref="ThreadsStandardCore"/> runs. No level clamp: the curve carries any level. Empty when the band holds no
+        /// usable sample (for example with dynamic_dungeons_stat_curve off above the authored roster). Pure; the Character
+        /// Details baseline (ThreadBaseline) reads it.
+        /// </summary>
+        internal static DungeonBandStandard ThreadsStandardAt(int level, DungeonPopulationLimits limits, IReadOnlyDictionary<string, SpeciesTableDef> species,
+            Func<uint, int> levelOf, Func<uint, DungeonStatProfile> profileOf, ThreadPlanMemo memo = null)
+        {
+            if (species == null || levelOf == null || profileOf == null || level <= 0)
+                return DungeonBandStandard.Empty;
+
+            var band = new DungeonRosterBand(limits.RosterBandLow, limits.RosterBandHigh);
+            var lowFloor = SanitizedBandLowFloor(limits.BandLowFloorRatio);
+            var pivot = limits.ReachUp || limits.StatCurve ? ReachUpPivot(AuthoredTopLevel(species, levelOf), band.High) : 0;
+            var reachScale = limits.ReachUp ? ReachUpScale(level, pivot) : 1.0;
+
+            Func<uint, DungeonStatProfile> projProfileOf = reachScale == 1.0
+                ? profileOf
+                : w =>
+                {
+                    var profile = profileOf(w);
+                    return profile == null ? null : profile.WithLevel(ProjectLevel(profile.Level, reachScale));
+                };
+
+            return ThreadsStandardCore(level, pivot, reachScale, band, lowFloor, limits, species, profileOf, projProfileOf, memo, out _);
+        }
+
+        /// <summary>
+        /// The one Threads band-standard derivation, shared by Build and <see cref="ThreadsStandardAt"/>. Above the pivot
+        /// with the stat curve on: the measured standard AT THE PIVOT (natural band, unprojected, k = 1) carried up by
+        /// DungeonStatCurve, and <paramref name="curve"/> is that curve. Otherwise: the measured standard at
+        /// <paramref name="level"/> over <paramref name="projProfileOf"/> (reach-up's projection when it applies), with
+        /// magic defense on the retail curve from 301 up when the stat curve is on (owner ruling 2026-10-22, a no-op at
+        /// or below 300); <paramref name="curve"/> is null.
+        /// </summary>
+        internal static DungeonBandStandard ThreadsStandardCore(int level, int pivot, double reachScale, DungeonRosterBand band, double lowFloor,
+            DungeonPopulationLimits limits, IReadOnlyDictionary<string, SpeciesTableDef> species, Func<uint, DungeonStatProfile> profileOf,
+            Func<uint, DungeonStatProfile> projProfileOf, ThreadPlanMemo memo, out DungeonStatCurve.Anchored curve)
+        {
+            DungeonBandStandard Measured(int atLevel, double scale, Func<uint, DungeonStatProfile> profiles)
+                => memo != null
+                    ? memo.BandStandard(species, atLevel, profiles, band, lowFloor, scale)
+                    : DungeonBandStandard.Compute(species, atLevel, profiles, band, lowFloor);
+
+            if (limits.StatCurve && pivot > 0 && level > pivot)
+            {
+                curve = new DungeonStatCurve.Anchored(Measured(pivot, 1.0, profileOf), pivot, limits.DefenseCurveRateAbove375,
+                    limits.MagicDefenseCurveRateAbove300, limits.DamageCurveRateAbovePivot,
+                    limits.WeaponAttackCurveRateAbove400, limits.MeleeDefenseCurveRateAbove400);
+                return curve.StandardAt(level);
+            }
+
+            curve = null;
+
+            var measured = Measured(level, reachScale, projProfileOf);
+
+            return limits.StatCurve
+                ? DungeonStatCurve.WithRetailMagicDefense(measured, level, limits.MagicDefenseCurveRateAbove300)
+                : measured;
         }
 
         /// <summary>
@@ -2717,6 +3033,16 @@ namespace ACE.Server.ThreadDungeons
             => double.IsNaN(value) || double.IsInfinity(value) || value < 0 ? 0.0 : value;
 
         // ---- reach-up (owner ruling 2026-10-08) -------------------------------------------------------------
+
+        /// <summary>
+        /// A stretched non-boss pick's health floor (plan decision 8): the run's trash floor, or the health standard at the
+        /// pick's mapped level rounded away from zero, whichever is higher. A NaN standard reads as no standard (the trash
+        /// floor alone).
+        /// </summary>
+        internal static uint StretchHealthFloor(uint trashHealthFloor, double healthStandardAtMapped)
+            => double.IsNaN(healthStandardAtMapped)
+                ? trashHealthFloor
+                : Math.Max(trashHealthFloor, (uint)Math.Clamp(Math.Round(healthStandardAtMapped, MidpointRounding.AwayFromZero), 0, uint.MaxValue));
 
         /// <summary>
         /// The uplift and reach-up tag for one roster pick (pure; the builder's local EntryFor delegates here so every

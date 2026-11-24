@@ -91,5 +91,13 @@ namespace ACE.Server.EquipmentMods
         /// or down live, with no item or schema impact.
         /// </summary>
         public static double PotencyScale() => PropertyManager.GetDouble("equipment_mod_potency_scale").Item;
+
+        /// <summary>
+        /// Applies a mod's cross-item StackCap (if any) to a summed potency. The one place the cap is applied:
+        /// <see cref="Creature.GetEquippedModPotencySum"/> calls it, and the class ability ceiling probes call it
+        /// to prove a declared gear ceiling binds. A StackCap of 0 or less means no cap.
+        /// </summary>
+        public static double CapPotencySum(EquipmentModDefinition definition, double sum) =>
+            definition.StackCap > 0.0 ? Math.Min(sum, definition.StackCap) : sum;
     }
 }

@@ -390,6 +390,22 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         [TestMethod]
+        [DataRow(400)]
+        [DataRow(475)]
+        [DataRow(500)]
+        public void A_guide_tag_on_the_2026_11_16_rungs_round_trips(int rung)
+        {
+            var spec = BoundFull(new GuideTag(rung, 3, 1342177281u));
+            var text = spec.Serialize();
+
+            StringAssert.Contains(text, $"|guide={rung}:3:1342177281|");
+            Assert.IsTrue(DungeonGemSpec.TryParse(text, out var back, out var error), error);
+            Assert.IsNotNull(back.Guide);
+            Assert.AreEqual(rung, back.Guide.Rung);
+            Assert.AreEqual(text, back.Serialize());
+        }
+
+        [TestMethod]
         public void A_guide_tag_round_trips()
         {
             var spec = BoundFull(new GuideTag(125, 3, 1342177281u));
@@ -419,7 +435,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         [DataRow("guide=50:1:7:9", "rung:serial:owner")]
         [DataRow("guide=60:1:7", "guide rung")]
         [DataRow("guide=25:1:7", "guide rung")]
-        [DataRow("guide=400:1:7", "guide rung")]
+        [DataRow("guide=525:1:7", "guide rung")]
         [DataRow("guide=0:1:7", "guide rung")]
         [DataRow("guide=-50:1:7", "guide rung")]
         [DataRow("guide=+50:1:7", "guide rung")]

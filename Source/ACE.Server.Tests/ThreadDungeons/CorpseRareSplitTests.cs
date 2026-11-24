@@ -52,12 +52,14 @@ namespace ACE.Server.Tests.ThreadDungeons
             var body = PooledLootSourceText.MethodBody(src, "public void TryGenerateRare(DamageHistoryInfo killer)");
 
             var roll = body.IndexOf("RollRareFor(killer, Name, Guid, out var killerPlayer, out var timestamp, out var realTimeRares, out var tier)", StringComparison.Ordinal);
-            var add = body.IndexOf("if (TryAddToInventory(wo))", StringComparison.Ordinal);
+            var add = body.IndexOf("var placed = TryAddToInventory(wo);", StringComparison.Ordinal);
             var books = body.IndexOf("ApplyRareFoundBookkeeping(killerPlayer, realTimeRares, timestamp, tier);", StringComparison.Ordinal);
             var failure = body.IndexOf("failed to add to corpse inventory", StringComparison.Ordinal);
 
             Assert.IsTrue(roll >= 0 && add > roll, "roll first, then the add");
-            Assert.IsTrue(books > add && books < failure, "bookkeeping only inside the successful-add branch");
+            var gate = body.IndexOf("if (placed)", StringComparison.Ordinal);
+            Assert.IsTrue(add >= 0 && failure > add && gate > failure && books > gate, "bookkeeping only inside the placed branch (corpse add, or the ground drop of a refused rare)");
+            Assert.AreEqual(1, body.Split(new[] { "ApplyRareFoundBookkeeping(" }, StringSplitOptions.None).Length - 1, "bookkeeping runs from one site");
             StringAssert.Contains(body, "CorpseGeneratedRare = true;");
             StringAssert.Contains(body, "TimeToRot = 900;");
         }

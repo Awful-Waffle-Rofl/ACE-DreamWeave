@@ -42,7 +42,7 @@ namespace ACE.Server.SpeedCourses
             => threads != null && threads.GetPuzzleSites(dungeonId).Any(s => string.Equals(s.Id, siteId, StringComparison.Ordinal));
 
         public bool FamilyExists(string family)
-            => species != null && family != null && species.ContainsKey(family);
+            => species != null && family != null && species.TryGetValue(family, out var table) && table != null && table.Drawable;
     }
 
     /// <summary>

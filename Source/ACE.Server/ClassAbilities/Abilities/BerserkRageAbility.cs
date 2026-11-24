@@ -11,7 +11,7 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// <summary>
     /// Berserker T3 (Berserker pass 2026-10-24, owner ruling): when ENEMY damage - melee, missile, spell, or
     /// an enemy's DoT - would kill the player, they are left at 1 HP instead, become immune to incoming damage
-    /// for 5 seconds, and deal x1.5 damage while the rage lasts. Cooldown 90 / 60 / 30 seconds by rank. No
+    /// for 5 seconds, and deal x1.5 damage while the rage lasts. Cooldown 135 / 90 / 45 seconds by rank. No
     /// affinity. Hazards (HazardContext.HitPlayers, and the Marae Lassel digsite boss mechanics) never trigger
     /// it and are not blocked by the immunity, matching "hazards bypass all wards" (owner rulings R3 and
     /// 2026-10-19).
@@ -51,16 +51,44 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "berserk_rage",
             DisplayName = "Berserk Rage",
-            Description = "When a monster's attack, spell or damage over time would kill you, you are left at 1 health " +
-                          "instead, become immune to all incoming damage for 5 seconds and deal 50% more damage while " +
-                          "the rage lasts. Once every 90 / 60 / 30 seconds by rank. Environmental hazards never " +
-                          "trigger it and are not blocked by it.",
+            DescriptionTemplate = "When a creature's attack, spell or damage over time would kill you, you stay at 1 health instead. " +
+                          "For {v:class_ability_berserkrage_duration_seconds|num} seconds you take no damage and deal " +
+                          "{fn:damage_bonus@max|pct}% more. Environmental hazards never trigger it and are not blocked by it.",
+            // Live text: duration = DurationKey (ModifyIncomingDamage below); cooldown for rank n = CooldownKey(n) = prefix + n (same method and
+            // GetReadout below). The cooldown keys are built by concatenation (CooldownKeyPrefix + rank), which the source-scan guard
+            // accepts from this file alone: it sees the quoted prefix followed by a rank digit. The "50% more damage" is damage_bonus:
+            // DamageMultiplier(values) - 1, the multiplier Player.GetBerserkRageDamageMod applies while raging (rank independent, so the
+            // description selects @max). The token tail differs in shape per rank ("(replaces 135)"), so it is a per-rank array.
+            RankTailTemplate = "once every {ranks:class_ability_berserkrage_cooldown_seconds_r|num} seconds",
+            TextFormulas = new Dictionary<string, TextFormula>
+            {
+                ["damage_bonus"] = new TextFormula(
+                    (values, rank) => DamageMultiplier(values) - 1.0,
+                    DamageMultiplierKey),
+            },
+            AllowedLiterals = new[]
+            {
+                ("at 1 health", "survives at exactly 1 health: the survival floor is SaveDamage's currentHealth - 1, a code constant"),
+            },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
         };
 
         public ClassAbilityDefinition Definition => SharedDefinition;
+
+        /// <summary>
+        /// The outgoing-damage multiplier while raging (class_ability_berserkrage_damage_multiplier, 1.5 by default):
+        /// the tunable when it is above 1.0, else exactly 1.0 (a value at or below 1.0 disables the bonus).
+        /// Player.GetBerserkRageDamageMod calls this with <see cref="ClassAbilityText.Live"/>; the live text's
+        /// damage_bonus formula is this minus 1.
+        /// </summary>
+        public static float DamageMultiplier(ITunableValues values)
+        {
+            var mult = values.GetDouble(DamageMultiplierKey);
+
+            return mult > 1.0 ? (float)mult : 1.0f;
+        }
 
         /// <summary>The per-rank cooldown tunable key (rank clamped to 1-3).</summary>
         public static string CooldownKey(int rank) => CooldownKeyPrefix + Math.Clamp(rank, 1, 3);

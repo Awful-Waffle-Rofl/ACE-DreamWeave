@@ -44,8 +44,11 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "adrenaline",
             DisplayName = "Adrenaline",
-            Description = "When you take damage, your next attack or spell within 6 seconds deals " +
-                          "4/8/12/16/20% more damage (by rank).",
+            // Live text: window = class_ability_adrenaline_window_seconds (ModifyIncomingDamage below); bonus =
+            // rank * class_ability_adrenaline_percent_per_rank (DamageBonus below), so a per-rank amount.
+            DescriptionTemplate = "When you take damage, your next attack or spell within " +
+                          "{v:class_ability_adrenaline_window_seconds|num} seconds deals more damage.",
+            RankTailTemplate = "+{per:class_ability_adrenaline_percent_per_rank|pct}% on the next hit",
             MaxRank = 5,
             CostPerRank = new[] { 1, 1, 1, 1, 1 },
             Implemented = true,

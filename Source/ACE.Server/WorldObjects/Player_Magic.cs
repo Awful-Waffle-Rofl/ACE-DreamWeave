@@ -503,6 +503,15 @@ namespace ACE.Server.WorldObjects
             if (ACE.Server.WorldEvents.WorldEventHooks.IsInvalidHoldSpellTarget(targetCreature, spell, out var holdInvalid))
                 return holdInvalid;
 
+            // Allegiance Gauntlet: a member held by the death hold may not heal or buff anyone inside the fight circle.
+            if (ACE.Server.Avatars.Gauntlet.GauntletHooks.RefusesHeldSupport(this, target, spell.IsBeneficial))
+                return true;
+
+            // Allegiance Gauntlet (owner ruling 2026-11-21): members may heal and buff the Avatar fighter, but only while its
+            // run's copy is live; every other spell on it is refused. One type test for every other target.
+            if (ACE.Server.Avatars.Gauntlet.GauntletAvatarFighter.IsInvalidFighterSpellTarget(targetCreature, spell, out var fighterInvalid))
+                return fighterInvalid;
+
             // Invalidate beneficial spells against Creature/Non-player targets
             if (targetCreature != null && targetPlayer == null && spell.IsBeneficial)
                 return true;
@@ -541,6 +550,16 @@ namespace ACE.Server.WorldObjects
             return false;
         }
 
+        /// <summary>
+        /// A player spell's range at a magic skill: BaseRangeConstant + skill x BaseRangeMod, capped at the outdoor radar
+        /// range (<see cref="MaxRadarRange_Outdoors"/>). The formula VerifySpellRange checks a hand cast against, and the one
+        /// an Echo Cast wisp measures from its own position (EchoWisp.PickTarget).
+        /// </summary>
+        public static float MaxSpellRange(float baseRangeConstant, float baseRangeMod, uint magicSkill)
+        {
+            return Math.Min(baseRangeConstant + magicSkill * baseRangeMod, MaxRadarRange_Outdoors);
+        }
+
         public bool VerifySpellRange(WorldObject target, TargetCategory targetCategory, Spell spell, WorldObject casterItem, uint magicSkill)
         {
             if (targetCategory != TargetCategory.WorldObject && targetCategory != TargetCategory.Wielded || target.Guid == Guid)
@@ -560,7 +579,7 @@ namespace ACE.Server.WorldObjects
                 magicSkill = playerSkill.InitLevel + playerSkill.Ranks;
             }
 
-            var maxRange = Math.Min(spell.BaseRangeConstant + magicSkill * spell.BaseRangeMod, MaxRadarRange_Outdoors);
+            var maxRange = MaxSpellRange(spell.BaseRangeConstant, spell.BaseRangeMod, magicSkill);
 
             if (distanceTo > maxRange)
             {
@@ -1003,7 +1022,14 @@ namespace ACE.Server.WorldObjects
                     ApplyBloodPriceCost(spell, target);
 
                     if (!spell.IsFellowshipSpell)
+                    {
+                        // Echo Cast (Archmage T3): the committed hand cast rolls for a wisp once, after the cast itself,
+                        // with the Life basis HandleCastSpell_Projectile noted for it (first write wins). A wisp's own
+                        // casts never come through here (Player.CastAsEchoWisp calls HandleCastSpell directly).
+                        EchoWispBasis.Arm();
                         CreatePlayerSpell(target, spell, isWeaponSpell);
+                        TryTriggerEchoWisp(spell, target, EchoWispBasis.Take(), inheritsProcCasterSkill: false);
+                    }
                     else
                     {
                         var fellows = GetFellowshipTargets();
@@ -1148,7 +1174,7 @@ namespace ACE.Server.WorldObjects
             // class abilities: Mana Rush (every school, PvE only - hence the target) scales cast speed; once per
             // committed cast. Quick Refresh (WeaponModId.QuickRefresh) composes multiplicatively here, see
             // Player_WeaponMods_Casting.cs.
-            castSpeedMultiplier = ApplyClassAbilityCastSpeed(spell, target) * GetWeaponModCastSpeedMod(spell, target);
+            castSpeedMultiplier = ApplyClassAbilityCastSpeed(spell, target) * GetWeaponModCastSpeedMod(spell, target) * GetKnotCelerityCastSpeedMod();
 
             // do wind-up gestures: fastcast has no windup (creature enchantments)
             DoWindupGestures(spell, isWeaponSpell, spellChain);
@@ -1279,7 +1305,7 @@ namespace ACE.Server.WorldObjects
             // class abilities: Mana Rush (every school) scales cast speed; once per committed cast
             // Quick Refresh (WeaponModId.QuickRefresh) composes multiplicatively here, see
             // Player_WeaponMods_Casting.cs. This is an untargeted (self) cast, so target is null.
-            castSpeedMultiplier = ApplyClassAbilityCastSpeed(spell) * GetWeaponModCastSpeedMod(spell, null);
+            castSpeedMultiplier = ApplyClassAbilityCastSpeed(spell) * GetWeaponModCastSpeedMod(spell, null) * GetKnotCelerityCastSpeedMod();
 
             // do wind-up gestures: fastcast has no windup (creature enchantments)
             DoWindupGestures(spell, false, spellChain);

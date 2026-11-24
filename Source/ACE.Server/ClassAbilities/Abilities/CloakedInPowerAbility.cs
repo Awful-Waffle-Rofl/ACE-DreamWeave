@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 using ACE.Entity.Enum;
 using ACE.Server.Managers;
@@ -7,7 +8,11 @@ using ACE.Server.WorldObjects;
 namespace ACE.Server.ClassAbilities.Abilities
 {
     /// <summary>
-    /// Vanguard T2 (added 2026-09-29): a FLOOR under the wearer's cloak spell-proc chance. One rank, 1 CAP.
+    /// Vanguard T2 (added 2026-09-29): a FLOOR under the wearer's cloak spell-proc chance. Three ranks, 1 CAP each
+    /// since the Vanguard pass of 2026-11-06, which added the CRITICAL THORNS window: any successful cloak SPELL
+    /// proc roll opens (or refreshes) a 0.5 / 1.0 / 1.5 s (by rank) window in which every Thorns reflect the
+    /// wearer deals is critical, the triggering hit's own reflect included - see Cloak.RollSpellProc and
+    /// Player.ApplyThornsReflect. The floor itself is the same at every rank.
     ///
     /// WHAT IT CHANGES, AND ONLY THAT. Cloak.RollProc computes its chance as
     /// <c>Math.Max(Math.Min(damage_percent, maxProcRate), floor)</c>, where damage_percent is the hit as a
@@ -58,19 +63,73 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "cloaked_in_power",
             DisplayName = "Cloaked in Power",
-            Description = "Your equipped cloak's spell proc never has less than a 10% chance to fire on a " +
-                          "hit that reaches you, however small the hit was. It does not shorten the cloak's " +
-                          "5 second proc cooldown, and a cloak that has not been leveled still never procs. " +
-                          "Higher Armor Tinkering multiplies the floor.",
-            MaxRank = 1,
-            CostPerRank = new[] { 1 },
+            // Live text: the floor is class_ability_cloakedinpower_floor (GetReadout). The description no longer quotes the
+            // cloak's own proc cooldown (Cloak.MinDelay, Entity/Cloak.cs, is the constant 5.0 unless use_cloak_proc_custom_scale,
+            // so cloak_cooldown_seconds is not what the game uses by default). The Critical Thorns window is quoted per rank by the
+            // tail, {ranks:...crit_window_r|f1} (CritWindowSeconds builds the same keys from CritWindowPrefix).
+            DescriptionTemplate = "Your cloak's spell proc always has at least a {v:class_ability_cloakedinpower_floor|pct}% chance " +
+                          "to fire on a hit that reaches you, however small the hit. It does not shorten the cloak's cooldown, and " +
+                          "an unleveled cloak still never procs. When the cloak procs, your Thorns reflects as a critical hit for a " +
+                          "few seconds, including on the hit that triggered it. A critical reflect deals double damage, and " +
+                          "Critical Damage Rating adds to that.",
+            RankTailTemplate = "{ranks:class_ability_cloakedinpower_crit_window_r|f1} seconds of critical Thorns",
+            MaxRank = 3,
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
             AffinitySkill = Skill.ArmorTinkering,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "affinity", Bounds = CeilingBounds.Affinity, Source = CeilingSource.Tunable, Key = "class_ability_affinity_chance_cap", Label = "max chance from affinity", Format = "pct" },
+            },
         };
 
         /// <summary>
+        /// The tunable-key prefix (rank number 1-3 appended) for the Critical Thorns window length in seconds.
+        /// </summary>
+        public const string CritWindowPrefix = "class_ability_cloakedinpower_crit_window_r";
+
+        /// <summary>
+        /// The base multiplier of a CRITICAL Thorns reflect, before the wearer's Critical Damage Rating mod
+        /// (owner ruling 2026-11-06: "your crit multiplier"): the same 2x a critical hit's base damage uses.
+        /// </summary>
+        public const double CritThornsBaseMultiplier = 2.0;
+
+        /// <summary>
+        /// How long the Critical Thorns window stays open after a cloak spell proc, in seconds, at a rank
+        /// (0 at rank 0). Ranks above the ladder clamp to the top rung.
+        /// </summary>
+        public static double CritWindowSeconds(int rank)
+        {
+            if (rank <= 0)
+                return 0.0;
+
+            return Math.Max(0.0, PropertyManager.GetDouble(CritWindowPrefix + Math.Clamp(rank, 1, EnhancedStatAbility.MaxTier)).Item);
+        }
+
+        /// <summary>
+        /// When the window closes after a proc at <paramref name="now"/>: always now + duration, never an
+        /// extension on top of the time left, so a proc inside an open window REFRESHES it and nothing stacks.
+        /// A zero duration leaves the current end untouched.
+        /// </summary>
+        public static double WindowEnd(double now, double durationSeconds, double currentEnd)
+        {
+            return durationSeconds > 0.0 ? now + durationSeconds : currentEnd;
+        }
+
+        /// <summary>
+        /// The multiplier a critical Thorns reflect takes: 2.0 x the positive rating mod of the wearer's total
+        /// Critical Damage Rating (Creature.GetPositiveRatingMod, (100 + rating) / 100; a negative rating
+        /// takes the negative-rating branch there, so it can shrink the crit but the 2.0 base stays).
+        /// </summary>
+        public static double CritThornsMultiplier(int critDamageRating)
+        {
+            return CritThornsBaseMultiplier * Creature.GetPositiveRatingMod(critDamageRating);
+        }
+
+        /// <summary>
         /// The proc-chance floor at a given rank, as a fraction: the ability's OWN rank bonus (the
-        /// <c>class_ability_cloakedinpower_floor</c> tunable, rank-invariant because MaxRank is 1) SCALED by
+        /// <c>class_ability_cloakedinpower_floor</c> tunable, rank-INVARIANT: ranks 2 and 3 (added 2026-11-06)
+        /// buy a longer Critical Thorns window, not a higher floor) SCALED by
         /// the Armor Tinkering affinity multiplier, with the added amount CAPPED. Pure for testability,
         /// matching PinningShotAbility.Chance / ReflectMagicAbility.ReflectChance.
         ///
@@ -95,7 +154,8 @@ namespace ACE.Server.ClassAbilities.Abilities
             if (rank <= 0)
                 return 0.0;
 
-            // Rank-invariant: MaxRank is 1, so there is no ladder to walk - the tunable IS the rank bonus.
+            // Rank-invariant: the floor does not climb with rank (the extra ranks lengthen the Critical Thorns
+            // window) - the tunable IS the rank bonus at every rank.
             var rankBonus = floorBase;
 
             // The multiplier scales this ability's OWN floor. What the cap bounds is the AMOUNT that multiply
@@ -110,8 +170,9 @@ namespace ACE.Server.ClassAbilities.Abilities
         }
 
         /// <summary>
-        /// Reports the FLOOR - the only number this entry carries, since MaxRank is 1 and the cooldown and
-        /// item-level gates it deliberately leaves alone are not its own values. Affinity is the CAPPED
+        /// Reports the FLOOR as the primary figure (rank-invariant: the cooldown and
+        /// item-level gates it deliberately leaves alone are not its own values) and the Critical Thorns window,
+        /// in seconds, as a Secondary. Affinity is the CAPPED
         /// amount the Armor Tinkering multiply ADDS (clamped the same way <see cref="Floor"/> clamps it), so
         /// Skill + Affinity + Gear sums to Effective exactly, which
         /// ClassAbilityAffinityCapReadoutInvariantTests pins for this readout family.
@@ -154,6 +215,22 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "cloak proc floor",
                 Per = null,
                 CapNote = affinityCapBites ? "affinity cap" : null,
+                Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "affinity", rawAdded * 100.0, rank, ClassAbilityText.Live) },
+                Secondary = new List<ClassAbilityReadout>
+                {
+                    new ClassAbilityReadout
+                    {
+                        HasValue = true,
+                        Skill = CritWindowSeconds(rank),
+                        Affinity = 0.0,
+                        Gear = 0.0,
+                        Effective = CritWindowSeconds(rank),
+                        Unit = "s",
+                        Label = "critical thorns window",
+                        Per = null,
+                        CapNote = null,
+                    },
+                },
             };
         }
     }

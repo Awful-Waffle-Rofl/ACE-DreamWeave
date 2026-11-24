@@ -9,7 +9,7 @@ using ACE.Server.Managers;
 namespace ACE.Server.Tests
 {
     /// <summary>
-    /// The four cloak tunables and the key names Cloak.cs actually reads.
+    /// The five cloak double tunables and the key names Cloak.cs actually reads.
     ///
     /// Cloak.cs read <c>cloak_min_proc_base</c> for years while the registered key is <c>cloak_min_proc</c>.
     /// Nothing caught it, because the shipped default of that lever is 0 and PropertyManager.GetDouble falls
@@ -34,7 +34,7 @@ namespace ACE.Server.Tests
         /// to be negative about.
         /// </summary>
         [TestMethod]
-        public void RegisteredCloakDoubles_AreTheFourExpectedKeys()
+        public void RegisteredCloakDoubles_AreTheFiveExpectedKeys()
         {
             var cloakKeys = DefaultPropertyManager.DefaultDoubleProperties.Keys
                 .Where(k => k.StartsWith("cloak_"))
@@ -42,7 +42,7 @@ namespace ACE.Server.Tests
                 .ToArray();
 
             CollectionAssert.AreEqual(
-                new[] { "cloak_cooldown_seconds", "cloak_max_proc_base", "cloak_max_proc_damage_percentage", "cloak_min_proc" },
+                new[] { "cloak_cooldown_seconds", "cloak_max_proc_base", "cloak_max_proc_damage_percentage", "cloak_min_proc", "cloak_rear_guard_armor_per_level" },
                 cloakKeys,
                 "the set of registered cloak_* double tunables changed");
 
@@ -50,6 +50,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0.25, DefaultPropertyManager.DefaultDoubleProperties["cloak_max_proc_base"].Item, 1e-9);
             Assert.AreEqual(0.30, DefaultPropertyManager.DefaultDoubleProperties["cloak_max_proc_damage_percentage"].Item, 1e-9);
             Assert.AreEqual(0.0, DefaultPropertyManager.DefaultDoubleProperties["cloak_min_proc"].Item, 1e-9);
+            Assert.AreEqual(20.0, DefaultPropertyManager.DefaultDoubleProperties["cloak_rear_guard_armor_per_level"].Item, 1e-9);
 
             // THE NEGATIVE CONTROL, and the actual bug: the name Cloak.cs used to read is not registered, and
             // never was. ModifyDouble is the discriminator, because it refuses an unregistered key outright
@@ -62,7 +63,7 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// SOURCE SCAN: every cloak_* key Cloak.cs reads is one of the registered four. A GetDouble against an
+        /// SOURCE SCAN: every cloak_* key Cloak.cs reads is one of the registered cloak doubles. A GetDouble against an
         /// unregistered key compiles, runs, and returns the caller's literal, so only reading the source
         /// catches a typo like the one this test exists for.
         /// </summary>

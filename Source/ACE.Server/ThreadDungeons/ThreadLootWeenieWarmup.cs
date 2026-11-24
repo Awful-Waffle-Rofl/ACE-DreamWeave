@@ -92,7 +92,7 @@ namespace ACE.Server.ThreadDungeons
 
         /// <summary>
         /// The wcids the delivery path creates OUTSIDE the loot factory: the cache chest and summoned exit, the Trade
-        /// Note of the boss bonus, every salvage bag (Player.MaterialSalvage, which the bonus's targeted bags index),
+        /// Note of the boss bonus, the Foolproof salvage pool, every salvage bag (Player.MaterialSalvage, which the bonus's targeted bags index),
         /// and every salvage-affinity base wcid a modifier can roll. Zeros are dropped.
         /// </summary>
         internal static IEnumerable<uint> DeliveryWcids(IEnumerable<uint> salvageBags, IEnumerable<uint> affinityBases)
@@ -107,6 +107,10 @@ namespace ACE.Server.ThreadDungeons
             yield return ACE.Server.Knots.KnotItems.PatternWcid;
             yield return ACE.Server.Knots.KnotItems.KnottedThreadCacheWcid;
             yield return ACE.Server.Knots.KnotItems.PinnacleCacheWcid;
+
+            // The Foolproof salvage pool the Thread Cache boss bonus and the Pinnacle Cache roll from.
+            foreach (var wcid in FoolproofSalvage.Wcids)
+                yield return wcid;
 
             foreach (var wcid in (salvageBags ?? Enumerable.Empty<uint>()).Concat(affinityBases ?? Enumerable.Empty<uint>()))
             {

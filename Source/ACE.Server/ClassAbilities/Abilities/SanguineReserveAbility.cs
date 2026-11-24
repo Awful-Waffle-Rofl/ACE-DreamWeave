@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+
 using ACE.Entity.Enum;
 using ACE.Server.EquipmentMods;
 using ACE.Server.Managers;
@@ -50,14 +52,35 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "sanguine_reserve",
             DisplayName = "Sanguine Reserve",
-            Description = "Landing a harmful Life Magic spell grants a Blood Charge, up to 3/4/5 by rank. Each " +
-                          "charge adds +7% Life Magic damage (up to +21/28/35%). Charges fade after 15 seconds " +
-                          "with no Life Magic cast. Against monsters only. Higher Creature Enchantment " +
-                          "multiplies the per-charge bonus.",
+            // Live text. Cap per rank: BloodChargeStackCap, Player_ClassAbilityBuffs.cs ~1241 (stack_cap_r1..r3); idle fade:
+            // BloodChargeExpireSeconds, Player_ClassAbilityBuffs.cs ~1232; per-charge value: GetReadout below (SanguineReserveAbility.cs ~83).
+            DescriptionTemplate = "Landing a harmful Life Magic spell gives you a Blood Charge. Each charge adds " +
+                          "+{v:class_ability_bloodmage_charge_per_stack|pct}% Life Magic damage. Charges fade after " +
+                          "{v:class_ability_bloodmage_charge_expire_seconds|num} seconds without a Life Magic cast.",
+            RankTailTemplate = "up to {ranks:class_ability_bloodmage_charge_stack_cap_r|int} charges (+{fn:full_pool|pct}% when " +
+                          "full)",
+            // full_pool is the bonus of a FULL pool: BloodChargeMath.FullPoolBonus = DamageMultiplier(StackCap, per-charge value) - 1, the
+            // ramp ApplyBloodChargeDamage applies (the per-charge value there is read through BloodChargeMath.PerChargeValue with
+            // ClassAbilityText.Live). The text is per RANK, not per player, so it assumes the neutral Creature Enchantment affinity
+            // and no Blood Charge gear; the mechanic multiplies the per-charge value by the caster's affinity.
+            TextFormulas = new Dictionary<string, TextFormula>
+            {
+                ["full_pool"] = new TextFormula(
+                    (values, rank) => BloodChargeMath.FullPoolBonus(values, rank),
+                    "class_ability_bloodmage_charge_stack_cap_r1",
+                    "class_ability_bloodmage_charge_stack_cap_r2",
+                    "class_ability_bloodmage_charge_stack_cap_r3",
+                    "class_ability_bloodmage_charge_per_stack"),
+            },
+            TunableSourceFiles = new[] { "WorldObjects/Player_ClassAbilityBuffs.cs", "ClassAbilities/BloodChargeMath.cs" },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
             AffinitySkill = Skill.CreatureEnchantment,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "stacks", Bounds = CeilingBounds.Stacks, Source = CeilingSource.TunablePerRank, Key = "class_ability_bloodmage_charge_stack_cap_r", Label = "max blood charges", Format = "int", ZeroIsLimit = true },
+            },
         };
 
         /// <summary>
@@ -80,7 +103,7 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
-            var perStack = PropertyManager.GetDouble("class_ability_bloodmage_charge_per_stack").Item;
+            var perStack = BloodChargeMath.PerStack(ClassAbilityText.Live);
 
             var multiplier = player?.GetClassAbilityAffinityMultiplier(Skill.CreatureEnchantment) ?? 1.0;
 
@@ -101,6 +124,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "life dmg",
                 Per = "/charge",
                 CapNote = null,
+                Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "stacks", player?.GetBloodChargeStacks() ?? 0, rank, ClassAbilityText.Live) },
             };
         }
     }

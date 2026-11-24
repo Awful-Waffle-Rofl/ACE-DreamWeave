@@ -223,6 +223,14 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// The end of the pin's own post-pin slow window: the pin's end plus <paramref name="slowSeconds"/>. THE
+        /// ONE PLACE this sum is made: <see cref="ApplyPinSlowState"/> writes the slow with it, and Pinning
+        /// Shot's damage-reduction rider (<see cref="TryApplyPinDamageReduction(double, double)"/>) ends with it,
+        /// so the reduction and the slow can never drift apart.
+        /// </summary>
+        public double PinSlowWindowEnd(double slowSeconds) => ClassAbilityPinnedUntil + slowSeconds;
+
+        /// <summary>
         /// The write half of <see cref="TryApplyClassAbilityMoveSlow"/>, after its refusals, at an explicit
         /// running-time clock. The slot is SHARED with Elemental Proficiency Frost and the stronger slow wins
         /// (ELEMENTAL-PROFICIENCY-DESIGN.md), with the same rule as the Frost entry point: while a STRONGER
@@ -241,7 +249,7 @@ namespace ACE.Server.WorldObjects
             if (running && factor > existing)
                 return false;
 
-            var endTime = ClassAbilityPinnedUntil + slowSeconds;
+            var endTime = PinSlowWindowEnd(slowSeconds);
 
             if (running && ClassAbilityMoveSlowUntil > endTime)
                 endTime = ClassAbilityMoveSlowUntil;

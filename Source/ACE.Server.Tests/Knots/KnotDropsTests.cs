@@ -437,7 +437,7 @@ namespace ACE.Server.Tests.Knots
         {
             var src = RepoFile(Path.Combine("Source", "ACE.Server", "ThreadDungeons", "ThreadDungeonSpawner.cs")).Replace("\r\n", "\n");
 
-            var build = src.IndexOf("plan = DungeonPopulationBuilder.Build(", StringComparison.Ordinal);
+            var build = src.IndexOf("plan = BuildLivePlan(", StringComparison.Ordinal);
             var stamp = src.IndexOf("run.MarkKnotLevel(KnotLevelMath.PlannedAverage(plan, LiveLevelOf));", StringComparison.Ordinal);
             // The placement queue is the per-landblock group queue since Open World Threads WP3b (one group for a dungeon).
             var queue = src.IndexOf("var placementGroups = new Queue<(Landblock Block, Queue<DungeonSpawnPlanEntry> Entries)>();", StringComparison.Ordinal);

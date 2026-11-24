@@ -99,5 +99,18 @@ namespace ACE.Entity.Enum.Properties
         /* PvP deserter lockout: the unix time (seconds) of this character's last deserter strike, which strike
            decay is measured from. */
         PvpDeserterLastStrikeAt = 9026,
+
+        /* Salvage Roller (Docs/SalvageRoller/DESIGN.md 5.2): on an item, the character_salvage_batch.id whose chosen
+           result is applied to it. Written in the same item save that applies the result, so a take re-run after a
+           crash sees it and does not apply the result twice. */
+        SalvageBatchApplied = 9029,
+
+        /* Luminance earned (WaffleACE): running total of Luminance this character has earned since logging in,
+           counted only in Player.AddLuminance (kills, quests, fellowship shares, digsite rewards, admin grants). EPHEMERAL: never saved, starts at 0 every
+           login, and is pushed to the client on each grant so client-side luminance-per-hour trackers can read
+           it. The id matches the "auto-banked" session total (9102) those tools already read. Deposits,
+           transfers, admin adds and spends do not change it - they are not earnings. */
+        [Ephemeral]
+        LuminanceEarnedThisSession = 9102,
     }
 }

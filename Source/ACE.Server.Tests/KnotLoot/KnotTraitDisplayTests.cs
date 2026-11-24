@@ -21,6 +21,7 @@ namespace ACE.Server.Tests.KnotLoot
         private static readonly string[] BoolKeys =
         {
             "knot_trait_cast_speed_enabled", "knot_trait_shield_trade_enabled", "knot_trait_frugal_hand_enabled", "knot_trait_wrist_trade_enabled", "knot_trait_overpowering_intent_enabled",
+            "knot_trait_harbinger_guard_enabled", "knot_trait_harbinger_celerity_enabled",
         };
 
         private static readonly string[] LongKeys =
@@ -38,6 +39,8 @@ namespace ACE.Server.Tests.KnotLoot
             "knot_trait_frugal_hand_min", "knot_trait_frugal_hand_max",
             "knot_trait_wrist_trade_gain_min", "knot_trait_wrist_trade_gain_max", "knot_trait_wrist_trade_cost_min", "knot_trait_wrist_trade_cost_max",
             "knot_trait_overpowering_intent_min", "knot_trait_overpowering_intent_max",
+            "knot_trait_harbinger_guard_min", "knot_trait_harbinger_guard_max",
+            "knot_trait_harbinger_celerity_attack_min", "knot_trait_harbinger_celerity_attack_max", "knot_trait_harbinger_celerity_cast_min", "knot_trait_harbinger_celerity_cast_max",
         };
 
         private static uint nextGuid = 0x7F200000;
@@ -109,12 +112,49 @@ namespace ACE.Server.Tests.KnotLoot
         {
             var d = Def(KnotTraitId.OverpoweringIntent);
 
-            Assert.AreEqual("Overpowering Intent [0%]: +5% War and Void Magic skill against monster resistance",
+            Assert.AreEqual("Overpowering Intent [0%]: +5% War, Void and Life Magic skill against monster resistance",
                 KnotTraitDisplay.Describe(d, new KnotTraitEffect(true, 0.0, 0.05, 0)));
-            Assert.AreEqual("Overpowering Intent [100%]: +10% War and Void Magic skill against monster resistance",
+            Assert.AreEqual("Overpowering Intent [100%]: +10% War, Void and Life Magic skill against monster resistance",
                 KnotTraitDisplay.Describe(d, new KnotTraitEffect(true, 1.0, 0.10, 0)));
-            Assert.AreEqual("Overpowering Intent [65%]: +8.3% War and Void Magic skill against monster resistance",
+            Assert.AreEqual("Overpowering Intent [65%]: +8.3% War, Void and Life Magic skill against monster resistance",
                 KnotTraitDisplay.Describe(d, new KnotTraitEffect(true, 0.65, 0.0825, 0)));
+        }
+
+        [TestMethod]
+        public void Describe_HarbingerGuard_AndCelerity()
+        {
+            Assert.AreEqual("Harbinger's Guard [50%]: +75 shield armor",
+                KnotTraitDisplay.Describe(Def(KnotTraitId.HarbingerGuard), new KnotTraitEffect(true, 0.5, 75, 0)));
+            Assert.AreEqual("Harbinger's Celerity [100%]: +5% attack speed, +5% cast speed",
+                KnotTraitDisplay.Describe(Def(KnotTraitId.HarbingerCelerity), new KnotTraitEffect(true, 1.0, 0.05, 0.05)));
+        }
+
+        [TestMethod]
+        public void Lines_HarbingerWand_ShowsBothTraits()
+        {
+            var weenie = new Weenie
+            {
+                WeenieClassId = 1008270,
+                WeenieType = WeenieType.Caster,
+                PropertiesInt = new Dictionary<PropertyInt, int>
+                {
+                    { PropertyInt.ItemType, (int)ItemType.Caster },
+                    { PropertyInt.KnotLootLevel, 400 },
+                },
+                PropertiesFloat = new Dictionary<PropertyFloat, double>
+                {
+                    { PropertyFloat.KnotTraitOverpoweringIntent, 1.0 },
+                    { PropertyFloat.KnotTraitHarbingerGuard, 1.0 },
+                },
+                PropertiesString = new Dictionary<PropertyString, string> { { PropertyString.KnotLootTable, "harbinger" } },
+            };
+
+            var wand = ACE.Server.Factories.WorldObjectFactory.CreateWorldObject(weenie, new ObjectGuid(nextGuid++));
+            var lines = KnotTraitDisplay.GetAppraisalLines(wand);
+
+            Assert.AreEqual(2, lines.Count);
+            Assert.AreEqual("- Overpowering Intent [100%]: +10% War, Void and Life Magic skill against monster resistance", lines[0]);
+            Assert.AreEqual("- Harbinger's Guard [100%]: +100 shield armor", lines[1]);
         }
 
         [TestMethod]
@@ -138,7 +178,7 @@ namespace ACE.Server.Tests.KnotLoot
             var lines = KnotTraitDisplay.GetAppraisalLines(baton);
 
             Assert.AreEqual(1, lines.Count);
-            Assert.AreEqual("- Overpowering Intent [65%]: +8.3% War and Void Magic skill against monster resistance", lines[0]);
+            Assert.AreEqual("- Overpowering Intent [65%]: +8.3% War, Void and Life Magic skill against monster resistance", lines[0]);
         }
 
         [TestMethod]

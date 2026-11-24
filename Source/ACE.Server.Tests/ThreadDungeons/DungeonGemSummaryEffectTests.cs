@@ -207,7 +207,7 @@ namespace ACE.Server.Tests.ThreadDungeons
                 .Where(d => d.MonsterEffectKind == DungeonRewardMath.SalvageAffinity)
                 .ToList();
 
-            Assert.AreEqual(8, affinities.Count, "the shipped file carries eight salvage affinities");
+            Assert.AreEqual(9, affinities.Count, "the shipped file carries nine salvage affinities");
 
             foreach (var def in affinities)
             {

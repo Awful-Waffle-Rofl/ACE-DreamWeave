@@ -79,6 +79,17 @@ namespace ACE.Server.Tests
             StringAssert.Contains(help, $"turn to facet N (1-{Player.MaxFacetSlot})");
         }
 
+        /// <summary>CATCHES: /facet vault missing from help, or help not saying grantees can take the deposited gear.</summary>
+        [TestMethod]
+        public void ComposeHelp_VaultDeposit_IsListedAndWarnsAboutGrantees()
+        {
+            var help = FacetCommands.ComposeHelp(Dials());
+
+            StringAssert.Contains(help, "/facet vault [on|off]");
+            StringAssert.Contains(help, FacetCommands.VaultGranteeWarning);
+            StringAssert.Contains(help, "you still need room in your main pack");
+        }
+
         [TestMethod]
         public void ComposeHelp_PkParagraph_UsesTheOwnerWordingAndTheDialsLevel()
         {
@@ -101,6 +112,38 @@ namespace ACE.Server.Tests
 
             Assert.IsFalse(help.Contains("/facet pk"), help);
             Assert.IsFalse(help.Contains("PK facet"), help);
+            Assert.IsFalse(help.Contains("N|pk"), help);
+        }
+
+        [TestMethod]
+        public void ComposeHelp_ListsFacetReset_WithAWorkedExample()
+        {
+            var help = FacetCommands.ComposeHelp(Dials());
+
+            StringAssert.Contains(help, "/facet reset <N|pk>    - clear facet N (2+ or pk) back to a fresh build, keeping its name");
+            StringAssert.Contains(help, "/facet reset 2");
+        }
+
+        [TestMethod]
+        public void ComposeHelp_PkDisabled_ResetLineDropsPk()
+        {
+            var dials = new FacetDials(true, 300, 400, 500, LandblockRealmList.Parse("01F5@1", "facet_allowlist"), "the Marketplace", pkEnabled: false, pkLevel: 150);
+            var help = FacetCommands.ComposeHelp(dials);
+
+            StringAssert.Contains(help, "/facet reset <N>       - clear facet N (2+) back to a fresh build, keeping its name");
+            Assert.IsFalse(help.Contains("N|pk"), help);
+        }
+
+        [TestMethod]
+        public void FacetCommandUsage_HasTheResetLine_AlignedWithTheOthers()
+        {
+            var method = typeof(FacetCommands).GetMethod("HandleFacet");
+            var attribute = (ACE.Server.Command.CommandHandlerAttribute)System.Attribute.GetCustomAttribute(method, typeof(ACE.Server.Command.CommandHandlerAttribute));
+
+            StringAssert.Contains(attribute.Usage, "reset <N|pk> | vault [on|off] | help]");
+            StringAssert.Contains(attribute.Usage, "\n  reset <N|pk>       - clear facet N (2+ or pk) back to a fresh build, keeping its name\n");
+            StringAssert.Contains(attribute.Usage, "\n  vault [on|off]     - send the gear you take off when you change facets to your account vault\n");
+            StringAssert.Contains(attribute.Usage, "\n  name <N> <text>    - set facet N's display name");
         }
 
         [TestMethod]

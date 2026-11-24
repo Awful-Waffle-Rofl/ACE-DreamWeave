@@ -260,11 +260,29 @@ namespace ACE.Server.ThreadDungeons
                 return false;
 
             lock (stateLock)
-                return puzzleRemoved.Add(guid);
+            {
+                if (!puzzleRemoved.Add(guid))
+                    return false;
+
+                puzzleRemovedCount++;
+                return true;
+            }
         }
+
+        /// <summary>
+        /// How many members <see cref="puzzleRemoved"/> holds. Written under stateLock, read lock-free: the set never shrinks,
+        /// so a zero means nobody is removed and <see cref="IsPuzzleRemoved"/> can answer without the lock. That is every
+        /// run but one with a lockout, and it keeps the presence test (ThreadRunPresence.IsMemberInside) off the run lock on
+        /// the Thread Shrine combat hooks. A reader racing the first removal sees it a moment late, exactly as it would had
+        /// it taken the lock a moment earlier.
+        /// </summary>
+        private volatile int puzzleRemovedCount;
 
         public bool IsPuzzleRemoved(uint guid)
         {
+            if (puzzleRemovedCount == 0)
+                return false;
+
             lock (stateLock)
                 return puzzleRemoved.Contains(guid);
         }

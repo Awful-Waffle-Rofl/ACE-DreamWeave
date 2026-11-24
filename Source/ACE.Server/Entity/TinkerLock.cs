@@ -31,7 +31,9 @@ namespace ACE.Server.Entity
     ///
     /// Drift Atlan weapons (PropertyBool.DriftAtlanWeapon, 9080) are a second, wider-allow-list rule in
     /// the same gate: they accept a ManaStone, an exact cook_book (source wcid, target wcid) pair (the
-    /// three Atlan Drift infusions), and - while weapon_mods_enabled is on - the fork's weapon-mod salvage
+    /// three Atlan Drift infusions), a Paragon mod gem or the Paragon reset item (ParagonModManager.IsParagonSource,
+    /// detected by property, allowed even with weapon_mods_enabled off so the manager can refuse with its own
+    /// message), and - while weapon_mods_enabled is on - the fork's weapon-mod salvage
     /// (Tourmaline and Amethyst, WeaponModManager.IsModMaterial), as if the weapon were loot-dropped.
     /// Everything else is refused, with its own message. Refire stations refuse the weapon outright.
     /// </summary>
@@ -57,10 +59,11 @@ namespace ACE.Server.Entity
         /// Pure core including the Drift Atlan rule. Refused when EITHER rule refuses: the Siraluun lock
         /// (see the 3-argument overload) or the Drift rule - a Drift Atlan target refuses everything except
         /// a mana stone, an exact cook_book pair, or a weapon-mod salvage source while weapon mods are
-        /// enabled. The enabled flag is a parameter so tests never read PropertyManager.
+        /// enabled, or a Paragon mod gem / Paragon reset item (sourceIsParagonModSource). The enabled flag is a
+        /// parameter so tests never read PropertyManager.
         /// </summary>
         public static bool IsRefused(bool targetLocked, bool targetIsDriftAtlan, bool sourceIsManaStone, bool hasCookbookRow,
-            bool sourceIsWeaponModMaterial, bool weaponModsEnabled)
+            bool sourceIsWeaponModMaterial, bool weaponModsEnabled, bool sourceIsParagonModSource = false)
         {
             if (IsRefused(targetLocked, sourceIsManaStone, hasCookbookRow))
                 return true;
@@ -71,12 +74,20 @@ namespace ACE.Server.Entity
             if (sourceIsManaStone || hasCookbookRow)
                 return false;
 
+            // A Paragon mod gem or the Paragon reset item (ParagonModManager.IsParagonSource) is allowed on a Drift
+            // Atlan weapon whether or not weapon_mods_enabled is on: with the system off the manager still claims
+            // the use and answers with its own refusal, so refusing here would only replace that message.
+            if (sourceIsParagonModSource)
+                return false;
+
             return !(sourceIsWeaponModMaterial && weaponModsEnabled);
         }
 
         /// <summary>
         /// What a tinker source is, for the salvage allow-list (PropertyInt.ModSalvageAllowMask). Tourmaline,
-        /// Amethyst (weapon mods) and Obsidian (equipment mods) are the fork-mod salvage bags; anything else is Other.
+        /// Amethyst (weapon mods) and Obsidian (equipment mods) are the fork-mod salvage bags; Tailoring is any
+        /// tailoring kit, reduction or layering tool, or tailored intermediate (Tailoring.IsTailoringKit, vendor
+        /// clones included); anything else is Other.
         /// </summary>
         public enum ModSalvageKind
         {
@@ -84,11 +95,25 @@ namespace ACE.Server.Entity
             Tourmaline = 1,
             Amethyst = 2,
             Obsidian = 4,
+            Tailoring = 8,
         }
 
         public const int ModSalvageTourmalineBit = 1;
         public const int ModSalvageAmethystBit = 2;
         public const int ModSalvageObsidianBit = 4;
+        public const int ModSalvageTailoringBit = 8;
+
+        /// <summary>
+        /// Pure classification of a use-on-target source for the mask rule: a tailoring kit (by wcid) is Tailoring,
+        /// otherwise the fork-mod salvage classification by item type and material.
+        /// </summary>
+        public static ModSalvageKind ClassifyMaskSource(uint sourceWcid, ItemType itemType, MaterialType? materialType)
+        {
+            if (Tailoring.IsTailoringKit(sourceWcid))
+                return ModSalvageKind.Tailoring;
+
+            return ClassifyModSalvage(itemType, materialType);
+        }
 
         /// <summary>
         /// Pure classification of a source by item type and material. A Salvage Hammer of an allowed material
@@ -107,17 +132,29 @@ namespace ACE.Server.Entity
         }
 
         /// <summary>
+        /// True for the Left-hand Tether (45683) and the Left-hand Tether Remover (45684). Both are code-mapped recipes
+        /// (RecipeManager_New), not cook_book rows, so the exact-pair exemption can never match them; the mask rule
+        /// exempts them by wcid instead.
+        /// </summary>
+        public static bool IsTetherSource(uint sourceWcid)
+        {
+            return sourceWcid == (uint)WeenieClassName.W_LEFTHANDTETHER_CLASS
+                || sourceWcid == (uint)WeenieClassName.W_LEFTHANDTETHERREMOVER_CLASS;
+        }
+
+        /// <summary>
         /// Pure core for the salvage allow-list rule. A null mask means the property is absent: never refuses. With
-        /// any mask (including 0) every source is refused except a mana stone, an exact cook_book pair, or a
-        /// fork-mod salvage whose bit is set in the mask AND whose system is enabled. True means refuse the use.
+        /// any mask (including 0) every source is refused except a mana stone, an exact cook_book pair, a Left-hand
+        /// Tether or its remover (sourceIsTether), a tailoring kit whose bit (8) is set in the mask, or a fork-mod
+        /// salvage whose bit is set in the mask AND whose system is enabled. True means refuse the use.
         /// </summary>
         public static bool ModSalvageMaskRefuses(int? mask, bool isManaStone, bool hasExactCookbookPair, ModSalvageKind sourceKind,
-            bool weaponModsEnabled, bool equipmentModsEnabled)
+            bool weaponModsEnabled, bool equipmentModsEnabled, bool sourceIsTether)
         {
             if (!mask.HasValue)
                 return false;
 
-            if (isManaStone || hasExactCookbookPair)
+            if (isManaStone || hasExactCookbookPair || sourceIsTether)
                 return false;
 
             switch (sourceKind)
@@ -128,18 +165,21 @@ namespace ACE.Server.Entity
                     return !((mask.Value & ModSalvageAmethystBit) != 0 && weaponModsEnabled);
                 case ModSalvageKind.Obsidian:
                     return !((mask.Value & ModSalvageObsidianBit) != 0 && equipmentModsEnabled);
+                case ModSalvageKind.Tailoring:
+                    return (mask.Value & ModSalvageTailoringBit) == 0;
                 default:
                     return true;
             }
         }
 
-        /// <summary>Refusal text for the salvage allow-list, built from the allowed bits in the order Tourmaline, Amethyst, Obsidian.</summary>
+        /// <summary>Refusal text for the salvage allow-list, built from the allowed bits in the order Tourmaline, Amethyst, Obsidian, tailoring kits.</summary>
         public static string ModSalvageMaskRefusalText(int mask)
         {
             var names = new List<string>();
             if ((mask & ModSalvageTourmalineBit) != 0) names.Add("Tourmaline");
             if ((mask & ModSalvageAmethystBit) != 0) names.Add("Amethyst");
             if ((mask & ModSalvageObsidianBit) != 0) names.Add("Obsidian");
+            if ((mask & ModSalvageTailoringBit) != 0) names.Add("tailoring kits");
 
             if (names.Count == 0)
                 return "This item cannot be tinkered.";
@@ -204,8 +244,8 @@ namespace ACE.Server.Entity
             var hasCookbookRow = DatabaseManager.World.GetCachedCookbook(source.WeenieClassId, target.WeenieClassId) != null;
 
             return ModSalvageMaskRefuses(mask, source.WeenieType == WeenieType.ManaStone, hasCookbookRow,
-                ClassifyModSalvage(source.ItemType, source.MaterialType), WeaponModRegistry.Enabled(),
-                PropertyManager.GetBool("equipment_mods_enabled").Item);
+                ClassifyMaskSource(source.WeenieClassId, source.ItemType, source.MaterialType), WeaponModRegistry.Enabled(),
+                PropertyManager.GetBool("equipment_mods_enabled").Item, IsTetherSource(source.WeenieClassId));
         }
 
         public const uint FirstDriftInfusionWcid = 1007400;
@@ -282,11 +322,13 @@ namespace ACE.Server.Entity
 
             var weaponModsEnabled = WeaponModRegistry.Enabled();
 
-            if (IsRefused(targetLocked, targetIsDriftAtlan, sourceIsManaStone, hasCookbookRow, sourceIsWeaponModMaterial, weaponModsEnabled))
+            var sourceIsParagonModSource = ParagonModManager.IsParagonSource(source);
+
+            if (IsRefused(targetLocked, targetIsDriftAtlan, sourceIsManaStone, hasCookbookRow, sourceIsWeaponModMaterial, weaponModsEnabled, sourceIsParagonModSource))
                 return true;
 
-            return ModSalvageMaskRefuses(mask, sourceIsManaStone, hasCookbookRow, ClassifyModSalvage(source.ItemType, source.MaterialType),
-                weaponModsEnabled, PropertyManager.GetBool("equipment_mods_enabled").Item);
+            return ModSalvageMaskRefuses(mask, sourceIsManaStone, hasCookbookRow, ClassifyMaskSource(source.WeenieClassId, source.ItemType, source.MaterialType),
+                weaponModsEnabled, PropertyManager.GetBool("equipment_mods_enabled").Item, IsTetherSource(source.WeenieClassId));
         }
 
         /// <summary>

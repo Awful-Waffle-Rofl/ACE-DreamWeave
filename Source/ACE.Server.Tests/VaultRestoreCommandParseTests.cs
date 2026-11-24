@@ -182,6 +182,7 @@ namespace ACE.Server.Tests
 
             StringAssert.Contains(text, "1: Open Item x1");
             StringAssert.Contains(text, "20d left", "an open row shows the retention it has left");
+            StringAssert.Contains(text, "up to 20d left", "an open ITEM row's window is an upper bound: a full barrel can evict it sooner");
 
             StringAssert.Contains(text, "2: Given Back x20");
             StringAssert.Contains(text, "RESTORED");

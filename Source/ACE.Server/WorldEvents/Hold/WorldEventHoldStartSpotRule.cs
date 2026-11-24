@@ -21,7 +21,8 @@ namespace ACE.Server.WorldEvents.Hold
     ///      search failed), the start re-rolls to spots spotMinDistance to spotMaxDistance from the nearest townReach.towns
     ///      towns, each checked the same way.
     ///
-    /// A spot that passes moves the composition's anchor IN PLACE (the AnchorPosition object is shared with nothing yet) and
+    /// A spot that passes moves the composition's anchor IN PLACE (the composer gives every composition its own copy of the
+    /// request's position, WorldEventComposer.TryResolveAnchor, so the request and any other candidate are untouched) and
     /// leaves the portal plan on WorldEventComposition.AreaPlan for the objective. The asked spot is always tried first (an
     /// admin's "--here" included); when it fails reach or the clear area the start re-rolls near towns, and when that finds
     /// nothing either the start stands at the asked spot with a warning. A start is never refused here. The portals checked
@@ -217,7 +218,9 @@ namespace ACE.Server.WorldEvents.Hold
                 AnglesY = anchor.AnglesY,
                 AnglesZ = anchor.AnglesZ,
                 BiomeTags = anchor.BiomeTags != null ? new List<string>(anchor.BiomeTags) : new List<string>(),
-                CooldownSeconds = anchor.CooldownSeconds
+                CooldownSeconds = anchor.CooldownSeconds,
+                RealmId = anchor.RealmId,
+                MaxRadius = anchor.MaxRadius
             };
         }
 

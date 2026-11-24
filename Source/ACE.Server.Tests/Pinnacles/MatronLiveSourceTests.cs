@@ -150,6 +150,36 @@ namespace ACE.Server.Tests.Pinnacles
         }
 
         [TestMethod]
+        public void SpawnProp_StampsEtherealAndAlwaysEtherealBeforeEnterWorld()
+        {
+            var b = Body("public PinnacleHandle SpawnProp(");
+            var enter = b.IndexOf("EnterWorld()", StringComparison.Ordinal);
+            var m = System.Text.RegularExpressions.Regex.Match(b, @"if \(prop\.Ethereal\)\s*wo\.Ethereal = true;");
+            var ethereal = m.Success ? m.Index : -1;
+            var always = b.IndexOf("door.AlwaysEthereal = prop.Ethereal;", StringComparison.Ordinal);
+            var doorOpen = b.IndexOf("if (prop.DoorOpen == true)", StringComparison.Ordinal);
+
+            Assert.IsTrue(ethereal > 0 && always > 0 && enter > ethereal && enter > always, $"ethereal={ethereal} always={always} enter={enter}");
+
+            // unconditional for every door, beside the seal, never inside the DoorOpen branch (the Matron doors spawn DoorOpen: false)
+            Assert.IsTrue(System.Text.RegularExpressions.Regex.IsMatch(b, @"door\.SealedShut = true;\s*door\.AlwaysEthereal = prop\.Ethereal;"), "AlwaysEthereal is stamped right after the unconditional seal");
+            Assert.IsTrue(doorOpen > always, $"always={always} doorOpen={doorOpen}");
+        }
+
+        [TestMethod]
+        public void MatronDoors_AreEthereal_TheDrainIrisKeepsItsWeenieState()
+        {
+            // player report 2026-11-11: a pit door swinging shut wedged a player in its niche
+            var ids = new System.Collections.Generic.List<int> { ACE.Server.Pinnacles.Matron.MatronData.NorthId };
+            ids.AddRange(ACE.Server.Pinnacles.Matron.MatronData.PitIds);
+
+            foreach (var id in ids)
+                Assert.IsTrue(ACE.Server.Pinnacles.Matron.MatronLayout.DoorProp(ACE.Server.Pinnacles.Matron.MatronData.Opening(id)).Ethereal, $"opening {id}");
+
+            Assert.IsFalse(ACE.Server.Pinnacles.Matron.MatronLayout.DrainIris(false).Ethereal, "the iris is ethereal by its weenie, not by the prop flag");
+        }
+
+        [TestMethod]
         public void SpawnProp_StampsScaleTranslucencyScriptBeforeEnterWorld()
         {
             var b = Body("public PinnacleHandle SpawnProp(");

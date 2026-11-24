@@ -27,13 +27,19 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "doublevolley",
             DisplayName = "Double Volley",
-            Description = "Your missile volleys have a 10/20/30% chance (by rank) to immediately fire a full " +
-                          "second volley at the same targets - no ammo, no stamina. Higher Run multiplies " +
-                          "the chance, uncapped.",
+            // Live text: chanceBase + (rank - 1) * chanceStep (GetReadout; Chance).
+            DescriptionTemplate = "Your missile volleys can fire a second full volley at the same targets straight away, with no " +
+                          "ammo and no stamina.",
+            RankTailTemplate = "{ladder:class_ability_doublevolley_chance_base,class_ability_doublevolley_chance_step|pct}% chance",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
             AffinitySkill = Skill.Run,
+            AffinityRate = AffinityRateSpec.Uncapped,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "gear", Bounds = CeilingBounds.Gear, Source = CeilingSource.GearStackCap, GearMod = EquipmentModId.DoubleVolley, Label = "max from gear", Format = "pct" },
+            },
         };
 
         /// <summary>
@@ -109,6 +115,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "re-fire",
                 Per = null,
                 CapNote = null,
+                Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "gear", gear, rank, ClassAbilityText.Live) },
             };
         }
     }

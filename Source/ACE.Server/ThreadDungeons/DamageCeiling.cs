@@ -204,6 +204,14 @@ namespace ACE.Server.ThreadDungeons
         public CreaturePerHit WithLevel(int level) => level == Level ? this : Make(level, Melee, Missile);
 
         /// <summary>
+        /// This creature with every damage source multiplied by <paramref name="ratio"/> and its attribute unchanged (the Thread
+        /// family stretch's overscale, ReachUpStamp.ScaleDamage with armour 1.0). A ratio that is not a finite number above 1
+        /// returns this creature unchanged.
+        /// </summary>
+        public CreaturePerHit DamageScaledBy(double ratio)
+            => double.IsNaN(ratio) || double.IsInfinity(ratio) || ratio <= 1.0 ? this : Make(Level, Melee.Project(ratio, 1.0), Missile.Project(ratio, 1.0), ByArchetype);
+
+        /// <summary>
         /// This creature as a reach-up stamp to <paramref name="toLevel"/> fields it with the stat curve on (ReachUpStamp):
         /// damage by the run's curve ratio on the Damage axis, the attribute by its own axis ratio. <paramref name="curveRatio"/>
         /// is the run's (from, to) ratio exactly as the live stamp reads it - plan.StatCurve.Ratio, with the live damage rate

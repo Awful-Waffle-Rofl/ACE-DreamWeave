@@ -192,7 +192,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             return row;
         }
 
-        private static DungeonGemSpec Spec() => new DungeonGemSpec("ow_mukkir_test", 100, 6, "any", 1, Array.Empty<(string, double)>(), 0, 0);
+        private static DungeonGemSpec Spec(int seed = 1) => new DungeonGemSpec("ow_mukkir_test", 100, 6, "any", seed, Array.Empty<(string, double)>(), 0, 0);
 
         [TestMethod]
         public void The_builder_themes_an_outdoor_site_and_leaves_a_dungeon_weighted()
@@ -202,9 +202,9 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             for (var seed = 0; seed < 60; seed++)
             {
-                outdoorFamilies.Add(DungeonPopulationBuilder.Build(Spec(), Row(outdoor: true), Store(), Tables(), LevelOf, w => 0, Limits(), new Random(seed),
+                outdoorFamilies.Add(DungeonPopulationBuilder.Build(Spec(seed), Row(outdoor: true), Store(), Tables(), LevelOf, w => 0, Limits(), new Random(seed),
                     movementHeightOf: w => 1.0f).FamilyId);
-                dungeonFamilies.Add(DungeonPopulationBuilder.Build(Spec(), Row(outdoor: false), Store(), Tables(), LevelOf, w => 0, Limits(), new Random(seed)).FamilyId);
+                dungeonFamilies.Add(DungeonPopulationBuilder.Build(Spec(seed), Row(outdoor: false), Store(), Tables(), LevelOf, w => 0, Limits(), new Random(seed)).FamilyId);
             }
 
             CollectionAssert.AreEqual(new[] { "mukkir" }, outdoorFamilies.ToList(), "the outdoor site always fields its theme");

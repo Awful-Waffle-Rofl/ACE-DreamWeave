@@ -987,12 +987,12 @@ namespace ACE.Server.Tests
         /// </summary>
         private static WorldEvent BossRun(Func<double> clock, Func<AudienceEstimate> audience,
             List<(uint Wcid, double Mult)> spawns, BossDef boss = null, Func<bool> placementSucceeds = null,
-            Func<bool> throughputFlag = null)
+            Func<bool> throughputFlag = null, GoalDef goal = null, int? maxDurationSeconds = 100000)
         {
             var composition = new WorldEventComposition(WaveTheme(),
                 new[] { Family(new FamilyMember { Wcid = 1002604, Name = "Drone", Level = 100, Role = 0 }) },
                 boss ?? NamedBossDef(),
-                new GoalDef
+                goal ?? new GoalDef
                 {
                     Id = "kill_boss",
                     DisplayName = "Slay the Champion",
@@ -1022,7 +1022,7 @@ namespace ACE.Server.Tests
                 FamilyId = "olthoi",
                 GoalId = "kill_boss",
                 AnnounceLeadSeconds = 0,
-                MaxDurationSeconds = 100000,
+                MaxDurationSeconds = maxDurationSeconds,
                 MinDurationSeconds = TestMinDuration,
                 AbandonAfterSeconds = 100000,
                 WipeGraceSeconds = 100000,
@@ -2042,6 +2042,631 @@ namespace ACE.Server.Tests
 
             foreach (var expected in ShippedBosses)
                 Assert.AreEqual(0u, store.Bosses[expected.id].BaseHealth, expected.id);
+        }
+
+        // ---- (m) the champion HP budget (kill_boss), keep-percentage raises, per-goal run length -------
+
+        /// <summary>The shipped budget dials: 750000 per power, linear, floor 750000, cap 30000000.</summary>
+        private static BossDef BudgetBossDef()
+        {
+            var boss = NamedBossDef();
+
+            boss.BudgetHealthPerPower = 750000;
+            boss.BudgetExponent = 1.0;
+            boss.BudgetFloorHealth = 750000;
+            boss.BudgetCapHealth = 30000000;
+
+            return boss;
+        }
+
+        /// <summary>
+        /// Runs <paramref name="body"/> with the budget flag, and every world_events_* override, pinned: a unit
+        /// test has no shard config, so the property reads would otherwise throw and log. Restored in finally.
+        /// </summary>
+        private static void WithBudgetSeams(bool budgetEnabled, Action body)
+        {
+            var originalFlag = WorldEvent.BossBudgetEnabledSource;
+            var originalDouble = WorldEventOverrides.DoubleSource;
+            var originalLong = WorldEventOverrides.LongSource;
+
+            try
+            {
+                WorldEvent.BossBudgetEnabledSource = () => budgetEnabled;
+                WorldEventOverrides.DoubleSource = key => 0;
+                WorldEventOverrides.LongSource = key => 0;
+
+                body();
+            }
+            finally
+            {
+                WorldEvent.BossBudgetEnabledSource = originalFlag;
+                WorldEventOverrides.DoubleSource = originalDouble;
+                WorldEventOverrides.LongSource = originalLong;
+            }
+        }
+
+        /// <summary>Drives one audience re-sample on a run, the way a wave pick does (SetAudience is private).</summary>
+        private static void Resample(WorldEvent evt, AudienceEstimate estimate)
+        {
+            var method = typeof(WorldEvent).GetMethod("SetAudience",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+
+            Assert.IsNotNull(method, "WorldEvent.SetAudience moved; update this seam");
+
+            method.Invoke(evt, new object[] { estimate });
+        }
+
+        /// <summary>The shipped goal for these tests: a kill_boss goal exactly as BossRun builds it by default.</summary>
+        private static GoalDef GoalOf(GoalType type, int maxDurationSeconds = 0)
+        {
+            return new GoalDef
+            {
+                Id = type.ToString().ToLowerInvariant(),
+                DisplayName = type.ToString(),
+                Type = type.ToString(),
+                TypeKind = type,
+                MvpRule = "killingBlowAndTopDamage",
+                RuleKind = MvpRule.KillingBlowAndTopDamage,
+                ProgressTemplate = "x",
+                MaxDurationSeconds = maxDurationSeconds
+            };
+        }
+
+        [TestMethod]
+        public void BossBudget_ResolveHealth_IsLinearInPowerBetweenTheFloorAndTheCap()
+        {
+            Assert.AreEqual(22500000u, WorldEventBossBudget.ResolveHealth(750000, 1.0, 30, 750000, 30000000), "power 30");
+            Assert.AreEqual(8250000u, WorldEventBossBudget.ResolveHealth(750000, 1.0, 11, 750000, 30000000), "power 11");
+            Assert.AreEqual(12000000u, WorldEventBossBudget.ResolveHealth(750000, 2.0, 4, 750000, 30000000),
+                "exponent 2: 750000 x 4^2");
+
+            Assert.AreEqual(750000u, WorldEventBossBudget.ResolveHealth(750000, 1.0, 0.5, 750000, 30000000), "below the floor");
+            Assert.AreEqual(750000u, WorldEventBossBudget.ResolveHealth(750000, 1.0, 0, 750000, 30000000), "no power");
+            Assert.AreEqual(30000000u, WorldEventBossBudget.ResolveHealth(750000, 1.0, 100, 750000, 30000000), "past the cap");
+        }
+
+        [TestMethod]
+        public void BossBudget_ResolveHealth_DegenerateInputsNeverThrowAndNeverBreakTheBounds()
+        {
+            Assert.AreEqual(750000u, WorldEventBossBudget.ResolveHealth(0, 1.0, 30, 750000, 30000000), "perPower 0 = off = floor");
+            Assert.AreEqual(750000u, WorldEventBossBudget.ResolveHealth(double.NaN, 1.0, 30, 750000, 30000000));
+            Assert.AreEqual(750000u, WorldEventBossBudget.ResolveHealth(750000, 1.0, 30, 750000, 600000), "cap below floor = floor");
+            Assert.AreEqual(22500000u, WorldEventBossBudget.ResolveHealth(750000, 0, 30, 750000, 30000000), "bad exponent reads as 1");
+            Assert.AreEqual(750000u, WorldEventBossBudget.ResolveHealth(750000, 1.0, double.NaN, 750000, 30000000));
+            Assert.AreEqual((uint)int.MaxValue, WorldEventBossBudget.ResolveHealth(750000, 1.0, 1e12, 750000, uint.MaxValue),
+                "bounded by int.MaxValue");
+
+            Assert.AreEqual(1.0, WorldEventBossBudget.ResolveMult(750000, 1.0, 30, 0, 30000000), "no floor, no multiplier");
+            Assert.AreEqual(30.0, WorldEventBossBudget.ResolveMult(750000, 1.0, 30, 750000, 30000000), 0.0000001);
+            Assert.AreEqual(40.0, WorldEventBossBudget.ResolveMult(750000, 1.0, 100, 750000, 30000000), 0.0000001, "cap / floor");
+        }
+
+        [TestMethod]
+        public void BossBudget_KillBossRun_SizesFromPower_30Players_Is22Point5M()
+        {
+            WithBudgetSeams(true, () =>
+            {
+                var now = T0;
+                var spawns = new List<(uint Wcid, double Mult)>();
+
+                var evt = BossRun(() => now, () => new AudienceEstimate(30, 275, 275, 30.0), spawns, BudgetBossDef());
+
+                evt.Stage(now);
+                evt.Tick(now);
+
+                now = T0 + TestMinDuration;
+                evt.Tick(now);
+
+                Assert.AreEqual(1, spawns.Count);
+                Assert.AreEqual(30.0, spawns[0].Mult, 0.0000001);
+                Assert.IsTrue(evt.BossBudgetActive);
+                Assert.IsFalse(evt.BossThroughputActive);
+                Assert.AreEqual(750000u, evt.BossRebaseHealth, "re-based to the budget floor");
+                Assert.AreEqual(22500000.0, spawns[0].Mult * evt.BossRebaseHealth, 0.5, "floor x mult = 22.5M");
+                Assert.AreEqual(30, evt.BossAudienceAtSpawn);
+                Assert.AreEqual(30.0, evt.BossPowerAtSpawn, 0.0000001);
+            });
+        }
+
+        [TestMethod]
+        public void BossBudget_KillBossRun_SizesFromPower_11Players_Is8Point25M()
+        {
+            WithBudgetSeams(true, () =>
+            {
+                var now = T0;
+                var spawns = new List<(uint Wcid, double Mult)>();
+
+                var evt = BossRun(() => now, () => new AudienceEstimate(11, 275, 275, 11.0), spawns, BudgetBossDef());
+
+                evt.Stage(now);
+                evt.Tick(now);
+
+                now = T0 + TestMinDuration;
+                evt.Tick(now);
+
+                Assert.AreEqual(1, spawns.Count);
+                Assert.AreEqual(8250000.0, spawns[0].Mult * evt.BossRebaseHealth, 0.5);
+            });
+        }
+
+        [TestMethod]
+        public void BossBudget_KillBossRun_ClampsToTheFloorAndTheCap()
+        {
+            WithBudgetSeams(true, () =>
+            {
+                var now = T0;
+                var spawns = new List<(uint Wcid, double Mult)>();
+
+                // An empty field is floored to one level-50 participant (power 4/121): far below the floor.
+                var thin = BossRun(() => now, () => new AudienceEstimate(0, 0, 0), spawns, BudgetBossDef());
+
+                thin.Stage(now);
+                thin.Tick(now);
+                now = T0 + TestMinDuration;
+                thin.Tick(now);
+
+                Assert.AreEqual(1.0, spawns[0].Mult, 0.0000001, "the floor itself");
+
+                now = T0;
+                spawns.Clear();
+
+                var crowd = BossRun(() => now, () => new AudienceEstimate(120, 275, 275, 120.0), spawns, BudgetBossDef());
+
+                crowd.Stage(now);
+                crowd.Tick(now);
+                now = T0 + TestMinDuration;
+                crowd.Tick(now);
+
+                Assert.AreEqual(40.0, spawns[0].Mult, 0.0000001, "30M cap over the 750k floor");
+            });
+        }
+
+        [TestMethod]
+        public void BossBudget_FlagOff_FallsBackToTheThroughputPath()
+        {
+            WithBudgetSeams(false, () =>
+            {
+                var now = T0;
+                var spawns = new List<(uint Wcid, double Mult)>();
+
+                var boss = ThroughputBossDef();
+                boss.BudgetHealthPerPower = 750000;
+                boss.BudgetFloorHealth = 750000;
+                boss.BudgetCapHealth = 30000000;
+
+                var evt = BossRun(() => now, () => new AudienceEstimate(5, 275, 275, 5.0), spawns, boss,
+                    throughputFlag: () => true);
+
+                evt.Stage(now);
+                evt.Tick(now);
+
+                ClearWavePhase(evt, 3000000);
+
+                now = T0 + TestMinDuration;
+                evt.Tick(now);
+
+                Assert.IsFalse(evt.BossBudgetActive);
+                Assert.IsTrue(evt.BossThroughputActive, "the existing throughput path, untouched");
+                Assert.AreEqual(30.0, spawns[0].Mult, 0.0000001);
+                Assert.AreEqual(100000u, evt.BossRebaseHealth);
+            });
+        }
+
+        [TestMethod]
+        public void BossBudget_FlagOffAndNoThroughput_FallsBackToThePowerCurve()
+        {
+            WithBudgetSeams(false, () =>
+            {
+                var now = T0;
+                var spawns = new List<(uint Wcid, double Mult)>();
+
+                var evt = BossRun(() => now, () => new AudienceEstimate(5, 275, 275, 5.0), spawns, BudgetBossDef());
+
+                evt.Stage(now);
+                evt.Tick(now);
+                now = T0 + TestMinDuration;
+                evt.Tick(now);
+
+                Assert.IsFalse(evt.BossBudgetActive);
+                Assert.AreEqual(1.75, spawns[0].Mult, 0.0000001);
+                Assert.AreEqual(0u, evt.BossRebaseHealth);
+            });
+        }
+
+        [TestMethod]
+        public void BossBudget_ANonKillBossGoal_KeepsTheLegacySizing()
+        {
+            WithBudgetSeams(true, () =>
+            {
+                foreach (var type in new[] { GoalType.KillCount, GoalType.DestroySource, GoalType.Hold })
+                {
+                    var now = T0;
+                    var spawns = new List<(uint Wcid, double Mult)>();
+
+                    var evt = BossRun(() => now, () => new AudienceEstimate(30, 275, 275, 30.0), spawns, BudgetBossDef(),
+                        goal: GoalOf(type));
+
+                    evt.Stage(now);
+                    evt.Tick(now);
+                    now = T0 + TestMinDuration;
+                    evt.Tick(now);
+
+                    Assert.IsFalse(evt.BossBudgetActive, type.ToString());
+                    Assert.AreEqual(0u, evt.BossRebaseHealth, type.ToString());
+                    Assert.AreEqual(BossDef.ResolveHealthMult(BossDef.DefaultPerPlayer, BossDef.DefaultHealthCap, 30.0),
+                        spawns[0].Mult, 0.0000001, type.ToString());
+                }
+            });
+        }
+
+        [TestMethod]
+        public void BossBudget_ABossWithNoBudget_KeepsTheLegacySizing()
+        {
+            WithBudgetSeams(true, () =>
+            {
+                var now = T0;
+                var spawns = new List<(uint Wcid, double Mult)>();
+
+                var evt = BossRun(() => now, () => new AudienceEstimate(5, 275, 275, 5.0), spawns, NamedBossDef());
+
+                evt.Stage(now);
+                evt.Tick(now);
+                now = T0 + TestMinDuration;
+                evt.Tick(now);
+
+                Assert.IsFalse(evt.BossBudgetActive);
+                Assert.AreEqual(1.75, spawns[0].Mult, 0.0000001);
+            });
+        }
+
+        [TestMethod]
+        public void BossBudget_ALateArrivalRaisesTheBoss_AndADepartureChangesNothing()
+        {
+            WithBudgetSeams(true, () =>
+            {
+                var now = T0;
+                var spawns = new List<(uint Wcid, double Mult)>();
+
+                var evt = BossRun(() => now, () => new AudienceEstimate(11, 275, 275, 11.0), spawns, BudgetBossDef());
+
+                evt.Stage(now);
+                evt.Tick(now);
+                now = T0 + TestMinDuration;
+                evt.Tick(now);
+
+                Assert.AreEqual(11.0, evt.BossHealthMult, 0.0000001, "sized for 11");
+                Assert.IsTrue(evt.BossBudgetActive);
+
+                Resample(evt, new AudienceEstimate(30, 275, 275, 30.0));
+
+                Assert.AreEqual(30.0, evt.BossHealthMult, 0.0000001, "a late crowd raises the boss to 22.5M");
+
+                Resample(evt, new AudienceEstimate(8, 275, 275, 8.0));
+
+                Assert.AreEqual(30.0, evt.BossHealthMult, 0.0000001, "a departing crowd never lowers it");
+
+                Assert.AreEqual(30, evt.PeakAudience);
+                Assert.AreEqual(30.0, evt.PeakPower, 0.0000001);
+            });
+        }
+
+        [TestMethod]
+        public void BossBudget_TheBudgetUsesAFreshSampleAtSpawn_NotTheLastWavesOne()
+        {
+            WithBudgetSeams(true, () =>
+            {
+                var now = T0;
+                var spawns = new List<(uint Wcid, double Mult)>();
+                var power = 11.0;
+
+                var evt = BossRun(() => now, () => new AudienceEstimate((int)power, 275, 275, power), spawns, BudgetBossDef());
+
+                evt.Stage(now);
+                evt.Tick(now);
+
+                // The crowd doubles between the last sample and the boss landing.
+                power = 22.0;
+
+                now = T0 + TestMinDuration;
+                evt.Tick(now);
+
+                Assert.AreEqual(22.0, spawns[0].Mult, 0.0000001, "sized for the crowd standing there at spawn");
+                Assert.AreEqual(22.0, evt.BossPowerAtSpawn, 0.0000001);
+            });
+        }
+
+        [TestMethod]
+        public void BossBudget_SizesFromThePeakPower_WhenTheSampleAtSpawnIsEmpty()
+        {
+            WithBudgetSeams(true, () =>
+            {
+                var now = T0;
+                var spawns = new List<(uint Wcid, double Mult)>();
+                var estimate = new AudienceEstimate(20, 275, 275, 20.0);
+
+                var evt = BossRun(() => now, () => estimate, spawns, BudgetBossDef());
+
+                evt.Stage(now);
+                evt.Tick(now);
+
+                // The wave samples saw power 20; the sample taken as the boss lands comes back empty.
+                estimate = new AudienceEstimate(0, 0, 0);
+
+                now = T0 + TestMinDuration;
+                evt.Tick(now);
+
+                Assert.AreEqual(1, spawns.Count);
+                Assert.AreEqual(20.0, spawns[0].Mult, 0.0000001, "HP from power 20 (15M), not the 4/121 floor estimate");
+                Assert.AreEqual(20.0, evt.BossPowerAtSpawn, 0.0000001);
+            });
+        }
+
+        [TestMethod]
+        public void BossBudget_ADialChangedMidFight_DoesNotMoveTheRatchet()
+        {
+            WithBudgetSeams(true, () =>
+            {
+                var now = T0;
+                var spawns = new List<(uint Wcid, double Mult)>();
+
+                var evt = BossRun(() => now, () => new AudienceEstimate(11, 275, 275, 11.0), spawns, BudgetBossDef());
+
+                evt.Stage(now);
+                evt.Tick(now);
+                now = T0 + TestMinDuration;
+                evt.Tick(now);
+
+                Assert.AreEqual(11.0, evt.BossHealthMult, 0.0000001);
+                Assert.AreEqual(750000u, evt.BossRebaseHealth);
+
+                // Halve the floor override and double perPower mid-fight. Unlatched, the candidate for the same
+                // power would be 22 (a new floor under the old rebase) and the ratchet would double the boss.
+                WorldEventOverrides.LongSource = key => key == "world_events_boss_budget_floor_health" ? 375000 : 0;
+                WorldEventOverrides.DoubleSource = key => key == "world_events_boss_health_per_power" ? 1500000 : 0;
+
+                Resample(evt, new AudienceEstimate(11, 275, 275, 11.0));
+
+                Assert.AreEqual(11.0, evt.BossHealthMult, 0.0000001, "same power, same multiplier");
+                Assert.AreEqual(750000u, evt.BossRebaseHealth, "the rebase stays what the boss was built on");
+
+                // Late arrivals still raise it, from the latched dials.
+                Resample(evt, new AudienceEstimate(30, 275, 275, 30.0));
+
+                Assert.AreEqual(30.0, evt.BossHealthMult, 0.0000001);
+            });
+        }
+
+        [TestMethod]
+        public void BossBudget_TakesPrecedenceOverThroughput_WhenBothFlagsAreOn()
+        {
+            WithBudgetSeams(true, () =>
+            {
+                var now = T0;
+                var spawns = new List<(uint Wcid, double Mult)>();
+
+                var boss = ThroughputBossDef();
+                boss.BudgetHealthPerPower = 750000;
+                boss.BudgetFloorHealth = 750000;
+                boss.BudgetCapHealth = 30000000;
+
+                var evt = BossRun(() => now, () => new AudienceEstimate(11, 275, 275, 11.0), spawns, boss,
+                    throughputFlag: () => true);
+
+                evt.Stage(now);
+                evt.Tick(now);
+
+                // A wave phase that would size the boss at 30x on the throughput path.
+                ClearWavePhase(evt, 3000000);
+
+                now = T0 + TestMinDuration;
+                evt.Tick(now);
+
+                Assert.IsTrue(evt.BossBudgetActive);
+                Assert.IsFalse(evt.BossThroughputActive);
+                Assert.AreEqual(11.0, spawns[0].Mult, 0.0000001, "the budget's 8.25M, not the throughput 30x");
+                Assert.AreEqual(750000u, evt.BossRebaseHealth);
+            });
+        }
+
+        [TestMethod]
+        public void MinDurationValidation_UsesTheEffectiveMax_SoAMinOf650PassesOnKillBoss()
+        {
+            Assert.IsTrue(WorldEvent.ValidateDurations(650, WorldEvent.ResolveMaxDuration(null, 900), out _), "kill_boss, no explicit max");
+            Assert.IsFalse(WorldEvent.ValidateDurations(650, WorldEvent.ResolveMaxDuration(null, 0), out _), "kill_count keeps the 600 bound");
+            Assert.IsFalse(WorldEvent.ValidateDurations(650, WorldEvent.ResolveMaxDuration(600, 900), out _), "an explicit 600 is a real bound");
+            Assert.IsFalse(WorldEvent.ValidateDurations(900, WorldEvent.ResolveMaxDuration(null, 900), out _), "min must stay below the max");
+        }
+
+        [TestMethod]
+        public void BossModeLabel_NamesTheSizingModeBudgetFirst()
+        {
+            Assert.AreEqual("budget", WorldEvent.BossModeLabel(true, false));
+            Assert.AreEqual("budget", WorldEvent.BossModeLabel(true, true));
+            Assert.AreEqual("throughput", WorldEvent.BossModeLabel(false, true));
+            Assert.AreEqual("power", WorldEvent.BossModeLabel(false, false));
+        }
+
+        [TestMethod]
+        public void BossMode_BothReportingSitesUseTheLabel_AndTheBudgetRunReportsBudget()
+        {
+            var root = FindServerSourceRoot();
+
+            var finish = File.ReadAllText(Path.Combine(root, "WorldEvents", "WorldEvent.cs"));
+            var status = File.ReadAllText(Path.Combine(root, "WorldEvents", "WorldEventManager.cs"));
+
+            StringAssert.Contains(finish, "bossMode={BossModeLabel(BossBudgetActive, BossThroughputActive)}");
+            StringAssert.Contains(status, "bossMode={WorldEvent.BossModeLabel(evt.BossBudgetActive, evt.BossThroughputActive)}");
+
+            WithBudgetSeams(true, () =>
+            {
+                var now = T0;
+                var evt = BossRun(() => now, () => new AudienceEstimate(11, 275, 275, 11.0),
+                    new List<(uint Wcid, double Mult)>(), BudgetBossDef());
+
+                evt.Stage(now);
+                evt.Tick(now);
+                now = T0 + TestMinDuration;
+                evt.Tick(now);
+
+                Assert.AreEqual("budget", WorldEvent.BossModeLabel(evt.BossBudgetActive, evt.BossThroughputActive));
+            });
+        }
+
+        [TestMethod]
+        public void RatchetBossHealth_AddsTheKeepPercentageDelta_NotTheFullIncrease()
+        {
+            var text = File.ReadAllText(Path.Combine(FindServerSourceRoot(), "WorldEvents", "WorldEventSpawner.cs"));
+
+            var start = text.IndexOf("public void RatchetBossHealth(WorldEvent evt, double newMult)", StringComparison.Ordinal);
+            Assert.IsTrue(start > 0, "RatchetBossHealth moved; update this pin");
+
+            var end = text.IndexOf("public bool ApplyBossDamageRating", start, StringComparison.Ordinal);
+            var body = end > start ? text.Substring(start, end - start) : text.Substring(start, 3000);
+
+            StringAssert.Contains(body, "WorldEventBossBudget.KeepPercentageDelta(currentBefore, before, after)");
+            Assert.IsFalse(body.Contains("ClampVitalDelta(after - before)"),
+                "the raise must not add the whole max-health increase");
+        }
+
+        private static string FindServerSourceRoot()
+        {
+            var dir = new DirectoryInfo(AppContext.BaseDirectory);
+
+            while (dir != null && !File.Exists(Path.Combine(dir.FullName, "ACE.Server", "WorldEvents", "WorldEventBossBudget.cs")))
+                dir = dir.Parent;
+
+            Assert.IsNotNull(dir, "Could not find ACE.Server/WorldEvents/WorldEventBossBudget.cs by walking up from " + AppContext.BaseDirectory);
+
+            return Path.Combine(dir.FullName, "ACE.Server");
+        }
+
+        [TestMethod]
+        public void KeepPercentageDelta_KeepsTheBarsPercentage()
+        {
+            // 50% of 20M, max raised to 22M: current ends at 11M.
+            var delta = WorldEventBossBudget.KeepPercentageDelta(10000000, 20000000, 22000000);
+
+            Assert.AreEqual(1000000u, delta);
+            Assert.AreEqual(11000000u, 10000000u + delta);
+
+            // A full bar stays full, the whole increase added.
+            Assert.AreEqual(2000000u, WorldEventBossBudget.KeepPercentageDelta(20000000, 20000000, 22000000));
+
+            // A nearly dead boss gets almost nothing, which is the point: the percentage is what is kept.
+            Assert.AreEqual(2000u, WorldEventBossBudget.KeepPercentageDelta(20000, 20000000, 22000000));
+
+            // An empty bar stays empty.
+            Assert.AreEqual(0u, WorldEventBossBudget.KeepPercentageDelta(0, 20000000, 22000000));
+
+            // No rise, no delta; and a malformed read never lowers or overshoots.
+            Assert.AreEqual(0u, WorldEventBossBudget.KeepPercentageDelta(10000000, 20000000, 20000000));
+            Assert.AreEqual(0u, WorldEventBossBudget.KeepPercentageDelta(10000000, 20000000, 19000000));
+            Assert.AreEqual(2000000u, WorldEventBossBudget.KeepPercentageDelta(25000000, 20000000, 22000000), "current above max reads as full");
+            Assert.AreEqual(2000000u, WorldEventBossBudget.KeepPercentageDelta(5, 0, 2000000), "max 0 reads as full");
+        }
+
+        [TestMethod]
+        public void ImpliedPerPower_IsTheDamageRateNormalisedTo175SecondsPerUnitOfPower()
+        {
+            // 8M boss killed in 175 s by power 11: exactly 8M / 11.
+            Assert.AreEqual(8000000.0 / 11.0, WorldEvent.ImpliedPerPower(8000000, 0, 175, 11), 0.001);
+
+            // Killed in 87.5 s: twice the rate, twice the implied health.
+            Assert.AreEqual(2 * 8000000.0 / 11.0, WorldEvent.ImpliedPerPower(8000000, 0, 87.5, 11), 0.001);
+
+            // Half the boss dealt in 175 s.
+            Assert.AreEqual(4000000.0 / 11.0, WorldEvent.ImpliedPerPower(8000000, 50, 175, 11), 0.001);
+
+            Assert.AreEqual(0.0, WorldEvent.ImpliedPerPower(0, 0, 175, 11));
+            Assert.AreEqual(0.0, WorldEvent.ImpliedPerPower(8000000, 0, 0, 11), "no fight time");
+            Assert.AreEqual(0.0, WorldEvent.ImpliedPerPower(8000000, 0, 175, 0), "no power");
+            Assert.AreEqual(0.0, WorldEvent.ImpliedPerPower(8000000, -1, 175, 11), "boss left is unmeasured");
+        }
+
+        [TestMethod]
+        public void ResolveMaxDuration_AnExplicitMaxWins_OtherwiseTheLargerOfDefaultAndGoal()
+        {
+            // Explicit always wins, shorter or longer than the goal value.
+            Assert.AreEqual(300, WorldEvent.ResolveMaxDuration(300, 900), "explicit 300 on a 900 goal");
+            Assert.AreEqual(600, WorldEvent.ResolveMaxDuration(600, 900), "explicit 600 on a 900 goal");
+            Assert.AreEqual(1200, WorldEvent.ResolveMaxDuration(1200, 900), "a longer explicit value");
+            Assert.AreEqual(0, WorldEvent.ResolveMaxDuration(0, 900), "explicit 0 means no limit and stays that way");
+            Assert.AreEqual(-1, WorldEvent.ResolveMaxDuration(-1, 900), "explicit negative passes through (no limit)");
+
+            // None given: the larger of the 600 default and the goal value.
+            Assert.AreEqual(900, WorldEvent.ResolveMaxDuration(null, 900), "kill_boss / destroy_source");
+            Assert.AreEqual(600, WorldEvent.ResolveMaxDuration(null, 0), "goal 0 = no goal value");
+            Assert.AreEqual(600, WorldEvent.ResolveMaxDuration(null, -5), "a negative goal value never shortens");
+            Assert.AreEqual(600, WorldEvent.ResolveMaxDuration(null, 300), "a goal value below the default never shortens it");
+        }
+
+        [TestMethod]
+        public void EffectiveMaxDuration_FollowsTheGoal()
+        {
+            WithBudgetSeams(true, () =>
+            {
+                var now = T0;
+                var spawns = new List<(uint Wcid, double Mult)>();
+
+                int Effective(GoalDef goal, int? requestMax) =>
+                    BossRun(() => now, () => WorldEventRosterSelector.FloorEstimate, spawns, goal: goal,
+                        maxDurationSeconds: requestMax).EffectiveMaxDurationSeconds;
+
+                Assert.AreEqual(900, Effective(GoalOf(GoalType.KillBoss, 900), null), "no explicit max: the goal value");
+                Assert.AreEqual(900, Effective(GoalOf(GoalType.DestroySource, 900), null));
+                Assert.AreEqual(WorldEvent.DefaultMaxDurationSeconds, Effective(GoalOf(GoalType.KillCount), null), "null kill_count");
+                Assert.AreEqual(WorldEvent.DefaultMaxDurationSeconds, Effective(GoalOf(GoalType.Hold), null));
+                Assert.AreEqual(300, Effective(GoalOf(GoalType.KillBoss, 900), 300), "an explicit shorter max wins over the goal");
+                Assert.AreEqual(600, Effective(GoalOf(GoalType.KillBoss, 900), 600), "an explicit 600 is not lengthened");
+                Assert.AreEqual(1500, Effective(GoalOf(GoalType.KillBoss, 900), 1500), "an explicit longer max wins");
+            });
+        }
+
+        [TestMethod]
+        public void ShippedGoals_OnlyKillBossAndDestroySourceCarryTheLongerRun()
+        {
+            var (sources, families, goals, rewards, anchors) = ReadShippedAxes();
+
+            var store = WorldEventAxisStore.Parse(sources, families, goals, rewards, anchors, ReadShippedBosses());
+
+            foreach (var goal in store.Goals.Values)
+            {
+                var expected = goal.Id == "kill_boss" || goal.Id == "destroy_source" ? 900 : 0;
+
+                Assert.AreEqual(expected, goal.MaxDurationSeconds, goal.Id);
+            }
+
+            Assert.IsTrue(store.Goals.ContainsKey("kill_boss") && store.Goals.ContainsKey("destroy_source"));
+        }
+
+        [TestMethod]
+        public void ShippedBosses_AllCarryTheSameChampionBudget()
+        {
+            var store = WorldEventAxisStore.Parse(null, null, null, null, null, ReadShippedBosses());
+
+            foreach (var expected in ShippedBosses)
+            {
+                var boss = store.Bosses[expected.id];
+
+                Assert.AreEqual(600000.0, boss.BudgetHealthPerPower, expected.id);
+                Assert.AreEqual(1.0, boss.BudgetExponent, expected.id);
+                Assert.AreEqual(750000u, boss.BudgetFloorHealth, expected.id);
+                Assert.AreEqual(1000000000u, boss.BudgetCapHealth, expected.id);
+            }
+        }
+
+        [TestMethod]
+        public void Bosses_BadBudgetDials_AreRepairedWithADiagnostic()
+        {
+            var store = ParseBosses(@"{ ""bosses"": [ { ""id"": ""odd"", ""displayName"": ""Odd"", ""wcid"": 1002619, " +
+                                    @"""budgetHealthPerPower"": -5, ""budgetExponent"": -1, ""budgetCapHealth"": 4000000000 } ] }");
+
+            var boss = store.Bosses["odd"];
+
+            Assert.AreEqual(0.0, boss.BudgetHealthPerPower, "a bad per-power turns the budget off");
+            Assert.AreEqual(1.0, boss.BudgetExponent);
+            Assert.AreEqual((uint)int.MaxValue, boss.BudgetCapHealth);
+            Assert.IsTrue(store.Diagnostics.Count >= 3);
         }
     }
 }

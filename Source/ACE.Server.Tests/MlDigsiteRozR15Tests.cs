@@ -267,6 +267,24 @@ namespace ACE.Server.Tests
 
             var offenders = new List<string>();
             var checkedWielders = 0;
+            var boundCasterPets = new List<string>();
+
+            // A Custom Summons caster pet (a CombatPet, type 71, with SummonCasterBrain 9087) authors no spellbook on
+            // purpose: its spells are the two the player binds to the device, added to the pet's biota at summon
+            // (CombatPet.ApplySummonStats), and a device with fewer than two bound refuses to summon at all
+            // (PetDevice.ActOnUse, SummonSpellBinder). So it never holds its wand with no spells - the Revenant Lich
+            // (1007752) wields one by owner decision 2026-11-02.
+            var boundCasterPet = new Regex(@"VALUES \((\d+), '[^']*', 71,", RegexOptions.Compiled);
+            var casterBrain = new Regex(@"\(\d+, 9087, True \) /\* SummonCasterBrain", RegexOptions.Compiled);
+            var deviceTexts = new List<string>();
+
+            foreach (var file in files)
+            {
+                var text = File.ReadAllText(file.FullName);
+
+                if (text.Contains(" 9086, True"))
+                    deviceTexts.Add(text);
+            }
 
             foreach (var file in files)
             {
@@ -285,13 +303,61 @@ namespace ACE.Server.Tests
 
                     checkedWielders++;
 
+                    if (boundCasterPet.IsMatch(sql) && casterBrain.IsMatch(sql))
+                    {
+                        // the exemption holds only if a binder device summons this pet: some weenie must pair
+                        // PetClass (266) = this pet with SummonSpellBinder (9086) True
+                        var petWcid = boundCasterPet.Match(sql).Groups[1].Value;
+
+                        if (!HasBinderDeviceFor(petWcid, deviceTexts))
+                            offenders.Add($"{file.Name} wields caster {row.Groups[2].Value} as a caster pet, but no weenie pairs PetClass (266) {petWcid} with SummonSpellBinder (9086) True");
+                        else
+                            boundCasterPets.Add(file.Name);
+
+                        continue;
+                    }
+
                     if (!sql.Contains("weenie_properties_spell_book"))
                         offenders.Add($"{file.Name} wields caster {row.Groups[2].Value}");
                 }
             }
 
             Assert.IsTrue(checkedWielders > 0, "control: at least one creature wields a fork caster (the Aun shamans do)");
+            Assert.IsTrue(boundCasterPets.Exists(f => f.StartsWith("1007752 ", StringComparison.Ordinal)),
+                "control: the Revenant Lich must be seen as a bound caster pet, or the exemption is not what lets it pass");
             Assert.AreEqual(0, offenders.Count, "held caster with no spellbook: " + string.Join("; ", offenders));
+        }
+
+        /// <summary>
+        /// True when one of <paramref name="weenieTexts"/> is a single weenie whose PetClass (int 266) is
+        /// <paramref name="petWcid"/> and which carries SummonSpellBinder (bool 9086) True on the same object id.
+        /// </summary>
+        internal static bool HasBinderDeviceFor(string petWcid, IEnumerable<string> weenieTexts)
+        {
+            var petClass = new Regex(@"\((\d+),\s*266,\s*" + Regex.Escape(petWcid) + @"\)");
+
+            foreach (var text in weenieTexts)
+            {
+                foreach (Match m in petClass.Matches(text))
+                {
+                    if (Regex.IsMatch(text, @"\(" + m.Groups[1].Value + @",\s*9086,\s*True\s*\)"))
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        [TestMethod]
+        public void BinderDeviceCheck_NeedsPetClassAndSummonSpellBinder_OnOneObject()
+        {
+            const string device = "VALUES (1007751, 266,   1007752) /* PetClass */\n     , (1007751, 9086, True ) /* SummonSpellBinder */;";
+
+            Assert.IsTrue(HasBinderDeviceFor("1007752", new[] { device }));
+            Assert.IsFalse(HasBinderDeviceFor("1007752", new[] { device.Replace("9086, True", "9086, False") }), "a bound (cleared) binder flag is not a binder");
+            Assert.IsFalse(HasBinderDeviceFor("1007752", new[] { "VALUES (1007751, 266,   1007752) /* PetClass */;" }), "PetClass without 9086");
+            Assert.IsFalse(HasBinderDeviceFor("1007752", new[] { "VALUES (1007751, 266,   1007752) /* PetClass */;", "VALUES (1007999, 9086, True ) /* SummonSpellBinder */;" }), "the two rows on different weenies");
+            Assert.IsFalse(HasBinderDeviceFor("1007705", new[] { device }), "another pet's device");
         }
 
         [TestMethod]

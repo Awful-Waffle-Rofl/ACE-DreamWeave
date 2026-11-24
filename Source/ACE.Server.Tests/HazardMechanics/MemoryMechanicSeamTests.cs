@@ -219,7 +219,7 @@ namespace ACE.Server.Tests.HazardMechanics
                 Assert.AreEqual(11, mine.Count, $"pad {pad}");
                 Assert.IsTrue(mine.All(s => Math.Abs(Vector2.Distance(new Vector2(s.Position.X, s.Position.Y), pads[pad]) - 1f) < 1e-3f),
                     $"pad {pad}: every marker on the rim round ({pads[pad].X}, {pads[pad].Y}); a swapped x/y would be metres away");
-                Assert.IsTrue(mine.All(s => s.Position.Z == 5f), "at the ground point, offset 0");
+                Assert.IsTrue(mine.All(s => s.Position.Z == 5f + MemoryMechanic.MarkerLift), "at the ground point plus MarkerLift");
                 Assert.IsTrue(mine.All(s => s.Tag == "pad-" + MemoryRules.ColourName(pad)));
             }
 

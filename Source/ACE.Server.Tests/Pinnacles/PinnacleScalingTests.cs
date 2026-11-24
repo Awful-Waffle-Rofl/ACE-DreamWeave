@@ -31,7 +31,7 @@ namespace ACE.Server.Tests.Pinnacles
             Assert.AreEqual(1, Count(src, "WorldEventBandMemo.MedianHealthFor("));
             Assert.AreEqual(1, Count(src, "lock (MemoGate)"));
 
-            var apply = PooledLootSourceText.MethodBody(src, "public static bool Apply(Creature creature, int knotLevel, PinnacleTier tier)");
+            var apply = PooledLootSourceText.MethodBody(src, "public static bool Apply(Creature creature, int knotLevel, PinnacleTier tier, double healthMultiplier = 1.0)");
             Assert.IsFalse(apply.Contains("lock ("), "BandUplift.Apply runs outside the lock");
             StringAssert.Contains(apply, "BandFor(knotLevel)");
         }
@@ -39,7 +39,7 @@ namespace ACE.Server.Tests.Pinnacles
         [TestMethod]
         public void LootGateLevel_IsRecordedBeforeTheUpliftRaisesTheLevel()
         {
-            var apply = PooledLootSourceText.MethodBody(Src(), "public static bool Apply(Creature creature, int knotLevel, PinnacleTier tier)");
+            var apply = PooledLootSourceText.MethodBody(Src(), "public static bool Apply(Creature creature, int knotLevel, PinnacleTier tier, double healthMultiplier = 1.0)");
 
             var gate = apply.IndexOf("creature.LootGateLevel = gate.Value", StringComparison.Ordinal);
             var uplift = apply.IndexOf("BandUplift.Apply(creature, knotLevel, standard)", StringComparison.Ordinal);
@@ -103,7 +103,7 @@ namespace ACE.Server.Tests.Pinnacles
         public void Apply_ReadsTheRatioBeforeTheUplift_AndScalesWeaponsWithIt_SkippingLaunchers()
         {
             var src = Src();
-            var apply = PooledLootSourceText.MethodBody(src, "public static bool Apply(Creature creature, int knotLevel, PinnacleTier tier)");
+            var apply = PooledLootSourceText.MethodBody(src, "public static bool Apply(Creature creature, int knotLevel, PinnacleTier tier, double healthMultiplier = 1.0)");
 
             var ratio = apply.IndexOf("BodyDamageRatio(creature.Biota?.PropertiesBodyPart, standard.MaxBodyDamage)", StringComparison.Ordinal);
             var uplift = apply.IndexOf("BandUplift.Apply(creature, knotLevel, standard)", StringComparison.Ordinal);
@@ -162,6 +162,56 @@ namespace ACE.Server.Tests.Pinnacles
         }
 
         [TestMethod]
+        public void TierHealth_TimesTwo_DoublesEveryTier()
+        {
+            // Harbinger round 2 (A7): a script's per-wcid multiplier rides on the tier. Values from the pins above x 2.
+            // the multiplier is applied before the rounding: 6.0 x 1100.5 = 6603 exactly (not 2 x the rounded 3302)
+            Assert.AreEqual(6603u, PinnacleScaling.TierHealth(PinnacleTier.Boss, 200, Low, High, Top, 2.0), "6.0 x T(200)");
+            Assert.AreEqual(3302u, PinnacleScaling.TierHealth(PinnacleTier.Elite, 200, Low, High, Top, 2.0), "3.0 x T(200) = 3301.5, rounded to even");
+            Assert.AreEqual(78600u, PinnacleScaling.TierHealth(PinnacleTier.Boss, 375, Low, High, Top, 2.0), "2 x 39300");
+            Assert.AreEqual(39300u, PinnacleScaling.TierHealth(PinnacleTier.Elite, 375, Low, High, Top, 2.0), "2 x 19650");
+            Assert.AreEqual(117900u, PinnacleScaling.TierHealth(PinnacleTier.Head, 375, Low, High, Top, 2.0), "2 x 58950");
+
+            Assert.AreEqual(Health(PinnacleTier.Boss, 200), PinnacleScaling.TierHealth(PinnacleTier.Boss, 200, Low, High, Top, 1.0), "1.0 is today's value");
+            Assert.AreEqual(0u, PinnacleScaling.TierHealth(PinnacleTier.Boss, 0, Low, High, Top, 2.0), "level 0 still leaves health authored");
+        }
+
+        [TestMethod]
+        public void HealthMultiplier_NotAPositiveNumber_IsOne()
+        {
+            foreach (var bad in new[] { 0.0, -2.0, double.NaN, double.PositiveInfinity, double.NegativeInfinity })
+            {
+                Assert.AreEqual(1.0, PinnacleScaling.SanitizeHealthMultiplier(bad), bad.ToString());
+                Assert.AreEqual(Health(PinnacleTier.Boss, 200), PinnacleScaling.TierHealth(PinnacleTier.Boss, 200, Low, High, Top, bad), bad.ToString());
+            }
+
+            Assert.AreEqual(2.0, PinnacleScaling.SanitizeHealthMultiplier(2.0));
+            Assert.AreEqual(0.5, PinnacleScaling.SanitizeHealthMultiplier(0.5), "below 1 is allowed (a softer add)");
+        }
+
+        [TestMethod]
+        public void ApplyTier_WithAMultiplier_SetsTheMultipliedHealth()
+        {
+            var creature = TestCreatures.CreateDefender(endurance: 20, quickness: 40, coordination: 20);
+
+            PinnacleScaling.ApplyTier(creature, 200, PinnacleTier.Boss, AttributeStandard(), DefaultDials, 2.0);
+
+            Assert.AreEqual(6603u, creature.Health.MaxValue, "2 x 3 x T(200) = 6603 (3302 without the multiplier)");
+            Assert.AreEqual(creature.Health.MaxValue, creature.Health.Current, "refilled");
+        }
+
+        [TestMethod]
+        public void Apply_PassesItsMultiplierToTheTierStep()
+        {
+            // source-level: Apply's one ApplyTier call carries the multiplier, and the settings overload forwards it
+            var src = Src();
+            var apply = PooledLootSourceText.MethodBody(src, "public static bool Apply(Creature creature, int knotLevel, PinnacleTier tier, double healthMultiplier = 1.0)");
+            StringAssert.Contains(apply, "ApplyTier(creature, knotLevel, tier, standard, healthMultiplier)");
+            StringAssert.Contains(src, "=> ApplyTier(creature, knotLevel, tier, standard, PinnacleTunables.HealthCurveDials(), healthMultiplier);");
+            StringAssert.Contains(PooledLootSourceText.MethodBody(src, "internal static string ApplyTier("), "TierHealth(tier, knotLevel, dials.Low, dials.High, dials.Top, healthMultiplier)");
+        }
+
+        [TestMethod]
         public void TierHealth_FollowsTheLiveAnchors()
         {
             // the anchors are parameters (read live by CurveDials), not baked in
@@ -184,7 +234,7 @@ namespace ACE.Server.Tests.Pinnacles
             StringAssert.Contains(dials, "GetLong(HealthCurveTopLevelKey, ThreadDungeons.DungeonPopulationLimits.DefaultHealthCurveTopLevel)");
             StringAssert.Contains(dials, "catch (Exception)");
 
-            StringAssert.Contains(Src(), "=> ApplyTier(creature, knotLevel, tier, standard, PinnacleTunables.HealthCurveDials());");
+            StringAssert.Contains(Src(), "=> ApplyTier(creature, knotLevel, tier, standard, PinnacleTunables.HealthCurveDials(), healthMultiplier);");
         }
 
         [TestMethod]
@@ -203,7 +253,7 @@ namespace ACE.Server.Tests.Pinnacles
             // L <= 0: no scaling at all, the creature spawns as authored (and a null creature is refused first)
             Assert.IsFalse(PinnacleScaling.Apply(null, 300, PinnacleTier.Boss));
 
-            var apply = PooledLootSourceText.MethodBody(Src(), "public static bool Apply(Creature creature, int knotLevel, PinnacleTier tier)");
+            var apply = PooledLootSourceText.MethodBody(Src(), "public static bool Apply(Creature creature, int knotLevel, PinnacleTier tier, double healthMultiplier = 1.0)");
             const string guardText = "if (creature == null || knotLevel <= 0)";
             var guard = apply.IndexOf(guardText, StringComparison.Ordinal);
             var refuse = apply.IndexOf("return false;", guard, StringComparison.Ordinal);
@@ -285,12 +335,12 @@ namespace ACE.Server.Tests.Pinnacles
         public void ApplyTier_RunsAfterTheUplift_NormalizesOnlyBossAndHead_AndSetsHealthLast()
         {
             var src = Src();
-            var apply = PooledLootSourceText.MethodBody(src, "public static bool Apply(Creature creature, int knotLevel, PinnacleTier tier)");
+            var apply = PooledLootSourceText.MethodBody(src, "public static bool Apply(Creature creature, int knotLevel, PinnacleTier tier, double healthMultiplier = 1.0)");
 
             var uplift = apply.IndexOf("BandUplift.Apply(creature, knotLevel, standard)", StringComparison.Ordinal);
             var weapons = apply.IndexOf("ScaleWieldedWeapons(creature, damageRatio)", StringComparison.Ordinal);
             var floor = apply.IndexOf("WorldEventSpawner.ApplyHealth(creature, (int)Math.Min(floorTarget", StringComparison.Ordinal);
-            var tier = apply.IndexOf("ApplyTier(creature, knotLevel, tier, standard)", StringComparison.Ordinal);
+            var tier = apply.IndexOf("ApplyTier(creature, knotLevel, tier, standard, healthMultiplier)", StringComparison.Ordinal);
 
             Assert.IsTrue(uplift >= 0 && weapons > uplift && floor > weapons && tier > floor, "uplift, weapons, floor, then the tier");
 

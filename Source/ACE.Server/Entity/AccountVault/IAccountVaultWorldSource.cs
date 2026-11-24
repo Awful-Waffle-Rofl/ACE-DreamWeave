@@ -57,6 +57,14 @@ namespace ACE.Server.Entity.AccountVault
         WorldObject CreateNewWorldObject(uint weenieClassId);
 
         /// <summary>
+        /// A fresh dynamic guid that names no object: the display alias a mule panel row lists a stored
+        /// item under (<see cref="AccountVaultStore.GetOrCreateDisplayAlias"/>). On this seam because it
+        /// takes a dynamic guid from GuidManager, which a unit test has no initialized allocator for.
+        /// Never recycled - see GetOrCreateDisplayAlias for why.
+        /// </summary>
+        uint NewDisplayAliasGuid();
+
+        /// <summary>
         /// Rehydrates one vault container from the shard.
         ///
         /// The return value, NOT the out parameter, is the answer: see <see cref="VaultContainerLoad"/>
@@ -120,6 +128,18 @@ namespace ACE.Server.Entity.AccountVault
         void DestroyItem(WorldObject item);
 
         /// <summary>
+        /// Destroys an object and reports whether its biota's REMOVAL reached the shard. The Salvage Roller
+        /// deletes a consumed Hammer's batch row only from <paramref name="landed"/>, so the row never goes
+        /// before the biota does. The default reports success at once, which is right for a source whose
+        /// destroy is synchronous; the production source overrides it with the real shard callback.
+        /// </summary>
+        void DestroyItem(WorldObject item, Action<bool> landed)
+        {
+            DestroyItem(item);
+            landed?.Invoke(true);
+        }
+
+        /// <summary>
         /// Resolves a character name to its guid, canonical name and owning account. False when no
         /// such character is known.
         /// </summary>
@@ -147,10 +167,20 @@ namespace ACE.Server.Entity.AccountVault
             }
         }
 
+        public uint NewDisplayAliasGuid() => GuidManager.NewDynamicGuid().Full;
+
         /// <summary>
-        /// Reads the container biota straight off the base ShardDatabase and hands it to
+        /// Reads the container biota through DatabaseManager.Shard.BaseDatabase and hands it to
         /// WorldObjectFactory, which is the same shape AllegianceManager uses to rehydrate an
-        /// allegiance object (Managers/AllegianceManager.cs:62). The Container constructor then fires
+        /// allegiance object (Managers/AllegianceManager.cs:62).
+        ///
+        /// "Base" here means "not through the serialized queue", NOT "uncached". At runtime BaseDatabase
+        /// is a ShardDatabaseWithCaching (DatabaseManager.Initialize builds one and wraps it), and
+        /// GetBiota(uint) is its caching overload: with ShardNonPlayerBiotaCacheTime above zero every
+        /// container biota a load reads is added to the non-player biota cache, with a tracked context,
+        /// for that retention time. A load therefore caches this account's own container biotas and
+        /// nothing else; the container contents come from GetInventoryInParallel, which is a NoTracking
+        /// read that does not touch the cache. The Container constructor then fires
         /// the async inventory load by itself (Container.cs:89-96), so the contents come back for
         /// free and InventoryLoaded is the signal that they have arrived.
         ///
@@ -247,6 +277,30 @@ namespace ACE.Server.Entity.AccountVault
         public void DestroyItem(WorldObject item)
         {
             item?.Destroy();
+        }
+
+        /// <summary>
+        /// Destroy() removes the biota with no callback (WorldObject.RemoveBiotaFromDatabase), and only
+        /// when the object was ever saved. A second RemoveBiota with the caller's callback is queued behind
+        /// it on the same FIFO worker, so the callback cannot fire before the first removal ran, and
+        /// ShardDatabase.RemoveBiota reports true for a row that is already gone, so the repeat is harmless.
+        /// </summary>
+        public void DestroyItem(WorldObject item, Action<bool> landed)
+        {
+            if (item == null)
+            {
+                landed?.Invoke(false);
+                return;
+            }
+
+            var guid = item.Guid.Full;
+
+            item.Destroy();
+
+            if (landed == null)
+                return;
+
+            DatabaseManager.Shard.RemoveBiota(guid, landed);
         }
 
         public bool TryResolveCharacter(string characterName, out uint characterGuid, out string canonicalName, out uint accountId)

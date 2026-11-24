@@ -28,7 +28,7 @@ namespace ACE.Server.Tests
     ///              three rows when its own subjects were removed.
     ///
     /// The resulting pool was six entries at melee 5, missile 5, caster 3. The 2026-08-06 v3 expansion (Heft,
-    /// Tension, Leverage, Attunement, Focus, Execution, see WeaponModRegistry.TierBExpansionBandStart) added
+    /// Tension, Leverage, Attunement, Precision, Execution, see WeaponModRegistry.TierBExpansionBandStart) added
     /// six rows to the catalog, but all six are Tier B, so the Tier A pool this file's scope is about was
     /// unchanged by it. The live gate-on depths (which DO include the v3 rows) are asserted in
     /// WeaponModTests.Registry_PoolDepthMatchesTheDesign instead.
@@ -104,7 +104,7 @@ namespace ACE.Server.Tests
                 { WeaponModId.ShieldBypass, "Shield Bypass" },
             };
 
-            // 2026-08-06: the v3 expansion (Heft, Tension, Leverage, Attunement, Focus, Execution) added six
+            // 2026-08-06: the v3 expansion (Heft, Tension, Leverage, Attunement, Precision, Execution) added six
             // more rows to the catalog, but ALL SIX ARE TIER B (see WeaponModRegistry.TierBExpansionBandStart),
             // so Tier A was untouched by it. The only things that have moved Tier A's count since the pool cut
             // are the 2026-08-07 Cleave removal and the 2026-08-17 Swift Flight removal, which took it from six

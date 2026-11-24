@@ -39,6 +39,9 @@ namespace ACE.Server.HazardMechanics
         /// <summary>The landblock-local position of the player the follower trails (the first player in the region), or false when nobody is in the region.</summary>
         bool TryFollowTarget(out Vector3 position, out uint targetId);
 
+        /// <summary>Every player in the region (landblock-local position, guid), in the region's own order: the pool follow_target=random draws from.</summary>
+        IReadOnlyList<(Vector3 Position, uint Id)> FollowCandidates();
+
         /// <summary>The driver's tick in seconds (the live cadence), so a leg can be chained one tick before the last one ends.</summary>
         double TickSeconds { get; }
 
@@ -73,8 +76,15 @@ namespace ACE.Server.HazardMechanics
         /// <summary>Where the host really is (its point pulled inside the region edge).</summary>
         Vector3 RestOf(THandle handle);
 
-        /// <summary>The one damage call: players within radius of centre, once per window. Returns how many were hit.</summary>
-        int Strike(THandle source, Vector3 centre, float radius, double window);
+        /// <summary>
+        /// The one damage call: players within radius of centre, once per window PER VOLLEY - every pillar struck with the
+        /// same <paramref name="volley"/> (from <see cref="NewHitGroup"/>) shares one hit per player (HazardContext.HitPlayers
+        /// hitGroup). Returns how many were hit.
+        /// </summary>
+        int Strike(THandle source, Vector3 centre, float radius, double window, int volley);
+
+        /// <summary>A fresh volley key for <see cref="Strike"/> (HazardContext.NewHitGroup): never a pillar host's own key.</summary>
+        int NewHitGroup();
 
         void Say(string line);
 
@@ -106,11 +116,15 @@ namespace ACE.Server.HazardMechanics
         private double followStartedAt = double.NaN;
         private uint followTargetId;
 
+        // follow_target=random: set at each cycle's first glide, consumed by the next follower tick (one fresh draw)
+        private bool repickTarget;
+
         // the follower's beat: the current step's crew hold start and first burst (WispFollowRules, "THE BEAT")
         private double beatHoldAt = double.NaN;
         private double beatBurstAt = double.NaN;
         private bool beatPending;
         private bool beatLocked;
+        private bool beatMarked;
         private HazardGround.WispPlacement beatPlaced;
 
         // the mark_dest ground mark of a locked beat, removed if that beat is abandoned before its burst (a mark with no
@@ -129,6 +143,10 @@ namespace ACE.Server.HazardMechanics
         private List<THandle> crew = new List<THandle>();
         private HazardGround.WispPlacement[] placed = Array.Empty<HazardGround.WispPlacement>();
         private bool ended;
+
+        // the current volley: the hit-ledger key shared by every pillar that fires in the tick at volleyAt
+        private double volleyAt = double.NaN;
+        private int volley;
 
         private int pillars;
         private int hits;
@@ -224,9 +242,10 @@ namespace ACE.Server.HazardMechanics
             if (!ended)
                 TickFollower(now);
 
-            // THE ONE PILLAR HIT, for every pattern: radius pillar_radius, one hit per pillar host per player.
+            // THE ONE PILLAR HIT, for every pattern: radius pillar_radius, one hit per VOLLEY per player (the pillars that
+            // fire in the same tick share one; a lone pillar is a volley of one, so that is one hit per pillar host).
             foreach (var entry in book.Due(now, o => port.Alive((THandle)o)))
-                hits += port.Strike((THandle)entry.Source, entry.Centre, s.HitRadius, s.HitWindow);
+                hits += port.Strike((THandle)entry.Source, entry.Centre, s.HitRadius, s.HitWindow, entry.Volley);
         }
 
         private void Glide(double now, WispAction action)
@@ -245,6 +264,9 @@ namespace ACE.Server.HazardMechanics
                     ResizeSquad(target);
                     planSettings = s.WithCount(target);
                 }
+
+                if (s.FollowTarget == WispFollowTarget.Random)
+                    repickTarget = true;
 
                 plan = WispFormations.Plan(region, planSettings, pattern, port.Rng);
                 CyclePattern = plan.Pattern;
@@ -476,17 +498,27 @@ namespace ACE.Server.HazardMechanics
                 return;
             }
 
-            // The infinite hit window (WispSettings.HitWindow) means "one hit per source per player", and a source is
-            // THIS host. That is only one-hit-per-burst because every burst gets a FRESH host (above); if a host were
-            // ever reused across bursts the second burst would deal no damage at all.
+            // The infinite hit window (WispSettings.HitWindow) means "one hit per ledger key per player", and the key is
+            // THIS tick's volley (below). That is only one-hit-per-burst because every tick that fires gets a FRESH volley
+            // key and every burst a FRESH host (above); if a key were ever reused across ticks the later burst would deal
+            // no damage at all.
             // The pillar strikes from strike_delay after it appears, not in its spawn tick: a hit sent with the host's
             // CreateObject could kill before the client ever drew the pillar. The strike window still ends at burst.
             // The FIRST strike is a scheduled step, not a tick of the book: the host's destroy is a scheduled step too
             // (due at burst, later than this one), and steps run in due order before the mechanic ticks, so even a late
             // tick past the whole burst strikes once before the host goes. Left to the book alone it would strike zero times.
+            // ONE HIT PER VOLLEY: every pillar that fires in this tick (a simultaneous crew burst, and the follower's burst
+            // in the tick of the step's first crew burst) strikes under one shared ledger key, so a player in reach of two
+            // of them, at once or one after the other while they burn, is hit once. Every pillar still shows.
+            if (volley == 0 || volleyAt != now)
+            {
+                volleyAt = now;
+                volley = port.NewHitGroup();
+            }
+
             pillars++;
             var delay = s.StrikeDelaySeconds;
-            var entry = book.Add(host, port.RestOf(host), now + delay, s.Burst - delay);
+            var entry = book.Add(host, port.RestOf(host), now + delay, s.Burst - delay, volley);
 
             if (delay > 0.0)
                 port.Schedule(delay, () => FirstStrike(entry));
@@ -497,14 +529,14 @@ namespace ACE.Server.HazardMechanics
             if (ended || !book.StrikeFirst(entry, o => port.Alive((THandle)o)))
                 return;
 
-            hits += port.Strike((THandle)entry.Source, entry.Centre, s.HitRadius, s.HitWindow);
+            hits += port.Strike((THandle)entry.Source, entry.Centre, s.HitRadius, s.HitWindow, entry.Volley);
         }
 
         /// <summary>
         /// The follower (follow=1), once per tick: record where the target is and issue the next 0.5 s leg towards where it
-        /// was follow_lag seconds ago (WispFollowRules). It bursts ON THE CREW'S BEAT, never on a clock of its own: at the
-        /// crew's hold start it settles on <see cref="WispFollowRules.BeatPoint"/> and sits still there (with a mark_dest
-        /// ground mark for the hold), and its pillar fires in the tick of the step's first crew burst
+        /// was follow_lag seconds ago (WispFollowRules). It bursts ON THE CREW'S BEAT, never on a clock of its own: it
+        /// arrives on <see cref="WispFollowRules.BeatPoint"/> by the crew's hold start (<see cref="LockBeat"/>) and sits
+        /// still there (with a mark_dest ground mark for the hold), and its pillar fires in the tick of the step's first crew burst
         /// (<see cref="FollowerBeat"/>). Every target point goes through WispRules.Place (the same wisp rule as the crew):
         /// the follower flies to the Stand point and its pillar fires at the Pillar point. With nobody in the region it
         /// idles. A dead follower is dropped and the run carries on.
@@ -524,7 +556,18 @@ namespace ACE.Server.HazardMechanics
                 return;
             }
 
-            if (!port.TryFollowTarget(out var target, out var targetId))
+            Vector3 target;
+            uint targetId;
+
+            if (s.FollowTarget == WispFollowTarget.Random)
+            {
+                if (!TryPickRandomTarget(out target, out targetId))
+                {
+                    ResetFollow();
+                    return;
+                }
+            }
+            else if (!port.TryFollowTarget(out target, out targetId))
             {
                 // nobody in the region: forget the session, so the next sighting is a first sighting (a fresh telegraph)
                 ResetFollow();
@@ -542,6 +585,16 @@ namespace ACE.Server.HazardMechanics
             }
 
             trail.Record(now, new Vector2(target.X, target.Y));
+
+            // the settle move: it starts one leg (plus a tick of slack) before the crew's hold start, so the follower
+            // ARRIVES on its beat point when the hold starts, as the crew's glide does, and sits still for the whole hold.
+            // Checked before the trailing leg, so the tick that settles issues only the settle move.
+            if (beatPending && !beatLocked && now >= beatHoldAt - WispFollowRules.LegStep - port.TickSeconds - 1e-9)
+                LockBeat(now);
+
+            // the crew's hold has begun: the warning mark (and ceiling beam) go down for the hold, as before
+            if (beatPending && beatLocked && !beatMarked && now >= beatHoldAt - 1e-9)
+                MarkBeat(now);
 
             // settled on a beat: no trailing leg until its burst fires (NextLeg would chain one a tick early)
             var leg = beatPending && beatLocked
@@ -561,20 +614,20 @@ namespace ACE.Server.HazardMechanics
                 if (port.MoveLeg(follower, placement.Stand, seconds))
                     legEndsAt = now + seconds;
             }
-
-            // the crew's hold has begun: settle on the beat point for it
-            if (beatPending && !beatLocked && now >= beatHoldAt - 1e-9)
-                LockBeat(now);
         }
 
         /// <summary>
-        /// The crew's hold start: fix where the follower bursts on this beat (where its target stood follow_lag before the
-        /// burst), fly there and sit still until the burst, and mark it (mark_dest) for the rest of the hold. A target
-        /// sighted under follow_lag before the burst gets no burst on this beat: a fresh sighting is warned first.
+        /// One leg (plus a tick) before the crew's hold start: fix where the follower bursts on this beat (where its target
+        /// stood follow_lag before the burst, or the newest position known when that is still in the future), and fly
+        /// there so it ARRIVES at the hold start, then sit still until the burst. The settle takes at least one
+        /// <see cref="WispFollowRules.LegStep"/> and never outruns FollowMaxSpeed, so it arrives late only when the glide
+        /// is shorter than a leg or the point is beyond the speed cap. <see cref="MarkBeat"/> marks it at the hold start.
+        /// A target sighted under follow_lag before the burst gets no burst on this beat: a fresh sighting is warned first.
         /// </summary>
         private void LockBeat(double now)
         {
             beatLocked = true;
+            beatMarked = false;
 
             if (follower == null || !port.Alive(follower))
             {
@@ -595,11 +648,28 @@ namespace ACE.Server.HazardMechanics
 
             beatPlaced = WispRules.Place(new[] { current }, new[] { desired }, port.HasCell, s.WispClear)[0];
 
-            var seconds = Math.Max(WispFollowRules.LegStep, Vector3.Distance(current, beatPlaced.Stand) / WispFollowRules.FollowMaxSpeed);
+            // arrive at the hold start: the time left to it, but never under one leg nor faster than the speed cap
+            var seconds = Math.Max(Math.Max(WispFollowRules.LegStep, beatHoldAt - now), Vector3.Distance(current, beatPlaced.Stand) / WispFollowRules.FollowMaxSpeed);
 
             // no trailing leg until the burst: the follower sits still for the hold, as the crew does
             if (port.MoveLeg(follower, beatPlaced.Stand, seconds))
                 legEndsAt = Math.Max(now + seconds, beatBurstAt);
+
+            // locked at or after the hold start (a glide shorter than a leg, or the burst's fallback): mark it now
+            if (now >= beatHoldAt - 1e-9)
+                MarkBeat(now);
+        }
+
+        /// <summary>
+        /// The crew's hold start: the locked beat's mark_dest ground mark goes down for the rest of the hold, and its
+        /// ceiling beam is scheduled against the burst (the same rule as the crew's).
+        /// </summary>
+        private void MarkBeat(double now)
+        {
+            beatMarked = true;
+
+            if (!beatPending || follower == null)
+                return;
 
             var remaining = beatBurstAt - now;
 
@@ -645,6 +715,61 @@ namespace ACE.Server.HazardMechanics
 
             // resume trailing on the next tick
             legEndsAt = now;
+        }
+
+        /// <summary>
+        /// follow_target=random: the player to trail this tick. A fresh uniform draw (the run's rng) when a cycle has just begun,
+        /// when there is no session, or when the current target has left the region; otherwise the current target. A draw clears the
+        /// trail and restarts the session (followStartedAt is NaN until TickFollower stamps it), so the new target gets the full
+        /// follow_lag telegraph. A new cycle's beat belongs to the new target and is kept; a target that left takes its beat with it.
+        /// False when nobody is in the region. Consumes the rng ONLY when it draws, so follow_target=first runs never touch it.
+        /// </summary>
+        private bool TryPickRandomTarget(out Vector3 position, out uint targetId)
+        {
+            var players = port.FollowCandidates();
+            position = default;
+            targetId = 0;
+
+            if (players == null || players.Count == 0)
+                return false;
+
+            var current = -1;
+
+            if (!double.IsNaN(followStartedAt))
+            {
+                for (var i = 0; i < players.Count; i++)
+                {
+                    if (players[i].Id == followTargetId)
+                    {
+                        current = i;
+                        break;
+                    }
+                }
+            }
+
+            if (current < 0 || repickTarget)
+            {
+                var fresh = port.Rng.Next(players.Count);
+
+                // a target that left mid-cycle takes its beat with it; when this tick is also the cycle's first glide the pending
+                // beat is the NEW cycle's (Glide already dropped the old one), so it stays and the new target is warned afresh
+                if (!double.IsNaN(followStartedAt) && current < 0 && !repickTarget)
+                    ResetFollow();
+                else
+                {
+                    trail.Clear();
+                    legEndsAt = double.NegativeInfinity;
+                }
+
+                followStartedAt = double.NaN;
+                followTargetId = players[fresh].Id;
+                current = fresh;
+                repickTarget = false;
+            }
+
+            position = players[current].Position;
+            targetId = players[current].Id;
+            return true;
         }
 
         private void ResetFollow()

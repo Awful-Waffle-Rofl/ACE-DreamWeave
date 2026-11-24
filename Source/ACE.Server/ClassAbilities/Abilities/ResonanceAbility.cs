@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 using ACE.Server.EquipmentMods;
 using ACE.Server.Managers;
@@ -43,12 +44,31 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "resonance",
             DisplayName = "Resonance",
-            Description = "Landing any magic damage grants a Resonance stack (up to 5, lapsing after 6 seconds " +
-                          "without a hit). Each stack adds 1.2/2.4/3.6% by rank to all of your magic damage - " +
-                          "+6/12/18% at a full stack.",
+            // Live text. Per-stack value per rank: ResonanceAbility.cs ~120-122; stack cap and lapse window:
+            // Player_ClassAbilityBuffs.cs ~2029-2034. The full-stack "+6/12/18%" is full_stack: DamageMultiplier at the stack cap, minus
+            // the 1.0 base (the ramp GetResonanceMagicDamageMod applies, with no Harmonics gear).
+            DescriptionTemplate = "Each time you land magic damage you gain a Resonance stack, up to " +
+                          "{v:class_ability_resonance_max_stacks|int}. Stacks lapse after " +
+                          "{v:class_ability_resonance_window_seconds|num} seconds without a hit. Each stack raises all your magic " +
+                          "damage.",
+            RankTailTemplate = "+{ranks:class_ability_resonance_per_stack_r|pct}% per stack (+{fn:full_stack|pct}% when full)",
+            TextFormulas = new Dictionary<string, TextFormula>
+            {
+                ["full_stack"] = new TextFormula(
+                    (values, rank) => DamageMultiplierFor(values, rank, MaxStacks(values)) - 1.0,
+                    "class_ability_resonance_max_stacks",
+                    "class_ability_resonance_per_stack_r1",
+                    "class_ability_resonance_per_stack_r2",
+                    "class_ability_resonance_per_stack_r3"),
+            },
+            TunableSourceFiles = new[] { "WorldObjects/Player_ClassAbilityBuffs.cs" },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "stacks", Bounds = CeilingBounds.Stacks, Source = CeilingSource.Tunable, Key = "class_ability_resonance_max_stacks", Label = "max stacks", Format = "int", ZeroIsLimit = true },
+            },
         };
 
         /// <summary>
@@ -82,6 +102,35 @@ namespace ACE.Server.ClassAbilities.Abilities
 
             return (float)(1.0 + stacks * perStack);
         }
+
+        /// <summary>
+        /// <see cref="DamageMultiplier(int, int, double, double, double, double)"/> with the three per-stack tunables read
+        /// through <paramref name="values"/>. Player.GetResonanceMagicDamageMod calls this with
+        /// <see cref="ClassAbilityText.Live"/>; the live text's full_stack formula calls it at the stack cap.
+        /// </summary>
+        public static float DamageMultiplierFor(ITunableValues values, int rank, int stacks, double gearPerStack = 0.0) =>
+            DamageMultiplier(rank, stacks,
+                values.GetDouble("class_ability_resonance_per_stack_r1"),
+                values.GetDouble("class_ability_resonance_per_stack_r2"),
+                values.GetDouble("class_ability_resonance_per_stack_r3"),
+                gearPerStack);
+
+        /// <summary>
+        /// <see cref="PerStack(int, double, double, double)"/> with the three tunables read through <paramref name="values"/>.
+        /// </summary>
+        public static double PerStack(ITunableValues values, int rank) => PerStack(rank,
+            values.GetDouble("class_ability_resonance_per_stack_r1"),
+            values.GetDouble("class_ability_resonance_per_stack_r2"),
+            values.GetDouble("class_ability_resonance_per_stack_r3"));
+
+        /// <summary>
+        /// The stack count after one more landed magic hit: one more, unless the pool already holds the cap
+        /// (<paramref name="cap"/> from <see cref="MaxStacks"/>). Player.AddResonanceStack grows the pool through this.
+        /// </summary>
+        public static int NextStacks(int stacks, int cap) => stacks >= cap ? stacks : stacks + 1;
+
+        /// <summary>The stack cap (class_ability_resonance_max_stacks, 5) read through <paramref name="values"/>.</summary>
+        public static int MaxStacks(ITunableValues values) => (int)values.GetLong("class_ability_resonance_max_stacks");
 
         /// <summary>
         /// The per-stack magic-damage fraction at a given rank: r1/r2/r3 tunables (0.012 / 0.024 / 0.036).
@@ -139,6 +188,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "magic dmg",
                 Per = "/stack",
                 CapNote = null,
+                Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "stacks", player?.GetResonanceStacks() ?? 0, rank, ClassAbilityText.Live) },
             };
         }
     }

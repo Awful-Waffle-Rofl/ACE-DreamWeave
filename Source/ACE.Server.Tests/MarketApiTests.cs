@@ -100,6 +100,16 @@ namespace ACE.Server.Tests
 
         private Func<uint, Weenie> savedWeenieLookup;
 
+        /// <summary>
+        /// The class-ability descriptions route reads PropertyManager (Live). Caching the code defaults once
+        /// per class means a read never misses into the database; the route test itself changes no value.
+        /// </summary>
+        [ClassInitialize]
+        public static void LoadDefaultsForLiveReads(TestContext context)
+        {
+            DefaultPropertyManager.LoadDefaultProperties();
+        }
+
         [TestInitialize]
         public void Setup()
         {
@@ -854,6 +864,31 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
+        public async Task Barrel_WhenTheBarrelIsFull_Returns409BarrelFull()
+        {
+            // Discord bug thread 1569220583785234502: a full barrel used to answer barrel_unavailable
+            // (503, "try again in a moment"). The fake feeds the store's REAL refusal string through
+            // the real ClassifyBarrelFailure, so this pins the route end to end.
+            var item = FakeVaultWorld.MakeStack(9001, 1, 1);
+            store.SeedItem(AccountId, item);
+            store.BarrelRefusalReasons[AccountId] = ACE.Server.Entity.AccountVault.AccountVaultStore.BarrelFullMessage;
+
+            var token = await LoginAsync();
+
+            var (status, json) = await Send(Request(HttpMethod.Post, "/v1/accounts/me/vault/barrel", bearer: token,
+                body: BarrelBody(item.Guid.Full)));
+
+            Assert.AreEqual(HttpStatusCode.Conflict, status);
+            Assert.AreEqual("barrel_full", json.GetProperty("error").GetString());
+            Assert.AreEqual(MarketErrorCodes.ToMessage(MarketError.BarrelFull), json.GetProperty("message").GetString());
+            Assert.AreEqual("Your barrel is full, or has no room for that many items. Trying again will not help until an administrator empties it.",
+                json.GetProperty("message").GetString());
+
+            var (_, vaultJson) = await Send(Request(HttpMethod.Get, "/v1/accounts/me/vault", bearer: token));
+            Assert.AreEqual(1, vaultJson.GetProperty("entries").GetArrayLength(), "a refusal destroys nothing");
+        }
+
+        [TestMethod]
         public async Task Barrel_ALedgerStack_TakesTheCountFromTheLedger()
         {
             store.SeedLedger(AccountId, 9001, 50);
@@ -1004,6 +1039,38 @@ namespace ACE.Server.Tests
             Assert.AreEqual(72, json.GetProperty("materials").GetArrayLength());
             Assert.IsTrue(json.GetProperty("materials")[0].TryGetProperty("material_type", out _));
             Assert.IsTrue(json.GetProperty("materials")[0].TryGetProperty("bag_name", out _));
+        }
+
+        /// <summary>
+        /// GET /v1/class-abilities/descriptions is key-only like /v1/materials: it answers with no session, and
+        /// without the market key it answers nothing. The body is the live text projection (wire shape pinned
+        /// field by field in ClassAbilityTextTests); here only the route, guard and Live source are exercised.
+        /// </summary>
+        [TestMethod]
+        public async Task ClassAbilityDescriptions_ServeLiveText_WithoutASession()
+        {
+            var (status, json) = await Send(Request(HttpMethod.Get, "/v1/class-abilities/descriptions"));
+            Assert.AreEqual(HttpStatusCode.OK, status);
+
+            var echo = json.GetProperty("abilities").EnumerateArray().Single(a => a.GetProperty("id").GetString() == "echocast");
+            Assert.AreEqual(3, echo.GetProperty("ranks").GetArrayLength());
+            Assert.IsFalse(echo.GetProperty("description").GetString().Contains('{'));
+        }
+
+        /// <summary>
+        /// The descriptions route is key-only: a missing or wrong key is dropped with 401 and NO body, the same
+        /// as /v1/health, so a scanner learns nothing about the endpoint.
+        /// </summary>
+        [TestMethod]
+        public async Task ClassAbilityDescriptions_RequireTheSharedKey_AndReturnNoBodyWithoutIt()
+        {
+            using var noKey = await client.SendAsync(Request(HttpMethod.Get, "/v1/class-abilities/descriptions", key: null));
+            Assert.AreEqual(HttpStatusCode.Unauthorized, noKey.StatusCode);
+            Assert.AreEqual(0, (await noKey.Content.ReadAsByteArrayAsync()).Length);
+
+            using var wrongKey = await client.SendAsync(Request(HttpMethod.Get, "/v1/class-abilities/descriptions", key: "not-the-key"));
+            Assert.AreEqual(HttpStatusCode.Unauthorized, wrongKey.StatusCode);
+            Assert.AreEqual(0, (await wrongKey.Content.ReadAsByteArrayAsync()).Length);
         }
 
         /// <summary>
@@ -1266,6 +1333,7 @@ namespace ACE.Server.Tests
                 { MarketError.ServerError,       500 },
                 { MarketError.ItemListed,        409 },
                 { MarketError.BarrelUnavailable, 503 },
+                { MarketError.BarrelFull,        409 },
                 { MarketError.ListingLimit,      409 },
                 { MarketError.OrderExists,       409 },
                 { MarketError.OrderNotActive,    404 },
@@ -1311,6 +1379,13 @@ namespace ACE.Server.Tests
                 { MarketError.InvalidTransfer,   400 },
                 { MarketError.TransferNotFound,  404 },
                 { MarketError.InPvp,             409 },
+                { MarketError.LaunchDisabled,    503 },
+                { MarketError.NotLaunchSession,  403 },
+                { MarketError.Stale,             409 },
+                { MarketError.RuleRefused,       422 },
+                { MarketError.InvalidChange,     400 },
+                { MarketError.PanelDisabled,     503 },
+                { MarketError.DetailsDisabled,   503 },
             };
 
             foreach (var kvp in expected)
@@ -1883,6 +1958,7 @@ namespace ACE.Server.Tests
             Enum.GetValues(typeof(MarketError)).Cast<MarketError>().Single(e => e != MarketError.None && MarketErrorCodes.ToCode(e) == code);
 
         [TestMethod]
+        [TestCategory("Slow")]
         public async Task AdminRun_CommandBusy_EnvelopeCarriesBusyCommand()
         {
             var fixture = NewRunFixture(timeoutMs: 2000);
@@ -2098,6 +2174,13 @@ namespace ACE.Server.Tests
                 { MarketError.InvalidTransfer, "That transfer request is missing a field or has one out of range." },
                 { MarketError.TransferNotFound, "There is no such transfer on this account." },
                 { MarketError.InPvp, "That character is in a PvP match or under a PvP template and cannot receive items from the vault." },
+                { MarketError.LaunchDisabled, "Signing in from the game is turned off on this server." },
+                { MarketError.NotLaunchSession, "Changing class abilities needs a page opened with /weblogin from that character in game." },
+                { MarketError.Stale, "That ability changed since the page last read it. The panel has been refreshed." },
+                { MarketError.RuleRefused, "The server refused that class ability change." },
+                { MarketError.InvalidChange, "That class ability change is not valid." },
+                { MarketError.PanelDisabled, "The class ability panel is turned off on this server." },
+                { MarketError.DetailsDisabled, "Character details are turned off on this server." },
             };
 
             foreach (var kvp in expected)

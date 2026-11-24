@@ -16,7 +16,7 @@ using ACE.Entity.Enum.Properties;
 
 namespace ACE.Database
 {
-    public static class ShardDatabaseOfflineTools
+    public static partial class ShardDatabaseOfflineTools
     {
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
@@ -119,6 +119,35 @@ namespace ACE.Database
                 context.Character.Remove(character);
 
                 charactersPurged++;
+            }
+
+            // Salvage Roller (WaffleACE, Docs/SalvageRoller/DESIGN.md 5.7): the character's open batch, the
+            // objects it holds in the account's escrow, and a CharacterPurged audit row snapshotting each one -
+            // all staged in THIS context, so the single SaveChanges below commits them atomically with the
+            // character, or not at all. A batch that cannot be read abandons this character's purge entirely
+            // (nothing is saved): purging the character while its batch is unknown could leave escrowed items
+            // owned by nobody, and the character is simply retried on the next purge run.
+            try
+            {
+                var alreadyRemoved = new HashSet<uint>(inventoryBiotas.Select(b => b.Id));
+                alreadyRemoved.UnionWith(wieldedGuids);
+                alreadyRemoved.Add(characterId);
+
+                possessionsPurged += StageSalvageBatchPurge(context, characterId, character, alreadyRemoved, reason);
+            }
+            catch (Exception ex)
+            {
+                // FIRST, before anything else: drop every deletion staged above. PurgeCharacter takes the caller's
+                // context, so returning with them still tracked would let the caller's next SaveChanges commit a
+                // half purge - the character gone and its batch left behind.
+                context.ChangeTracker.Clear();
+
+                log.ErrorFormat("[DATABASE][PURGE] PurgeCharacter 0x{0:X8} abandoned: its Salvage Roller batch could not be read or staged, so nothing was purged and the character will be retried. {1}", characterId, ex.GetFullMessage());
+
+                charactersPurged = 0;
+                playerBiotasPurged = 0;
+                possessionsPurged = 0;
+                return;
             }
 
             var message = $"[DATABASE][PURGE] Character 0x{characterId:X8}";
@@ -512,10 +541,30 @@ namespace ACE.Database
                 // exempt every vault container by guid. See the exemption itself for why it exists.
                 var vaultContainers = context.AccountVault.AsNoTracking().Select(i => i.ContainerGuid).ToHashSet();
 
+                // Salvage Roller (WaffleACE): every object a batch holds. See the exemption below. FAILS CLOSED: a
+                // read that throws must never be taken as "no batch items", because every escrowed object between
+                // two writes would then be deleted. On a failure this whole no-parent pass is skipped for this run.
+                HashSet<uint> salvageBatchItems;
+
+                try
+                {
+                    salvageBatchItems = context.CharacterSalvageBatchItem.AsNoTracking().Select(i => i.Guid).ToHashSet();
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[DATABASE][PURGE] could not read character_salvage_batch_item, so the purge of biotas with no parent Container, Wielder or Location is SKIPPED this run rather than run without the Salvage Roller exemption. {ex.GetFullMessage()}");
+                    salvageBatchItems = null;
+                }
+
                 var results = new List<uint>();
 
                 foreach (var kvp in biotas)
                 {
+                    // Salvage Roller (WaffleACE): the batch item read above failed, so NOTHING is purged by this pass
+                    // (fail closed). Leaving the loop before the first results.Add keeps the purge list empty.
+                    if (salvageBatchItems == null)
+                        break;
+
                     // exclude allegiances
                     if (kvp.Value == WeenieType.Allegiance)
                         continue;
@@ -527,6 +576,14 @@ namespace ACE.Database
                     // This exemption is the redundant second half of DESIGN 7.2's mitigation; the Location is
                     // the first. Neither may be removed as "already covered by the other".
                     if (vaultContainers.Contains(kvp.Key))
+                        continue;
+
+                    // Salvage Roller (WaffleACE, Docs/SalvageRoller/DESIGN.md 5.2): the sell path saves an item's
+                    // detach BEFORE the escrow save that gives it a new parent, and a Hammer or a taken target can
+                    // likewise be parentless between two writes. A crash there leaves a biota with no Container,
+                    // Wielder or Location that a batch row still names, and reconcile can only finish or undo the
+                    // batch if the biota is still there. Exempting every batch item guid keeps it.
+                    if (salvageBatchItems.Contains(kvp.Key))
                         continue;
 
                     // exclude objects that have either a container, wielder, or location

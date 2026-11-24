@@ -12,7 +12,7 @@ namespace ACE.Server.KnotLoot
     /// <summary>
     /// Turns rolled drops into fresh, unplaced items. A trait drop gets exactly three stamps: its level, its table and
     /// its trait position u. A stack drop gets its stack size, clamped to the item's MaxStackSize. A drop carrying a
-    /// mutation gets that mutation (UpgradedCloak), drawing from <c>next</c>. Nothing else is written.
+    /// mutation gets that mutation (UpgradedCloak, HarbingerGuard), drawing from <c>next</c>. Nothing else is written.
     /// </summary>
     public static class KnotLootMaterializer
     {
@@ -44,6 +44,14 @@ namespace ACE.Server.KnotLoot
 
                 if (drop.Mutation == KnotLootMutation.UpgradedCloak)
                     UpgradedCloak.Mutate(item, knotLevel, next);
+
+                if (drop.Mutation == KnotLootMutation.HarbingerGuard && KnotTraitRegistry.TryGet(KnotTraitId.HarbingerGuard, out var guard))
+                {
+                    // a second trait on the same item: level and table are shared with the first trait's stamps (same values), u is its own draw
+                    item.SetProperty(PropertyInt.KnotLootLevel, knotLevel);
+                    item.SetProperty(PropertyString.KnotLootTable, tableKey);
+                    item.SetProperty(guard.Property, Math.Clamp(next(), 0.0, 1.0));
+                }
 
                 if (drop.StackSize > 1)
                 {

@@ -20,6 +20,8 @@ namespace ACE.Server.WorldEvents
         public const string UndefendedSecondsPerParticipant = "undefended_seconds_per_participant";
         public const string UndefendedSecondsFloor = "undefended_seconds_floor";
         public const string MinDeathSeconds = "min_death_seconds";
+        public const string KnightDurabilityPerParticipant = "knight_durability_per_participant";
+        public const string KnightDurabilityCap = "knight_durability_cap";
         public const string MinSurvivors = "min_survivors";
         public const string DefendPose = "defend_pose";
         public const string DefendSwingSeconds = "defend_swing_seconds";

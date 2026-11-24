@@ -143,6 +143,16 @@ namespace ACE.Server.ClassAbilities
         /// ordinal and the column stores ToCode's string anyway.
         /// </summary>
         Reprice,
+
+        /// <summary>
+        /// Player.LowerClassAbilityRank - the web class ability panel's one-rank lower: refunds exactly the cost
+        /// of the rank removed (CostPerRank[rank - 1]) to Available, rank_After = rank - 1, never 0: lowering rank 1
+        /// delegates to UnlearnClassAbility and writes an Unlearn row. Priced by OwnedCost like Unlearn, so it is NOT a sink: the refund raises Available by the
+        /// same amount OwnedCost falls, and Unexplained is unchanged. Its own code rather than Unlearn's because
+        /// an "unlearn" row with rank_After above 0 would read as a broken unlearn in an incident sweep.
+        /// Appended at the END, matching the members above.
+        /// </summary>
+        Lower,
     }
 
     /// <summary>
@@ -178,6 +188,7 @@ namespace ACE.Server.ClassAbilities
                 case CapLedgerReason.GrantItem: return "grant_item";
                 case CapLedgerReason.OverhaulRespec: return "overhaul_respec";
                 case CapLedgerReason.Reprice: return "reprice";
+                case CapLedgerReason.Lower: return "lower";
                 default:
                     throw new ArgumentOutOfRangeException(nameof(reason), reason, "no reason code mapped for this CapLedgerReason member");
             }

@@ -324,7 +324,7 @@ namespace ACE.Server.HazardMechanics
 
             var ground = port.GroundZ(p.X, p.Y);
             var dropZ = s.DropZ ?? ground + RainRules.DefaultDropHeight;
-            var endZ = ground + RainRules.BallRadius;
+            var endZ = ground + s.BallRadius;
 
             if (!float.IsFinite(ground) || dropZ - endZ < RainRules.MinFallMetres)
             {
@@ -342,7 +342,7 @@ namespace ACE.Server.HazardMechanics
             if (!port.HasCell(start))
                 return false;
 
-            var fall = RainRules.FallSeconds(dropZ, ground, s.Speed);
+            var fall = RainRules.FallSeconds(dropZ, ground, s.Speed, s.BallRadius);
             var lead = RainRules.LeadFor(s, fall);
             var early = lead - s.Lead; // > 0 only when the fair-warning floor needs more than the asked lead
 

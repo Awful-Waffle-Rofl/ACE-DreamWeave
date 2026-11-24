@@ -279,6 +279,7 @@ namespace ACE.Server.WorldEvents.Hold
             Guard("shrine pulse", () => TickShrinePulse(now));
             Guard("knight health", TickKnightHealth);
             Guard("milestones", TickMilestones);
+            Guard("health wisps", TickHealthWisps);
             Guard("wake", TickWake);
             Guard("defend pose", () => TickDefendPose(now));
             Guard("markers", () => TickMarkers(now));

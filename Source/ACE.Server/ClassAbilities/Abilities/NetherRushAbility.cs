@@ -47,13 +47,28 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "netherrush",   // persisted quest-key suffix - NEVER rename (displays as "Mana Rush")
             DisplayName = "Mana Rush",
-            Description = "Casting spells of any school builds Mana Rush, speeding your casts by 5% / 10% / 15% per rank " +
-                          "for each stack, up to 5 stacks, to a maximum of +50% cast speed. Stacks reset after 20 seconds " +
-                          "without casting. Higher Loyalty increases both the per-stack bonus and the maximum.",
+            DescriptionTemplate = "Casting spells from any school builds Mana Rush stacks that speed up your casting, up to 5 stacks " +
+                          "and +{v:class_ability_netherrush_max_bonus|pct}% cast speed. Stacks reset after " +
+                          "{v:class_ability_netherrush_expire_seconds|num} seconds without a cast.",
+            // Live text: per-stack rate = rank * class_ability_netherrush_percent_per_rank (GetReadout below); the cap is
+            // class_ability_netherrush_max_bonus (GetReadout below); the reset window is class_ability_netherrush_expire_seconds
+            // (Player_ClassAbilityBuffs.cs:440). The "5% / 10% / 15%" ladder is {per:...;join=spaced;unit=%}. "up to 5 stacks" is NetherRushAbility.MaxStacks.
+            RankTailTemplate = "+{per:class_ability_netherrush_percent_per_rank|pct}% cast speed per stack",
+            TunableSourceFiles = new[] { "WorldObjects/Player_ClassAbilityBuffs.cs" },
+            AllowedLiterals = new[]
+            {
+                ("up to 5 stacks", "the stack count is NetherRushAbility.MaxStacks, a code constant with no tunable"),
+            },
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },   // flat 1/rank (class ability overhaul repricing, 2026-09-12)
             Implemented = true,
             AffinitySkill = Skill.Loyalty,   // moved off Arcane Lore in the 2026-09-12 affinity overhaul
+            Ceilings = new[]
+            {
+                // the cap is class_ability_netherrush_max_bonus times the Loyalty multiplier (MaxBonus), so affinity raises this ceiling
+                new ClassAbilityCeiling { Id = "total", Bounds = CeilingBounds.Total, Source = CeilingSource.Tunable, Key = "class_ability_netherrush_max_bonus", Label = "max cast speed bonus", Format = "pct", AffinityScalesMax = true, ZeroIsLimit = true },
+                new ClassAbilityCeiling { Id = "stacks", Bounds = CeilingBounds.Stacks, Source = CeilingSource.Constant, ConstantValue = _ => MaxStacks, ConstantRef = "NetherRushAbility.MaxStacks", Label = "max stacks", Format = "int" },
+            },
         };
 
         /// <summary>
@@ -93,7 +108,11 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// equipment mod exists for this ability (no EquipmentModId.NetherRush entry), so Gear is 0.
         /// CapNote is set when a full 5-stack ramp would exceed the affinity-scaled maximum bonus.
         /// </summary>
-        public ClassAbilityReadout GetReadout(Player player, int rank)
+        public ClassAbilityReadout GetReadout(Player player, int rank) =>
+            BuildReadout(rank, player.GetClassAbilityAffinityMultiplier(Skill.Loyalty), player.GetNetherRushStacks());
+
+        /// <summary>The pure core of <see cref="GetReadout"/>, taking the live affinity multiplier so the readings can be pinned with fixed inputs.</summary>
+        public ClassAbilityReadout BuildReadout(int rank, double multiplier, int stacksHeld)
         {
             var percentPerRank = PropertyManager.GetDouble("class_ability_netherrush_percent_per_rank").Item;
 
@@ -101,8 +120,6 @@ namespace ACE.Server.ClassAbilities.Abilities
 
             // Affinity is a MULTIPLIER on the rank term, reported as the AMOUNT it adds so the displayed
             // terms stay in one unit and still sum to Effective.
-            var multiplier = player.GetClassAbilityAffinityMultiplier(Skill.Loyalty);
-
             var skill = rankBonus * 100.0;
 
             var affinity = (rankBonus * multiplier - rankBonus) * 100.0;
@@ -122,6 +139,13 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "cast speed",
                 Per = "/stack",
                 CapNote = MaxStacks * total / 100.0 > cap + 0.0000001 ? $"max +{Math.Round(cap * 100.0)}%" : null,
+                Ceilings = new[]
+                {
+                    // Scaled reading (R16): Max = declared cap x max(1, multiplier) and Current = the full ramp's affinity-scaled bonus,
+                    // the two values MaxBonus and CastSpeedMultiplier actually compare.
+                    ClassAbilityCeilings.ReadScaled(Definition, "total", MaxStacks * total, rank, ClassAbilityText.Live, multiplier),
+                    ClassAbilityCeilings.Read(Definition, "stacks", stacksHeld, rank, ClassAbilityText.Live),
+                },
             };
         }
     }

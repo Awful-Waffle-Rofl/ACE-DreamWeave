@@ -1198,6 +1198,43 @@ namespace ACE.Database
         }
 
         /// <summary>
+        /// One account's OPEN ITEM rows: a biota barreling (item guid not null) that is neither restored
+        /// nor purged. Newest first, bounded by the same ceiling as every other barrel read.
+        ///
+        /// This is the read a full barrel plans its evictions from. It deliberately leaves out ledger,
+        /// class, restored and purged rows: none of them names an item in the barrel container, and
+        /// <see cref="GetAccountVaultBarrels"/> returning all of them would let an account's grow-only
+        /// history of closed rows push its open item rows out of a bounded read.
+        ///
+        /// NoTracking, one context, no transaction. Returns NULL if the read failed; an empty list means
+        /// the account has no open item row.
+        /// </summary>
+        public List<AccountVaultBarrel> GetOpenAccountVaultBarrelItems(uint accountId, int limit)
+        {
+            limit = ClampBarrelLimit(limit);
+
+            try
+            {
+                using (var context = new ShardDbContext())
+                {
+                    context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
+
+                    return context.AccountVaultBarrel
+                        .Where(b => b.AccountId == accountId && b.ItemGuid != null && b.RestoredAt == null && b.PurgedAt == null)
+                        .OrderByDescending(b => b.BarreledAt)
+                        .ThenByDescending(b => b.Id)
+                        .Take(limit)
+                        .ToList();
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[VAULT] GetOpenAccountVaultBarrelItems failed for account {accountId}, limit {limit}: {ex.GetFullMessage()}");
+                return null;
+            }
+        }
+
+        /// <summary>
         /// Records one barreling. Returns false if the write failed, and the caller must then NOT move
         /// the item: an item in the barrel with no row naming it is unrecoverable, because nothing
         /// else records that it was ever barreled.

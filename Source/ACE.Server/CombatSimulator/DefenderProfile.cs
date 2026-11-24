@@ -138,6 +138,13 @@ namespace ACE.Server.CombatSimulator
         public IReadOnlyDictionary<ShieldKey, ShieldRow> Shield { get; init; }
 
         /// <summary>
+        /// The worn Mantle cloak's rear-guard armor level against a PvE hit (Player.GetCloakRearGuardArmorLevel(pvp:
+        /// false)); 0 without one. Read by MitigationMath.ShieldMod for an attack outside the frontal arc, exactly where
+        /// Creature.GetShieldMod hands a rear hit to Player.GetCloakRearGuardMod.
+        /// </summary>
+        public double RearGuardArmorLevel { get; init; }
+
+        /// <summary>
         /// Damage resist rating mod with no attacker-dependent term applied, one entry per combat
         /// type. It has to be per combat type because GetSpecDefenseBonus grants a damage rating
         /// resist for a SPECIALIZED defense skill and therefore depends on which defense the attack

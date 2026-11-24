@@ -1,12 +1,17 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 
 using ACE.DatLoader;
 using ACE.Entity.Enum;
+using ACE.Entity;
 using ACE.Entity.Enum.Properties;
+using ACE.Entity.Models;
+using ACE.Server.Entity;
 using ACE.Server.MonsterEffects;
 using ACE.Server.Physics.Animation;
+using ACE.Server.WeaponMods;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.CombatSimulator
@@ -40,6 +45,166 @@ namespace ACE.Server.CombatSimulator
         private const float PreCastSpeed = 2.0f;
         private const float PostCastSpeed = 1.0f;
         private const float PostCastSpeedRanged = 1.66f;
+
+        // ---- Summoner casters (Docs/SummonerCasters/DESIGN.md) ----
+
+        /// <summary>
+        /// Scales a pet combatant by a Summoner focus: every mode's NormalDamage and CritDamage by <paramref name="dealtMultiplier"/>,
+        /// and the combatant's IncomingMultiplier by <paramref name="takenMultiplier"/>.
+        /// </summary>
+        public static void ApplySummonerFocus(DuelCombatant pet, double dealtMultiplier, double takenMultiplier)
+        {
+            foreach (var mode in pet.Modes)
+            {
+                mode.NormalDamage *= dealtMultiplier;
+                mode.CritDamage *= dealtMultiplier;
+            }
+
+            pet.IncomingMultiplier *= takenMultiplier;
+        }
+
+        /// <summary>
+        /// Parses <c>--summoner-mods=&lt;mod&gt;=&lt;fraction&gt;,...</c>. A mod is a WeaponModId name (case-insensitive) that reaches a
+        /// Summoner focus's pets: any route but Wielder (SummonerFocus.ReachesPets: PetsOnly or Shared), or Attunement, which
+        /// feeds the elemental damage mod. The fraction is the roll fraction in (0, 1].
+        /// </summary>
+        public static List<(WeaponModId Id, double Fraction)> ParseSummonerMods(string text)
+        {
+            var result = new List<(WeaponModId, double)>();
+
+            if (string.IsNullOrWhiteSpace(text))
+                return result;
+
+            foreach (var part in text.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+            {
+                var pair = part.Split('=', StringSplitOptions.TrimEntries);
+
+                if (pair.Length != 2 || !Enum.TryParse<WeaponModId>(pair[0], true, out var id) || !Enum.IsDefined(typeof(WeaponModId), id)
+                    || !double.TryParse(pair[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var fraction) || double.IsNaN(fraction) || fraction <= 0.0 || fraction > 1.0)
+                    throw new ArgumentException($"summon-duel: --summoner-mods entry '{part}' must be <mod>=<fraction in (0,1]>.");
+
+                if (!WeaponModRegistry.TryGet(id, out var definition) || !(SummonerFocus.ReachesPets(definition) || id == WeaponModId.Attunement))
+                    throw new ArgumentException($"summon-duel: --summoner-mods names '{pair[0]}', which a Summoner focus does not send to its pets (a PetsOnly or Shared mod, or Attunement).");
+
+                if (result.Any(r => r.Item1 == id))
+                    throw new ArgumentException($"summon-duel: --summoner-mods names '{pair[0]}' twice.");
+
+                result.Add((id, fraction));
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Parses <c>--summoner-imbue=&lt;ImbuedEffectType&gt;</c> (case-insensitive): one imbue from SummonerFocus.PetImbues, which
+        /// BuildSummonerFocus stamps on the offline focus (stat 179) so the pets read it through the live hooks. Undef for none.
+        /// </summary>
+        public static ImbuedEffectType ParseSummonerImbue(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return ImbuedEffectType.Undef;
+
+            if (!Enum.TryParse<ImbuedEffectType>(text.Trim(), true, out var imbue) || Array.IndexOf(SummonerFocus.PetImbues, imbue) < 0)
+                throw new ArgumentException($"summon-duel: --summoner-imbue='{text}' must be one imbue a focus sends to its pets: {string.Join(", ", SummonerFocus.PetImbues)}.");
+
+            return imbue;
+        }
+
+        private static uint offlineFocusWcid = 996900;
+        private static uint offlineFocusGuid = 0x7E900000;
+
+        /// <summary>
+        /// An offline Summoner focus: a Caster carrying the SummonerFocus marker, the stored ElementalDamageMod
+        /// <paramref name="elementalDamageMod"/>, and each mod written through the applicator
+        /// (WeaponModTinkerSet.ApplySpecialAtFraction: the record, plus the native a Tier A row adds).
+        /// </summary>
+        public static Caster BuildSummonerFocus(double elementalDamageMod, IEnumerable<(WeaponModId Id, double Fraction)> mods, ImbuedEffectType imbue = ImbuedEffectType.Undef)
+        {
+            var weenie = new Weenie
+            {
+                WeenieClassId = offlineFocusWcid++,
+                WeenieType = WeenieType.Caster,
+                PropertiesInt = new Dictionary<PropertyInt, int> { { PropertyInt.ItemType, (int)ItemType.Caster } },
+                PropertiesFloat = new Dictionary<PropertyFloat, double> { { PropertyFloat.ElementalDamageMod, elementalDamageMod } },
+                PropertiesBool = new Dictionary<PropertyBool, bool> { { PropertyBool.SummonerFocus, true } },
+            };
+
+            var focus = new Caster(weenie, new ObjectGuid(offlineFocusGuid++));
+
+            foreach (var (id, fraction) in mods)
+                WeaponModTinkerSet.ApplySpecialAtFraction(focus, WeaponModRegistry.Get(id), fraction);
+
+            // PropertyInt 179, the one slot combat reads (WorldObject.HasImbuedEffect); tinkering allows one imbue per item
+            if (imbue != ImbuedEffectType.Undef)
+                focus.ImbuedEffect = imbue;
+
+            return focus;
+        }
+
+        // ---- target debuffs (harness-only, default off) ----
+
+        /// <summary>
+        /// HYPOTHETICAL (--target-spells): puts one player debuff on a monster before its defender profile is built, so the
+        /// profile's own reads (GetBodyArmorMod for Imperil, GetVulnerabilityResistanceMod for a Vulnerability) see it. The
+        /// entry is what EnchantmentManager.Add writes for a first cast in a category (BuildEntry, LayerId 1; the spell's
+        /// StatModType / StatModKey / StatModVal); a monster already carrying an enchantment in that category is refused,
+        /// because that would need Add's surpass/refresh stacking. Assumes the cast lands (no resist roll modelled).
+        /// </summary>
+        public static void ApplyTargetDebuff(Creature monster, int spellId, SpellCategory category, uint power, EnchantmentTypeFlags statModType, uint statModKey, float statModValue)
+        {
+            if (monster == null)
+                throw new ArgumentNullException(nameof(monster));
+
+            if (monster.EnchantmentManager.GetEnchantments(category).Count > 0)
+                throw new InvalidOperationException($"summon-duel: {monster.Name} (wcid {monster.WeenieClassId}) already carries an enchantment in spell category {category}; --target-spells models a first cast only.");
+
+            var entry = new PropertiesEnchantmentRegistry
+            {
+                SpellId = spellId,
+                SpellCategory = category,
+                PowerLevel = power,
+                LayerId = 1,
+                Duration = -1.0,
+                CasterObjectId = monster.Guid.Full,
+                StatModType = statModType,
+                StatModKey = statModKey,
+                StatModValue = statModValue,
+            };
+
+            monster.Biota.PropertiesEnchantmentRegistry.AddEnchantment(entry, monster.BiotaDatabaseLock);
+        }
+
+        /// <summary><see cref="ApplyTargetDebuff(Creature, int, SpellCategory, uint, EnchantmentTypeFlags, uint, float)"/> from a loaded Spell.</summary>
+        public static void ApplyTargetDebuff(Creature monster, Spell spell) =>
+            ApplyTargetDebuff(monster, (int)spell.Id, spell.Category, spell.Power, spell.StatModType, spell.StatModKey, spell.StatModVal);
+
+        /// <summary>
+        /// The pet dealt and taken multipliers of a focus, from the same sum combat uses (SumCasterElementalDamageMod, so Attunement counts)
+        /// and the live scales: the numbers ApplySummonerFocus takes. The offline focus has no wielder, so no wielder enchantments.
+        /// </summary>
+        public static (double Edm, double Dealt, double Taken) FocusMultipliers(WorldObject focus)
+        {
+            var edm = (double)WorldObject.SumCasterElementalDamageMod(focus, null);
+
+            return (edm, SummonerFocusMath.DealtMultiplier(edm, SummonerFocus.PetDamageScale()),
+                SummonerFocusMath.TakenMultiplier(edm, SummonerFocus.PetDefenseScale(), SummonerFocus.PetDefenseFloor()));
+        }
+
+        /// <summary>Makes every ownerless non-Echo CombatPet resolve <paramref name="focus"/> until the result is disposed, which resets the seam.</summary>
+        public static IDisposable SimulateFocus(WorldObject focus) => new FocusSeam(focus);
+
+        private sealed class FocusSeam : IDisposable
+        {
+            private readonly Func<WorldObject, WorldObject> previous;
+
+            public FocusSeam(WorldObject focus)
+            {
+                previous = SummonerFocus.SimulatedPetFocusSource;
+                SummonerFocus.SimulatedPetFocusSource = _ => focus;
+            }
+
+            public void Dispose() => SummonerFocus.SimulatedPetFocusSource = previous;
+        }
 
         /// <summary>
         /// A copy of a spec with its crit chance replaced. The analytic mean is linear in the crit chance, so the
@@ -270,6 +435,33 @@ namespace ACE.Server.CombatSimulator
             return (new DuelAttackCycle { AnimSeconds = pre + post, StrikeFractions = new[] { (double)pre / (pre + post) } }, extra);
         }
 
+        /// <summary>
+        /// The cast cycle of a CASTER PET (CombatPet_Caster through Monster_Magic.TryStartExplicitCast), in the stance the
+        /// pet actually casts from: with no wand SetCombatMode(Magic) leaves its motion stance where it was (NonCombat), so
+        /// CurrentMotionState.Stance is read as the engine reads it. Pre-cast = CastSpell at 2.0, post-cast = CastSpell to
+        /// Ready at 1.0 (1.66 ranged), the strike when the pre-cast ends, and the magic-delay gate measured from that
+        /// landing (CombatPet.CasterCastReady). The returned mode carries the cadence only; the caller adds the numbers.
+        /// Null when the motion table yields no cast animation at all.
+        /// </summary>
+        public static (DuelAttackCycle Cycle, double Post, double MagicDelay, double Recovery)? PetCastCycle(Creature c)
+        {
+            if (c.MotionTableId == 0)
+                return null;
+
+            var stance = c.CurrentMotionState.Stance;
+
+            var pre = MotionTable.GetAnimationLength(c.MotionTableId, stance, MotionCommand.CastSpell, PreCastSpeed);
+            var post = MotionTable.GetAnimationLength(c.MotionTableId, stance, MotionCommand.CastSpell, MotionCommand.Ready, c.IsRanged ? PostCastSpeedRanged : PostCastSpeed);
+
+            if (pre + post <= 0.0f)
+                return null;
+
+            // the unscaled gate (no effect stacks yet); the duel divides it by the cast-axis ramp itself
+            var magicDelay = c.GetWeakenedBloodScaledMagicDelay();
+
+            return (new DuelAttackCycle { AnimSeconds = pre + post, StrikeFractions = new[] { (double)pre / (pre + post) } }, post, magicDelay, RecoveryMax(c));
+        }
+
         // ---- Frenzy ----
 
         /// <summary>
@@ -288,7 +480,29 @@ namespace ACE.Server.CombatSimulator
 
             foreach (var spec in specs)
             {
-                if (spec.Kind != "ramp" || !string.Equals(spec.GetString("axis"), "attackspeed", StringComparison.OrdinalIgnoreCase))
+                if (spec.Kind != "ramp")
+                    continue;
+
+                // Mana Rush: castspeed accruing on=cast (RampEffect.OnCastComplete) scales a caster pet's gated cast cycle
+                if (string.Equals(spec.GetString("axis"), "castspeed", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!spec.GetFlags("on", MonsterEffectTrigger.Hit).HasFlag(MonsterEffectTrigger.Cast))
+                    {
+                        note = (note == null ? "" : note + "; ") + $"ramp axis=castspeed on={spec.GetString("on")} does not accrue from a cast: ignored";
+                        continue;
+                    }
+
+                    return new DuelRamp
+                    {
+                        PerStack = spec.GetDouble("per", 0.0),
+                        MaxStacks = Math.Min(Math.Max(1, spec.GetInt("max", 1)), Math.Max(1, stackCap)),
+                        WindowSeconds = spec.GetDouble("window", 0.0),
+                        SpeedCap = speedCap,
+                        CastAxis = true,
+                    };
+                }
+
+                if (!string.Equals(spec.GetString("axis"), "attackspeed", StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 // RampEffect.OnOutgoingHit accrues only when on= carries Hit; on=spellhit / avoid never accrue from a landed

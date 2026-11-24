@@ -125,10 +125,12 @@ namespace ACE.Server.WorldObjects
         /// EnchantmentManagerWithCaching, which is why it is read exactly once here.
         ///
         /// The top layers come from ONE copy of the registry taken under its read lock (Clone), reduced by
-        /// VulnerabilityProfile.BuildTopLayers. Internal for ACE.Server.Tests (InternalsVisibleTo,
+        /// VulnerabilityProfile.BuildTopLayers. <paramref name="withDispelFacts"/> (a caster pet that holds a dispel) also
+        /// resolves each layer's alignment, school and dispellability; the monster roll never asks for it, so it pays no
+        /// spell lookups. Internal for ACE.Server.Tests (InternalsVisibleTo,
         /// ACE.Server.csproj:15), which builds it from a real Creature's registry.
         /// </summary>
-        internal static VulnerabilityProfile BuildVulnerabilityProfile(Creature target)
+        internal static VulnerabilityProfile BuildVulnerabilityProfile(Creature target, bool withDispelFacts = false)
         {
             var enchantments = target.EnchantmentManager;
 
@@ -146,7 +148,9 @@ namespace ACE.Server.WorldObjects
                 enchantments.GetVulnerabilityResistanceMod(DamageType.Acid),
                 enchantments.GetVulnerabilityResistanceMod(DamageType.Electric),
                 enchantments.GetBodyArmorMod(false),
-                VulnerabilityProfile.BuildTopLayers(registry));
+                withDispelFacts
+                    ? VulnerabilityProfile.BuildTopLayers(registry, EnchantmentDispelFactsCache.Resolve)
+                    : VulnerabilityProfile.BuildTopLayers(registry));
         }
 
         /// <summary>
@@ -348,8 +352,9 @@ namespace ACE.Server.WorldObjects
         /// MagicAttack sets them (so NextMagicAttackTime gates the next cast). The pet is snapped to face the
         /// target first (FaceTargetDirectly), since the target need not be the one StartTurn turns toward.
         ///
-        /// Two deliberate differences from MagicAttack: OnMonsterEffectCastComplete is not called (its recast
-        /// re-casts at AttackTarget, which for a heal would be the enemy), and at release a harmful spell is
+        /// Two deliberate differences from MagicAttack: OnMonsterEffectCastComplete is called with chaining OFF
+        /// (a recast re-casts at AttackTarget, which for a heal would be the enemy, so it is skipped; a ramp
+        /// on=cast still accrues, which is the pet Mana Rush), and at release a harmful spell is
         /// dropped if the target has left combat with the owner's side during the wind-up (the never-initiates
         /// rule, like CombatPet.MayLooseAt). Returns FALSE, starting nothing, when the target is gone or the pet
         /// cannot pay the mana.
@@ -362,9 +367,11 @@ namespace ACE.Server.WorldObjects
             if (target is Creature targetCreature && !targetCreature.IsAlive)
                 return false;
 
+            uint manaUsed = 0;
+
             if (AiUsesMana)
             {
-                var manaUsed = CalculateManaUsage(this, spell, ExplicitCastManaTarget(spell, target));
+                manaUsed = CalculateManaUsage(this, spell, ExplicitCastManaTarget(spell, target));
 
                 if (manaUsed > Mana.Current)
                     return false;
@@ -393,10 +400,29 @@ namespace ACE.Server.WorldObjects
                 if (IsDead || target.IsDestroyed || (target is Creature c && c.IsDead))
                     return;
 
-                if (!friendly && this is CombatPet pet && !(target is Creature engaged && PetEngagement.IsEngagedWithOwner(engaged, pet.P_PetOwner)))
+                // a pet releases a harmful spell only at a monster engaged with its owner's side; the one exemption is a
+                // by-design never-initiates pet whose owner has turned /summonaggro on (NeverInitiates is then false)
+                if (!friendly && this is CombatPet pet && !(pet.NeverInitiatesByDesign && !pet.NeverInitiates) && !(target is Creature engaged && PetEngagement.IsEngagedWithOwner(engaged, pet.P_PetOwner)))
                     return;
 
+                // a caster pet's heal whose target was topped up during the pre-cast (a kit, a potion, or the other
+                // caster pet's heal landing first) is not released; the mana it reserved is refunded, and the
+                // post-cast cooldown set below is released so the pet may act again at once (PrevAttackTime stays:
+                // CasterCastReady's magic-delay gate still applies)
+                if (friendly && this is CombatPet healer && !healer.FriendlyCastStillWanted(spell, target))
+                {
+                    Mana.Current = CombatPet.RefundedMana(Mana.Current, Mana.MaxValue, manaUsed);
+
+                    NextMoveTime = NextAttackTime = Timers.RunningTime;
+
+                    PostCastMotion();
+                    return;
+                }
+
                 CastSpellAt(spell, target, friendly);
+
+                // monster combat effects: the cast completed. Chaining off - see the summary above.
+                OnMonsterEffectCastComplete(spell, allowChaining: false);
 
                 PostCastMotion();
             });
@@ -426,7 +452,12 @@ namespace ACE.Server.WorldObjects
             if (AiUseHumanMagicAnimations && !fallback)
                 return PreCastMotion_Human(target);
 
-            var motion = new Motion(this, MotionCommand.CastSpell, PreCastSpeed);
+            // a motion table with no CastSpell animation for this stance plays nothing and reports length 0, so the
+            // caster stands still (lugian table 0x09000006): MonsterCastGesture swaps in a gesture the table does have
+            var castSpellLength = MotionTable.GetAnimationLength(MotionTableId, CurrentMotionState.Stance, MotionCommand.CastSpell, PreCastSpeed);
+            var castMotion = MonsterCastGesture.Select(MotionTableId, castSpellLength);
+
+            var motion = new Motion(this, castMotion, PreCastSpeed);
             motion.MotionState.TurnSpeed = 2.25f;
             //motion.HasTarget = true;
             //motion.TargetGuid = target.Guid;
@@ -434,7 +465,8 @@ namespace ACE.Server.WorldObjects
 
             EnqueueBroadcastMotion(motion);
 
-            return MotionTable.GetAnimationLength(MotionTableId, CurrentMotionState.Stance, MotionCommand.CastSpell, PreCastSpeed);
+            return MonsterCastGesture.PreCastLength(castMotion, castSpellLength,
+                m => MotionTable.GetAnimationLength(MotionTableId, CurrentMotionState.Stance, m, PreCastSpeed));
         }
 
         /// <summary>
@@ -575,9 +607,29 @@ namespace ACE.Server.WorldObjects
                 case MagicSchool.WarMagic:
                 case MagicSchool.VoidMagic:
 
-                    HandleCastSpell(spell, target, caster);
+                    HandleCastSpell(spell, target, caster, WarVoidSpellLauncher(this, caster));
                     break;
             }
+        }
+
+        /// <summary>
+        /// The weapon a war or void cast hands HandleCastSpell, which becomes SpellProjectile.ProjectileLauncher (crit
+        /// chance, Crippling Blow, elemental damage mod, slayer, resistance cleaving) and the DoT weapon of a void
+        /// enchantment. A Custom Summons caster pet (CombatPet with IsCasterPet) gets its wielded wand, the same weapon a
+        /// player's cast passes (Player_Magic: HandleCastSpell(spell, target, itemCaster, caster, ...)). Every other
+        /// monster, a melee or missile pet included, gets null, exactly as before: retail ACE hands a monster's wand only
+        /// as the item caster, so its spell damage never read the wand, and that stays bit-identical.
+        ///
+        /// Side effect, intended (owner ruling 2026-11-02): the launcher also lets the pet's CRIT RATING reach its bolts.
+        /// GetWeaponMagicCritFrequency returns the flat default before it reads the wielder's crit rating when the
+        /// launcher is null, so with no wand a caster pet's dagger Crit rating does nothing for war/void; with the wand
+        /// it adds 1% crit chance per point (WorldObject_Weapon.GetWeaponMagicCritFrequency). Either way, a pet also gets
+        /// the Precision on its owner's wielded Summoner focus (SummonerFocus.PetFocusModValue): the no-launcher return
+        /// adds it to the flat default, and the launcher path adds it after the wielder's own Precision read.
+        /// </summary>
+        internal static WorldObject WarVoidSpellLauncher(Creature castingCreature, WorldObject wand)
+        {
+            return castingCreature is CombatPet { IsCasterPet: true } ? wand : null;
         }
 
         /// <summary>

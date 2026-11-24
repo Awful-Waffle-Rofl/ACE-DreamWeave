@@ -38,15 +38,19 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "spellstorm",
             DisplayName = "Spellstorm",
-            Description = "Your landed light weapon hits have a 5/10/15% chance (by rank) to unleash a ring of " +
-                          "nine war projectiles matching the damage type of the swing, radiating outward in " +
-                          "every direction - roughly one for each enemy around you. A Nether weapon unleashes a " +
-                          "ring of void projectiles instead. Its resist chance and skill damage bonus use your " +
-                          "Item Enchantment. A swing at full power unleashes the greater ring instead, and " +
-                          "every proc hits harder the more power you put into the swing.",
+            // Live text. Chance per rank: SpellstormAbility.cs ~72-74 (LiveBaseChance).
+            DescriptionTemplate = "Your light weapon hits can unleash a ring of nine war projectiles matching the swing's damage " +
+                          "type, flying out in every direction. A Nether weapon unleashes void projectiles. A full-power swing " +
+                          "unleashes the greater ring, and every proc hits harder the more power you put into the swing. Your Item " +
+                          "Enchantment sets its resist chance and damage bonus.",
+            RankTailTemplate = "{ranks:class_ability_spellstorm_chance_r|pct}% chance",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },   // Spellsword pass 2026-10-24: one rank at 3 -> three at 1/1/1 (ClassAbilityRepricing wave 4, PromoteToPaid)
             Implemented = true,
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "gear", Bounds = CeilingBounds.Gear, Source = CeilingSource.GearStackCap, GearMod = EquipmentModId.Spellstorm, Label = "max from gear", Format = "pct" },
+            },
         };
 
         /// <summary>
@@ -171,6 +175,10 @@ namespace ACE.Server.ClassAbilities.Abilities
                 procDamageScale,
                 damageEvent.OriginalDamageType);   // Volatile Elements: the re-typed hit's original type, for the proc's rend max
 
+            // Echo Cast (Archmage T3): a class-ability proc is a qualifying cast (the 2026-09 firework ruling); its wisp
+            // casts with the proc's caster skill, damage scale, rend source and weapon. Triggered by a landed MELEE hit, so a wisp cast can never reach here.
+            attacker.TryTriggerEchoWisp(spell, target, 0, inheritsProcCasterSkill: true, procDamageScale: procDamageScale, rendSourceDamageType: damageEvent.OriginalDamageType, procWeapon: damageEvent.Weapon);
+
             // A landed war proc feeds Spellsurge (design section 5e).
             attacker.AddSpellsurgeStack();
         }
@@ -205,6 +213,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "proc",
                 Per = null,
                 CapNote = null,
+                Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "gear", gear, rank, ClassAbilityText.Live) },
             };
         }
     }

@@ -109,8 +109,8 @@ namespace ACE.Server.ThreadDungeons.Defs
         /// The salvage affinities - the powder slot's own budget category, and what a WILDCARD powder draws
         /// from. Owner ruling 2026-09-07: a powder aligns to a material from a list the owner chooses rather
         /// than to the gem its name comes from, and the powders left without a mapping roll at random over
-        /// this scope. Resolved through RawFragmentRules.BudgetOf, so a ninth affinity row is reachable by
-        /// the wildcards the moment it is added - nothing anywhere counts them.
+        /// this scope. Resolved through RawFragmentRules.BudgetOf, so a further affinity row is reachable by
+        /// the wildcards the moment it is added. No runtime code counts them; two shipped-content tests pin the row count (ThreadDungeonStoreTests.Shipped_salvage_affinity_rows_are_well_formed, DungeonGemSummaryEffectTests.Every_shipped_affinity_names_the_material_from_its_own_material_id).
         /// </summary>
         public const string Salvage = "salvage";
 

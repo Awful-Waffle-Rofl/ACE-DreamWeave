@@ -687,11 +687,11 @@ namespace ACE.Server.WorldEvents
             return result;
         }
 
-        /// <summary>A level band moved by <paramref name="offset"/> levels, kept within 1 to 275.</summary>
+        /// <summary>A level band moved by <paramref name="offset"/> levels, kept within 1 to <see cref="WorldEventRosterSelector.MaxConsideredLevel"/>.</summary>
         public static LevelBand ShiftBand(LevelBand band, int offset)
         {
-            var low = Math.Clamp(band.Low + offset, 1, 275);
-            var high = Math.Clamp(band.High + offset, low, 275);
+            var low = Math.Clamp(band.Low + offset, 1, WorldEventRosterSelector.MaxConsideredLevel);
+            var high = Math.Clamp(band.High + offset, low, WorldEventRosterSelector.MaxConsideredLevel);
 
             return new LevelBand(low, high);
         }
@@ -731,7 +731,7 @@ namespace ACE.Server.WorldEvents
 
         /// <summary>A slot level moved by a role level offset; "no slot level" (<paramref name="none"/>) stays as it is.</summary>
         public static int MovedSlotLevel(int slotLevel, int offset, int none = 0) =>
-            offset == 0 || slotLevel == none ? slotLevel : Math.Clamp(slotLevel + offset, 1, 275);
+            offset == 0 || slotLevel == none ? slotLevel : Math.Clamp(slotLevel + offset, 1, WorldEventRosterSelector.MaxConsideredLevel);
 
         /// <summary>The tuning role of a wave monster from its wave role: breach, seekers and hunters are melee; a ranged slot is a caster when <paramref name="isCaster"/>.</summary>
         public static HoldDamageRole DamageRoleFor(HoldRole role, bool isCaster)

@@ -576,7 +576,12 @@ namespace ACE.Server.Tests.ThreadDungeons
             // argument now lives there, and TryPopulate must still build its limits through it.
             var body = PooledLootSourceText.MethodBody(src, "internal static DungeonPopulationLimits ReadLimits(GroupScaling group)");
 
-            StringAssert.Contains(populate, "var limits = ReadLimits(run.Group);");
+            // The plan build then moved on into BuildLivePlan: it builds its limits through ReadLimits(group), and
+            // TryPopulate hands it run.Group.
+            var build = PooledLootSourceText.MethodBody(src, "internal static DungeonSpawnPlan BuildLivePlan(");
+
+            StringAssert.Contains(populate, "BuildLivePlan(run.Spec, run.Dungeon, run.Group,");
+            StringAssert.Contains(build, "var limits = ReadLimits(group);");
             StringAssert.Contains(body, "modifierLevelExponent: ResolveModifierLevelExponent()");
         }
 

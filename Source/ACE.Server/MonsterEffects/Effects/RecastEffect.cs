@@ -28,6 +28,9 @@ namespace ACE.Server.MonsterEffects.Effects
     {
         public string Kind => "recast";
 
+        /// <summary>Recast chains a new cast at AttackTarget, so the explicit-target pet path skips it.</summary>
+        public bool StartsCasts => true;
+
         public bool Validate(MonsterEffectSpec spec, out string error)
         {
             var chance = spec.GetDouble("chance", 0.0);
@@ -70,8 +73,9 @@ namespace ACE.Server.MonsterEffects.Effects
         /// times the cap rather than branching.
         ///
         /// The consequence to know: a chained cast's completion is answered by THIS record only. It does not
-        /// re-run the monster's other cast hooks. Today that is invisible (recast is the only IMonsterCastHook
-        /// there is), and it is the deliberate price of a bounded chain.
+        /// re-run the monster's other cast hooks. ramp on=cast is the other IMonsterCastHook, so on a monster that
+        /// carries both, a recast-chained cast adds no ramp stack: the chain calls caster.CastSpell directly and never
+        /// reaches OnMonsterEffectCastComplete. That is the deliberate price of a bounded chain.
         ///
         /// TWO BUDGETS, BOTH STILL ENFORCED. state.Stacks counts the levels this record has taken and is
         /// bounded by its own max=; Creature.TryEnterMonsterEffectCastChain claims a level of the shared,

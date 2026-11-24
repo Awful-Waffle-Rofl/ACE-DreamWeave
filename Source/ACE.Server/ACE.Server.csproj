@@ -207,6 +207,10 @@
       <Link>Content\dungeons\dynamic\outdoor\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="..\..\Content\dungeons\gauntlet\*.json">
+      <Link>Content\dungeons\gauntlet\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <ItemGroup>
@@ -315,7 +319,7 @@
     <PackageReference Include="Lib.Harmony" Version="2.4.3" />
     <PackageReference Include="log4net" Version="2.0.17" />
     <PackageReference Include="Log4Net.Async.Standard" Version="3.1.0" />
-    <PackageReference Include="MaxMind.Db" Version="5.2.0" />
+    <PackageReference Include="MaxMind.Db" Version="5.3.0" />
     <PackageReference Include="McMaster.NETCore.Plugins" Version="2.0.0" />
     <PackageReference Include="MySqlConnector" Version="2.6.2" />
   </ItemGroup>

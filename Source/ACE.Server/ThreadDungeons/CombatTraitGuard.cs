@@ -58,6 +58,24 @@ namespace ACE.Server.ThreadDungeons
         /// (ThreadDungeonSpawner.cs:1079-1080), so nothing sitting in Inventory can reach the corpse either
         /// way, before or after this change.
         ///
+        /// Crit amplifiers (owner ruling 2026-11-21) are swept the same way: the CripplingBlow/CriticalStrike imbue bits, a
+        /// CriticalMultiplier or CriticalFrequency above the default, and the Execution record on each item; an authored CritDamageRating is cleared on the CREATURE itself (BypassPositiveInts), not swept per item,
+        /// see DungeonCreatureNormalizer.StripItemCombatTraits. They reach a MISSILE hit because DamageEvent reads
+        /// Weapon = damageSource.ProjectileLauncher ?? damageSource.ProjectileAmmo (DamageEvent.cs:428), and
+        /// Creature_Missile.LaunchProjectile stamps those from the instances Monster_Missile.LaunchMissile passes in -
+        /// GetEquippedMissileLauncher() and the equipped ammo, or the equipped thrown weapon itself when there is no launcher
+        /// (Monster_Missile.cs:63-69, :151; Creature_Missile.cs:482-483). The spawned projectile is a fresh copy of the ammo
+        /// wcid but is only the damage SOURCE, never the Weapon, so the equipped instances this sweep strips are the ones read.
+        /// Pinned by DungeonCritAmplifierStripTests.
+        ///
+        /// Owner ruling 2026-11-23 widens the per-item strip to every special damage modifier - every damage imbue bit,
+        /// slayer, resistance cleave, offensive gear ratings, caster elemental mod, weapon procs, Paragon gems and the
+        /// Focus/Attunement records (DungeonCombatNormalizer.StrippedImbues, ItemStripInts, ItemStripGearRatings,
+        /// ItemStripFloats). The projectile is the ONE place the equipped-instance argument above does not close: its own
+        /// ProcSpell is read on impact (ProjectileCollisionHelper -> TryProcEquippedItems' HasProc branch), so this method
+        /// also sets Creature.StripProjectileCombatTraits, and Creature_Missile.LaunchProjectile strips each new projectile.
+        /// Pinned by DungeonWeaponModifierStripTests.
+        ///
         /// Order inside matters only once: the defense-skill cap reads plan.BandStandard, which the builder
         /// computes whenever this guard is on and the plan has a non-boss entry. The BOSS is exempt from the cap -
         /// with normalization on its defense is SET to the band standard afterwards, and with normalization off
@@ -83,8 +101,29 @@ namespace ACE.Server.ThreadDungeons
                 // in both collections. Recorded as "<PropertyName>@<item wcid>" so the log line names which item
                 // carried the trait, since the same property can legitimately appear once for the creature and
                 // again for one of its items.
-                SweepItems = () => creature.EquippedObjects.Values.Concat(creature.Inventory.Values).Where(i => i != null).Distinct()
-                    .SelectMany(item => DungeonCreatureNormalizer.StripItemCombatTraits(item).Select(change => $"{change}@{item.WeenieClassId}")),
+                // An EQUIPPED item's gear ratings already sit in the creature's equip-time rating cache, so it comes out of
+                // the cache before the strip and goes back in after (DungeonCombatNormalizer.ItemStripGearRatings). ToList
+                // first: the sweep must not enumerate EquippedObjects while the cache step runs.
+                SweepItems = () => creature.EquippedObjects.Values.Concat(creature.Inventory.Values).Where(i => i != null).Distinct().ToList()
+                    .SelectMany(item =>
+                    {
+                        var equipped = creature.EquippedObjects.ContainsKey(item.Guid);
+
+                        if (equipped)
+                            creature.RemoveItemFromEquippedItemsRatingCache(item);
+
+                        var itemChanges = DungeonCreatureNormalizer.StripItemCombatTraits(item);
+
+                        if (equipped)
+                            creature.AddItemToEquippedItemsRatingCache(item);
+
+                        // Damage-changing item spells: the spellbook entry, and any enchantment the equip-time cast already
+                        // put on the item or (for an aura) on this creature. RemoveItemSpell picks the registry.
+                        itemChanges.AddRange(DungeonCreatureNormalizer.StripItemDamageSpells(item, DungeonCreatureNormalizer.LiveSpellStat,
+                            spellId => creature.RemoveItemSpell(item, (uint)spellId, silent: true)));
+
+                        return itemChanges.Select(change => $"{change}@{item.WeenieClassId}");
+                    }).ToList(),
 
                 GetEthereal = () => creature.Ethereal,
                 SetEthereal = v => creature.Ethereal = v,
@@ -95,6 +134,12 @@ namespace ACE.Server.ThreadDungeons
                 BaseOf = skill => creature.GetCreatureSkill(skill, false)?.Base,
                 SetCeiling = (skill, cap) => (creature.DefenseSkillCeilings ??= new Dictionary<Skill, uint>())[skill] = cap,
             };
+
+            // The projectile half of the item strip: every arrow, bolt or thrown weapon this creature fires is a FRESH copy
+            // of the ammo wcid (Creature_Missile.LaunchProjectile, WorldObjectFactory.CreateNewWorldObject), so the swept
+            // ammo instance never reaches it, and ProjectileCollisionHelper fires the projectile's OWN ProcSpell on impact.
+            // LaunchProjectile runs the same per-item strip on each new projectile while this is set.
+            creature.StripProjectileCombatTraits = true;
 
             return ApplyCore(target, dials, standard, isBoss);
         }
@@ -159,6 +204,18 @@ namespace ACE.Server.ThreadDungeons
             foreach (var p in DungeonCombatNormalizer.BypassInts)
             {
                 if (t.GetInt(p).HasValue)
+                {
+                    t.RemoveInt(p);
+                    changes.Add(p.ToString());
+                }
+            }
+
+            // Creature level only. An item's crit-damage rating rides on GearCritDamage (374), which combat reads through
+            // the creature's equip-time rating cache (Creature_Rating.cs GetCritDamageRating, Creature_Equipment.cs); this
+            // strip does not touch it and no wielded roster item carries it today. Item PropertyInt 314 is never read.
+            foreach (var p in DungeonCombatNormalizer.BypassPositiveInts)
+            {
+                if (t.GetInt(p) > 0)
                 {
                     t.RemoveInt(p);
                     changes.Add(p.ToString());

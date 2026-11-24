@@ -8,9 +8,16 @@ namespace ACE.Server.ClassAbilities.Abilities
 {
     /// <summary>
     /// Void/Summon T3: when a blow would kill the summoner and a combat pet is alive, the PET dies instead
-    /// and the summoner is restored to 10% of maximum health, once every 6/4/2 minutes by rank. WITH NO PET
-    /// ALIVE THERE IS NO SAVE, and that is the entry's whole cost structure - it is not a free death save,
-    /// it is one that spends a pet and then leaves the summoner at 10% health with nothing out.
+    /// and the summoner is restored to 20/40/60% of maximum health by rank and shielded from monster damage
+    /// for a few seconds (the companion <see cref="SoulJumpImmunity"/>), once every 6/4/2 minutes by rank.
+    /// WITH NO PET ALIVE THERE IS NO SAVE, and that is the entry's whole cost structure - it is not a free
+    /// death save, it is one that spends a pet and then leaves the summoner at a fraction of their health
+    /// with nothing out.
+    ///
+    /// TWO PRE-WRITE HANDLERS, ONE ABILITY, exactly as Berserk Rage does it: the save must run last
+    /// (DeathSave band) but the immunity window must run ahead of every absorb pool (Immunity band), and one
+    /// handler cannot sit in two bands. <see cref="SoulJumpImmunity"/> shares this Definition and is appended
+    /// to the registry's pre-write bucket only.
     ///
     /// A DEATH SAVE BELONGS ON IPreWriteDamageAbility AT THE DeathSave BAND. It cannot work on
     /// IIncomingDamageAbility, which fires after the health write has already clamped at zero; see
@@ -46,17 +53,35 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// </summary>
     public class SoulJumpAbility : IClassAbility, IPreWriteDamageAbility, IAbilityReadout
     {
-        public ClassAbilityDefinition Definition { get; } = new ClassAbilityDefinition
+        /// <summary>The companion immunity handler, appended to the pre-write bucket by ClassAbilityRegistry.</summary>
+        public static readonly SoulJumpImmunity Immunity = new SoulJumpImmunity();
+
+        public ClassAbilityDefinition Definition => SharedDefinition;
+
+        public static readonly ClassAbilityDefinition SharedDefinition = new ClassAbilityDefinition
         {
             Id = ClassAbilityId.SoulJump,
             AbilityClass = ClassAbilityClass.VoidSummon,
             Tier = 3,
             Name = "soul_jump",
             DisplayName = "Soul Jump",
-            Description = "When a blow would kill you and one of your combat pets is alive, the pet dies in " +
-                          "your place and you are restored to 10% of your maximum health. Once every 6/4/2 " +
-                          "minutes by rank. With no pet alive, there is no save. Higher Jump multiplies " +
-                          "the health you come back with.",
+            DescriptionTemplate = "When a creature's blow would kill you while one of your combat pets is alive, the pet dies instead. You come " +
+                          "back at a share of your maximum health, and creatures cannot harm you for " +
+                          "{v:class_ability_souljump_immunity_seconds|num} seconds. With no pet alive, nothing saves you.",
+            // Live text: the restore share is base + (rank - 1) * step of class_ability_souljump_restore_fraction / _step (ModifyIncomingDamage and
+            // GetReadout below); the immunity window is class_ability_souljump_immunity_seconds. The cooldown is
+            // base + (rank - 1) * step in SECONDS (class_ability_souljump_cooldown_seconds_base / _step, same two methods), shown in
+            // minutes by the min formatter ("6/4/2"). The cooldown formula is SoulJumpAbility.CooldownSeconds (SoulJumpMath.CooldownSeconds with its guards: floor at
+            // 0 and the MinimumCooldownSeconds of 1 s), which only a mis-tuned base/step pair reaches.
+            RankTailTemplate = "{ladder:class_ability_souljump_restore_fraction,class_ability_souljump_restore_fraction_step|pct}% " +
+                          "health, once every {fn:cooldown|min} minutes",
+            TextFormulas = new Dictionary<string, TextFormula>
+            {
+                ["cooldown"] = new TextFormula(
+                    (values, rank) => CooldownSeconds(values, rank),
+                    "class_ability_souljump_cooldown_seconds_base",
+                    "class_ability_souljump_cooldown_seconds_step"),
+            },
             MaxRank = 3,
             CostPerRank = new[] { 2, 2, 2 },   // premium reprice 2026-09-13: 1/rank -> 2/rank
             Implemented = true,
@@ -71,6 +96,14 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// infrastructure trouble.
         /// </summary>
         public const double MinimumCooldownSeconds = 1.0;
+
+        /// <summary>
+        /// The seconds between saves at a rank, with both tunables read through <paramref name="v"/>: <see cref="SoulJumpMath.CooldownSeconds"/>
+        /// with the runaway floor <see cref="MinimumCooldownSeconds"/>. ModifyIncomingDamage and GetReadout call this with
+        /// <see cref="ClassAbilityText.Live"/>; the live text's cooldown formula calls it too, so the quoted minutes follow the same clamps.
+        /// </summary>
+        public static double CooldownSeconds(ITunableValues v, int rank) =>
+            SoulJumpMath.CooldownSeconds(rank, v.GetDouble("class_ability_souljump_cooldown_seconds_base"), v.GetDouble("class_ability_souljump_cooldown_seconds_step"), MinimumCooldownSeconds);
 
         /// <summary>
         /// DeathSave band, and it must stay there: the save decides on the FINAL post-mitigation figure, so
@@ -102,37 +135,36 @@ namespace ACE.Server.ClassAbilities.Abilities
                 return;
 
             // 6/4/2 minutes by rank, with NO affinity term - see the ruling in the type doc.
-            var cooldownSeconds = SoulJumpMath.CooldownSeconds(rank,
-                PropertyManager.GetDouble("class_ability_souljump_cooldown_seconds_base").Item,
-                PropertyManager.GetDouble("class_ability_souljump_cooldown_seconds_step").Item,
-                MinimumCooldownSeconds);
+            var cooldownSeconds = CooldownSeconds(ClassAbilityText.Live, rank);
 
             // Jump MULTIPLIES the health the summoner comes back with, at the SHARED affinity rate
             // (class_ability_affinity_rate_per_trained / _per_spec) via the single-argument overload -
             // Soul Jump's own non-standard rate pair was retired by the 2026-10-02 owner ruling. At zero
             // effective Jump the factor is exactly 1.0 and the restore is bit-identical to the bare
             // tunable.
-            var restoreFraction = SoulJumpMath.RestoreFraction(
+            var restoreFraction = SoulJumpMath.RestoreFractionForRank(rank,
                 PropertyManager.GetDouble("class_ability_souljump_restore_fraction").Item,
+                PropertyManager.GetDouble("class_ability_souljump_restore_fraction_step").Item,
                 defender.GetClassAbilityAffinityMultiplier(Skill.Jump));
 
-            context.Damage = defender.TrySoulJumpSave(context.Damage, context.Attacker, cooldownSeconds, restoreFraction);
+            var immunitySeconds = PropertyManager.GetDouble("class_ability_souljump_immunity_seconds").Item;
+
+            context.Damage = defender.TrySoulJumpSave(context.Damage, context.Attacker, cooldownSeconds, restoreFraction, immunitySeconds);
         }
 
         /// <summary>
         /// Reports the RESTORED HEALTH as a percentage of maximum, which is the one magnitude the affinity
-        /// moves. Mirrors <see cref="SoulJumpMath.RestoreFraction"/> exactly (x100 for display) - the two
+        /// moves. Mirrors <see cref="SoulJumpMath.RestoreFractionForRank"/> exactly (x100 for display) - the two
         /// must stay in step.
         ///
-        /// <paramref name="rank"/> is deliberately absent from the arithmetic: rank buys COOLDOWN on this
-        /// ability, not restore size, so a rank 1 and a rank 3 summoner come back with the same share of
-        /// their health. The cooldown is in the ability's description rather than on this line, because a
-        /// readout carries one scalar and the restore is the one the affinity acts on.
+        /// The restore is RANK-SCALED (base + (rank - 1) * step, 20/40/60% at the defaults) and the cooldown
+        /// is a secondary segment, because a readout carries one primary scalar and the restore is the one
+        /// the affinity acts on.
         ///
-        /// Affinity is a MULTIPLIER on the flat base fraction, reported as the AMOUNT it adds so the three
-        /// terms share one unit and sum exactly to Effective. Nothing clamps the FRACTION (the only ceiling
-        /// is that the restored amount cannot exceed maximum health, which bounds the points and not this
-        /// percentage), so CapNote is always null; the ability carries no equipment mod, so Gear is 0.
+        /// Affinity is a MULTIPLIER on the rank's fraction, reported as the AMOUNT it adds so the three
+        /// terms share one unit and sum exactly to Effective. The only clamp is the 100% ceiling inside
+        /// RestoreFractionForRank (a tuning guard), so CapNote is always null; the ability carries no
+        /// equipment mod, so Gear is 0.
         ///
         /// SECONDARY: the COOLDOWN (SoulJumpMath.CooldownSeconds, 6/4/2 minutes by rank) is the second
         /// player-meaningful, rank-scaled magnitude here - rank buys cooldown, Jump buys restore size, and
@@ -142,16 +174,16 @@ namespace ACE.Server.ClassAbilities.Abilities
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
             var baseFraction = PropertyManager.GetDouble("class_ability_souljump_restore_fraction").Item;
+            var stepFraction = PropertyManager.GetDouble("class_ability_souljump_restore_fraction_step").Item;
 
             var multiplier = player.GetClassAbilityAffinityMultiplier(Skill.Jump);
 
-            var skill = baseFraction * 100.0;
-            var affinity = (SoulJumpMath.RestoreFraction(baseFraction, multiplier) - baseFraction) * 100.0;
+            var rankFraction = SoulJumpMath.RestoreFractionForRank(rank, baseFraction, stepFraction, 1.0);
 
-            var cooldownSeconds = SoulJumpMath.CooldownSeconds(rank,
-                PropertyManager.GetDouble("class_ability_souljump_cooldown_seconds_base").Item,
-                PropertyManager.GetDouble("class_ability_souljump_cooldown_seconds_step").Item,
-                MinimumCooldownSeconds);
+            var skill = rankFraction * 100.0;
+            var affinity = (SoulJumpMath.RestoreFractionForRank(rank, baseFraction, stepFraction, multiplier) - rankFraction) * 100.0;
+
+            var cooldownSeconds = CooldownSeconds(ClassAbilityText.Live, rank);
 
             var cooldownSecondary = new ClassAbilityReadout
             {
@@ -179,6 +211,42 @@ namespace ACE.Server.ClassAbilities.Abilities
                 CapNote = null,
                 Secondary = new List<ClassAbilityReadout> { cooldownSecondary },
             };
+        }
+    }
+
+    /// <summary>
+    /// Soul Jump's post-save immunity window, the companion pre-write handler (see SoulJumpAbility's type doc
+    /// for why it is a second handler). Shares SoulJumpAbility's Definition, so the hook cache filters it on the
+    /// same rank. Immunity band: ahead of every absorb pool, so a blocked hit drains nothing.
+    ///
+    /// THE RULE IS BERSERK RAGE'S, NOT A COPY OF IT: it calls BerserkRageImmunity.DamageAfterImmunity, so a
+    /// hazard hit and a Player-sourced hit are never blocked (class abilities are PvE only) and a DoT tick
+    /// loses only its enemy-creature share. The window is opened by Player.TrySoulJumpSave; the retail
+    /// "something tried to hurt you but you are protected" feedback (PlayScript.ShieldUpBlue) plays whenever
+    /// this actually removes damage. It deliberately does NOT use the lifestone-protection flag, which lasts
+    /// 60 seconds, persists, is dispelled by attacking and blocks PvP.
+    /// </summary>
+    public class SoulJumpImmunity : IPreWriteDamageAbility
+    {
+        public ClassAbilityDefinition Definition => SoulJumpAbility.SharedDefinition;
+
+        public int MitigationOrder => DamageMitigationOrder.Immunity;
+
+        public bool RunsWithoutLearnedRank => false;
+
+        /// <summary>RANK-GATED (the cache filter); reads the live window on the defender.</summary>
+        public void ModifyIncomingDamage(Player defender, int rank, PreWriteDamageContext context)
+        {
+            if (defender == null || rank <= 0 || context.Damage == 0 || !defender.IsSoulJumpImmune)
+                return;
+
+            var before = context.Damage;
+
+            context.Damage = BerserkRageImmunity.DamageAfterImmunity(before, context.IsHazard, context.Source is Player,
+                context.IsDamageOverTime, context.SpellDamageFromEnemyCreature);
+
+            if (context.Damage < before)
+                defender.PlaySoulJumpShield();
         }
     }
 }

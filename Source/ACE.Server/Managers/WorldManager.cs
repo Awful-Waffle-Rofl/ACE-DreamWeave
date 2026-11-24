@@ -78,6 +78,22 @@ namespace ACE.Server.Managers
         /// </summary>
         internal static volatile bool WorldThreadFaulted;
 
+        /// <summary>The managed thread id of the world thread once it has started; 0 before that (and in unit tests).</summary>
+        private static volatile int worldThreadId;
+
+        /// <summary>
+        /// True on the world thread, and also while no world thread has started (startup, unit tests), when the answer is
+        /// unknown. False only when the caller is provably on another thread. For precondition checks that log, never gate.
+        /// </summary>
+        internal static bool IsOnWorldThreadOrUnknown
+        {
+            get
+            {
+                var id = worldThreadId;
+                return id == 0 || id == Environment.CurrentManagedThreadId;
+            }
+        }
+
         public enum WorldStatusState
         {
             Closed,
@@ -181,6 +197,7 @@ namespace ACE.Server.Managers
             {
                 try
                 {
+                    worldThreadId = Environment.CurrentManagedThreadId;
                     LandblockManager.PreloadConfigLandblocks();
                     UpdateWorld();
                 }
@@ -647,23 +664,29 @@ namespace ACE.Server.Managers
             var popup_header = PropertyManager.GetString("popup_header").Item;
             var popup_motd = PropertyManager.GetString("popup_motd").Item;
 
-            if (character.TotalLogins <= 1)
+            if (routedToLoom && session.Player.Location?.RealmID == LoomRealmId)
             {
                 // the welcome popup sends the player off to find the Society Greeter, who is in the
                 // training hall - so it must not arrive while they are still standing in the Loom,
                 // where there is no greeter and no training to begin. Hold it until the DreamWeave
                 // sets them down in the hall; the exit portal plays it on arrival.
-                if (routedToLoom)
-                    player.DeferredWelcomePopup = true;
-                else
-                    SendWelcomePopup(session);
+                //
+                // Keyed on the Loom route, not on TotalLogins: a character who logs out inside the
+                // Loom is resumed into it with TotalLogins of 2 or more, has still never seen the
+                // welcome, and would otherwise never get it. The welcome includes the MOTD, so the
+                // MOTD-only popup below is skipped here rather than sent twice.
+                player.DeferredWelcomePopup = true;
+            }
+            else if (character.TotalLogins <= 1)
+            {
+                SendWelcomePopup(session);
             }
             else if (!string.IsNullOrEmpty(popup_motd))
             {
                 session.Network.EnqueueSend(new GameEventPopupString(session, AppendLines(popup_header, popup_motd)));
             }
 
-            var info = "Welcome to Dreamweave.\nDiscord: https://discord.gg/nZnzJeWrM\nMarket: https://market.acdreamweave.com/\nWiki: https://wiki.acdreamweave.com/\n";
+            var info = "Welcome to Dreamweave.\nDiscord: https://discord.gg/p2h3yca4BD\nMarket: https://market.acdreamweave.com/\nWiki: https://wiki.acdreamweave.com/\n";
             session.Network.EnqueueSend(new GameMessageSystemChat(info, ChatMessageType.Broadcast));
 
             var server_motd = PropertyManager.GetString("server_motd").Item;
@@ -695,6 +718,18 @@ namespace ACE.Server.Managers
             if (stageTestMsg != null)
                 session.Network.EnqueueSend(new GameMessageSystemChat(stageTestMsg, ChatMessageType.Broadcast));
 
+            // The Loom: tell the player how to leave it. On prod, 30 characters ended at level 1 still
+            // standing in the Loom (see loom.sql's "no gate" note), so the one action the scene needs
+            // is stated outright, as a popup and again in chat, rather than left to the figure's lines.
+            // Sent after the login broadcasts so the chat line is not scrolled away by them. Covers a
+            // resume into a fresh Loom after a relog too, since routedToLoom is set on both paths. The
+            // realm check skips it if a later fallback (the !success spawn path) moved them elsewhere.
+            if (routedToLoom && session.Player.Location?.RealmID == LoomRealmId)
+            {
+                session.Network.EnqueueSend(new GameEventPopupString(session, LoomEnterWorldPrompt));
+                session.Network.EnqueueSend(new GameMessageSystemChat(LoomEnterWorldPrompt, ChatMessageType.Broadcast));
+            }
+
             if (olthoiPlayerReturnedToLifestone)
                 session.Network.EnqueueSend(new GameMessageSystemChat("You have returned to the Olthoi Queen to serve the hive.", ChatMessageType.Broadcast));
             else if (playerLoggedInOnNoLogLandblock) // see http://acpedia.org/wiki/Mount_Elyrii_Hive
@@ -707,6 +742,12 @@ namespace ACE.Server.Managers
         /// is its first tenant. Must match the realm id registered by loom.sql.
         /// </summary>
         public const ushort LoomRealmId = 2;
+
+        /// <summary>
+        /// Sent to a character as they arrive in the Loom, as a popup and as a chat line: the one
+        /// thing they must do there. "DreamWeave" is the name of the portal object (wcid 1000052).
+        /// </summary>
+        public const string LoomEnterWorldPrompt = "To enter the world, use the DreamWeave object in the middle of the room.";
 
         /// <summary>
         /// The first-login welcome popup. Normally sent as the player enters the world, but a
@@ -893,6 +934,18 @@ namespace ACE.Server.Managers
             // objects are transient and must be destroyed while the landblocks are still up.
             WorldEventHooks.OnShutdown();
 
+            // Allegiance Avatars: credit what is queued and hand the last batch to the shard queue while the world
+            // thread still owns the state, ahead of the shard drain in ServerManager. Contained: a throw here
+            // must not stop WorldActive from clearing.
+            try
+            {
+                ACE.Server.Avatars.AvatarManager.OnShutdown();
+            }
+            catch (Exception ex)
+            {
+                log.Error("WorldManager: AvatarManager.OnShutdown() threw; the last Avatar flush may be lost", ex);
+            }
+
             // World has finished operations and concedes the thread to garbage collection
             WorldActive = false;
         }
@@ -940,6 +993,28 @@ namespace ACE.Server.Managers
             {
                 log.Error("WorldManager.UpdateGameWorld(): WorldEventManager.Tick() threw; skipping it this heartbeat", ex);
             }
+
+            try
+            {
+                // Allegiance Avatars: self-rate-limited to once a second; drains the XP feed, recomputes
+                // activity every 10 minutes and flushes every flush_seconds through the shard queue.
+                ACE.Server.Avatars.AvatarManager.Tick();
+            }
+            catch (Exception ex)
+            {
+                log.Error("WorldManager.UpdateGameWorld(): AvatarManager.Tick() threw; skipping it this heartbeat", ex);
+            }
+
+            try
+            {
+                // Allegiance Gauntlet: self-rate-limited to twice a second; drives every run's state machine and
+                // enqueues its creature work onto the arena landblock.
+                ACE.Server.Avatars.Gauntlet.GauntletManager.Tick();
+            }
+            catch (Exception ex)
+            {
+                log.Error("WorldManager.UpdateGameWorld(): GauntletManager.Tick() threw; skipping it this heartbeat", ex);
+            }
             WorldTickProfile.Lap(WorldTickPhase.WorldManagers);
 
             try
@@ -968,6 +1043,17 @@ namespace ACE.Server.Managers
             catch (Exception ex)
             {
                 log.Error("WorldManager.UpdateGameWorld(): SpeedCourseManager.Tick() threw; skipping it this heartbeat", ex);
+            }
+
+            try
+            {
+                // Balance Trials: ends sessions whose private room went away and enqueues each live session's tick and
+                // vital sample onto its own room landblock. Self-rate-limited to a half-second sweep.
+                ACE.Server.BalanceTrials.TrialManager.Tick();
+            }
+            catch (Exception ex)
+            {
+                log.Error("WorldManager.UpdateGameWorld(): TrialManager.Tick() threw; skipping it this heartbeat", ex);
             }
             WorldTickProfile.Lap(WorldTickPhase.ThreadDungeons);
 

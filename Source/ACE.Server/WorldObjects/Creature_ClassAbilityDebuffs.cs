@@ -355,5 +355,131 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>TRUE while this creature carries a live Lightning debuff.</summary>
         public bool HasElementalLightning => GetElementalLightningMod() > 1.0f;
+
+        // ---- Pinning Shot's defensive rider: a TARGET-SIDE "deals less damage" slot ----------------------
+        //
+        // A creature PINNED by an archer deals PinReductionMath-sized less damage to every Player and CombatPet
+        // while the pin holds and through its post-pin slow (Docs/ClassAbilities/ARCHER-HUNTERS-ECHO-DESIGN.md). Transient state on the
+        // VICTIM monster, for the same reasons as Weakened Blood and Elemental Lightning above: not dispellable,
+        // not persisted, not a resistable spell. Clock: Timers.RunningTime. Never persisted.
+        //
+        // ONE SLOT, NOT ONE PER ARCHER, MERGED BY MAX STRENGTH AND LATEST END. Pins CAN overlap: the pin immunity
+        // (class_ability_pinningshot_immunity_seconds) runs 8 s from the pin's END, but this window runs the
+        // post-pin slow (10 s) from the same point, so a creature can be pinned again - by the same archer or a
+        // different one - while the earlier window is still live. The slot therefore keeps the stronger reduction
+        // and the later end of the two. ACCEPTED CONSEQUENCE: a stronger archer's magnitude persists through a
+        // weaker archer's later window (and a weaker write never shortens or weakens a live one). The slot is an
+        // immutable entry published by reference.
+        //
+        // STILL MULTI-WRITER-SAFE. Archers in different landblock groups tick on different threads, so two pins
+        // that raced past CanBeClassAbilityPinned's check could both write. The publish is a COMPARE-EXCHANGE LOOP
+        // (the stronger of two live entries wins, the later end wins - which is also what makes a re-pin extend the window), and the lazy clear on read is a
+        // compare-exchange against the exact entry it inspected, so it can never wipe a newer one. Reads are
+        // lock-free: one snapshot of the reference.
+
+        private sealed class PinReductionEntry
+        {
+            public readonly double Reduction;
+            public readonly double EndTime;
+
+            public PinReductionEntry(double reduction, double endTime)
+            {
+                Reduction = reduction;
+                EndTime = endTime;
+            }
+        }
+
+        private PinReductionEntry pinReductionEntry;
+
+        /// <summary>
+        /// Arms the pin reduction on this creature: it deals <paramref name="reduction"/> (a fraction) less
+        /// outgoing damage to players and combat pets until the ABSOLUTE running time
+        /// <paramref name="endTime"/>. The caller sets that to what actually happened to the creature: the end of
+        /// the pin's post-pin slow window when the slow was applied (Creature.PinSlowWindowEnd, the same sum the
+        /// slow itself is written with), or the pin's own end when no slow was. Called by
+        /// PinningShotAbility.TryPin only, after the pin has landed.
+        ///
+        /// A re-pin that lands while the slow is still running (once the pin immunity has passed) EXTENDS the
+        /// window: a live pin reduction keeps the stronger reduction and the LATER end, so a refresh never shortens one.
+        ///
+        /// RETURNS TRUE ONLY FOR A FRESH LANDING (no live reduction held). A refusal - an ineligible victim
+        /// (<see cref="PinReductionMath.IsEligibleVictim"/>: players, pets, game pieces), a dead creature, a
+        /// non-positive reduction, or an end time not in the future - returns FALSE, as does a write that would
+        /// change nothing, which returns without allocating.
+        /// </summary>
+        public bool TryApplyPinDamageReduction(double reduction, double endTime)
+        {
+            return TryApplyPinDamageReduction(reduction, endTime, Timers.RunningTime);
+        }
+
+        /// <summary>
+        /// <see cref="TryApplyPinDamageReduction(double, double)"/> at an explicit running-time clock, so the
+        /// merge and lapse rules are testable without waiting out a real window.
+        /// </summary>
+        internal bool TryApplyPinDamageReduction(double reduction, double endTime, double now)
+        {
+            if (reduction <= 0.0 || endTime <= now)
+                return false;
+
+            if (!PinReductionMath.IsEligibleVictim(this) || IsDead)
+                return false;
+
+            reduction = Math.Min(reduction, PinReductionMath.MaxReduction);
+
+            while (true)
+            {
+                var current = System.Threading.Volatile.Read(ref pinReductionEntry);
+                var live = current != null && now < current.EndTime;
+                var newEnd = endTime;
+
+                // nothing would change: no allocation, no publish
+                if (live && current.Reduction >= reduction && current.EndTime >= newEnd)
+                    return false;
+
+                var next = live
+                    ? new PinReductionEntry(Math.Max(current.Reduction, reduction), Math.Max(current.EndTime, newEnd))
+                    : new PinReductionEntry(reduction, newEnd);
+
+                if (ReferenceEquals(System.Threading.Interlocked.CompareExchange(ref pinReductionEntry, next, current), current))
+                    return !live;
+
+                // another writer published first: re-read and merge on top of it
+            }
+        }
+
+        /// <summary>
+        /// The multiplier this creature applies to the health damage it deals to players and combat pets (1.0 =
+        /// none): 1 - the live reduction. Read by the four monster-damage sites, each behind
+        /// <see cref="PinReductionMath.AppliesTo"/>.
+        ///
+        /// HOT PATH - every monster hit. A creature carrying no reduction pays one null check and reads no clock.
+        /// </summary>
+        public float GetPinOutgoingDamageMod()
+        {
+            if (System.Threading.Volatile.Read(ref pinReductionEntry) == null)
+                return 1.0f;
+
+            return GetPinOutgoingDamageMod(Timers.RunningTime);
+        }
+
+        internal float GetPinOutgoingDamageMod(double now)
+        {
+            var entry = System.Threading.Volatile.Read(ref pinReductionEntry);
+
+            if (entry == null)
+                return 1.0f;
+
+            // lapsed: clear lazily, against the exact entry inspected so a newer one a writer published stays
+            if (now >= entry.EndTime)
+            {
+                System.Threading.Interlocked.CompareExchange(ref pinReductionEntry, null, entry);
+                return 1.0f;
+            }
+
+            return PinReductionMath.ToMultiplier(entry.Reduction);
+        }
+
+        /// <summary>TRUE while this creature carries a live pin damage reduction.</summary>
+        public bool HasPinDamageReduction => GetPinOutgoingDamageMod() < 1.0f;
     }
 }

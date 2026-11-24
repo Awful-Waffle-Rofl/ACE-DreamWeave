@@ -1,9 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 
 using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Server.Avatars;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Managers;
@@ -75,7 +77,7 @@ namespace ACE.Server.WorldObjects
             CreateMoveToChain(patron, (success) => SwearAllegiance(patron.Guid.Full, success), Allegiance_MaxSwearDistance);
         }
 
-        public void SwearAllegiance(uint targetGuid, bool success, bool confirmed = false)
+        public void SwearAllegiance(uint targetGuid, bool success, bool confirmed = false, AvatarSnapshot avatarSnapshot = null)
         {
             if (!success) return;
 
@@ -87,10 +89,22 @@ namespace ACE.Server.WorldObjects
 
             if (!confirmed)
             {
+                // Allegiance Avatar: when an Avatar travels with this swear, both sides confirm the consequence first.
+                if (TryBeginAvatarSwear(patron))
+                    return;
+
                 if (!patron.ConfirmationManager.EnqueueSend(new Confirmation_SwearAllegiance(patron.Guid, Guid), Name))
                 {
                     Session.Network.EnqueueSend(new GameMessageSystemChat($"{patron.Name} is busy.", ChatMessageType.Broadcast));
                 }
+                return;
+            }
+
+            // Allegiance Avatar: re-check what the swear was confirmed on, before any property changes.
+            if (!AvatarLifecycle.CheckConfirmedSwear(avatarSnapshot, Guid.Full, PatronId == null, Name, AllegianceManager.GetMonarch(patron).Guid.Full, out var avatarCancelReason))
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"The swear was cancelled: {avatarCancelReason}.", ChatMessageType.Broadcast));
+                patron.Session.Network.EnqueueSend(new GameMessageSystemChat($"{Name}'s oath of allegiance was cancelled: {avatarCancelReason}.", ChatMessageType.Broadcast));
                 return;
             }
 
@@ -127,6 +141,9 @@ namespace ACE.Server.WorldObjects
             // rebuild allegiance tree structure
             AllegianceManager.OnSwearAllegiance(this);
 
+            // Allegiance Avatar: only now that the swear has happened does the Avatar move (adopt or absorb).
+            AvatarLifecycle.CompleteSwear(monarchGuid, avatarSnapshot);
+
             AllegianceXPGenerated = 0;
             AllegianceOfficerRank = null;
 
@@ -135,6 +152,124 @@ namespace ACE.Server.WorldObjects
 
             if (GetCharacterOption(CharacterOption.ListenToAllegianceChat) && Allegiance != null)
                 JoinTurbineChatChannel("Allegiance");
+        }
+
+        /// <summary>
+        /// Allegiance Avatar swear (spec correction 5): when an Avatar is involved, the swearing monarch confirms the
+        /// consequence first, then the patron gets a Yes/No carrying the same line instead of the client's own swear
+        /// popup. The patron's Yes swears with the snapshot, which SwearAllegiance re-checks before anything changes.
+        /// Returns false when no Avatar is involved, leaving the plain swear untouched.
+        /// THREADS: Confirmation_Choice runs its Yes on the answering player's action queue (a landblock-group thread),
+        /// so each Yes hands its work to the world thread, where the plain swear runs and where AllegianceManager's
+        /// unlocked dictionaries are mutated. The re-check runs inside that world-thread action, right before the step.
+        /// </summary>
+        private bool TryBeginAvatarSwear(Player patron)
+        {
+            var plan = AvatarLifecycle.PlanSwear(Guid.Full, PatronId == null, Name, AllegianceManager.GetMonarch(patron).Guid.Full);
+            if (plan == null || plan.Effect == SwearAvatarEffect.None)
+                return false;
+
+            var vassalGuid = Guid;
+            var patronGuid = patron.Guid;
+
+            var ask = new Confirmation_Choice(Guid, () => WorldManager.EnqueueAction(new ActionEventDelegate(() =>
+            {
+                // This character logged out (or was replaced by a later login) before the action ran.
+                if (PlayerManager.GetOnlinePlayer(Guid.Full) != this)
+                    return;
+
+                var target = PlayerManager.GetOnlinePlayer(patronGuid);
+                if (target == null)
+                {
+                    SendMessage("The swear was cancelled: your patron is no longer here.");
+                    return;
+                }
+
+                if (!IsPledgable(target))
+                    return;
+
+                if (!AvatarLifecycle.CheckConfirmedSwear(plan.Snapshot, Guid.Full, PatronId == null, Name, AllegianceManager.GetMonarch(target).Guid.Full, out var reason))
+                {
+                    SendMessage($"The swear was cancelled: {reason}.");
+                    return;
+                }
+
+                // SwearAllegiance(confirmed) re-checks the snapshot immediately before PatronId changes, inside this world action.
+                var offer = new Confirmation_Choice(target.Guid,
+                    () => WorldManager.EnqueueAction(new ActionEventDelegate(() => PlayerManager.GetOnlinePlayer(vassalGuid)?.SwearAllegiance(patronGuid.Full, true, true, plan.Snapshot))),
+                    () => PlayerManager.GetOnlinePlayer(vassalGuid)?.SendMessage($"{target.Name} has declined your offer of allegiance."),
+                    DateTime.UtcNow);
+
+                if (!target.ConfirmationManager.EnqueueSend(offer, $"{Name} wishes to swear allegiance to you. {plan.PatronLine}"))
+                    SendMessage($"{target.Name} is busy.");
+            })), null, DateTime.UtcNow);
+
+            if (!ConfirmationManager.EnqueueSend(ask, plan.SwearerText))
+                SendMessage("You are already answering another question.");
+
+            return true;
+        }
+
+        /// <summary>
+        /// Allegiance Avatar break gate, shared by break and boot. Inheritance and GoesInactive ask first and break
+        /// only on Yes, after re-classifying; InfoStays tells the actor and breaks at once. After the break the
+        /// Avatar moves (Inheritance) and both sides re-resolve their Keeper. The handlers call this on the world thread;
+        /// the popup's Yes arrives on this player's action queue and hands the re-check, the break and CompleteBreak back
+        /// to the world thread as one action.
+        /// </summary>
+        private void GateAvatarBreak(Func<AvatarBreakGate> plan, Func<bool> stillBreakable, Action doBreak)
+        {
+            var gate = plan();
+
+            if (gate.Effect == BreakAvatarEffect.Inheritance || gate.Effect == BreakAvatarEffect.GoesInactive)
+            {
+                var confirmation = new Confirmation_Choice(Guid, () => WorldManager.EnqueueAction(new ActionEventDelegate(() =>
+                {
+                    // This character logged out (or was replaced by a later login) before the action ran.
+                    if (PlayerManager.GetOnlinePlayer(Guid.Full) != this)
+                        return;
+
+                    if (!stillBreakable())
+                        return;
+
+                    var again = plan();
+                    if (!AvatarLifecycle.BreakStillMatches(gate, again, out var reason))
+                    {
+                        SendMessage($"The break was cancelled: {reason}.");
+                        return;
+                    }
+
+                    doBreak();
+                    AvatarLifecycle.CompleteBreak(again, Guid.Full);
+                })), null, DateTime.UtcNow);
+
+                if (!ConfirmationManager.EnqueueSend(confirmation, gate.Text))
+                    SendMessage("You are already answering another question.");
+                return;
+            }
+
+            if (gate.Effect == BreakAvatarEffect.InfoStays)
+                SendMessage(gate.Text);
+
+            doBreak();
+            AvatarLifecycle.CompleteBreak(gate, Guid.Full);
+        }
+
+        /// <summary>The Avatar break plan for this player breaking from <paramref name="targetGuid"/> (their patron or a vassal).</summary>
+        private AvatarBreakGate PlanAvatarBreak(uint targetGuid)
+        {
+            var actorLeaves = PatronId == targetGuid;
+            var leavingNode = actorLeaves ? AllegianceNode : (Allegiance != null && Allegiance.Members.TryGetValue(new ObjectGuid(targetGuid), out var node) ? node : null);
+
+            return AvatarLifecycle.PlanBreak(Guid.Full, Allegiance?.MonarchId ?? Guid.Full, actorLeaves, actorLeaves ? Guid.Full : targetGuid, BranchGuids(leavingNode));
+        }
+
+        /// <summary>Every character in the branch headed by <paramref name="node"/>, the head included.</summary>
+        private static List<uint> BranchGuids(AllegianceNode node)
+        {
+            var guids = new List<uint>();
+            node?.Walk(n => guids.Add(n.PlayerGuid.Full));
+            return guids;
         }
 
         /// <summary>
@@ -171,6 +306,12 @@ namespace ACE.Server.WorldObjects
         {
             if (!IsBreakable(targetGuid)) return;
 
+            // Allegiance Avatar: classify first; the break itself runs now or on the popup's Yes.
+            GateAvatarBreak(() => PlanAvatarBreak(targetGuid), () => IsBreakable(targetGuid), () => DoBreakAllegiance(targetGuid));
+        }
+
+        private void DoBreakAllegiance(uint targetGuid)
+        {
             var target = PlayerManager.FindByGuid(targetGuid, out var targetIsOnline);
 
             if (target == null) return;
@@ -448,6 +589,10 @@ namespace ACE.Server.WorldObjects
                 }
             });
             actionChain.EnqueueChain();
+
+            // Allegiance Avatar: touch this account in the live activity index, then re-resolve the Keeper. A monarch's
+            // own MonarchId is null, so the allegiance is read from Allegiance (pre-flight 8); solo, it is this character.
+            AvatarLifecycle.OnLogin(Account?.AccountId, Allegiance?.MonarchId ?? Guid.Full);
 
             if (Allegiance != null)
             {
@@ -831,6 +976,7 @@ namespace ACE.Server.WorldObjects
             var title = Allegiance.GetOfficerTitle((AllegianceOfficerLevel)officerLevel);
 
             Allegiance.BuildOfficers();
+            AvatarLifecycle.RecomputeKeeper(Allegiance.MonarchId ?? Guid.Full);
 
             Session.Network.EnqueueSend(new GameMessageSystemChat($"{player.Name} is now {title}.", ChatMessageType.Broadcast));
 
@@ -885,6 +1031,7 @@ namespace ACE.Server.WorldObjects
 
             officer.AllegianceOfficerRank = null;
             Allegiance.BuildOfficers();
+            AvatarLifecycle.RecomputeKeeper(Allegiance.MonarchId ?? Guid.Full);
 
             Session.Network.EnqueueSend(new GameMessageSystemChat($"{officer.Name} has been removed from allegiance officers.", ChatMessageType.Broadcast));
 
@@ -917,6 +1064,7 @@ namespace ACE.Server.WorldObjects
             }
 
             Allegiance.BuildOfficers();
+            AvatarLifecycle.RecomputeKeeper(Allegiance.MonarchId ?? Guid.Full);
 
             Session.Network.EnqueueSend(new GameMessageSystemChat($"The list of officers has been cleared.", ChatMessageType.Broadcast));
         }
@@ -1447,6 +1595,26 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // Allegiance Avatar: classify first; the boot itself runs now or on the popup's Yes. The booter stays, so
+            // a boot never takes the Avatar anywhere, but the monarch booting the last active vassal is asked first.
+            GateAvatarBreak(
+                () => AvatarLifecycle.PlanBreak(Guid.Full, Allegiance?.MonarchId ?? Guid.Full, false, player.Guid.Full,
+                    BranchGuids(Allegiance != null && Allegiance.Members.TryGetValue(player.Guid, out var bootedNode) ? bootedNode : null)),
+                () => Allegiance != null && AllegiancePermissionLevel >= AllegiancePermissionLevel.Seneschal && player.Guid != Guid
+                    && player.Guid.Full != Allegiance.MonarchId && Allegiance.Members.ContainsKey(player.Guid),
+                () =>
+                {
+                    // On the popup's Yes the captured record may be stale (the vassal logged in or out since): boot the current one.
+                    var current = PlayerManager.FindByGuid(player.Guid);
+                    if (current == null)
+                        return;
+
+                    DoBreakAllegianceBoot(current, accountBoot);
+                });
+        }
+
+        private void DoBreakAllegianceBoot(IPlayer player, bool accountBoot)
+        {
             var patron = PlayerManager.FindByGuid(new ObjectGuid(player.PatronId ?? 0));
             if (patron == null)
             {

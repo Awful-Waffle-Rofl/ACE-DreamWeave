@@ -309,7 +309,7 @@ namespace ACE.Server.Tests
             var damageTarget = MethodBody(spellProjectile, "public void DamageTarget(Creature target, float damage, bool critical, bool critDefended, bool overpower)");
             AssertSingleThornsCall(damageTarget, "SpellProjectile.DamageTarget");
             AssertBetween(damageTarget, "SpellProjectile.DamageTarget",
-                after: "amount = (uint)-target.UpdateVitalDelta(target.Health, (int)-Math.Round(damage)); LastAppliedDamage = amount; target.DamageHistory.Add(ProjectileSource, Spell.DamageType, amount, thrown: (uint)Math.Round(damage));",
+                after: "amount = (uint)-target.UpdateVitalDelta(target.Health, (int)-Math.Round(damage)); LastAppliedDamage = amount; target.DamageHistory.Add(ProjectileSource, Spell.DamageType, amount, thrown: (uint)Math.Round(damage), kind: DamageAttackKind.Magic, isCritical: critical, spellId: Spell.Id);",
                 statement: "targetPlayer?.ApplyThornsOnMagicHit(ProjectileSource, Spell.DamageType, IncomingDamageOrigin);",
                 before: "amount = (uint)Math.Round(damage);");
 
@@ -317,7 +317,7 @@ namespace ACE.Server.Tests
             var boost = MethodBody(magic, "private void HandleCastSpell_Boost(Spell spell, Creature targetCreature, bool fromProc = false)");
             AssertSingleThornsCall(boost, "HandleCastSpell_Boost");
             AssertBetween(boost, "HandleCastSpell_Boost",
-                after: "targetCreature.DamageHistory.Add(this, DamageType.Health, (uint)-boost, thrown: (uint)-tryBoost);",
+                after: "targetCreature.DamageHistory.Add(this, DamageType.Health, (uint)-boost, thrown: (uint)-tryBoost, kind: DamageAttackKind.Magic, isCritical: lifeCritMultiplier > 1.0f, spellId: spell.Id);",
                 statement: "if (isHarmfulLifeBoost && targetCreature is Player thornsTarget) thornsTarget.ApplyThornsOnMagicHit(this, spell.DamageType, fromProc ? IncomingDamageOrigin.Secondary : IncomingDamageOrigin.DirectHit);",
                 before: "HandleBoostTransferDeath(creature, targetCreature);");
 
@@ -327,7 +327,7 @@ namespace ACE.Server.Tests
             var transfer = MethodBody(magic, "private void HandleCastSpell_Transfer(Spell spell, Creature targetCreature, bool isSecondaryStrike = false)");
             AssertSingleThornsCall(transfer, "HandleCastSpell_Transfer");
             AssertBetween(transfer, "HandleCastSpell_Transfer (capture)",
-                after: "transferSource.DamageHistory.Add(this, DamageType.Health, srcVitalChange, thrown: drainThrown);",
+                after: "transferSource.DamageHistory.Add(this, DamageType.Health, srcVitalChange, thrown: drainThrown, kind: DamageAttackKind.Magic, isCritical: drainCritCapMod > 1.0f, spellId: spell.Id);",
                 statement: "thornsDrainTarget = transferSource as Player;",
                 before: "switch (spell.Destination)");
             AssertBetween(transfer, "HandleCastSpell_Transfer (call)",

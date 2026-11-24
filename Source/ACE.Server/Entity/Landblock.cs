@@ -355,6 +355,8 @@ namespace ACE.Server.Entity
                 SpawnEncounters();
 
                 SpawnSkyDecor();
+
+                SpawnAvatarSeats();
             }).ContinueWith(t =>
             {
                 // Open World Threads: lets the Thread reap end a run whose copy can never load at once (LoadFailed)
@@ -398,8 +400,10 @@ namespace ACE.Server.Entity
 
             // Open World Threads: an outdoor run's footprint member (the primary or any other member; buffers carry no
             // InnerRealmInfo and loaded no rows above) takes the outdoor allow-list instead of the dungeon filter.
+            // Allegiance Gauntlet: a run-less arena copy takes the same allow-list from EphemeralRealm.OutdoorEntry. The
+            // resolver reads the Thread run's dungeon FIRST, so a Thread copy resolves exactly as before.
             var outdoorRun = InnerRealmInfo?.Run;
-            var outdoorSite = threadCopyExit != null && outdoorRun?.Dungeon?.IsOutdoor == true ? outdoorRun.Dungeon.Outdoor : null;
+            var outdoorSite = Realms.EphemeralRealm.OutdoorSiteFor(InnerRealmInfo);
             var outdoorHoldsExit = false;
 
             // Open World Threads R8: the run's ONE exit, decided before anything is built. A site whose exit does not parse,
@@ -807,6 +811,38 @@ namespace ACE.Server.Entity
                 return;
 
             EnqueueSkyDecorRebuild();
+        }
+
+        /// <summary>
+        /// Allegiance Avatar seats for this landblock (WaffleACE fork)<para />
+        /// This will be called from a separate task from our constructor. Reads AvatarManager's in-memory Seats (a
+        /// snapshot under its lock, no database), then queues the spawn onto this landblock's action queue, where one
+        /// AvatarVendor is created per Bound Avatar seated on this landblock and instance. NEVER throws: a failure here is
+        /// logged and Init carries on, so a bad Seat can never leave a landblock empty.
+        /// </summary>
+        private void SpawnAvatarSeats()
+        {
+            try
+            {
+                if (ACE.Server.Avatars.AvatarManager.SeatsOn(Id.Landblock, Instance).Count == 0)
+                    return;
+
+                actionQueue.EnqueueAction(new ActionEventDelegate(() =>
+                {
+                    try
+                    {
+                        ACE.Server.Avatars.AvatarNpcs.SpawnSeated(this);
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error($"Landblock 0x{Id.Landblock:X4} instance 0x{Instance:X8}: Allegiance Avatar seat spawn failed.", ex);
+                    }
+                }));
+            }
+            catch (Exception ex)
+            {
+                log.Error($"Landblock 0x{Id.Landblock:X4} instance 0x{Instance:X8}: Allegiance Avatar seat lookup failed.", ex);
+            }
         }
 
         /// <summary>

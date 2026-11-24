@@ -50,8 +50,9 @@ namespace ACE.Server.ThreadDungeons
     /// <summary>One materialised item waiting in a member's held pile, tagged with the deal round that put it there.</summary>
     public sealed class HeldPileItem
     {
-        public HeldPileItem(WorldObject item, string rareFinderName, int round, IReadOnlyList<int> mergedRounds = null, int? fixedOrder = null)
+        public HeldPileItem(WorldObject item, string rareFinderName, int round, IReadOnlyList<int> mergedRounds = null, int? fixedOrder = null, bool peddlerPurchase = false)
         {
+            PeddlerPurchase = peddlerPurchase;
             Item = item;
             RareFinderName = rareFinderName;
             Round = round;
@@ -66,6 +67,12 @@ namespace ACE.Server.ThreadDungeons
         /// in the first slots of the player's first cache whatever their Value or stackability (owner rulings 2026-10-30). Null for everything else.
         /// </summary>
         public int? FixedOrder { get; }
+
+        /// <summary>
+        /// True for a Wandering Peddler purchase the buyer's pack could not take at the buy (ThreadPeddlerVendor.TryBuy), so it
+        /// waits in their pile for their Thread Cache: never taken as payment. Not carried through ThreadLootStacking.ConsolidatePile.
+        /// </summary>
+        public bool PeddlerPurchase { get; }
 
         public WorldObject Item { get; }
         public string RareFinderName { get; }

@@ -3,13 +3,15 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 
 using ACE.Entity.Enum;
+using ACE.Entity.Models;
+using ACE.Server.WorldObjects.Managers;
 
 namespace ACE.Server.Entity
 {
     /// <summary>What a caster pet may do with one of its spells.</summary>
     public enum CasterSpellKind
     {
-        /// <summary>Never cast by the brain: self-targeted, a dispel, a portal spell, a missing spell.</summary>
+        /// <summary>Never cast by the brain: a harmful self-targeted spell, a self-targeted strip, a portal spell, a missing spell.</summary>
         Unusable,
 
         /// <summary>A beneficial vital boost (Heal, Revitalize, Mana Boost): owner first, then sibling pets.</summary>
@@ -20,6 +22,25 @@ namespace ACE.Server.Entity
 
         /// <summary>A harmful spell (war, void, debuff, harm, drain): cast only on an engaged enemy.</summary>
         Harmful,
+
+        /// <summary>
+        /// A dispel aligned Negative (removes harmful enchantments), the Other variant: cast on the owner only, and only
+        /// while the owner carries a harmful enchantment of the spell's dispel school.
+        /// </summary>
+        Cleanse,
+
+        /// <summary>
+        /// A Cleanse's Self variant. The engine applies a Self spell to the caster, so this one is cast on the PET itself,
+        /// while the pet carries a harmful enchantment of the spell's dispel school.
+        /// </summary>
+        CleanseSelf,
+
+        /// <summary>
+        /// A dispel aligned Positive or All, the Other variant (removes beneficial enchantments): cast on an engaged enemy
+        /// only - never on the owner or a sibling, whatever its alignment - and Redundant on an enemy that carries no
+        /// beneficial enchantment of the spell's dispel school.
+        /// </summary>
+        Strip,
     }
 
     /// <summary>The vital a Heal-kind spell restores.</summary>
@@ -60,9 +81,27 @@ namespace ACE.Server.Entity
         /// <summary>A projectile spell (bolt, streak, ring, ...): needs direct line of sight to its target.</summary>
         public bool IsProjectile { get; }
 
+        /// <summary>
+        /// The school a Cleanse / CleanseSelf / Strip dispels (SelectDispel's dispel_school). None means every school.
+        /// Ignored for every other kind.
+        /// </summary>
+        public MagicSchool DispelSchool { get; }
+
+        /// <summary>
+        /// The power window a dispel removes (SelectDispel keeps only entries whose PowerLevel lies between MinPower and
+        /// MaxPower). Defaults to unbounded. Ignored for every kind but the dispels.
+        /// </summary>
+        public int MinPower { get; }
+
+        public int MaxPower { get; }
+
         public CasterSpell(int spellId, CasterSpellKind kind, CasterVital vital = CasterVital.Health, SpellCategory category = SpellCategory.Undef,
-            uint power = 0, MonsterSpellShape shape = default, float range = float.PositiveInfinity, uint manaCost = 0, bool isProjectile = false)
+            uint power = 0, MonsterSpellShape shape = default, float range = float.PositiveInfinity, uint manaCost = 0, bool isProjectile = false,
+            MagicSchool dispelSchool = MagicSchool.None, int minPower = int.MinValue, int maxPower = int.MaxValue)
         {
+            DispelSchool = dispelSchool;
+            MinPower = minPower;
+            MaxPower = maxPower;
             SpellId = spellId;
             Kind = kind;
             Vital = vital;
@@ -146,6 +185,12 @@ namespace ACE.Server.Entity
         public Func<IReadOnlyDictionary<SpellCategory, CarriedEnchantment>> OwnerTopLayers { get; set; }
 
         /// <summary>
+        /// The pet's OWN top-layer enchantments, with each layer's alignment and school resolved (a CleanseSelf reads
+        /// it). Lazy. The pet's registry is on its own tick thread, so this needs no thread guard.
+        /// </summary>
+        public Func<IReadOnlyDictionary<SpellCategory, CarriedEnchantment>> PetTopLayers { get; set; }
+
+        /// <summary>
         /// Distance to each engaged enemy, in preference order: the pet's current target first, then the rest
         /// nearest first. Only monsters already engaged with the owner's side are ever listed.
         /// </summary>
@@ -182,6 +227,9 @@ namespace ACE.Server.Entity
         Owner,
         Sibling,
         Enemy,
+
+        /// <summary>The casting pet itself (a CleanseSelf).</summary>
+        Self,
     }
 
     /// <summary>
@@ -231,8 +279,11 @@ namespace ACE.Server.Entity
     /// Order (design doc "Casting behaviour" and "Calls I made"):
     ///   1. the owner below HealThreshold in a vital a bound heal restores: heal the owner (Health first);
     ///   2. else the lowest sibling pet below HealThreshold: heal it (out of range: move in range of it);
+    ///   2b. else a bound cleanse (a Negative-aligned dispel) whose dispel school matches a harmful enchantment the owner
+    ///      carries (the Other variant, owner only; out of range: move in range of the owner), or the pet itself carries
+    ///      (the Self variant, cast on the pet);
     ///   3. else a bound buff the owner lacks at equal or greater power in its category: buff the owner;
-    ///   4. else a bound harmful spell that is not Redundant (and, for a projectile, has line of sight) on an engaged enemy: the current target first, then
+    ///   4. else a bound harmful spell, or a strip (a Positive or All aligned dispel, Redundant on an enemy with nothing it can remove), that is not Redundant (and, for a projectile, has line of sight) on an engaged enemy: the current target first, then
     ///      the next engaged enemy. In range: cast. Out of range: move in range (rings close in);
     ///   5. else Follow. A caster never melees. A spell costing more than PetMana is never chosen at any step.
     /// </summary>
@@ -295,10 +346,44 @@ namespace ACE.Server.Entity
                 }
             }
 
-            // 3. buffs, owner only. The snapshot is taken once, and only when an affordable buff is bound.
+            // the owner's enchantment snapshot is taken once, and only when an affordable cleanse or buff is bound
             IReadOnlyDictionary<SpellCategory, CarriedEnchantment> ownerLayers = null;
             var ownerLayersRead = false;
 
+            // 2b. cleanses: a Negative-aligned dispel, after the heals and before the buffs. The Other variant goes to
+            // the owner while they carry a harmful enchantment it can remove; the Self variant goes to the pet itself
+            // while IT carries one.
+            foreach (var spell in spells)
+            {
+                if (spell.ManaCost > mana)
+                    continue;
+
+                if (spell.Kind == CasterSpellKind.CleanseSelf)
+                {
+                    if (CarriesDispellable(ctx.PetTopLayers?.Invoke(), false, spell.DispelSchool, spell.MinPower, spell.MaxPower))
+                        return CasterDecision.Cast(spell.SpellId, CasterTargetKind.Self);
+
+                    continue;
+                }
+
+                if (spell.Kind != CasterSpellKind.Cleanse)
+                    continue;
+
+                if (!ownerLayersRead)
+                {
+                    ownerLayers = ctx.OwnerTopLayers?.Invoke();
+                    ownerLayersRead = true;
+                }
+
+                if (!CarriesDispellable(ownerLayers, false, spell.DispelSchool, spell.MinPower, spell.MaxPower))
+                    continue;
+
+                return ctx.Owner.Distance <= spell.Range
+                    ? CasterDecision.Cast(spell.SpellId, CasterTargetKind.Owner)
+                    : CasterDecision.MoveInRange(spell.SpellId, CasterTargetKind.Owner);
+            }
+
+            // 3. buffs, owner only.
             foreach (var spell in spells)
             {
                 if (spell.Kind != CasterSpellKind.Buff || spell.ManaCost > mana)
@@ -338,10 +423,14 @@ namespace ACE.Server.Entity
                 {
                     var spell = spells[s];
 
-                    if (spell.Kind != CasterSpellKind.Harmful || spell.ManaCost > mana)
+                    if ((spell.Kind != CasterSpellKind.Harmful && spell.Kind != CasterSpellKind.Strip) || spell.ManaCost > mana)
                         continue;
 
-                    var priority = MonsterSpellSelector.Classify(spell.Shape, profile);
+                    // a strip is wasted on an enemy with no beneficial enchantment it can remove; otherwise it weighs
+                    // as a Neutral spell (a Preferred vulnerability or nuke still goes first, ties go to spellbook order)
+                    var priority = spell.Kind == CasterSpellKind.Strip
+                        ? (CarriesDispellable(profile.TopLayers, true, spell.DispelSchool, spell.MinPower, spell.MaxPower) ? MonsterSpellPriority.Neutral : MonsterSpellPriority.Redundant)
+                        : MonsterSpellSelector.Classify(spell.Shape, profile);
 
                     // never waste a cast: this spell's effect is already on this enemy at equal or greater strength
                     if (priority == MonsterSpellPriority.Redundant)
@@ -383,6 +472,14 @@ namespace ACE.Server.Entity
             return CasterDecision.Follow;
         }
 
+        /// <summary>
+        /// Whether a heal chosen earlier is still wanted when its pre-cast ends: the target's vital is still below
+        /// <see cref="HealThreshold"/>. The decision is made a whole pre-cast before the spell lands, and in that
+        /// time a kit, a potion, the owner's own spell or the other caster pet (Duo Summon: both see the same low
+        /// owner on the same tick) may already have topped the vital up; a heal released then is wasted.
+        /// </summary>
+        public static bool HealStillNeeded(in CasterVitals vitals, CasterVital vital) => vitals.Get(vital) < HealThreshold;
+
         private static bool TryFindHeal(IReadOnlyList<CasterSpell> spells, CasterVital vital, uint mana, out CasterSpell heal)
         {
             foreach (var spell in spells)
@@ -402,12 +499,42 @@ namespace ACE.Server.Entity
         {
             foreach (var spell in spells)
             {
-                if (spell.Kind == CasterSpellKind.Harmful && spell.ManaCost <= mana)
+                if ((spell.Kind == CasterSpellKind.Harmful || spell.Kind == CasterSpellKind.Strip) && spell.ManaCost <= mana)
                     return true;
             }
 
             return false;
         }
+
+        /// <summary>
+        /// Whether a cleanse chosen earlier is still wanted when its pre-cast ends: the target still carries a harmful
+        /// layer the spell can remove (its school and power window). The decision is made a whole pre-cast before the
+        /// spell lands, and in that time the other caster pet of a Duo pair (both see the same afflicted owner on the
+        /// same tick), a potion or the owner may already have cleaned it; a cleanse released then is wasted.
+        /// </summary>
+        public static bool CleanseStillNeeded(IReadOnlyDictionary<SpellCategory, CarriedEnchantment> layers, MagicSchool dispelSchool, int minPower, int maxPower) =>
+            CarriesDispellable(layers, false, dispelSchool, minPower, maxPower);
+
+        /// <summary>
+        /// TRUE when any top layer in <paramref name="layers"/> is one a dispel of <paramref name="dispelSchool"/> could
+        /// remove, on the beneficial (<paramref name="beneficial"/> true: a strip) or harmful (false: a cleanse) side.
+        /// A null snapshot (nothing carried, or not read) is FALSE.
+        /// </summary>
+        internal static bool CarriesDispellable(IReadOnlyDictionary<SpellCategory, CarriedEnchantment> layers, bool beneficial, MagicSchool dispelSchool,
+            int minPower = int.MinValue, int maxPower = int.MaxValue)
+        {
+            if (layers == null)
+                return false;
+
+            foreach (var carried in layers.Values)
+            {
+                if (carried.IsDispellableBy(beneficial, dispelSchool, minPower, maxPower))
+                    return true;
+            }
+
+            return false;
+        }
+
         /// <summary>
         /// The buff's category already holds a top-layer entry at equal or greater power on the owner - the same
         /// comparison the engine stacks on (EnchantmentManager.Add groups by SpellCategory and the top layer is
@@ -429,9 +556,23 @@ namespace ACE.Server.Entity
         /// (Creature.CastSpellAt with friendly). A self-targeted HARMFUL spell is Unusable: it could only ever
         /// land on the pet itself.
         /// </summary>
-        public static CasterSpellKind ClassifySpell(SpellType metaSpellType, bool beneficial, bool selfTargeted, int boost, DamageType vitalDamageType, out CasterVital vital)
+        public static CasterSpellKind ClassifySpell(SpellType metaSpellType, bool beneficial, bool selfTargeted, int boost, DamageType vitalDamageType, DispelType align, out CasterVital vital)
         {
             vital = CasterVital.Health;
+
+            // A dispel is sorted by its ALIGN, before the self-targeted-harmful refusal below: the retail Self dispels
+            // (4337, 4346) are flagged SelfTargeted and NOT Beneficial (dat bitfield 0x88), the Other cleanses are Beneficial
+            // (0x87) and the Other strips are not (0x83 / 0x3), so the Beneficial flag does not carry the meaning.
+            // Align Negative removes harmful enchantments (SelectDispel: IsHarmful): a cleanse, which in its Self variant
+            // lands on the pet. Align Positive or All removes beneficial ones: a strip, enemy-only. A Self strip would
+            // strip the pet's own buffs, so it is never used.
+            if (metaSpellType == SpellType.Dispel || metaSpellType == SpellType.FellowDispel)
+            {
+                if (align == DispelType.Negative)
+                    return selfTargeted ? CasterSpellKind.CleanseSelf : CasterSpellKind.Cleanse;
+
+                return selfTargeted ? CasterSpellKind.Unusable : CasterSpellKind.Strip;
+            }
 
             if (selfTargeted && !beneficial)
                 return CasterSpellKind.Unusable;
@@ -515,7 +656,7 @@ namespace ACE.Server.Entity
             if (range != 0.0f)
                 return range;
 
-            return kind == CasterSpellKind.Harmful ? UnboundedHarmfulReach : radarCap;
+            return kind == CasterSpellKind.Harmful || kind == CasterSpellKind.Strip ? UnboundedHarmfulReach : radarCap;
         }
     }
 
@@ -536,9 +677,21 @@ namespace ACE.Server.Entity
         public float BaseRangeMod { get; }
         public bool IsProjectile { get; }
 
+        /// <summary>The school a dispel removes (None = every school). Meaningful for the dispel kinds only.</summary>
+        public MagicSchool DispelSchool { get; }
+
+        /// <summary>The dispel power window (SelectDispel's min_power / max_power).</summary>
+        public int MinPower { get; }
+
+        public int MaxPower { get; }
+
         public CasterSpellFacts(CasterSpellKind kind, CasterVital vital, SpellCategory category, uint power, MonsterSpellShape shape,
-            MagicSchool school, float baseRangeConstant, float baseRangeMod, bool isProjectile)
+            MagicSchool school, float baseRangeConstant, float baseRangeMod, bool isProjectile, MagicSchool dispelSchool = MagicSchool.None,
+            int minPower = int.MinValue, int maxPower = int.MaxValue)
         {
+            DispelSchool = dispelSchool;
+            MinPower = minPower;
+            MaxPower = maxPower;
             IsProjectile = isProjectile;
             Kind = kind;
             Vital = vital;
@@ -569,10 +722,10 @@ namespace ACE.Server.Entity
             }
             else
             {
-                var kind = PetCasterBrain.ClassifySpell(spell.MetaSpellType, spell.IsBeneficial, spell.IsSelfTargeted, spell.Boost, spell.VitalDamageType, out var vital);
+                var kind = PetCasterBrain.ClassifySpell(spell.MetaSpellType, spell.IsBeneficial, spell.IsSelfTargeted, spell.Boost, spell.VitalDamageType, spell.Align, out var vital);
 
                 cached = new CasterSpellFacts(kind, vital, spell.Category, spell.Power, MonsterSpellShapeCache.Get(spellId),
-                    spell.School, spell.BaseRangeConstant, spell.BaseRangeMod, spell.IsProjectile);
+                    spell.School, spell.BaseRangeConstant, spell.BaseRangeMod, spell.IsProjectile, spell.DispelSchool, spell.MinPower, spell.MaxPower);
             }
 
             facts[spellId] = cached;
@@ -580,5 +733,53 @@ namespace ACE.Server.Entity
         }
 
         public static void Clear() => facts.Clear();
+    }
+
+    /// <summary>
+    /// Resolves what a dispel judgement needs about one registry entry (VulnerabilityProfile.BuildTopLayers's resolver):
+    /// the entry spell's alignment and school, memoized per spell id (new Spell(...) allocates a SpellFormula every
+    /// time), and whether a creature's dispel could ever remove it - the same two filters EnchantmentManager.SelectDispel
+    /// applies before alignment and school (Duration -1 item and vitae entries; the CreatureDispelExempt buffs a non-player
+    /// caster cannot strip).
+    /// </summary>
+    public static class EnchantmentDispelFactsCache
+    {
+        private static readonly ConcurrentDictionary<int, (bool Beneficial, MagicSchool School)?> spells = new ConcurrentDictionary<int, (bool Beneficial, MagicSchool School)?>();
+
+        /// <summary>
+        /// The spell lookup Resolve uses: the dat, memoized. A seam so a test can run the real snapshot path without
+        /// the client dat (save and restore it).
+        /// </summary>
+        internal static Func<int, (bool Beneficial, MagicSchool School)?> SpellInfoLookup = LookupFromDat;
+
+        public static EnchantmentDispelFacts? Resolve(PropertiesEnchantmentRegistry entry) => ResolveWith(entry, SpellInfoLookup);
+
+        /// <summary>The pure half of Resolve: the spell facts come from <paramref name="spellInfo"/>.</summary>
+        internal static EnchantmentDispelFacts? ResolveWith(PropertiesEnchantmentRegistry entry, Func<int, (bool Beneficial, MagicSchool School)?> spellInfo)
+        {
+            var info = spellInfo(entry.SpellId);
+
+            if (!info.HasValue)
+                return null;
+
+            var dispellable = entry.Duration != -1 && !EnchantmentManager.CreatureDispelExempt.Contains((uint)entry.SpellId);
+
+            return new EnchantmentDispelFacts(info.Value.Beneficial, info.Value.School, dispellable);
+        }
+
+        private static (bool Beneficial, MagicSchool School)? LookupFromDat(int spellId)
+        {
+            if (!spells.TryGetValue(spellId, out var info))
+            {
+                var spell = new Spell(spellId);
+
+                info = spell.NotFound ? null : (spell.IsBeneficial, spell.School);
+                spells[spellId] = info;
+            }
+
+            return info;
+        }
+
+        public static void Clear() => spells.Clear();
     }
 }

@@ -60,6 +60,114 @@ namespace ACE.Server.Tests
                 "GetIgnoreShieldMod reads weapon?.IgnoreShield directly again, which bypasses Shield Bypass suppression");
         }
 
+        // ================= Paragon weapon mods: the read-time adds =================
+        //
+        // EXACT-STATEMENT pins, not substring pins: the comment-stripped body is split into statements on ';' and
+        // one statement must equal the expected text (whitespace-insensitive). A substring match would still pass
+        // with the add moved onto a dead line or wrapped in a condition that disables it.
+
+        private const string WeaponModCombatFile = "Source/ACE.Server/WeaponMods/WeaponModCombat.cs";
+
+        /// <summary>Creature.GetDamageRating adds the GearDamage (Bloodthirst) Paragon amount in the equipment term.</summary>
+        [TestMethod]
+        public void GetDamageRating_AddsTheGearDamageParagonAmount() => AssertParagonRatingPin("public int GetDamageRating()", "GearDamage");
+
+        /// <summary>Creature.GetCritRating adds the GearCrit (Weak Point) Paragon amount in the equipment term.</summary>
+        [TestMethod]
+        public void GetCritRating_AddsTheGearCritParagonAmount() => AssertParagonRatingPin("public int GetCritRating()", "GearCrit");
+
+        /// <summary>Creature.GetCritDamageRating adds the GearCritDamage (Devastation) Paragon amount in the equipment term.</summary>
+        [TestMethod]
+        public void GetCritDamageRating_AddsTheGearCritDamageParagonAmount() => AssertParagonRatingPin("public int GetCritDamageRating()", "GearCritDamage");
+
+        /// <summary>
+        /// WorldObject.GetIgnoreShieldMod adds the Paragon Shield Bypass amount to the WEAPON term, resolved for this
+        /// attacker, before the max against the attacker's own term is returned.
+        /// </summary>
+        [TestMethod]
+        public void GetIgnoreShieldMod_AddsTheParagonShieldBypassAmount()
+        {
+            var statements = Statements(MethodBody(WorldObjectWeapon, "public float GetIgnoreShieldMod(WorldObject weapon)"));
+
+            var add = IndexOfStatement(statements, "weaponMod += WeaponModParagon.IgnoreShieldAddFor(weapon, this)", "GetIgnoreShieldMod");
+            var clamp = IndexOfStatement(statements, "weaponMod = WeaponModParagon.ClampWeaponIgnoreShield(weaponMod)", "GetIgnoreShieldMod");
+            var ret = IndexOfStatement(statements, "return 1.0f - (float)Math.Max(creatureMod, weaponMod)", "GetIgnoreShieldMod");
+
+            Assert.IsTrue(add < clamp, "GetIgnoreShieldMod: the weapon-term clamp must run after the Paragon add");
+            Assert.IsTrue(clamp < ret, "GetIgnoreShieldMod: the weapon-term clamp must run before the return");
+        }
+
+        /// <summary>
+        /// The Tier B accessor folds the Paragon fraction into the record read, so a Paragon-only mod is not skipped by
+        /// the old "record absent, return 0" exit. The fold lives in the shared ReadCore, which both the wielder read
+        /// (ReadWeaponOnly) and the Summoner focus pet read (ReadFocusModForPets) end on.
+        /// </summary>
+        [TestMethod]
+        public void ReadWeaponOnly_FoldsTheParagonFractionIntoTheRecord()
+        {
+            var core = Statements(MethodBody(WeaponModCombatFile, "private static double ReadCore(WorldObject weapon, WeaponModDefinition definition, WeaponModId modId, double scale)"));
+
+            IndexOfStatement(core,
+                "var fraction = WeaponModParagon.CombinedFraction(weapon.GetProperty(definition.Record), WeaponModParagon.ParagonFraction(weapon, modId))",
+                "ReadCore");
+            IndexOfStatement(core, "return WeaponModValue.MagnitudeFromFraction(definition, fraction, scale, weapon)", "ReadCore");
+
+            var wielder = Statements(MethodBody(WeaponModCombatFile, "public static double ReadWeaponOnly(WorldObject weapon, WeaponModId modId, bool enabled, double scale)"));
+            IndexOfStatement(wielder, "return ReadCore(weapon, definition, modId, scale)", "ReadWeaponOnly");
+
+            var pets = Statements(MethodBody(WeaponModCombatFile, "internal static double ReadFocusModForPets(WorldObject focus, WeaponModId modId)"));
+            IndexOfStatement(pets, "return ReadCore(focus, definition, modId, WeaponModValue.MagnitudeScale())", "ReadFocusModForPets");
+        }
+
+        /// <summary>The exact-statement helper rejects a near miss that a substring pin would accept.</summary>
+        [TestMethod]
+        public void Statements_ExactMatchRejectsASubstringNearMiss()
+        {
+            var statements = Statements("{ var x = 1; if (false) weaponMod += WeaponModParagon.IgnoreShieldAddFor(weapon, this); }");
+
+            Assert.IsFalse(statements.Contains(Squash("weaponMod += WeaponModParagon.IgnoreShieldAddFor(weapon, this)")),
+                "a guarded statement must not satisfy an exact pin");
+            Assert.IsTrue(statements.Contains(Squash("var x = 1")), "a plain statement must match");
+        }
+
+        private static void AssertParagonRatingPin(string signature, string native)
+        {
+            var statements = Statements(MethodBody(CreatureRating, signature));
+
+            IndexOfStatement(statements,
+                // The Summoner focus terms (Docs/SummonerCasters/DESIGN.md) ride the same statement: the pet bonus and the wielder strip
+                $"var equipment = GetEquippedItemsRatingSum(PropertyInt.{native}) - WeaponModSuppression.RatingOffsetFor(this, PropertyInt.{native}) + WeaponModParagon.RatingAddFor(this, PropertyInt.{native}) + SummonerFocus.PetFocusRatingBonus(this, PropertyInt.{native}) - SummonerFocus.WielderFocusRatingStrip(this, PropertyInt.{native})",
+                signature);
+
+            foreach (var other in RatingNatives)
+            {
+                if (other == native)
+                    continue;
+
+                foreach (var statement in statements)
+                    Assert.IsFalse(statement.Contains(Squash($"RatingAddFor(this,PropertyInt.{other})"), StringComparison.Ordinal),
+                        $"{signature} adds the {other} Paragon amount - that is another rating's native");
+            }
+        }
+
+        /// <summary>The body split into whitespace-free statements on ';', each with leading braces trimmed.</summary>
+        private static System.Collections.Generic.List<string> Statements(string body)
+        {
+            var list = new System.Collections.Generic.List<string>();
+
+            foreach (var part in Squash(body).Split(';'))
+                list.Add(part.TrimStart('{', '}'));
+
+            return list;
+        }
+
+        private static int IndexOfStatement(System.Collections.Generic.List<string> statements, string expected, string where)
+        {
+            var at = statements.IndexOf(Squash(expected));
+            Assert.IsTrue(at >= 0, $"{where}: expected a live statement exactly equal to:\n  {expected}");
+            return at;
+        }
+
         // ================= the pin machinery proves itself =================
 
         /// <summary>

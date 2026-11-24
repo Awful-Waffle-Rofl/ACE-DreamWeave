@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Numerics;
 
 namespace ACE.Server.HazardMechanics
@@ -27,6 +28,16 @@ namespace ACE.Server.HazardMechanics
         Sequence,
     }
 
+    /// <summary>Which player the follower wisp trails (args follow_target).</summary>
+    public enum WispFollowTarget
+    {
+        /// <summary>The first player in the region, every time (the original behaviour).</summary>
+        First,
+
+        /// <summary>A player drawn uniformly (the run's rng) at each cycle's first glide, and again when the target leaves the region.</summary>
+        Random,
+    }
+
     /// <summary>
     /// The wisps mechanic's numbers, read from the merged <see cref="HazardArgs"/> (shared invariant 5: never from
     /// PropertyManager), each with a documented default and clamp. Pure.
@@ -48,9 +59,15 @@ namespace ACE.Server.HazardMechanics
     ///   rest_end      (none)   0..60      ramp: the last cycle's rest
     ///   hold_floor    1        0|1        0 lifts the hold floor above for BOTH hold and hold_end (hold keeps its 0.2 s clamp); the safe default is 1
     ///   follow        0        0|1        one extra follower wisp trails the first player in the region (WispFollowRules); not counted in n or cycles
+    ///   follow_target first    first|random   who the follower trails: first = the first player in the region; random = a fresh uniform pick (the run's rng) at each cycle's first glide, re-picked if the target leaves the region; the new target gets the full follow_lag telegraph
     ///   mark_dest     0        0|1        1 marks each wisp's destination (its Pillar point) on the ground from the glide's start until its burst, so the move is warning time too
     ///   ceiling_beam  0        0..5       seconds before each burst that a narrow beam falls from the ceiling onto the wisp's Pillar point (0 = off; visual only, never damages)
     ///   beam_script   (beam)   script id  decimal or 0x hex: the look of the ceiling beam, default HazardDefaults.BeamScript
+    ///   beam_height   0        0..30      metres over the Pillar point's ground the ceiling beam's host hangs (0 = off: just under the
+    ///                                     region's ceiling, the original placement). The beam mesh hangs 5 m BELOW its host
+    ///                                     (MemoryLayout.BeamOrientation), so in a room taller than about 5.3 m a host under the
+    ///                                     ceiling ends the beam in mid-air; 5.4 puts its foot 0.4 m over the floor, as a 5.7 m
+    ///                                     ceiling does. Never above the ceiling placement (WispRules.CeilingBeamHost)
     ///   follow_lag    2.0      0.5..10    seconds the follower trails its target by; it bursts on the crew's beat (WispDirector), so there is no cadence key
     ///   pillar_radius 2.0      0.5..15    2D DAMAGE radius of a pillar (the player's is added). NOT the visual size: the flames are fixed by the effect script
     ///   cycles        8        1..500     formations (or sweeps) per run
@@ -61,6 +78,7 @@ namespace ACE.Server.HazardMechanics
     ///   steps         0 (auto) 0..40      sweep steps; auto = enough to tile the region depth with pillar_radius bands
     ///   ring_radius   half the inscribed radius   0.5..200
     ///   cx, cy        the region centre   centre of ring and diagonal (must be inside the region)
+    ///   mixed_pool    (none)   comma list of row|column|diagonal|ring|sweep|scatter   restricts the patterns "mixed" picks from (the usual fit checks still apply); Validate refuses an unknown name, "mixed", or a list that leaves no pattern that fits
     ///   scatter_cover 0.5      0.1..0.8   scatter: at most this fraction of the usable area is covered by pillars
     ///   wisp_clear    max(0.5, 0.48 x scale)  0..3  how far a blocked wisp stands back from a solid
     ///   wisp_wcid     1006950               the wisp weenie
@@ -135,6 +153,9 @@ namespace ACE.Server.HazardMechanics
         /// <summary>args "follow", default false: the run adds one follower wisp (<see cref="WispFollowRules"/>).</summary>
         public bool Follow { get; private init; }
 
+        /// <summary>args "follow_target", default first: see <see cref="WispFollowTarget"/>.</summary>
+        public WispFollowTarget FollowTarget { get; private init; }
+
         /// <summary>args "mark_dest", default false: each glide marks every wisp's destination on the ground until its burst (WispDirector).</summary>
         public bool MarkDest { get; private init; }
 
@@ -143,6 +164,9 @@ namespace ACE.Server.HazardMechanics
 
         /// <summary>args "beam_script" (decimal or 0x hex), default <see cref="HazardDefaults.BeamScript"/>: the effect script of the ceiling beam.</summary>
         public uint BeamScript { get; private init; }
+
+        /// <summary>args "beam_height", metres, default 0 (off), 0..30 (Validate refuses outside it): the ceiling beam's host hangs this far over the Pillar point's ground, capped at the ceiling placement (<see cref="WispRules.CeilingBeamHost"/>).</summary>
+        public double BeamHeight { get; private init; }
 
         /// <summary>args "follow_lag", seconds, default 2, clamped 0.5..10: how far behind its target the follower is.</summary>
         public double FollowLag { get; private init; }
@@ -158,6 +182,10 @@ namespace ACE.Server.HazardMechanics
         public float? CentreX { get; private init; }
         public float? CentreY { get; private init; }
         public double ScatterCover { get; private init; }
+
+        /// <summary>args "mixed_pool", a comma list of pattern names: the only patterns "mixed" may pick (intersected with the ones that fit). Null = unrestricted. Names are lower-cased and de-duplicated; they are checked by <see cref="WispRules.Validate"/>.</summary>
+        public IReadOnlyList<string> MixedPool { get; private init; }
+
         public float WispClear { get; private init; }
         public uint WispWcid { get; private init; }
         public uint Script { get; private init; }
@@ -173,7 +201,7 @@ namespace ACE.Server.HazardMechanics
         /// <summary>The least hold a run may give: 0.5 s plus the time to run out of a pillar (pillar_radius + player_radius) at escape_speed.</summary>
         public double EscapeHoldFloor => 0.5 + ((double)PillarRadius + PlayerRadius) / EscapeSpeed;
 
-        /// <summary>The hit window every pillar of every pattern uses: one hit per player per pillar host (+infinity, the same window the balls use; every burst gets a NEW host, so a player is hit once per burst).</summary>
+        /// <summary>The hit window every pillar of every pattern uses: one hit per player per volley (+infinity, the same window the balls use). A volley is every pillar that fires in one tick (WispDirector: a unison crew burst, and the follower's burst with the step's first crew burst); every tick that fires gets a NEW volley key and every burst a NEW host, so a player is hit at most once per firing tick.</summary>
         public double HitWindow => double.PositiveInfinity;
 
         /// <summary>
@@ -206,9 +234,11 @@ namespace ACE.Server.HazardMechanics
                 RestEnd = a.Has("rest_end") ? a.GetDouble("rest_end", DefaultRest, 0.0, 60.0) : (double?)null,
                 HoldFloor = a.GetBool("hold_floor", true),
                 Follow = a.GetBool("follow", false),
+                FollowTarget = a.GetChoice("follow_target", "first", "first", "random") == "random" ? WispFollowTarget.Random : WispFollowTarget.First,
                 MarkDest = a.GetBool("mark_dest", false),
                 CeilingBeam = a.GetDouble("ceiling_beam", 0.0, 0.0, 5.0),
                 BeamScript = HazardToolRoutes.ParseScript(a.GetString("beam_script"), HazardDefaults.BeamScript),
+                BeamHeight = a.GetDouble("beam_height", 0.0, 0.0, 30.0),
                 FollowLag = a.GetDouble("follow_lag", WispFollowRules.DefaultLag, 0.5, 10.0),
                 PillarRadius = (float)a.GetDouble("pillar_radius", DefaultPillarRadius, 0.5, 15.0),
                 Cycles = a.GetInt("cycles", DefaultCycles, 1, 500),
@@ -221,6 +251,7 @@ namespace ACE.Server.HazardMechanics
                 CentreX = a.Has("cx") ? (float)a.GetDouble("cx", 0.0, -1e6, 1e6) : (float?)null,
                 CentreY = a.Has("cy") ? (float)a.GetDouble("cy", 0.0, -1e6, 1e6) : (float?)null,
                 ScatterCover = a.GetDouble("scatter_cover", DefaultScatterCover, 0.1, 0.8),
+                MixedPool = ParsePool(a.GetString("mixed_pool")),
                 WispClear = (float)a.GetDouble("wisp_clear", Math.Max(0.5, HazardDefaults.WispRadiusAtScale1 * scale), 0.0, 3.0),
                 WispWcid = (uint)a.GetInt("wisp_wcid", (int)HazardDefaults.EmberWispWcid, 1, int.MaxValue),
                 Script = HazardToolRoutes.ParseScript(a.GetString("script"), HazardDefaults.PillarScript),
@@ -255,9 +286,11 @@ namespace ACE.Server.HazardMechanics
                 RestEnd = RestEnd,
                 HoldFloor = HoldFloor,
                 Follow = Follow,
+                FollowTarget = FollowTarget,
                 MarkDest = MarkDest,
                 CeilingBeam = CeilingBeam,
                 BeamScript = BeamScript,
+                BeamHeight = BeamHeight,
                 FollowLag = FollowLag,
                 PillarRadius = PillarRadius,
                 Cycles = Cycles,
@@ -270,6 +303,7 @@ namespace ACE.Server.HazardMechanics
                 CentreX = CentreX,
                 CentreY = CentreY,
                 ScatterCover = ScatterCover,
+                MixedPool = MixedPool,
                 WispClear = WispClear,
                 WispWcid = WispWcid,
                 Script = Script,
@@ -277,6 +311,25 @@ namespace ACE.Server.HazardMechanics
                 PlayerRadius = PlayerRadius,
                 EdgeInset = EdgeInset,
             };
+        }
+
+        /// <summary>The names of a mixed_pool arg (lower-case, trimmed, no empties or repeats), or null when the arg is absent.</summary>
+        internal static IReadOnlyList<string> ParsePool(string raw)
+        {
+            if (raw == null)
+                return null;
+
+            var names = new List<string>();
+
+            foreach (var part in raw.Split(','))
+            {
+                var name = part.Trim().ToLowerInvariant();
+
+                if (name.Length > 0 && !names.Contains(name))
+                    names.Add(name);
+            }
+
+            return names;
         }
 
         private static WispFire ParseFire(string text)
@@ -460,16 +513,38 @@ namespace ACE.Server.HazardMechanics
             if (SweepProblem(region, s) == null)
                 pool.Add(Sweep);
 
+            if (s.MixedPool != null)
+                pool.RemoveAll(p => !s.MixedPool.Contains(p));
+
             return pool;
+        }
+
+        // ---- the ceiling beam's host ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Where a ceiling beam's host stands over <paramref name="xy"/>: just under the ceiling
+        /// (<see cref="MemoryLayout.CeilingBeamPoint"/>, the original placement) when <paramref name="beamHeight"/> is 0, else
+        /// <paramref name="beamHeight"/> over <paramref name="groundZ"/>, never higher than the ceiling placement. The mesh hangs
+        /// 5 m below the host, so the height is what puts the beam's foot down at the pillar in a tall room. Pure.
+        /// </summary>
+        public static Vector3 CeilingBeamHost(Vector2 xy, float ceilingZ, float groundZ, double beamHeight)
+        {
+            var underCeiling = MemoryLayout.CeilingBeamPoint(xy, ceilingZ);
+
+            if (!(beamHeight > 0.0) || !float.IsFinite(groundZ))
+                return underCeiling;
+
+            return new Vector3(xy.X, xy.Y, Math.Min(underCeiling.Z, (float)(groundZ + beamHeight)));
         }
 
         // ---- Validate -------------------------------------------------------------------------------------
 
-        private static readonly string[] NumberKeys =
+        /// <summary>Every numeric key Validate parses (internal: WispKeyDocumentationTests pins each one's documentation).</summary>
+        internal static readonly string[] NumberKeys =
         {
             "scale", "move", "hold", "burst", "rest", "pillar_radius", "seq_gap", "sweep_move", "ring_radius", "cx", "cy",
             "scatter_cover", "wisp_clear", HazardDefaults.EscapeSpeedKey, HazardDefaults.PlayerRadiusKey, HazardDefaults.EdgeInsetKey, HazardDefaults.PctKey,
-            "move_end", "hold_end", "rest_end", "follow_lag", "ceiling_beam", "strike_delay",
+            "move_end", "hold_end", "rest_end", "follow_lag", "ceiling_beam", "strike_delay", "beam_height",
         };
 
         private static readonly string[] WholeNumberKeys = { "n", "cycles", "steps", "wisp_wcid" };
@@ -546,7 +621,7 @@ namespace ACE.Server.HazardMechanics
             var s = WispSettings.From(args);
             var asked = pattern ?? Scatter;
 
-            var bad = BadChoice(args, "fire", "unison", "random", "sequence") ?? BadChoice(args, "dir", "n", "s", "e", "w", "random");
+            var bad = BadChoice(args, "fire", "unison", "random", "sequence") ?? BadChoice(args, "dir", "n", "s", "e", "w", "random") ?? BadChoice(args, "follow_target", "first", "random");
 
             if (bad != null)
                 return bad;
@@ -573,6 +648,14 @@ namespace ACE.Server.HazardMechanics
 
                 if (beamSeconds < 0.0 || beamSeconds > 5.0)
                     return $"ceiling_beam={args.GetString("ceiling_beam")}: must be 0..5 seconds";
+            }
+
+            if (args.Has("beam_height"))
+            {
+                var beamHeight = double.Parse(args.GetString("beam_height"), NumberStyles.Float, inv);
+
+                if (beamHeight < 0.0 || beamHeight > 30.0)
+                    return $"beam_height={args.GetString("beam_height")}: must be 0..30 metres";
             }
 
             var beamScript = args.GetString("beam_script");
@@ -647,7 +730,22 @@ namespace ACE.Server.HazardMechanics
                     "this run would last {0:0} s ({1} cycles x {2} step(s) x {3:0.##} s of move + hold + burst + rest); the limit is {4:0} s: lower cycles or the timings",
                     total, s.Cycles, steps, s.Move + s.Hold + s.Burst + s.Rest, WispSettings.MaxRunSeconds);
 
-            if (asked == Scatter || asked == Mixed)
+            if (args.Has("mixed_pool"))
+            {
+                foreach (var name in s.MixedPool)
+                {
+                    if (name == Mixed)
+                        return "mixed_pool='" + args.GetString("mixed_pool") + "' names mixed itself; list only row, column, diagonal, ring, sweep or scatter";
+
+                    if (!Patterns.Contains(name))
+                        return "mixed_pool names an unknown pattern '" + name + "'; it must be some of " + string.Join(", ", Patterns.Where(p => p != Mixed));
+                }
+
+                if (asked == Mixed && Pool(region, s).Count == 0)
+                    return "mixed_pool leaves no pattern that fits this region";
+            }
+
+            if (asked == Scatter || (asked == Mixed && (s.MixedPool == null || s.MixedPool.Contains(Scatter))))
             {
                 var problem = ScatterProblem(region, s);
 
@@ -655,7 +753,7 @@ namespace ACE.Server.HazardMechanics
                     return problem;
             }
 
-            if (asked == Ring || (asked == Mixed && s.RingRadius.HasValue))
+            if (asked == Ring || (asked == Mixed && s.RingRadius.HasValue && (s.MixedPool == null || s.MixedPool.Contains(Ring))))
             {
                 var problem = RingProblem(region, s);
 

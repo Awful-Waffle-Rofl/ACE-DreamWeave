@@ -1,9 +1,11 @@
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 
 using ACE.Server.Network;
 using ACE.Server.Network.GameMessages.Messages;
+using ACE.Server.WeaponMods;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.Entity
@@ -57,7 +59,76 @@ namespace ACE.Server.Entity
         }
 
         /// <summary>
-        /// Emits every script attached to <paramref name="wo"/> down this session, AT MOST ONCE for as
+        /// The persistent scripts sent behind an object's CreateObject, in send order: the object's own
+        /// VisualEffectScript (9000) first, then - only when that is a weapon quality tier aura, the instance still has the template's Setup and the
+        /// template's script differs - the script its weenie TEMPLATE carries (<see cref="BaseScriptToLayer"/>). This is the layering rule: a weapon-mod quality tier
+        /// aura takes the single 9000 slot of the instance (WeaponModManager.ApplyTierScript), which would
+        /// otherwise erase the element look the weenie bakes there (Olthoi Voidclaw 0x33001154, the Harbinger
+        /// elemental casters). Sent effects are additive on the client, so the two render together, the way a
+        /// retail elemental weapon shows its per-element Setup script plus the tier aura. An object with no
+        /// template script, or whose current 9000 equals the template's, yields at most one script, as before.
+        /// </summary>
+        internal static uint[] PersistentScripts(WorldObject wo)
+        {
+            // The common case (no 9000) allocates nothing: this runs behind every CreateObject.
+            var property = wo.VisualEffectScript;
+            if (!property.HasValue || property.Value == 0)
+                return Array.Empty<uint>();
+
+            var baseScript = BaseScriptToLayer(wo, property.Value);
+            return baseScript.HasValue ? new[] { property.Value, baseScript.Value } : new[] { property.Value };
+        }
+
+        /// <summary>
+        /// The template base script to layer under the instance's own 9000, or null. Null when the instance's 9000
+        /// is not a weapon quality tier aura (<see cref="WeaponQualityTiers.IsTierScript"/>), when it has
+        /// no non-zero 9000 (a cleared property is deliberate, so nothing is resurrected; this also keeps the
+        /// template read off the CreateObject path of the great majority of objects, which carry no script),
+        /// when the template has none, or when the two are equal. The read is WeaponModManager's
+        /// BaseVisualEffectScript, a dictionary lookup in the already-loaded world weenie cache, so it adds no
+        /// per-wcid cache of its own.
+        /// </summary>
+        internal static uint? BaseScriptToLayer(WorldObject wo, uint property)
+        {
+            // Only a weapon quality tier aura layers. Every other stamped 9000 (a tailored look, a hazard host,
+            // a puzzle gate, a pinnacle prop) owns the slot deliberately and is sent alone, as before.
+            if (!WeaponQualityTiers.IsTierScript(property))
+                return null;
+
+            // Tailoring changes the look (Setup), so the template's element effect no longer belongs to the
+            // instance; only the template's own Setup keeps its base script.
+            var baseScript = WeaponModManager.BaseVisualEffectScript(wo, requireTemplateSetup: true);
+            if (!baseScript.HasValue || baseScript.Value == property)
+                return null;
+
+            return baseScript;
+        }
+
+        /// <summary>
+        /// Everything SendTo emits for <paramref name="wo"/>: <see cref="PersistentScripts"/>, then each /vfxstick
+        /// scratch script not already in that set. A scratch entry duplicating an emitted script would send it
+        /// twice, and because handle 0 allocates a fresh emitter each time that renders as a visibly doubled
+        /// effect rather than a no-op.
+        /// </summary>
+        internal static IReadOnlyList<uint> ScriptsToEmit(WorldObject wo)
+        {
+            var persistent = PersistentScripts(wo);
+
+            if (Scratch.IsEmpty || !Scratch.TryGetValue(wo.Guid.Full, out var scratch))
+                return persistent;
+
+            var all = new List<uint>(persistent);
+            foreach (var scriptId in scratch.ToList())
+            {
+                if (!all.Contains(scriptId))
+                    all.Add(scriptId);
+            }
+
+            return all;
+        }
+
+        /// <summary>
+        /// Emits every script attached to <paramref name="wo"/> (see <see cref="ScriptsToEmit"/>: the 9000 property plus the layered template base) down this session, AT MOST ONCE for as
         /// long as that client keeps the object built. Must be called immediately after the object's
         /// GameMessageCreateObject - EnqueueSend preserves order, so the client has built the object
         /// before the script arrives.
@@ -67,7 +138,8 @@ namespace ACE.Server.Entity
         /// forever and the effect visibly doubles. Several paths can legitimately fire for the same
         /// object in one session - created into a pack, then equipped, then unequipped and re-equipped -
         /// and only the first should reach the client. Forget() reopens it when the client is told to
-        /// destroy the object, which is the only thing that actually clears a handle-0 emitter.
+        /// destroy the object or rebuilds it with a fresh create, which are the only things that actually
+        /// clear a handle-0 emitter (see Forget).
         /// </summary>
         /// <param name="rebuilt">
         /// The caller re-sent this object's CreateObject WITHOUT a preceding delete (see /fi). The
@@ -89,32 +161,18 @@ namespace ACE.Server.Entity
                 }
             }
 
-            var property = wo.VisualEffectScript;
-            if (property.HasValue && property.Value != 0)
-                session.Network.EnqueueSend(new GameMessagePlayScriptId(wo.Guid, property.Value));
-
-            if (Scratch.IsEmpty)
-                return;
-
-            if (!Scratch.TryGetValue(wo.Guid.Full, out var scratch))
-                return;
-
-            foreach (var scriptId in scratch.ToList())
-            {
-                // A scratch entry duplicating the stored property would send the same script twice,
-                // and because handle 0 allocates a fresh emitter each time that renders as a visibly
-                // doubled effect rather than a no-op.
-                if (property.HasValue && property.Value == scriptId)
-                    continue;
-
+            foreach (var scriptId in ScriptsToEmit(wo))
                 session.Network.EnqueueSend(new GameMessagePlayScriptId(wo.Guid, scriptId));
-            }
         }
 
         /// <summary>
-        /// Call when a client is told to DESTROY an object (GameMessageDeleteObject). That is the only
-        /// thing that clears a handle-0 emitter, so it is also the only point at which re-sending
-        /// becomes correct rather than duplicating.
+        /// Call when a client is told to DESTROY an object (GameMessageDeleteObject), or is sent a fresh
+        /// GameMessageCreateObject for an object it is not drawing (a pack or container item), which rebuilds
+        /// the object and drops its emitters the same way. Those are the only points at which re-sending
+        /// becomes correct rather than duplicating. Player.TryCreateInInventoryWithNetworking, the pack
+        /// pickup in Player.HandleActionPutItemInContainer, Container.SendInventory, ThreadCachePlacer.Deliver
+        /// and PlayerDuoGemInventory.CommitAdd call it for exactly that reason. Forgetting a guid that was
+        /// never recorded is a no-op (HashSet.Remove of an absent key).
         /// </summary>
         public static void Forget(Session session, WorldObject wo)
         {

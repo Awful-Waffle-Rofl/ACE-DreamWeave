@@ -17,7 +17,7 @@ namespace ACE.Server.ClassAbilities
     /// parent's flight plus its own, and a second life cast in between (an Exsanguinate burst, say) handed the
     /// echo a burst multiplier and resistance-ignore it never earned. Now each projectile snapshots the stamp
     /// at launch (WorldObject_Magic.LaunchSpellProjectiles), the same pattern as LifeProjectileDamage and
-    /// SpellweaveDamageMod, and an echo copies its parent's snapshot (EchoCastAbility.StampEchoCopy).
+    /// SpellweaveDamageMod, and a Spell AOE or Cascade child copies its parent's snapshot (SpellProjectile.CopyPerCastStamps).
     ///
     /// A value type with a neutral <see cref="None"/>; a zero multiplier (default(LifeProjectileCastStamp))
     /// is read as the neutral 1.0 rather than zeroing the damage, so an unstamped projectile behaves as a cast

@@ -41,9 +41,14 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "malediction",
             DisplayName = "Malediction",
-            Description = "Vulnerability and Imperil enchantments you apply land at +10/20/30% intensity by " +
-                          "rank and last 25% longer. Every attacker on that target benefits, not just you. " +
-                          "Higher Creature Enchantment increases the intensity.",
+            // Live text. Intensity ladder is base + (rank - 1) * step, uncapped (MaledictionAbility.cs ~161-165 GetReadout,
+            // Player_ClassAbilityMalediction.cs ~41-47); duration bonus: Player_ClassAbilityMalediction.cs ~67.
+            DescriptionTemplate = "Vulnerability and Imperil spells you cast land stronger and last " +
+                          "{v:class_ability_malediction_duration_bonus|pct}% longer. Everyone attacking that target benefits, not " +
+                          "only you.",
+            RankTailTemplate = "+{ladder:class_ability_malediction_intensity_base,class_ability_malediction_intensity_step|pct}% " +
+                          "strength",
+            TunableSourceFiles = new[] { "WorldObjects/Player_ClassAbilityMalediction.cs" },
             MaxRank = 3,
             CostPerRank = new[] { 2, 2, 2 },   // premium reprice 2026-09-13: 1/rank -> 2/rank
             Implemented = true,

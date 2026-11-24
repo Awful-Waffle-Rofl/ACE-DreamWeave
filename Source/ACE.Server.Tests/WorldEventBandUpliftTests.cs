@@ -98,13 +98,14 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void Widening_StopsAtTheFloor_WhenThePoolNeverFills()
         {
-            // One member at every 10 levels from 100: far fewer than 6 inside [165, 275], so the search ends at the floor.
+            // One member at every 10 levels from 100: far fewer than 6 inside [240, 400], so the search ends at the floor.
             var members = Enumerable.Range(0, 5).Select(i => Member((uint)(10 + i), 100 + 10 * i)).ToList();
+            var level = WorldEventRosterSelector.MaxConsideredLevel;
 
-            var band = WorldEventRosterSelector.WidenTrashBand(members, 275, 1.0, 1.5, lowFloor: 0.60, minPool: 6);
+            var band = WorldEventRosterSelector.WidenTrashBand(members, level, 1.0, 1.5, lowFloor: 0.60, minPool: 6);
 
-            Assert.AreEqual(165, band.Low, "floor(275 * 0.60) - never lower, even though members exist below it");
-            Assert.AreEqual(275, band.High, "the high edge never moves and stays capped at 275");
+            Assert.AreEqual((int)Math.Floor(level * 0.60), band.Low, "floor(L * 0.60) - never lower, even though members exist below it");
+            Assert.AreEqual(WorldEventRosterSelector.MaxConsideredLevel, band.High, "the high edge never moves and stays capped at MaxConsideredLevel");
         }
 
         [TestMethod]
@@ -311,16 +312,16 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void Memo_StandardIsMeasuredOverTheCappedBand()
         {
-            // L = 275 caps the sample band at [275, 275]. A member at level 300 would be in Threads' unclamped
-            // [275, 413] but must NOT enter WE's standard: with only the level-300 creatures in range and the
-            // floor at 1.0 (no widening) the sample is empty.
-            var tables = Tables((1, 300), (2, 300), (3, 300), (4, 300), (5, 300), (6, 300));
+            // L = MaxConsideredLevel (400) caps the sample band at [400, 400]. A member at level 450 would be in
+            // Threads' unclamped [400, 600] but must NOT enter WE's standard: with only the level-450 creatures
+            // in range and the floor at 1.0 (no widening) the sample is empty.
+            var tables = Tables((1, 450), (2, 450), (3, 450), (4, 450), (5, 450), (6, 450));
 
-            DungeonStatProfile Resolve(uint w) => Profile(300, 99999, 999);
+            DungeonStatProfile Resolve(uint w) => Profile(450, 99999, 999);
 
-            var standard = WorldEventBandMemo.StandardFor(tables, 275, 1.0, 1.5, 1.0, Resolve);
+            var standard = WorldEventBandMemo.StandardFor(tables, WorldEventRosterSelector.MaxConsideredLevel, 1.0, 1.5, 1.0, Resolve);
 
-            Assert.IsTrue(standard.IsEmpty, "a level-300 member lies above the 275 cap and must not feed the standard");
+            Assert.IsTrue(standard.IsEmpty, "a level-450 member lies above the 400 cap and must not feed the standard");
         }
 
         [TestMethod]
@@ -412,7 +413,7 @@ namespace ACE.Server.Tests
             int Find(string code) => Array.FindIndex(lines, l => l.Trim() == code);
 
             var hostility = Find("SpawnedCreatureHostility.MakeHostileToPlayers(creature);");
-            var uplift = Find("ApplyBandUplift(evt, creature, entry.UpliftLevel, kind);");
+            var uplift = Find("ApplyBandUplift(evt, creature, entry.UpliftLevel, kind, slotStandard, upliftDials);");
             var capture = Find("candidate.AuthoredStartingValue = creature.Health.StartingValue;");
             var multiplier = Find("ApplyHealthMultiplier(evt, creature, healthMult);");
 

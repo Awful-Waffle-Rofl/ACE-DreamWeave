@@ -9,7 +9,9 @@ namespace ACE.Server.WorldObjects
     {
         /// <summary>
         /// Wakes up any monsters within the applicable range. A never-initiates pet (CombatPet.NeverInitiates,
-        /// Custom Summons) wakes nothing: it only ever joins fights already in progress.
+        /// Custom Summons: by design, unless the owner has /summonaggro on) wakes nothing: it only joins fights
+        /// already in progress. Casters never reach here (Monster_Tick sends them to TickCaster), so a caster starts a
+        /// fight only by casting, never by waking.
         /// </summary>
         public void PetCheckMonsters()
         {

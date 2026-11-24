@@ -147,10 +147,9 @@ namespace ACE.Server.ClassAbilities
         BreakArmor          = 71,   // Berserker T2 (replaces Blood Fury)
         Surefooted          = 72,   // RETIRED 2026-09-12 (class ability overhaul) - id reserved, never re-use;
                                     // unregistered + inert. Its stacking avoidance overlapped Parry inside
-                                    // the same pooled cap. Killer Instinct (77) replaces it in the class, but
-                                    // at Rogue T3, NOT the T2 this comment claimed until 2026-09-12: T3 is
-                                    // the signed-off placement and the only one that reproduces Rogue's 44
-                                    // CAP total (T3 would otherwise be 9 and T2 18, against 15/15).
+                                    // the same pooled cap. Killer Instinct (77) replaces it in the class: Rogue
+                                    // T2 since 2026-11-06 (T3 before, via the Acid Proc swap, reprice wave 8).
+                                    // Rogue CAP is T1 14 / T2 18 / T3 18 = 50, pinned by ClassAbilityCapTotalsTests.
         PocketSand          = 73,   // Rogue T3
 
         // Class ability overhaul 2026-09-12, NEW-ABILITY WAVE. Fifteen entries: one 5-rank Tier 1 "splash"
@@ -165,7 +164,7 @@ namespace ACE.Server.ClassAbilities
         HuntersMark         = 74,   // Archer T1
         PinningShot         = 75,   // Archer T2 (the slot Heavy Draw vacated)
         Opportunist         = 76,   // Rogue T1
-        KillerInstinct      = 77,   // Rogue T3
+        KillerInstinct      = 77,   // Rogue T2 (was T3 until 2026-11-06)
         RallyingPresence    = 78,   // Vanguard T1
         KineticCharge       = 79,   // Vanguard T1 as of 2026-09-29 (owner ruling); entered at T2 on
                                     // 2026-09-12 in the slot Shield Check vacated
@@ -199,6 +198,15 @@ namespace ACE.Server.ClassAbilities
 
         // Spellsword 2026-10-30. Append only, never renumber or reuse.
         VolatileElements    = 96,   // Spellsword T2: weapon hits are re-typed to a random element, weighted to the target's weakest
+
+        // Archmage 2026-11-03. Append only, never renumber or reuse. Elemental Rend RETURNED as a new, additional
+        // Archmage T3 alongside Elemental Proficiency. Id 42 (member ElementalRend, Name elementalrend) is STILL the
+        // Proficiency ability's internal id - do not rename or reuse it; this member is the old vulnerability-proc Rend.
+        ElementalRendVuln   = 97,   // Archmage T3: a landed damaging spell may inflict the matching element's Vulnerability
+
+        // Archer 2026-11-10. Append only, never renumber or reuse. 98 was used on an unmerged branch by
+        // Crippling Shot, which never shipped (it was folded into Pinning Shot), so no shard row carries it.
+        HuntersEcho         = 98,   // Archer T3: an aetheria surge or cloak spell proc summons a translucent copy of the archer
     }
 
     /// <summary>
@@ -218,6 +226,104 @@ namespace ACE.Server.ClassAbilities
         VoidSummon,
         BloodMage,
         Spellsword,
+    }
+
+    /// <summary>
+    /// A rank tail: ONE template used for every rank (assign a string), or one template per rank (assign a
+    /// string[] whose length is the ability's MaxRank), so wording can differ by rank (singular /
+    /// plural: "1 extra arrow", "2 extra arrows"; or a different total per rank). Both assign implicitly; a null stays null (no tail).
+    /// </summary>
+    public sealed class RankTailSpec
+    {
+        private readonly string single;
+        private readonly string[] perRank;
+
+        private RankTailSpec(string single, string[] perRank)
+        {
+            this.single = single;
+            this.perRank = perRank;
+        }
+
+        public static implicit operator RankTailSpec(string template) => template == null ? null : new RankTailSpec(template, null);
+
+        public static implicit operator RankTailSpec(string[] templates) => templates == null ? null : new RankTailSpec(null, templates);
+
+        /// <summary>True when the spec carries one template per rank.</summary>
+        public bool IsPerRank => perRank != null;
+
+        /// <summary>The template for a rank; throws FormatException when a per-rank array does not match MaxRank.</summary>
+        public string For(int rank, int maxRank, string name)
+        {
+            if (perRank == null)
+                return single;
+
+            if (perRank.Length != maxRank)
+                throw new FormatException($"{name} has {maxRank} ranks but {perRank.Length} per-rank tail templates");
+
+            if (perRank[rank - 1] == null)
+                throw new FormatException($"{name} has a null per-rank tail template for rank {rank}");
+
+            return perRank[rank - 1];
+        }
+
+        /// <summary>Every distinct template (one entry for a single string, MaxRank entries for an array).</summary>
+        public System.Collections.Generic.IReadOnlyList<string> All(int maxRank, string name)
+        {
+            if (perRank == null)
+                return new[] { single };
+
+            if (perRank.Length != maxRank)
+                throw new FormatException($"{name} has {maxRank} ranks but {perRank.Length} per-rank tail templates");
+
+            for (var i = 0; i < perRank.Length; i++)
+            {
+                if (perRank[i] == null)
+                    throw new FormatException($"{name} has a null per-rank tail template for rank {i + 1}");
+            }
+
+            return perRank;
+        }
+    }
+
+    /// <summary>
+    /// One named text formula: the func and the FULL tunable keys it reads. The keys are declared so the guard
+    /// tests (key exists with a type, class_ability_ prefix, source scan over the handler and declared files)
+    /// cover a formula's inputs exactly as they cover a placeholder's, and a perturbation test proves each declared
+    /// key really moves the output.
+    /// </summary>
+    public sealed class TextFormula
+    {
+        public readonly Func<ITunableValues, int, double> Compute;
+
+        public readonly string[] Keys;
+
+        /// <summary>
+        /// True for a formula that reads a code table and no tunable (a rank's grant from RatingBonus, say). Such a
+        /// formula declares no keys, which the guard tests otherwise forbid: a formula that reads no tunable and is
+        /// not marked constant is a mistake, because the perturbation guard could not prove it reads anything.
+        /// </summary>
+        public readonly bool IsConstant;
+
+        public TextFormula(Func<ITunableValues, int, double> compute, params string[] keys)
+        {
+            Compute = compute ?? throw new ArgumentNullException(nameof(compute));
+            Keys = keys ?? Array.Empty<string>();
+        }
+
+        private TextFormula(Func<ITunableValues, int, double> compute, bool isConstant)
+            : this(compute)
+        {
+            IsConstant = isConstant;
+        }
+
+        /// <summary>A formula of the rank alone, from a code table: no tunable key, so a retune cannot move it.</summary>
+        public static TextFormula Constant(Func<int, double> table)
+        {
+            if (table == null)
+                throw new ArgumentNullException(nameof(table));
+
+            return new TextFormula((values, rank) => table(rank), true);
+        }
     }
 
     public class ClassAbilityDefinition
@@ -251,9 +357,48 @@ namespace ACE.Server.ClassAbilities
         public string Category = "Combat";
 
         /// <summary>
-        /// Shown by /abilities info - should include per-rank effect text
+        /// The description TEMPLATE: plain text, optionally with <c>{kind:key|fmt}</c> placeholders that
+        /// <see cref="ClassAbilityText"/> fills from the current tunable values. It is deliberately NOT named
+        /// Description: this string may contain raw braces, so nothing may print it directly. Render it with
+        /// <see cref="ClassAbilityText.Describe"/> (Live for a player, Defaults for committed files). Should
+        /// include per-rank effect text.
         /// </summary>
-        public string Description;
+        public string DescriptionTemplate;
+
+        /// <summary>
+        /// Optional template for what ONE rank gives, as that rank's TOTAL (what a token shows after "This token
+        /// teaches rank N: ", without the closing period, and what /abilities info prints as "Rank N: ..."). Same
+        /// grammar as <see cref="DescriptionTemplate"/>; a ladder placeholder renders that rank's single value here.
+        /// Null = the ability has no per-rank line: its token still renders ("This token teaches rank N.") and
+        /// /abilities info prints no rank lines. Assign one string (every rank) or a string[] of MaxRank templates
+        /// (one per rank); see <see cref="RankTailSpec"/>.
+        /// </summary>
+        public RankTailSpec RankTailTemplate;
+
+        /// <summary>
+        /// Named rank-shaped formulas for <c>{fn:NAME|fmt}</c> placeholders: NAME -> <see cref="TextFormula"/> (func of
+        /// tunable source and rank, plus the keys it reads).
+        /// Each func must call the SAME pure method the handler uses for that mechanic (a method taking an
+        /// <see cref="ITunableValues"/>), so the text and the mechanic share one formula. Every {fn:NAME} used by a
+        /// template must exist here and every entry must be used (ClassAbilityTextTests).
+        /// </summary>
+        public System.Collections.Generic.IReadOnlyDictionary<string, TextFormula> TextFormulas;
+
+        /// <summary>
+        /// Source files OTHER than this ability's own handler that read the tunables named in its templates,
+        /// as paths relative to Source/ACE.Server (for example "WorldObjects/Player_ClassAbilityBuffs.cs").
+        /// The guard test requires every placeholder key to appear in the handler file or one of these, so a
+        /// template can never quote a key no code reads.
+        /// </summary>
+        public string[] TunableSourceFiles;
+
+        /// <summary>
+        /// Literal numbers that may stay typed into a migrated template (for example a structural "2x"),
+        /// each with the reason it is not a tunable. Per-ability on purpose: migration batches run in
+        /// parallel and must not conflict on one shared list. Only enforced for a definition whose templates
+        /// contain at least one placeholder.
+        /// </summary>
+        public (string Literal, string Reason)[] AllowedLiterals;
 
         /// <summary>
         /// 1 = flat one-time unlock
@@ -311,6 +456,12 @@ namespace ACE.Server.ClassAbilities
         /// carries its call.
         /// </summary>
         public ACE.Entity.Enum.Skill[] AdditionalAffinitySkills;
+
+        /// <summary>Declared ceilings (caps) of this ability, rendered by ClassAbilityCeilingText. Null = none declared.</summary>
+        public System.Collections.Generic.IReadOnlyList<ClassAbilityCeiling> Ceilings;
+
+        /// <summary>How this ability's affinity rider is rated, for the rate line. Null derives the shared rates when AffinitySkill is set and quotes nothing otherwise; declare Own, LegacyAdditive or Uncapped explicitly.</summary>
+        public AffinityRateSpec AffinityRate;
 
         /// <summary>
         /// Total points invested to be at the given rank

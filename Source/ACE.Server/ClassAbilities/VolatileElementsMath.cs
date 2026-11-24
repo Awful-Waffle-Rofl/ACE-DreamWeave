@@ -161,16 +161,18 @@ namespace ACE.Server.ClassAbilities
         /// WorldObject.GetWeaponResistanceModifier, for the two live call sites (DamageEvent.ResolveDefenderHalf
         /// and the war/void branch of SpellProjectile.CalculateDamage). A direct overload rather than a lambda at
         /// those sites: a lambda capturing their parameters would allocate a closure on EVERY hit, re-typed or
-        /// not, on two of the hottest paths in combat. Same rule, same order of lookups.
+        /// not, on two of the hottest paths in combat. Same rule, same order of lookups. <paramref name="target"/> is
+        /// required, never defaulted: the Summoner focus pet rend refuses a Player-side target, and a silent null
+        /// would pass that check.
         /// </summary>
-        public static float ResolveWeaponResistanceMod(WorldObject weapon, Creature wielder, CreatureSkill skill, DamageType? original, DamageType rolled)
+        public static float ResolveWeaponResistanceMod(WorldObject weapon, Creature wielder, CreatureSkill skill, DamageType? original, DamageType rolled, Creature target)
         {
-            var rolledMod = WorldObject.GetWeaponResistanceModifier(weapon, wielder, skill, rolled);
+            var rolledMod = WorldObject.GetWeaponResistanceModifier(weapon, wielder, skill, rolled, target);
 
             if (original == null || original.Value == rolled)
                 return rolledMod;
 
-            return Math.Max(WorldObject.GetWeaponResistanceModifier(weapon, wielder, skill, original.Value), rolledMod);
+            return Math.Max(WorldObject.GetWeaponResistanceModifier(weapon, wielder, skill, original.Value, target), rolledMod);
         }
     }
 }

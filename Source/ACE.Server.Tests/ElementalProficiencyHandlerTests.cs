@@ -73,16 +73,14 @@ namespace ACE.Server.Tests
             Assert.AreEqual(3, def.MaxRank);
 
             Assert.AreEqual(
-                "Your damaging spells apply an effect by element when they land on a monster. " +
-                "Fire: +10/20/30% damage. " +
-                "Lightning: the target takes 10/20/30% more damage from all sources for 10 seconds. " +
-                "Frost: the target is slowed by 20/40/60% for 10 seconds. " +
-                "Acid: the target burns for 20/40/60% of the hit over 6 seconds; a new acid hit refreshes the burn. " +
-                "Bludgeon: the target is stunned for 2/3/4 seconds, then cannot be stunned again for 8 seconds. " +
-                "Pierce: ignores 10/20/30% of the target's resistance or deals 10/20/30% more damage, whichever is greater. " +
-                "Slash: +5/10/15 percentage points of critical chance. " +
-                "Higher War Magic strengthens the Fire, Lightning, Acid and Pierce effects.",
-                def.Description);
+                "Your damaging spells add an effect by element when they hit a target. Fire deals extra damage. " +
+                "Lightning makes the target take more damage from all sources for 10 seconds. " +
+                "Frost slows it for 10 seconds. " +
+                "Acid burns for a share of the hit over 6 seconds, and a new acid hit restarts the burn. " +
+                "Bludgeon stuns, and the target then cannot be stunned again for 8 seconds. " +
+                "Pierce ignores part of the target's resistance or adds the same share as damage, whichever is more. " +
+                "Slash raises your critical chance.",
+                ClassAbilityText.Describe(def, ClassAbilityText.Defaults));
         }
 
         [TestMethod]
@@ -245,10 +243,14 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void RetiredChanceKeys_AreGoneFromTheDefaults()
+        public void ChanceKeys_AreTheReturnedRendsNow_AndProficiencyNeverReadsThem()
         {
-            Assert.IsFalse(DefaultPropertyManager.DefaultDoubleProperties.ContainsKey("class_ability_elementalrend_chance_base"));
-            Assert.IsFalse(DefaultPropertyManager.DefaultDoubleProperties.ContainsKey("class_ability_elementalrend_chance_step"));
+            // The two class_ability_elementalrend_chance_* keys were retired by Elemental Proficiency (2026-11-02) and
+            // RE-REGISTERED 2026-11-03 for the returned Elemental Rend (ElementalRendVulnAbility). Proficiency's own
+            // handler still reads neither - the Handler_RollsNothing test above pins that by source text.
+            Assert.IsTrue(DefaultPropertyManager.DefaultDoubleProperties.ContainsKey("class_ability_elementalrend_chance_base"));
+            Assert.IsTrue(DefaultPropertyManager.DefaultDoubleProperties.ContainsKey("class_ability_elementalrend_chance_step"));
+            Assert.IsFalse(Read("Source/ACE.Server/ClassAbilities/Abilities/ElementalRendAbility.cs").Contains("elementalrend_chance"));
         }
     }
 }

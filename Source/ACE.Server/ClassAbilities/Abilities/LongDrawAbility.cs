@@ -1,5 +1,6 @@
 using System;
 
+using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Server.Entity;
 using ACE.Server.EquipmentMods;
@@ -27,23 +28,36 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "longdraw",
             DisplayName = "Long Draw",
-            Description = "Your missile damage grows with distance to the target: no bonus up close, up to " +
-                          "+10% per rank at long range. Higher Missile Weapons increases the bonus.",
+            // Live text: rank * class_ability_longdraw_percent_per_rank is the peak bonus (ModifyOutgoingDamage / GetReadout).
+            DescriptionTemplate = "Your missile damage grows with distance: no bonus up close, the full bonus at long range.",
+            RankTailTemplate = "+{per:class_ability_longdraw_percent_per_rank|pct}% at long range",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
             AffinitySkill = Skill.MissileWeapons,
         };
 
+        /// <summary>
+        /// Where Long Draw measures a missile hit from: an arrow a Hunter's Echo fired measures from where the Echo stood
+        /// when it launched it (WorldObject.HuntersEchoLaunchOrigin, orchestrator ruling 2026-11-11), so the owner's own
+        /// position never counts for it; every other shot measures from the attacker. Read by this hook and by the
+        /// standalone gear mod (Player.ApplyEquipmentModOutgoingDamage).
+        /// </summary>
+        internal static Position ShotOrigin(Player attacker, DamageEvent damageEvent) =>
+            damageEvent?.DamageSource?.HuntersEchoLaunchOrigin ?? attacker?.Location;
+
         public void ModifyOutgoingDamage(Player attacker, int rank, Creature target, DamageEvent damageEvent)
         {
             if (attacker == null || damageEvent.CombatType != CombatType.Missile)
                 return;
 
-            if (attacker.Location == null || target?.Location == null)
+            // Hunter's Echo: an Echo arrow measures from where the Echo stood when it launched it (ShotOrigin)
+            var origin = ShotOrigin(attacker, damageEvent);
+
+            if (origin == null || target?.Location == null)
                 return;
 
-            var distance = attacker.Location.DistanceTo(target.Location);
+            var distance = origin.DistanceTo(target.Location);
 
             // Long Draw equipment mod (STANDALONE): the peak of the SAME ramp, so the mod is additive
             // inside the parenthesis and inherits the ability's exact distance curve. The rank-0 half in

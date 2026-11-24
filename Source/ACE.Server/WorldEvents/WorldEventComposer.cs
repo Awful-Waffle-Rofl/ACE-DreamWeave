@@ -14,7 +14,7 @@ namespace ACE.Server.WorldEvents
     ///
     /// Pure apart from one read - no logging, no manager state, no side effects - so the whole refusal matrix is unit
     /// testable (D6) and so "/worldevent simulate" and "--dry" can run it without touching a live event. The one read is
-    /// world_events_hold_enabled for a pinned Hold goal (World Events Hold H6), behind the <see cref="HoldEnabledReader"/> seam.
+    /// world_events_hold_enabled for a pinned or rolled Hold goal (World Events Hold H6), behind the <see cref="HoldEnabledReader"/> seam.
     /// WorldEventManager.TryCompose is a thin wrapper that adds the one warning this cannot emit.
     /// </summary>
     public static class WorldEventComposer
@@ -55,12 +55,12 @@ namespace ACE.Server.WorldEvents
         // ---- World Events Hold: the composer gate (H6) ------------------------------------------------------------------
 
         /// <summary>
-        /// THE ONE-LINE FLIP (owner decision pending, H6 builds pinned-only): whether a RANDOM roll may land on a Hold goal at
-        /// all. False: a Hold goal starts only when pinned with --goal, and a random roll never picks one whatever
+        /// THE ONE-LINE FLIP (owner ruled 2026-11-16: random rolls may pick Hold): whether a RANDOM roll may land on a Hold
+        /// goal at all. False: a Hold goal starts only when pinned with --goal, and a random roll never picks one whatever
         /// world_events_hold_enabled says. True: a random roll may pick a Hold goal while world_events_hold_enabled is on.
         /// Every decision reads it through <see cref="RandomRollMayPick"/>.
         /// </summary>
-        public const bool RandomRollIncludesHoldGoals = false;
+        public const bool RandomRollIncludesHoldGoals = true;
 
         /// <summary>
         /// Whether a random roll may cross a source with <paramref name="goal"/> (pure): every goal that is not Hold; a Hold
@@ -96,6 +96,13 @@ namespace ACE.Server.WorldEvents
                 return false;
             }
         }
+
+        /// <summary>
+        /// Whether <paramref name="goal"/> may start at all as far as the Hold switch goes (pure apart from the reader seam):
+        /// every goal that is not Hold; a Hold goal only while world_events_hold_enabled is on. The web Admin catalog uses it
+        /// to leave a Hold goal out while it would only be refused.
+        /// </summary>
+        internal static bool GoalSwitchedOn(GoalDef goal) => goal == null || goal.TypeKind != GoalType.Hold || HoldEnabled(goal);
 
         private static bool HoldEnabled(GoalDef goal)
         {
@@ -242,6 +249,15 @@ namespace ACE.Server.WorldEvents
             if (!TryResolveAnchor(store, request, out var anchor, out var anchorPosition, out error))
                 return false;
 
+            // A NAMED anchor (--anchor <id>) carries the city's maxRadius; a position anchor (--here, the web page) does not.
+            if (!string.IsNullOrWhiteSpace(request.AnchorId))
+            {
+                error = WorldEventAnchorRules.Refusal(anchor, source);
+
+                if (error != null)
+                    return false;
+            }
+
             composition = new WorldEventComposition(source, families, boss, goal, reward, anchor, anchorPosition, store);
             return true;
         }
@@ -308,7 +324,8 @@ namespace ACE.Server.WorldEvents
         /// catalog families that satisfies the pairing rule - family A must have a member at or below
         /// world_events_family_floor_level, and at least one of A/B must have a caster - degrading through
         /// <see cref="WorldEventFamilyPairing.PairTier"/> when nothing in the catalog can satisfy that.
-        /// Both lists are shuffled once (Fisher-Yates) with the caller's rng before search, so a seeded rng
+        /// The (source, goal) list is ordered by weighted sampling (<see cref="WeightedPairOrder"/>) and the family
+        /// pairs are shuffled once (Fisher-Yates) with the caller's rng before search, so a seeded rng
         /// reproduces the same run, and search crosses the first <see cref="MaxPairsTried"/> family pairs
         /// with the shuffled (source, goal) list until one composes, within the attempt budget
         /// <see cref="ResolveMaxAttempts"/> sets (big enough that every pair being tried gets a full cross).
@@ -322,12 +339,64 @@ namespace ACE.Server.WorldEvents
         /// families at all), this delegates straight to <see cref="TryCompose"/> with the best-effort ids
         /// so the caller gets the same specific refusal a manual "/worldevent start" would have produced,
         /// rather than a generic "no combination" message.
+        ///
+        /// This is the FIRST element of <see cref="RandomCompositions"/>; WorldEventManager.TryStart walks further
+        /// along the same sequence when a later stage (the start-spot rule, the objective factory) refuses it.
         /// </summary>
         private static bool TryComposeRandom(WorldEventAxisStore store, WorldEventCatalog catalog,
             WorldEventRequest request, out WorldEventComposition composition, out string error, Random rng)
         {
-            composition = null;
-            error = null;
+            var first = RandomCompositions(store, catalog, request, rng).First();
+
+            composition = first.Composition;
+            error = first.Error;
+
+            return composition != null;
+        }
+
+        /// <summary>
+        /// One step of <see cref="RandomCompositions"/>: a composed candidate (<see cref="Composition"/> set,
+        /// <see cref="Error"/> null), or the search's end (<see cref="Composition"/> null, <see cref="Error"/>
+        /// the refusal <see cref="TryCompose"/> would have returned).
+        /// </summary>
+        internal readonly struct RandomComposeStep
+        {
+            public RandomComposeStep(WorldEventComposition composition, string error)
+            {
+                Composition = composition;
+                Error = error;
+            }
+
+            public WorldEventComposition Composition { get; }
+
+            public string Error { get; }
+        }
+
+        /// <summary>
+        /// The random search of <see cref="TryComposeRandom"/> as a LAZY sequence, in the weighted draw order: every
+        /// candidate that composes, then exactly one terminal step with a null composition and the refusal. Nothing is
+        /// searched past what the caller pulls, so taking the first element costs exactly what TryComposeRandom always
+        /// did. Every yielded composition is independent (its own anchor Position, see <see cref="TryResolveAnchor"/>),
+        /// so a caller may let a later stage mutate or discard one and move on to the next. <paramref name="request"/>
+        /// is never written.
+        /// </summary>
+        internal static IEnumerable<RandomComposeStep> RandomCompositions(WorldEventAxisStore store, WorldEventCatalog catalog,
+            WorldEventRequest request, Random rng)
+        {
+            if (store == null)
+            {
+                yield return new RandomComposeStep(null, "no axes loaded");
+                yield break;
+            }
+
+            if (request == null)
+            {
+                yield return new RandomComposeStep(null, "no request");
+                yield break;
+            }
+
+            WorldEventComposition composition;
+            string error;
 
             rng = rng ?? new Random(ThreadSafeRandom.Next(0, int.MaxValue - 1));
 
@@ -339,34 +408,18 @@ namespace ACE.Server.WorldEvents
                 .Select(Normalize)
                 .ToList();
 
-            var pairs = new List<(string sourceId, string goalId)>();
+            var pairs = RandomCandidatePairs(store, request, requestedSource, requestedGoal);
 
-            foreach (var source in store.Sources.Values.OrderBy(s => s.Id, StringComparer.Ordinal))
+            // Weighted draw (TECH-DESIGN 5.3): replaces the old uniform shuffle of the (source, goal) list. The list
+            // comes back in draw order with every weight-0 pair removed, so "first pair that composes wins" holds.
+            if (pairs.Count > 0)
             {
-                if (requestedSource != null && source.Id != requestedSource)
-                    continue;
+                pairs = WeightedPairOrder(store, pairs, requestedSource != null, requestedGoal != null, rng);
 
-                // A restricted request (the web Admin panel) only ever searches the sources it allows, so a
-                // roll can never land on one it would have refused had it been pinned.
-                if (!SourceAllowed(request, source.Id))
-                    continue;
-
-                var compatibleGoals = (source.CompatibleGoals ?? new List<string>())
-                    .Where(store.Goals.ContainsKey)
-                    .OrderBy(g => g, StringComparer.Ordinal);
-
-                foreach (var goalId in compatibleGoals)
+                if (pairs.Count == 0)
                 {
-                    if (requestedGoal != null && goalId != requestedGoal)
-                        continue;
-
-                    // World Events Hold (H6): the roll itself never lands on a Hold goal (RandomRollMayPick); a goal pinned
-                    // with --goal is the caller's choice and is crossed here, then gated by TryCompose's switch check.
-                    if (requestedGoal == null && store.Goals.TryGetValue(goalId, out var rolledGoal)
-                        && rolledGoal.TypeKind == GoalType.Hold && !RandomRollMayPick(rolledGoal, RandomRollIncludesHoldGoals && HoldEnabled(rolledGoal)))
-                        continue;
-
-                    pairs.Add((source.Id, goalId));
+                    yield return new RandomComposeStep(null, ZeroWeightRefusal(store, requestedSource, requestedGoal));
+                    yield break;
                 }
             }
 
@@ -393,14 +446,15 @@ namespace ACE.Server.WorldEvents
             {
                 if (familyCandidates.Count == 0 && pinnedFamilies.Count == 0)
                 {
-                    error = "random composition: no family in the catalog has any members";
-                    return false;
+                    yield return new RandomComposeStep(null, "random composition: no family in the catalog has any members");
+                    yield break;
                 }
 
                 if (requestedSource == null && !store.Sources.Keys.Any(id => SourceAllowed(request, id)))
                 {
-                    error = $"random composition: no loaded source is allowed for this request (allowed: {Join(request.AllowedSourceIds)})";
-                    return false;
+                    yield return new RandomComposeStep(null,
+                        $"random composition: no loaded source is allowed for this request (allowed: {Join(request.AllowedSourceIds)})");
+                    yield break;
                 }
 
                 var probeSourceId = requestedSource ?? store.Sources.Keys
@@ -416,10 +470,10 @@ namespace ACE.Server.WorldEvents
                 if (string.IsNullOrEmpty(error))
                     error = "no compatible source/family/goal combination was found";
 
-                return false;
+                yield return new RandomComposeStep(null, error);
+                yield break;
             }
 
-            Shuffle(pairs, rng);
             Shuffle(familyCandidates, rng);
 
             // Only the first few drawn family pairs are crossed with the (source, goal) list. The pair is
@@ -450,6 +504,10 @@ namespace ACE.Server.WorldEvents
                     bossId = request.BossId;
                 else if (store.Goals.TryGetValue(combo.goalId, out var goalDef) && goalDef.TypeKind == GoalType.KillBoss)
                     bossId = AutoBossId;
+                else if (goalDef != null && goalDef.TypeKind == GoalType.Hold)
+                    // A Hold run brings its own finale boss; a rolled family champion would also arm the base champion
+                    // tick, whose placement grace can end the run as SuccessBossAbsent. Same as a pinned Hold start.
+                    bossId = DefaultBossId;
                 else
                     bossId = rng.Next(2) == 0 ? DefaultBossId : "family_champion";
 
@@ -465,18 +523,102 @@ namespace ACE.Server.WorldEvents
                         composition.PairingFloorLevel = floorLevel;
                     }
 
-                    return true;
+                    yield return new RandomComposeStep(composition, null);
+                    continue;
                 }
 
                 lastError = error;
             }
 
-            composition = null;
-            error = lastError != null
+            yield return new RandomComposeStep(null, lastError != null
                 ? $"{lastError}; no compatible source/family/goal combination was found"
-                : "no compatible source/family/goal combination was found";
+                : "no compatible source/family/goal combination was found");
+        }
 
-            return false;
+        /// <summary>
+        /// The (source, goal) pairs a random roll may draw from: every source crossed with its own CompatibleGoals,
+        /// minus sources the request does not allow and (for an unpinned goal) Hold goals the roll may not pick.
+        /// Weights are NOT applied here - <see cref="WeightedPairOrder"/> does that. Ordered by source then goal id.
+        /// </summary>
+        internal static List<(string sourceId, string goalId)> RandomCandidatePairs(WorldEventAxisStore store,
+            WorldEventRequest request, string requestedSource, string requestedGoal)
+        {
+            var pairs = new List<(string sourceId, string goalId)>();
+
+
+            foreach (var source in store.Sources.Values.OrderBy(s => s.Id, StringComparer.Ordinal))
+            {
+                if (requestedSource != null && source.Id != requestedSource)
+                    continue;
+
+                // A restricted request (the web Admin panel) only ever searches the sources it allows, so a
+                // roll can never land on one it would have refused had it been pinned.
+                if (!SourceAllowed(request, source.Id))
+                    continue;
+
+                // A named city anchor (--anchor) only hosts the sources whose clearance fits its maxRadius, the same rule the
+                // scheduler narrows by. Done per candidate rather than through AllowedSourceIds, which would also lift the
+                // in-game roll's InGameRandom opt-out below.
+                if (!string.IsNullOrWhiteSpace(request.AnchorId)
+                    && store.Anchors.TryGetValue(Normalize(request.AnchorId), out var namedAnchor)
+                    && !WorldEventAnchorRules.Hosts(namedAnchor, source))
+                    continue;
+
+                // An unrestricted in-game roll skips a source that opts out (envoy_muster: its only goal is ambush's too).
+                if (requestedSource == null && request.AllowedSourceIds == null && !source.InGameRandom)
+                    continue;
+
+                var compatibleGoals = (source.CompatibleGoals ?? new List<string>())
+                    .Where(store.Goals.ContainsKey)
+                    .OrderBy(g => g, StringComparer.Ordinal);
+
+                foreach (var goalId in compatibleGoals)
+                {
+                    if (requestedGoal != null && goalId != requestedGoal)
+                        continue;
+
+                    // World Events Hold (H6): the roll lands on a Hold goal only when RandomRollMayPick allows it; a goal pinned
+                    // with --goal is the caller's choice and is crossed here, then gated by TryCompose's switch check.
+                    if (requestedGoal == null && store.Goals.TryGetValue(goalId, out var rolledGoal)
+                        && rolledGoal.TypeKind == GoalType.Hold && !RandomRollMayPick(rolledGoal, RandomRollIncludesHoldGoals && HoldEnabled(rolledGoal)))
+                        continue;
+
+                    pairs.Add((source.Id, goalId));
+                }
+            }
+
+            return pairs;
+        }
+
+        /// <summary>
+        /// The refusal for a roll whose every candidate pair has weight 0. Names the axis that is actually unpinned,
+        /// because that is the one the caller can pin to get a run.
+        /// </summary>
+        private static string ZeroWeightRefusal(WorldEventAxisStore store, string requestedSource, string requestedGoal)
+        {
+            if (requestedSource != null && requestedGoal == null)
+            {
+                var holdHints = string.Empty;
+
+                if (store.Sources.TryGetValue(requestedSource, out var source))
+                {
+                    foreach (var goalId in (source.CompatibleGoals ?? new List<string>()).OrderBy(g => g, StringComparer.Ordinal))
+                    {
+                        if (store.Goals.TryGetValue(goalId, out var goal) && goal.TypeKind == GoalType.Hold)
+                            holdHints += $"; {goalId} also needs world_events_hold_enabled";
+                    }
+                }
+
+                return $"random composition: every candidate goal for source '{requestedSource}' has random weight 0 " +
+                       $"(pin --goal to start one explicitly{holdHints})";
+            }
+
+            if (requestedGoal != null && requestedSource == null)
+                return $"random composition: every candidate source for goal '{requestedGoal}' has random weight 0 " +
+                       "(pin --source to start one explicitly)";
+
+            return "random composition: every candidate source/goal has random weight 0 " +
+                   "(pin --source or --goal to start one explicitly)";
         }
 
         /// <summary>
@@ -537,6 +679,98 @@ namespace ACE.Server.WorldEvents
                 WipeGraceSeconds = request.WipeGraceSeconds,
                 TeaserLeadSeconds = request.TeaserLeadSeconds
             };
+        }
+
+        /// <summary>
+        /// Orders the candidate (source, goal) pairs by repeated weighted sampling WITHOUT replacement. Each
+        /// step draws a source bucket by weight, then a source inside it, then a goal of that source, each
+        /// share taken over only the pairs still eligible, so P(pair) = bucket x source x goal share.
+        ///
+        /// Bucket = the source's randomGroup (weight from <see cref="WorldEventAxisStore.RandomGroups"/>, a
+        /// source inside it counts by its randomWeight) or, ungrouped, the source itself (its randomWeight is
+        /// the bucket weight). A pinned axis ignores its own weight (it counts as 1) so a weight-0 source or
+        /// goal can still be started explicitly. Pairs with any applicable weight at 0 are dropped.
+        /// Candidates must arrive in a stable order; the result is reproducible for a seeded rng.
+        /// </summary>
+        internal static List<(string sourceId, string goalId)> WeightedPairOrder(WorldEventAxisStore store,
+            IReadOnlyList<(string sourceId, string goalId)> candidates, bool sourcePinned, bool goalPinned, Random rng)
+        {
+            var pool = new List<(string sourceId, string goalId, string bucket, double bucketW, double sourceW, double goalW)>();
+
+            foreach (var (sourceId, goalId) in candidates)
+            {
+                if (!store.Sources.TryGetValue(sourceId, out var source) || !store.Goals.TryGetValue(goalId, out var goal))
+                    continue;
+
+                string bucket;
+                double bucketW;
+                double sourceW;
+
+                if (!string.IsNullOrEmpty(source.RandomGroup) && store.RandomGroups.TryGetValue(source.RandomGroup, out var groupW))
+                {
+                    bucket = "g:" + source.RandomGroup;
+                    bucketW = groupW;
+                    sourceW = source.RandomWeight;
+                }
+                else
+                {
+                    bucket = "s:" + sourceId;
+                    bucketW = source.RandomWeight;
+                    sourceW = 1.0;
+                }
+
+                if (sourcePinned)
+                {
+                    bucketW = 1.0;
+                    sourceW = 1.0;
+                }
+
+                var goalW = goalPinned ? 1.0 : goal.RandomWeight;
+
+                if (bucketW > 0 && sourceW > 0 && goalW > 0)
+                    pool.Add((sourceId, goalId, bucket, bucketW, sourceW, goalW));
+            }
+
+            var ordered = new List<(string sourceId, string goalId)>(pool.Count);
+
+            // A level at a time: pick a key among the distinct keys of the remaining pool by weight.
+            int PickIndex(List<double> weights)
+            {
+                var total = 0.0;
+
+                foreach (var w in weights)
+                    total += w;
+
+                var roll = rng.NextDouble() * total;
+
+                for (var i = 0; i < weights.Count; i++)
+                {
+                    roll -= weights[i];
+
+                    if (roll < 0)
+                        return i;
+                }
+
+                return weights.Count - 1;
+            }
+
+            while (pool.Count > 0)
+            {
+                var buckets = pool.Select(e => e.bucket).Distinct().ToList();
+                var bucket = buckets[PickIndex(buckets.Select(b => pool.First(e => e.bucket == b).bucketW).ToList())];
+
+                var inBucket = pool.Where(e => e.bucket == bucket).ToList();
+                var sources = inBucket.Select(e => e.sourceId).Distinct().ToList();
+                var sourceId = sources[PickIndex(sources.Select(id => inBucket.First(e => e.sourceId == id).sourceW).ToList())];
+
+                var goals = inBucket.Where(e => e.sourceId == sourceId).ToList();
+                var picked = goals[PickIndex(goals.Select(e => e.goalW).ToList())];
+
+                ordered.Add((picked.sourceId, picked.goalId));
+                pool.Remove(picked);
+            }
+
+            return ordered;
         }
 
         /// <summary>Fisher-Yates, in place, using the caller's rng so a seed makes the pick reproducible.</summary>
@@ -669,7 +903,15 @@ namespace ACE.Server.WorldEvents
                 return false;
             }
 
-            position = request.AnchorPosition;
+            // A COPY, never the request's own object: a start-spot rule moves the composed anchor in place
+            // (WorldEventHoldStartSpotRule.AnchorAt), and a random start that refuses one candidate composes the next
+            // from this same request (WorldEventManager.TryStart). Sharing the reference would start every later
+            // candidate from the spot an earlier one was moved to, and would rewrite the caller's request.
+            // relativePos: true copies the raw cell and offsets verbatim; the non-relative constructor would re-derive the
+            // cell from the offsets (SetPosition) when the low word is 0, so the copy would not be exact.
+            var asked = request.AnchorPosition;
+            position = new Position(asked.Cell, asked.PositionX, asked.PositionY, asked.PositionZ,
+                asked.RotationX, asked.RotationY, asked.RotationZ, asked.RotationW, asked.Instance, relativePos: true);
 
             var positionAnchorId = string.IsNullOrWhiteSpace(request.PositionAnchorId) ? HereAnchorId : request.PositionAnchorId;
 

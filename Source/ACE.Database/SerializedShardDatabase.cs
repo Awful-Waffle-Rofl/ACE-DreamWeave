@@ -732,6 +732,168 @@ namespace ACE.Database
             })));
         }
 
+        // Allegiance Avatar - `allegiance_avatar` / `allegiance_avatar_contribution`.
+        //
+        // Both take the generic non-batched Task path, like AddCapLedgerRow above, but for a different reason:
+        // the batching already happened in the caller. AvatarManager accumulates XP feeds in memory and flushes
+        // them periodically as ONE SaveAvatarBatch call (one transaction carrying every dirty Avatar and every
+        // dirty day row), so each queue item is already a whole batch. A batchable queue-item kind would only
+        // merge separate periodic flushes and add another held-over case to the worker loop for nothing.
+        // InsertAvatar is a rare one-off (founding an Avatar). The startup reads (GetAllAvatars,
+        // GetAvatarContributionsSince) are NOT queued: they run synchronously through BaseDatabase before the
+        // world ticks.
+        //
+        // Fire-and-forget, with the same trade as the CAP ledger: the caller pays only an enqueue, and a queued
+        // flush can be lost on an unclean shutdown. The values are absolute, so the next flush rewrites them.
+        // The callbacks run on a thread-pool thread serialized with the worker, never on the world thread; a
+        // caller that touches world state from one must marshal back itself.
+        //
+        // The lists are copied here so a caller that reuses its own list after enqueueing cannot change what is
+        // written. The entities in them are NOT copied: the caller must hand over snapshots it no longer mutates.
+
+        /// <summary>
+        /// Queues one Avatar flush - see ShardDatabase_AllegianceAvatar.SaveAvatarBatch. The callback receives
+        /// true when the batch committed and false when it was refused or failed (nothing written).
+        /// </summary>
+        public void SaveAvatarBatch(IReadOnlyList<AllegianceAvatar> avatars, IReadOnlyList<AllegianceAvatarContribution> rows, Action<bool> callback)
+        {
+            var avatarsCopy = avatars?.ToList();
+            var rowsCopy = rows?.ToList();
+
+            _queue.Add(new QueueEntry(new Task(() =>
+            {
+                var result = BaseDatabase.SaveAvatarBatch(avatarsCopy, rowsCopy);
+                callback?.Invoke(result);
+            })));
+        }
+
+        /// <summary>
+        /// Queues the founding of one Avatar - see ShardDatabase_AllegianceAvatar.InsertAvatar. The callback
+        /// receives (true, new avatar_Id) or (false, 0). The row is read on the worker when the item runs, not
+        /// copied at enqueue, so the caller must not mutate it after this call.
+        /// </summary>
+        public void InsertAvatar(AllegianceAvatar row, Action<bool, uint> callback)
+        {
+            _queue.Add(new QueueEntry(new Task(() =>
+            {
+                var result = BaseDatabase.InsertAvatar(row, out var avatarId);
+                callback?.Invoke(result, avatarId);
+            })));
+        }
+
+        // Allegiance Gauntlet - `allegiance_gauntlet_record`, `allegiance_gauntlet_run`, `allegiance_gauntlet_wave`,
+        // `allegiance_gauntlet_claim`.
+        //
+        // All six take the generic non-batched Task path, like the Avatar block above: each is a rare single-row
+        // write (a run starts, a wave ends, a record is banked, a crate is claimed), so there is nothing to amortise
+        // and a batchable queue-item kind would only add a held-over case to the worker loop. The worker's strict
+        // FIFO order is what keeps one run's writes landing in the order the manager issued them, so the later
+        // absolute run, wave or record write is the one that sticks. The startup calls (GetAllGauntletRecords,
+        // CloseOpenGauntletRuns) are NOT queued: they run synchronously through BaseDatabase before the world ticks.
+        //
+        // Fire-and-forget, with the same trade as the CAP ledger and the Avatar flush: the caller pays only an
+        // enqueue, and a queued write can be lost on an unclean shutdown. The values are absolute, so the next write
+        // of the same row rewrites them. Every callback is nullable, and runs on a thread-pool thread serialized with
+        // the worker, never on the world thread; a caller that touches world state from one must marshal back itself.
+        //
+        // Unlike the Avatar block, each row is COPIED here, at enqueue, so a caller that keeps mutating its live run
+        // object after enqueueing cannot change what this item writes.
+
+        /// <summary>
+        /// Queues the creation of one run row - see ShardDatabase_AllegianceGauntlet.InsertGauntletRun. The callback
+        /// receives (true, new run_Id) or (false, 0).
+        /// </summary>
+        public void InsertGauntletRun(AllegianceGauntletRun row, Action<bool, uint> callback)
+        {
+            var copy = ShardDatabase.CopyGauntletRun(row);
+
+            _queue.Add(new QueueEntry(new Task(() =>
+            {
+                var result = BaseDatabase.InsertGauntletRun(copy, out var runId);
+                callback?.Invoke(result, runId);
+            })));
+        }
+
+        /// <summary>
+        /// Queues one run's absolute progress write - see ShardDatabase_AllegianceGauntlet.SaveGauntletRunEnd. The
+        /// callback receives true when the row was written and false when it was refused, missing, or failed.
+        /// </summary>
+        public void SaveGauntletRunEnd(AllegianceGauntletRun row, Action<bool> callback)
+        {
+            var copy = ShardDatabase.CopyGauntletRun(row);
+
+            _queue.Add(new QueueEntry(new Task(() =>
+            {
+                var result = BaseDatabase.SaveGauntletRunEnd(copy);
+                callback?.Invoke(result);
+            })));
+        }
+
+        /// <summary>
+        /// Queues one wave row's absolute write - see ShardDatabase_AllegianceGauntlet.SaveGauntletWave.
+        /// </summary>
+        public void SaveGauntletWave(AllegianceGauntletWave row, Action<bool> callback)
+        {
+            var copy = ShardDatabase.CopyGauntletWave(row);
+
+            _queue.Add(new QueueEntry(new Task(() =>
+            {
+                var result = BaseDatabase.SaveGauntletWave(copy);
+                callback?.Invoke(result);
+            })));
+        }
+
+        /// <summary>
+        /// Queues one Avatar record's absolute upsert - see ShardDatabase_AllegianceGauntlet.UpsertGauntletRecord.
+        /// </summary>
+        public void UpsertGauntletRecord(AllegianceGauntletRecord row, Action<bool> callback)
+        {
+            var copy = ShardDatabase.CopyGauntletRecord(row);
+
+            _queue.Add(new QueueEntry(new Task(() =>
+            {
+                var result = BaseDatabase.UpsertGauntletRecord(copy);
+                callback?.Invoke(result);
+            })));
+        }
+
+        /// <summary>
+        /// Queues one daily account crate claim - see ShardDatabase_AllegianceGauntlet.TryInsertGauntletDailyClaim.
+        /// The callback receives Inserted or OwnRowOnRetry (both: the claim is this caller's), AlreadyClaimedToday
+        /// (the account's crate for that UTC day is taken), or Failed (unknown: the claim may or may not have
+        /// committed).
+        ///
+        /// <paramref name="claimToken"/> identifies one logical attempt. Null means a fresh token, generated here at
+        /// enqueue. A caller that may resubmit after Failed must generate its token ONCE
+        /// (ShardDatabase.NewGauntletClaimToken), pass it on the first submit, and REUSE THE SAME TOKEN on every
+        /// resubmit: if the failed attempt had in fact committed, the same token reads back as OwnRowOnRetry, while a
+        /// new token reads back as AlreadyClaimedToday, consuming the day with no crate given.
+        /// </summary>
+        public void TryInsertGauntletDailyClaim(uint accountId, DateTime date, uint runId, uint characterId, Action<GauntletClaimInsertResult> callback, string claimToken = null)
+        {
+            var token = claimToken ?? ShardDatabase.NewGauntletClaimToken();
+
+            _queue.Add(new QueueEntry(new Task(() =>
+            {
+                var result = BaseDatabase.TryInsertGauntletDailyClaim(accountId, date, runId, characterId, token);
+                callback?.Invoke(result);
+            })));
+        }
+
+        /// <summary>
+        /// Queues the undo of one daily claim whose crate could not be given - see
+        /// ShardDatabase_AllegianceGauntlet.DeleteGauntletDailyClaim. The callback receives (true, rows deleted) or
+        /// (false, 0) when the delete failed.
+        /// </summary>
+        public void DeleteGauntletDailyClaim(uint accountId, DateTime date, uint runId, uint characterId, Action<bool, int> callback)
+        {
+            _queue.Add(new QueueEntry(new Task(() =>
+            {
+                var result = BaseDatabase.DeleteGauntletDailyClaim(accountId, date, runId, characterId, out var deleted);
+                callback?.Invoke(result, deleted);
+            })));
+        }
+
         // PvP Arena (DreamWeave) - `character_pvp_rating`, `pvp_match`, `pvp_match_participant`.
         //
         // Both take the generic non-batched Task path, like AddSpeedRun and the CAP ledger above: a

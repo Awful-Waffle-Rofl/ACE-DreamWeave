@@ -6,13 +6,14 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 using ACE.Server.WorldEvents;
 using ACE.Server.WorldEvents.Defs;
+using ACE.Server.WorldEvents.Hold;
 
 namespace ACE.Server.Tests
 {
     /// <summary>
     /// Loads the REAL Content/events/axes folder (not a fixture) and checks the Hold goal defend_envoys shipped by
     /// World Events slice H1: it parses and validates as a Hold goal with the 1007650-1007653 wcids, it is listed by the
-    /// ambush source (H6), and a random roll never composes it (the H6 composer gate). Reads files only: no PropertyManager,
+    /// ambush source (H6) and the web-startable envoy_muster source, and a random roll composes it only while world_events_hold_enabled is on (the H6 composer gate). Reads files only: no PropertyManager,
     /// no database (world_events_hold_enabled goes through the composer's seam).
     /// </summary>
     [TestClass]
@@ -50,25 +51,47 @@ namespace ACE.Server.Tests
             Assert.AreEqual(1007653u, goal.Protect.Shrine.Wcid);
         }
 
+        /// <summary>
+        /// Consumer pin: bots classify a client-attackable creature as a monster, so the shipped envoy knights must NOT be
+        /// sent to the client as attackable. Asserts on what the knight tag and the client-Attackable core receive from the shipped goal.
+        /// </summary>
         [TestMethod]
-        public void DefendEnvoys_IsListedByAmbushOnly_SoItCanBePinned()
+        public void DefendEnvoys_KnightsAreNotSentToTheClientAsAttackable()
         {
             var store = WorldEventAxisStore.Load(AxesFolder());
 
-            var listing = store.Sources.Values.Where(s => s.CompatibleGoals != null && s.CompatibleGoals.Contains(GoalId)).Select(s => s.Id).ToList();
+            Assert.IsTrue(store.Goals.TryGetValue(GoalId, out var goal));
+            Assert.IsFalse(goal.Protect.ShowHealthBar, "defend_envoys must not show a health bar (it makes the client treat the knights as attackable monsters)");
 
-            CollectionAssert.AreEqual(new[] { "ambush" }, listing,
-                "defend_envoys must be listed by exactly the ambush source (H6): listed by " + string.Join(", ", listing));
-            Assert.IsFalse(store.Sources["ambush"].WebStartable, "ambush is not web-startable, so the web Admin panel never offers defend_envoys");
+            var tag = WorldEventSpawner.KnightTag(1, null, goal.Protect.ShowHealthBar);
+
+            Assert.IsFalse(WorldEventHooks.HoldClientAttackable(false, tag.Kind == HoldUnitKind.Knight, tag.ShowHealthBar));
+        }
+
+        [TestMethod]
+        public void DefendEnvoys_IsListedByAmbushAndEnvoyMuster()
+        {
+            var store = WorldEventAxisStore.Load(AxesFolder());
+
+            var listing = store.Sources.Values.Where(s => s.CompatibleGoals != null && s.CompatibleGoals.Contains(GoalId))
+                .Select(s => s.Id).OrderBy(id => id, StringComparer.Ordinal).ToList();
+
+            CollectionAssert.AreEqual(new[] { "ambush", "envoy_muster" }, listing,
+                "defend_envoys must be listed by exactly ambush (in game) and envoy_muster (the web panel): listed by " + string.Join(", ", listing));
+            Assert.IsFalse(store.Sources["ambush"].WebStartable, "ambush stays off the web (its 45 m edges geometry fits almost no town spot)");
+            Assert.IsTrue(store.Sources["envoy_muster"].WebStartable, "envoy_muster is how the web Admin panel offers defend_envoys");
+            CollectionAssert.AreEqual(new[] { GoalId }, store.Sources["envoy_muster"].CompatibleGoals.ToArray(), "envoy_muster offers Hold only");
+
+            var mine = store.Diagnostics.Where(d => d.Contains("envoy_muster", StringComparison.Ordinal)).ToList();
+            Assert.AreEqual(0, mine.Count, "envoy_muster raised load diagnostics: " + string.Join(" | ", mine));
         }
 
         /// <summary>
-        /// The composer gate (H6, owner-pending, built pinned-only): even with world_events_hold_enabled ON, a random roll over
-        /// the real content never lands on defend_envoys, while ambush itself still composes. Flipping
-        /// WorldEventComposer.RandomRollIncludesHoldGoals is the one change that would make this fail.
+        /// The composer gate (H6; owner ruled 2026-11-16 that random rolls may pick Hold): over the real content, a random
+        /// ambush roll lands on defend_envoys for some seeds while world_events_hold_enabled is ON, and never while it is OFF.
         /// </summary>
         [TestMethod]
-        public void DefendEnvoys_IsNeverRandomlyComposed_EvenWithHoldEnabled()
+        public void DefendEnvoys_IsRandomlyComposed_OnlyWithHoldEnabled()
         {
             var store = WorldEventAxisStore.Load(AxesFolder());
             var family = store.Families.Keys.OrderBy(k => k, StringComparer.Ordinal).First();
@@ -77,22 +100,111 @@ namespace ACE.Server.Tests
             var saved = WorldEventComposer.HoldEnabledReader;
             try
             {
+                foreach (var switchOn in new[] { true, false })
+                {
+                    WorldEventComposer.HoldEnabledReader = _ => switchOn;
+
+                    var composed = 0;
+                    var holds = 0;
+
+                    for (var seed = 0; seed < 60; seed++)
+                    {
+                        var request = WorldEventHoldComposerGateTests.Request("ambush", null, family, random: true);
+
+                        if (!WorldEventComposer.TryCompose(store, catalog, request, out var composition, out var error, new Random(seed)))
+                            continue;
+
+                        composed++;
+
+                        if (composition.Goal.Id == GoalId)
+                        {
+                            holds++;
+
+                            // A rolled Hold run rolls no boss (its finale boss is its own), exactly as a pinned start defaults.
+                            Assert.AreEqual(BossKind.None, composition.Boss.Kind, $"seed {seed}: a random Hold roll drew boss {composition.Boss.Kind}");
+                        }
+                    }
+
+                    var candidates = WorldEventComposer.RandomCandidatePairs(store, WorldEventHoldComposerGateTests.Request("ambush", null, family, random: true), "ambush", null);
+
+                    if (switchOn)
+                    {
+                        Assert.IsTrue(candidates.Contains(("ambush", GoalId)), "switch on: defend_envoys must be a candidate pair");
+                        Assert.IsTrue(composed > 0, $"switch {switchOn}: no random ambush roll composed at all, so this test proved nothing");
+                        Assert.IsTrue(holds > 0, $"switch on: no random ambush roll of {composed} composed defend_envoys");
+                    }
+                    else
+                    {
+                        // The Hold filter, not the weights, must be what removes defend_envoys: assert it is absent from the
+                        // pairs fed to WeightedPairOrder, then that the pool left held only weight-0 pairs (kill_count).
+                        Assert.IsFalse(candidates.Contains(("ambush", GoalId)), "switch off: defend_envoys must not be a candidate pair");
+                        CollectionAssert.AreEqual(new[] { ("ambush", "kill_count") }, candidates);
+
+                        Assert.AreEqual(0, composed, $"switch off: {composed} random ambush rolls composed");
+                        Assert.AreEqual(0, holds);
+
+                        Assert.IsFalse(WorldEventComposer.TryCompose(store, catalog, WorldEventHoldComposerGateTests.Request("ambush", null, family, random: true),
+                            out _, out var refusal, new Random(1)));
+                        Assert.AreEqual("random composition: every candidate goal for source 'ambush' has random weight 0 " +
+                                        "(pin --goal to start one explicitly; defend_envoys also needs world_events_hold_enabled)", refusal);
+                    }
+                }
+            }
+            finally
+            {
+                WorldEventComposer.HoldEnabledReader = saved;
+            }
+        }
+
+        /// <summary>
+        /// Owner ruling 2026-11-16: Hold has the same likelihood as every other option. An unrestricted in-game random roll
+        /// never lands on envoy_muster (inGameRandom false; ambush already carries the one defend_envoys pair), while a roll
+        /// restricted to the web's allowed sources, and a pinned source, still reach it.
+        /// </summary>
+        [TestMethod]
+        public void EnvoyMuster_IsSkippedByAnUnrestrictedRoll_ButNotByAWebRoll()
+        {
+            var store = WorldEventAxisStore.Load(AxesFolder());
+            var family = store.Families.Keys.OrderBy(k => k, StringComparer.Ordinal).First();
+            var catalog = WorldEventHoldComposerGateTests.CatalogFor(family);
+
+            Assert.IsFalse(store.Sources["envoy_muster"].InGameRandom);
+            Assert.IsTrue(store.Sources.Values.Where(s => s.Id != "envoy_muster").All(s => s.InGameRandom), "only envoy_muster opts out");
+
+            var saved = WorldEventComposer.HoldEnabledReader;
+            try
+            {
                 WorldEventComposer.HoldEnabledReader = _ => true;
 
-                var composed = 0;
+                var unrestricted = 0;
+                var web = 0;
 
-                for (var seed = 0; seed < 60; seed++)
+                for (var seed = 0; seed < 200; seed++)
                 {
-                    var request = WorldEventHoldComposerGateTests.Request("ambush", null, family, random: true);
+                    var request = WorldEventHoldComposerGateTests.Request(null, null, family, random: true);
 
-                    if (!WorldEventComposer.TryCompose(store, catalog, request, out var composition, out var error, new Random(seed)))
-                        continue;
+                    if (WorldEventComposer.TryCompose(store, catalog, request, out var composition, out _, new Random(seed)))
+                    {
+                        unrestricted++;
+                        Assert.AreNotEqual("envoy_muster", composition.Source.Id, $"seed {seed}: an unrestricted roll landed on envoy_muster");
+                    }
 
-                    composed++;
-                    Assert.AreNotEqual(GoalId, composition.Goal.Id, $"seed {seed}: a random roll composed defend_envoys");
+                    var webRequest = WorldEventHoldComposerGateTests.Request(null, null, family, random: true);
+                    webRequest.AllowedSourceIds = new[] { "envoy_muster" };
+
+                    if (WorldEventComposer.TryCompose(store, catalog, webRequest, out var webComposition, out _, new Random(seed)))
+                    {
+                        web++;
+                        Assert.AreEqual("envoy_muster", webComposition.Source.Id);
+                    }
                 }
 
-                Assert.IsTrue(composed > 0, "no random ambush roll composed at all, so this test proved nothing");
+                Assert.IsTrue(unrestricted > 0, "no unrestricted roll composed at all, so this test proved nothing");
+                Assert.IsTrue(web > 0, "a web roll restricted to envoy_muster never composed, so the flag leaked into restricted rolls");
+
+                var pinned = WorldEventHoldComposerGateTests.Request("envoy_muster", null, family, random: true);
+                Assert.IsTrue(WorldEventComposer.TryCompose(store, catalog, pinned, out var pinnedComposition, out var pinnedError, new Random(1)), pinnedError);
+                Assert.AreEqual("envoy_muster", pinnedComposition.Source.Id);
             }
             finally
             {

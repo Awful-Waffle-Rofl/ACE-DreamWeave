@@ -44,8 +44,25 @@ namespace ACE.Server.WorldObjects
             if (!ElementalProficiencyMath.HasEffect(type))
                 return 0.0;
 
-            var rank = GetElementalProficiencyRank(target);
-            if (rank <= 0)
+            return ElementalProficiencyMagnitudeAtRank(type, GetElementalProficiencyRank(target));
+        }
+
+        /// <summary>
+        /// The Slash crit-chance bonus a landed Slash spell gets against an ELIGIBLE monster target (what
+        /// <see cref="GetElementalProficiencySlashCritBonus"/> returns for any such target): the held rank's Slash
+        /// magnitude. For readers with no target in hand (Character Details); 0 with no rank.
+        /// </summary>
+        public float GetElementalProficiencySlashCritBonusVsMonsters()
+        {
+            var rank = TryGetClassAbility(ClassAbilityId.ElementalRend, out var held) ? held : 0;
+
+            return (float)ElementalProficiencyMagnitudeAtRank(DamageType.Slash, rank);
+        }
+
+        /// <summary>GetElementalProficiencyMagnitude's arithmetic once the rank is known (0 for no rank or no effect).</summary>
+        private double ElementalProficiencyMagnitudeAtRank(DamageType type, int rank)
+        {
+            if (!ElementalProficiencyMath.HasEffect(type) || rank <= 0)
                 return 0.0;
 
             var scaled = ElementalProficiencyMath.IsAffinityScaled(type);
@@ -169,19 +186,31 @@ namespace ACE.Server.WorldObjects
                 return;
 
             var ticks = ElementalProficiencyMath.AcidTicks();
-            var perTick = ElementalProficiencyMath.AcidDamagePerTick(projectile.LastAppliedDamage, fraction, ticks);
-            if (perTick <= 0.0)
+            var tickAmount = ElementalAcidTickAmount(projectile.LastAppliedDamage, projectile.LastAppliedWielderDamageMod, fraction, ticks);
+            if (tickAmount == 0)
                 return;
 
             // Everything the caster-side work needs is captured NOW; the dictionary itself is only ever
             // touched inside an action on THIS player's own queue (the same one the tick chain runs on),
             // because this method is reached from the projectile's collision, which may be another thread.
-            var tickAmount = (uint)Math.Max(1.0, Math.Round(perTick));
             var interval = ElementalProficiencyMath.AcidSeconds() / ticks;
 
             var chain = new ActionChain();
             chain.AddAction(this, () => StartElementalAcidBurn(target, tickAmount, ticks, interval));
             chain.EnqueueChain();
+        }
+
+        /// <summary>
+        /// One Acid burn tick, from the hit's applied damage: 0 for no burn, otherwise at least 1. Each tick lands through
+        /// Creature.TakeDamage, whose Summoner focus multiplier cuts a focus wielder's damage again, so the hit's own cut
+        /// (<paramref name="wielderDamageMod"/>, SpellProjectile.LastAppliedWielderDamageMod) is divided back out first and
+        /// the burn carries the cut exactly once.
+        /// </summary>
+        internal static uint ElementalAcidTickAmount(uint appliedDamage, float wielderDamageMod, double fraction, int ticks)
+        {
+            var perTick = ElementalProficiencyMath.AcidDamagePerTick(SummonerFocusMath.BeforeWielderCut(appliedDamage, wielderDamageMod), fraction, ticks);
+
+            return perTick <= 0.0 ? 0u : (uint)Math.Max(1.0, Math.Round(perTick));
         }
 
         /// <summary>

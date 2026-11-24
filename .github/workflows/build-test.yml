@@ -8,16 +8,17 @@ on:
     branches:
       - 'master'
   # Pull requests skip the build when they touch nothing the build can see. Content units, the
-  # prod manifest, docs and markdown are applied by tools/apply-content.sh or read by people,
-  # never compiled; content-lint.yml covers Content/. A PR mixing code and content still builds.
+  # prod manifest and markdown outside Docs/ are applied by tools/apply-content.sh or read by people,
+  # never compiled; content-lint.yml covers Content/ (Docs/ is re-included below, see "Test impact"). A PR mixing code and content still builds.
   # The one thing this defers: a handful of tests walk up to Content/ and could fail on a
   # content-only change - they now surface on the master push after merge instead of on the PR.
   #
   # Also skips on tools/** (except tools/ca-planner/** and tools/salvage-sim/**, whose catalogs are
   # read directly by ClassAbilityCapQuestTests.cs, ClassAbilityPlannerCatalogTests.cs and
-  # SalvageSimCatalogTests.cs), .claude/** and any workflow file other than this one - none of
+  # SalvageSimCatalogTests.cs), third_party/dereth/** (the vendored Dereth.Network mod: not in ACE.sln,
+  # never read by the build or the tests), .claude/** and any workflow file other than this one - none of
   # those are read by the build or the test suites (verified by grepping every Source/*Tests*/**
-  # project, the path-walker tests, csproj Content/None includes and Directory.Build.*; the only
+  # project, the path-walker tests, csproj Content/None includes and Source/Directory.Build.props, which is under Source/ and so still triggers a build; the only
   # repo-root-relative literals found outside Content/Docs were deploy/prod|stage/Config.js.template
   # in StartupDatabaseStepsTests.cs, which live under deploy/ and stay in scope). GitHub forbids
   # combining `paths` and `paths-ignore` on one event, so this is one `paths:` list: '**' followed
@@ -26,19 +27,41 @@ on:
   # deliberately NOT excluded: build-test's own "Launch world import in the background" and
   # "Verify world-db release pin" steps read .github/actions/import-world-db/import.sh and
   # action.yml directly, so a change there must still build.
+  #
+  # Test impact (tools/test-impact, design step 6): tools/test-impact/** is re-included because the
+  # selector, the scope decision and their self-test run here. tools/loot-catalog/**,
+  # tools/suit-catalog/**, tools/vtank-monster-pack/** and Docs/** are re-included (owner ruling
+  # 2026-11-18) because tests read them; once TEST_IMPACT_MODE is narrow their `readers` rules select
+  # only the reading classes, and until then such a PR runs the full suite. Docs/** sits after
+  # '!**.md' on purpose, so a markdown file under Docs/ also triggers.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - '**'
       - '!Content/**'
+      - '!third_party/dereth/**'
       - '!Docs/**'
       - '!**.md'
       - '!tools/**'
       - 'tools/ca-planner/**'
       - 'tools/salvage-sim/**'
+      - 'tools/check-test-budget.py'
+      - 'tools/test_check_test_budget.py'
+      - 'tools/test-budget-skips.py'
+      - 'tools/test_test_budget_skips.py'
+      - 'tools/test-impact/**'
+      - 'tools/loot-catalog/**'
+      - 'tools/suit-catalog/**'
+      - 'tools/vtank-monster-pack/**'
+      - 'Docs/**'
       - '!.claude/**'
       - '!.github/workflows/**'
       - '.github/workflows/build-test.yml'
+      # The deploy gates' covered-run refusal is tested by test_superseded.py, which runs here.
+      - '.github/workflows/deploy-prod.yml'
+      - '.github/workflows/deploy-stage.yml'
+      - '.github/workflows/seed-stage-roster.yml'
+      - '.github/workflows/seed-trial-archetypes.yml'
 
 concurrency:
   # One in-flight run per pull request: pushing a fixup cancels the superseded run instead of
@@ -73,16 +96,26 @@ jobs:
     # 'pull_request' triggers the draft/label check at all.
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft || contains(github.event.pull_request.labels.*.name, 'ci')
     # contents: read for checkout; actions: read for the verified-tree lookup below, which lists
-    # artifacts and reads the producing run through the REST API.
+    # artifacts and reads the producing run through the REST API. checks: read for the test-impact
+    # master audit (mode shadow or narrow only), which reads build-test's check runs on the commits it
+    # walks (GET commits/{sha}/check-runs 403s without it, deploy-stage.yml's permissions note).
     permissions:
       contents: read
       actions: read
+      checks: read
     env:
       WORLD_DB_RELEASE_TAG: v0.9.294
       WORLD_DB_RELEASE_ASSET: ACE-World-Database-v0.9.294.sql.zip
     steps:
+      # fetch-depth 2 on pull_request (1, the default, on push, so a push checks out exactly as before): the
+      # test-impact selector diffs HEAD^1..HEAD. On a pull_request run HEAD is
+      # refs/pull/<n>/merge, whose first parent is master as of GitHub's last merge-ref computation; that
+      # can lag master, and it is still the right base, because it is exactly the change as tested
+      # (design section 15). Never compare against origin/master here.
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
 
       # Verified-tree short-circuit (.github/actions/verified-tree). The key is the checked-out
       # commit's TREE id: a pull_request run checks out refs/pull/<n>/merge, and when master has
@@ -93,16 +126,56 @@ jobs:
       # still concludes success under the same job name, which is what the deploy gates read.
       # Only push runs look up; schedule/workflow_dispatch and pull_request runs never do. Any
       # lookup doubt (API error, no match, a non-success or fork producer) runs everything.
+      #
+      # Superseded-push skip: when the own-tree lookup misses but master has already moved on to
+      # a STRICT descendant of this commit (a merge train lands its members seconds apart), the
+      # run looks up the TIP's tree key instead. If that exact tree was verified (for a train, by
+      # the train PR's own run, whose merge tree is the final master tree), this commit is covered
+      # by it: heavy steps are skipped, the job concludes success, and the step summary names the
+      # covering tip and run. There is no wait.
+      #
+      # Covered while pending (test-impact design step 11, owner ruling 2026-11-18): when the tip
+      # key is NOT verified (a narrow train PR never records one), this commit is still covered if
+      # the tip has exactly one queued or in-progress first-attempt push run of this workflow on
+      # master - a push run is always the full suite. The check is one API call made once; a tip
+      # whose push run is not registered yet, or that already completed (failed, cancelled, or a
+      # success without a marker), or anything unreadable, means this commit runs in full. If the
+      # pending tip run later fails, this commit's covered success stands: it is undeployable (the
+      # deploy gates refuse any covered sha), master is red at the tip (fix forward or revert), and
+      # in mode shadow or narrow the tip's master audit walks back through this commit. A cancelled or
+      # never-started tip run is caught only by the deploy gates (superseded.py has the full rule).
+      # A covered run never records a marker for its own tree (record is pull_request only here
+      # anyway), so coverage never vouches transitively. The steps.verified id below is the combined verdict.
+      - name: Detect a superseding master tip (master push only)
+        id: vt-tip
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        # Fails closed: a failure here leaves the verdict empty, which is the full run.
+        continue-on-error: true
+        uses: ./.github/actions/verified-tree
+        with:
+          mode: superseded
+
       - name: Compute the verified-tree key
         id: vt-key
         shell: bash
+        env:
+          VT_SUPERSEDED: ${{ steps.vt-tip.outputs.superseded }}
+          VT_TIP_SHA: ${{ steps.vt-tip.outputs.tip-sha }}
         run: |
           tree=$(git rev-parse 'HEAD^{tree}')
           echo "name=verified-build-test-$tree" >> "$GITHUB_OUTPUT"
           echo "verified-tree key: verified-build-test-$tree (tree of $GITHUB_SHA)"
+          if [ "${VT_SUPERSEDED:-}" = "true" ] && [ -n "${VT_TIP_SHA:-}" ]; then
+            if tip_tree=$(git rev-parse --verify --quiet "$VT_TIP_SHA^{tree}"); then
+              echo "tip-name=verified-build-test-$tip_tree" >> "$GITHUB_OUTPUT"
+              echo "superseding tip key: verified-build-test-$tip_tree (tree of $VT_TIP_SHA)"
+            else
+              echo "::warning::could not read the tree of superseding tip $VT_TIP_SHA; no tip lookup (full run unless the own key verifies)."
+            fi
+          fi
 
       - name: Verified-tree lookup (master push only)
-        id: verified
+        id: verified-own
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         uses: ./.github/actions/verified-tree
         with:
@@ -110,6 +183,94 @@ jobs:
           names: ${{ steps.vt-key.outputs.name }}
           workflow-path: .github/workflows/build-test.yml
           token: ${{ github.token }}
+
+      - name: Verified-tree lookup of the superseding tip (master push only)
+        id: verified-tip
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.verified-own.outputs.verified != 'true' && steps.vt-key.outputs.tip-name != ''
+        # Fails closed: a failure here leaves the verdict empty, which is the full run.
+        continue-on-error: true
+        uses: ./.github/actions/verified-tree
+        with:
+          mode: lookup
+          names: ${{ steps.vt-key.outputs.tip-name }}
+          workflow-path: .github/workflows/build-test.yml
+          token: ${{ github.token }}
+
+      - name: Verified-tree pending check of the superseding tip (master push only)
+        id: verified-pending
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.verified-own.outputs.verified != 'true' && steps.vt-key.outputs.tip-name != '' && steps.verified-tip.outputs.verified != 'true'
+        # Fails closed: a failure here leaves the verdict empty, which is the full run.
+        continue-on-error: true
+        uses: ./.github/actions/verified-tree
+        with:
+          mode: pending
+          tip-sha: ${{ steps.vt-tip.outputs.tip-sha }}
+          workflow-path: .github/workflows/build-test.yml
+          token: ${{ github.token }}
+
+      - name: Verified-tree verdict (master push only)
+        id: verified
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        # Fails closed: a failure here leaves the verdict empty, which is the full run.
+        continue-on-error: true
+        uses: ./.github/actions/verified-tree
+        with:
+          mode: combine
+          job-label: build-test
+          own-verified: ${{ steps.verified-own.outputs.verified }}
+          own-run-url: ${{ steps.verified-own.outputs.run-url }}
+          own-matched-name: ${{ steps.verified-own.outputs.matched-name }}
+          superseded: ${{ steps.vt-tip.outputs.superseded }}
+          tip-sha: ${{ steps.vt-tip.outputs.tip-sha }}
+          tip-names: ${{ steps.vt-key.outputs.tip-name }}
+          tip-verified: ${{ steps.verified-tip.outputs.verified }}
+          tip-run-url: ${{ steps.verified-tip.outputs.run-url }}
+          tip-matched-name: ${{ steps.verified-tip.outputs.matched-name }}
+          tip-pending: ${{ steps.verified-pending.outputs.pending }}
+          tip-pending-sha: ${{ steps.verified-pending.outputs.pending-tip-sha }}
+          tip-pending-run-url: ${{ steps.verified-pending.outputs.pending-run-url }}
+
+      # Deploy-gate signal. Runs ONLY on a run covered by a newer master tip (either basis: tip
+      # verified, or tip's full run pending), and does nothing but
+      # succeed: deploy-stage.yml, deploy-prod.yml, seed-stage-roster.yml and seed-trial-archetypes.yml
+      # read this job's steps through the jobs API and refuse to deploy a sha whose newest build-test
+      # job has a successful step whose name starts with "Covered by newer master tip". Do not
+      # rename it without changing all four gates.
+      - name: Covered by newer master tip ${{ steps.verified.outputs.covering-sha }}
+        if: steps.verified.outputs.source == 'superseded'
+        shell: bash
+        env:
+          VT_COVERING_SHA: ${{ steps.verified.outputs.covering-sha }}
+        run: echo "This run of $GITHUB_SHA was covered by master tip $VT_COVERING_SHA and is NOT deployable; deploy the tip, or re-run build-test on this sha."
+
+      # The verified-tree action's own self-test (detect against throwaway git repos, the combine
+      # table, lookup.py against a local fake REST API, and the deploy gates' covered-run refusal
+      # run against recorded API JSON). Pull requests
+      # only: this workflow's pull_request path filter covers .github/actions/**, which is where
+      # every file it tests lives. Seconds, stdlib only, no network.
+      - name: Self-test the verified-tree action (pull_request only)
+        if: github.event_name == 'pull_request'
+        run: python3 -I .github/actions/verified-tree/test_superseded.py
+
+      # Pins the test-impact wiring in this file: push is never narrow, only "Decide test scope" writes
+      # narrow, the record step's scope guards, every test step's run_ guard and exclusion, no step passing
+      # both filters, and mode off behaving exactly as the pre-wiring workflow (a golden extracted from
+      # origin/master, tools/test-impact/ci/build-test.off-golden.json; see tools/test-impact/ci/README.md for
+      # regenerating it). Seconds, stdlib plus PyYAML. The public mirror has no tools/, so it no-ops there.
+      - name: Self-test the test-impact CI wiring (pull_request only)
+        if: github.event_name == 'pull_request' && hashFiles('tools/test-impact/test_ci_workflow.py') != ''
+        run: |
+          # The invariant and golden checks (about 4 s) run on every pull_request run, a build-test.yml edit
+          # included. The mutation pass (about 2 min on the runner) measures the self-test's own discriminating
+          # power, which changes only when the self-test does, so CI runs it only when this change touches
+          # test_ci_workflow.py or ci/ (or the diff cannot be read). Anyone editing the self-test also runs it
+          # locally with mutations (tools/test-impact/ci/README.md).
+          args=()
+          if git diff --quiet HEAD^1 HEAD -- tools/test-impact/test_ci_workflow.py tools/test-impact/ci; then
+            args+=(--no-mutations)
+          fi
+          python3 -I tools/test-impact/test_ci_workflow.py "${args[@]}"
+
       # The image Dockerfile copies each project's .csproj as its own layer and then restores the
       # whole solution, so a project added to Source/ACE.sln without a matching COPY line fails
       # `dotnet restore` inside the image build - and only there, at deploy time, long after this
@@ -137,7 +298,23 @@ jobs:
               echo "::warning file=Dockerfile::Dockerfile copies Source/$d/*.csproj but that directory does not exist here - an image build from this checkout would fail at that COPY."
             fi
           done
-          if [ "$rc" -eq 0 ]; then echo "Dockerfile COPY list matches Source/ACE.sln ($(printf '%s\n' "$sln_dirs" | wc -l) projects)."; fi
+          # MSBuild-wide files feed properties to the csprojs at restore time, so each one under Source/
+          # must be COPYed before the Dockerfile's `RUN dotnet restore` (run 44365868046 failed NU1015
+          # because Source/Directory.Build.props, which supplies $(MSTestVersion), was not).
+          # `|| true` keeps a no-match from aborting the step silently if it ever runs under pipefail.
+          restore_line=$(grep -nE '^RUN dotnet restore' Dockerfile | head -1 | cut -d: -f1 || true)
+          if [ -z "$restore_line" ]; then
+            echo "::error file=Dockerfile::no 'RUN dotnet restore' line found - this check cannot verify the restore layer."
+            rc=1
+          fi
+          for f in $(cd Source && find . -maxdepth 2 \( -iname 'Directory.Build.props' -o -iname 'Directory.Build.targets' -o -iname 'Directory.Packages.props' -o -iname 'NuGet.config' -o -iname 'global.json' \) | sed 's#^\./##' | sort); do
+            copy_line=$(grep -nE '^COPY ' Dockerfile | grep -F "COPY ./Source/$f " | head -1 | cut -d: -f1 || true)
+            if [ -z "$copy_line" ] || [ -z "$restore_line" ] || [ "$copy_line" -gt "$restore_line" ]; then
+              echo "::error file=Dockerfile::Source/$f affects every project's restore but Dockerfile does not 'COPY ./Source/$f ...' before 'RUN dotnet restore' - the image build will fail or restore with different properties."
+              rc=1
+            fi
+          done
+          if [ "$rc" -eq 0 ]; then echo "Dockerfile COPY list matches Source/ACE.sln ($(printf '%s\n' "$sln_dirs" | wc -l) projects) and copies every MSBuild-wide file before restore."; fi
           exit $rc
       - name: Setup .NET
         if: steps.verified.outputs.verified != 'true'
@@ -248,9 +425,53 @@ jobs:
           disown
           echo "world import launched in the background"
 
+      # Test impact selector (tools/test-impact), pull_request runs in mode shadow or narrow only
+      # (repo variable TEST_IMPACT_MODE; unset means off, and off never reaches this step). It builds and
+      # runs in the background, like the world import above, so it overlaps Build without being part of
+      # the Build step's timing (ci-budget.json pins that step's p90). It runs under nice 19, its own
+      # MSBuild node (-nodeReuse:false) and its own compiler process (UseSharedCompilation=false), so
+      # Build keeps the CPU; a concurrent build was proven safe in design step 0. "Decide test scope"
+      # waits for it, and any failure (no launch, a non-zero exit, a timeout, a bad selection) is full.
+      - name: Launch the test-impact selector in the background (pull_request, mode shadow or narrow)
+        if: github.event_name == 'pull_request' && (vars.TEST_IMPACT_MODE == 'shadow' || vars.TEST_IMPACT_MODE == 'narrow') && hashFiles('tools/test-impact/TestImpact.csproj') != ''
+        continue-on-error: true
+        shell: bash
+        env:
+          TI_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          d="$RUNNER_TEMP/test-impact"
+          mkdir -p "$d"
+          rm -f "$d/selector.exit" "$d/selector.launched" "$d/selector.pid" "$d/selector.log" "$RUNNER_TEMP/selection.json"
+          labels=()
+          names=()
+          while IFS= read -r l; do
+            if [ -n "$l" ]; then labels+=(--label "$l"); names+=("$l"); fi
+          done < <(python3 -I -c 'import json, os; v = json.loads(os.environ.get("TI_LABELS") or "null") or []; print("\n".join(x for x in v if isinstance(x, str)))')
+          lower=()
+          if command -v nice >/dev/null 2>&1; then lower+=(nice -n 19); fi
+          if command -v ionice >/dev/null 2>&1; then lower+=(ionice -c 2 -n 7); fi
+          setsid nohup "${lower[@]}" bash -c '
+            d="$1"; shift
+            {
+              dotnet build tools/test-impact -c Release -nodeReuse:false -p:UseSharedCompilation=false &&
+              dotnet tools/test-impact/bin/Release/net10.0/test-impact.dll select --repo . --base HEAD^1 --head HEAD "$@" --out "$RUNNER_TEMP/selection.json"
+            } > "$d/selector.log" 2>&1 < /dev/null
+            echo $? > "$d/selector.exit"
+          ' _ "$d" "${labels[@]}" >/dev/null 2>&1 &
+          echo $! > "$d/selector.pid"
+          disown
+          touch "$d/selector.launched"
+          if [ "${#names[@]}" -gt 0 ]; then shown=$(printf "'%s' " "${names[@]}"); else shown="none"; fi
+          echo "test-impact selector launched in the background (labels: ${shown% })"
+
       - name: Build
         if: steps.verified.outputs.verified != 'true'
-        run: dotnet build Source/ACE.sln -c Release -p:Platform=x64
+        # RunAnalyzers=false skips Roslyn analyzers (CA*, MSTEST*, EF1001). Here they only ever emit
+        # warnings, which no step reads; source generators still run, and the emitted assemblies were
+        # byte-identical with and without it (59 DLLs, measured 2026-11-17). About 29% off a clean
+        # build (CI Build step ~200 s -> ~145 s projected). Local builds keep analyzers on. Trade-off:
+        # a future error-severity analyzer finding would no longer fail CI.
+        run: dotnet build Source/ACE.sln -c Release -p:Platform=x64 -p:RunAnalyzers=false
 
       - name: Wait for world import
         if: steps.verified.outputs.verified != 'true'
@@ -274,6 +495,44 @@ jobs:
             exit 1
           fi
           echo "world import finished OK (exit $rc)"
+
+      # The ONLY writer of scope=narrow (tools/test-impact/test_ci_workflow.py pins that). Every run that
+      # is not a pull_request in mode shadow or narrow takes the inline full branch below without running
+      # any script, so a push, the public mirror (no tools/) and mode off are full by construction. A
+      # pull_request in mode shadow or narrow hands off to tools/test-impact/ci_scope.py, which waits for
+      # the selector and decides; narrow needs mode narrow, no ci-full label, a selector exit of 0 and a
+      # valid narrow selection for exactly this HEAD^1..HEAD. Any script failure falls back to full.
+      # Outputs: scope (full|narrow) and run_<project> per test project (true|false; always true under
+      # full). It also writes $RUNNER_TEMP/test-scope, which the narrow test branches and the record step
+      # re-read.
+      - name: Decide test scope
+        id: scope
+        shell: bash
+        env:
+          TI_MODE: ${{ vars.TEST_IMPACT_MODE }}
+          TI_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && { [ "${TI_MODE:-}" = "shadow" ] || [ "${TI_MODE:-}" = "narrow" ]; } && [ -f tools/test-impact/ci_scope.py ]; then
+            head=$(git rev-parse --verify --quiet 'HEAD^{commit}' || true)
+            base=$(git rev-parse --verify --quiet 'HEAD^1^{commit}' || true)
+            if python3 -I tools/test-impact/ci_scope.py decide --event "$GITHUB_EVENT_NAME" --mode "$TI_MODE" \
+                --labels-json "$TI_LABELS" --work-dir "$RUNNER_TEMP/test-impact" --selection "$RUNNER_TEMP/selection.json" \
+                --head "$head" --base "$base" --scope-file "$RUNNER_TEMP/test-scope" --github-output "$GITHUB_OUTPUT" \
+                --summary "$GITHUB_STEP_SUMMARY"; then
+              exit 0
+            fi
+            echo "::warning::test-impact scope script failed; running full."
+          fi
+          printf 'full\n' > "$RUNNER_TEMP/test-scope"
+          {
+            echo "run_ACE_Server_Tests=true"
+            echo "run_ACE_Content_Tools_Tests=true"
+            echo "run_ACE_Database_Tests=true"
+            echo "run_ACE_DatLoader_Tests=true"
+            echo "run_ACE_Database_LoadTest_Tests=true"
+            echo "scope=full"
+          } >> "$GITHUB_OUTPUT"
+          echo "test scope: full (event $GITHUB_EVENT_NAME, mode '${TI_MODE:-unset}')"
       # MySQL-gated tests (AccountTests, StartupTests, WeenieSearchTests) now run against the
       # runner's own preinstalled MySQL (started above) and the imported world database release,
       # via the Config.js.example fallback (root/no password/127.0.0.1:3306) that TestEnvironment
@@ -289,13 +548,45 @@ jobs:
       # exactly where --no-build -p:Platform=x64 looks, so nothing is missing. Keep -p:Platform=x64
       # on these lines: without it --no-build looks in bin/Release/net10.0 and either errors or
       # (locally) runs a stale AnyCPU assembly - see CLAUDE.md's Test section.
+      # Source/Directory.Build.props now defaults Platform to x64 for *.Tests projects, but that moves only the
+      # test assembly's own output directory: ProjectReferences (ACE.Server and below) still build with the
+      # caller's platform, so a bare local `dotnet test` can still rebuild ACE.Server AnyCPU. CI is unaffected
+      # because it passes -p:Platform=x64 explicitly; keep passing it.
+      # The same props file gives every *.Tests project a default filter that excludes the Probe and Slow test
+      # categories, so a plain local run stays fast. A --filter on the command line REPLACES that default, so
+      # EVERY test step below passes its own: Probe (measurement probes that always end Inconclusive) stays
+      # out, Slow runs here. Do not drop a --filter or that step silently stops running Slow tests.
+      # Test impact: under scope narrow (only "Decide test scope" can set it) each step runs its project with
+      # the selection's filter VERBATIM from a generated runsettings TestCaseFilter, and replaces --filter with
+      # -p:VSTestTestCaseFilter=<the same exclusion>, which keeps Slow tests in; the two are never passed
+      # together, because the MSBuild property overrides a --filter on the same command line (schema
+      # "Never pass both filters"). A project the selection does not run is skipped. The else branch is the
+      # pre-wiring command, byte for byte, and is what every full run (and mode off) executes.
       - name: Test ACE.Server.Tests
-        if: steps.verified.outputs.verified != 'true'
-        run: dotnet test Source/ACE.Server.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings
+        if: steps.verified.outputs.verified != 'true' && (steps.scope.outputs.scope != 'narrow' || steps.scope.outputs.run_ACE_Server_Tests != 'false')
+        env:
+          TI_SCOPE: ${{ steps.scope.outputs.scope }}
+        run: |
+          rs="$RUNNER_TEMP/test-impact/ACE.Server.Tests.runsettings"
+          if [ "${TI_SCOPE:-}" = "narrow" ] && [ "$(cat "$RUNNER_TEMP/test-scope" 2>/dev/null)" = "narrow" ] && [ -f "$rs" ]; then
+            echo "test-impact narrow run: class filter from $rs"
+            dotnet test Source/ACE.Server.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings "$rs" "-p:VSTestTestCaseFilter=TestCategory!=Probe" --logger "trx;LogFileName=ACE.Server.Tests.trx" --results-directory "$RUNNER_TEMP/test-results"
+          else
+            dotnet test Source/ACE.Server.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings --filter "TestCategory!=Probe" --logger "trx;LogFileName=ACE.Server.Tests.trx" --results-directory "$RUNNER_TEMP/test-results"
+          fi
       # ACE.Content.Tools.Tests is excluded from the public ACE-DreamWeave publish alongside ACE.Content.Tools, so no-op if the project is absent
       - name: Test ACE.Content.Tools.Tests
-        if: steps.verified.outputs.verified != 'true' && hashFiles('Source/ACE.Content.Tools.Tests/ACE.Content.Tools.Tests.csproj') != ''
-        run: dotnet test Source/ACE.Content.Tools.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings
+        if: steps.verified.outputs.verified != 'true' && hashFiles('Source/ACE.Content.Tools.Tests/ACE.Content.Tools.Tests.csproj') != '' && (steps.scope.outputs.scope != 'narrow' || steps.scope.outputs.run_ACE_Content_Tools_Tests != 'false')
+        env:
+          TI_SCOPE: ${{ steps.scope.outputs.scope }}
+        run: |
+          rs="$RUNNER_TEMP/test-impact/ACE.Content.Tools.Tests.runsettings"
+          if [ "${TI_SCOPE:-}" = "narrow" ] && [ "$(cat "$RUNNER_TEMP/test-scope" 2>/dev/null)" = "narrow" ] && [ -f "$rs" ]; then
+            echo "test-impact narrow run: class filter from $rs"
+            dotnet test Source/ACE.Content.Tools.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings "$rs" "-p:VSTestTestCaseFilter=TestCategory!=Probe" --logger "trx;LogFileName=ACE.Content.Tools.Tests.trx" --results-directory "$RUNNER_TEMP/test-results"
+          else
+            dotnet test Source/ACE.Content.Tools.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings --filter "TestCategory!=Probe" --logger "trx;LogFileName=ACE.Content.Tools.Tests.trx" --results-directory "$RUNNER_TEMP/test-results"
+          fi
       # ACE_REQUIRE_WORLD_DB=1 makes the bulk weenie loader's tests (WeenieBulkLoaderTests) FAIL instead of
       # reporting Inconclusive if this job's world database is ever unreachable - a blocking gate must not be
       # able to turn itself off quietly.
@@ -304,37 +595,193 @@ jobs:
       # full fork manifest (a strict superset of this job's retail-only import), whenever the weenie reader or
       # any content changes. Remove the filter only if that job stops covering it.
       - name: Test ACE.Database.Tests
-        if: steps.verified.outputs.verified != 'true'
+        if: steps.verified.outputs.verified != 'true' && (steps.scope.outputs.scope != 'narrow' || steps.scope.outputs.run_ACE_Database_Tests != 'false')
         env:
           ACE_REQUIRE_WORLD_DB: '1'
-        run: dotnet test Source/ACE.Database.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings --filter "FullyQualifiedName!~BulkMatchesPerId"
+          TI_SCOPE: ${{ steps.scope.outputs.scope }}
+        run: |
+          rs="$RUNNER_TEMP/test-impact/ACE.Database.Tests.runsettings"
+          if [ "${TI_SCOPE:-}" = "narrow" ] && [ "$(cat "$RUNNER_TEMP/test-scope" 2>/dev/null)" = "narrow" ] && [ -f "$rs" ]; then
+            echo "test-impact narrow run: class filter from $rs"
+            dotnet test Source/ACE.Database.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings "$rs" "-p:VSTestTestCaseFilter=FullyQualifiedName!~BulkMatchesPerId" --logger "trx;LogFileName=ACE.Database.Tests.trx" --results-directory "$RUNNER_TEMP/test-results"
+          else
+            dotnet test Source/ACE.Database.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings --filter "FullyQualifiedName!~BulkMatchesPerId" --logger "trx;LogFileName=ACE.Database.Tests.trx" --results-directory "$RUNNER_TEMP/test-results"
+          fi
       - name: Test ACE.DatLoader.Tests
-        if: steps.verified.outputs.verified != 'true'
-        run: dotnet test Source/ACE.DatLoader.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings
+        if: steps.verified.outputs.verified != 'true' && (steps.scope.outputs.scope != 'narrow' || steps.scope.outputs.run_ACE_DatLoader_Tests != 'false')
+        env:
+          TI_SCOPE: ${{ steps.scope.outputs.scope }}
+        run: |
+          rs="$RUNNER_TEMP/test-impact/ACE.DatLoader.Tests.runsettings"
+          if [ "${TI_SCOPE:-}" = "narrow" ] && [ "$(cat "$RUNNER_TEMP/test-scope" 2>/dev/null)" = "narrow" ] && [ -f "$rs" ]; then
+            echo "test-impact narrow run: class filter from $rs"
+            dotnet test Source/ACE.DatLoader.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings "$rs" "-p:VSTestTestCaseFilter=TestCategory!=Probe" --logger "trx;LogFileName=ACE.DatLoader.Tests.trx" --results-directory "$RUNNER_TEMP/test-results"
+          else
+            dotnet test Source/ACE.DatLoader.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings --filter "TestCategory!=Probe" --logger "trx;LogFileName=ACE.DatLoader.Tests.trx" --results-directory "$RUNNER_TEMP/test-results"
+          fi
       # pure comparison logic for the benchmark harness - no MySQL, no dat files, nothing to skip
       - name: Test ACE.Database.LoadTest.Tests
+        if: steps.verified.outputs.verified != 'true' && (steps.scope.outputs.scope != 'narrow' || steps.scope.outputs.run_ACE_Database_LoadTest_Tests != 'false')
+        env:
+          TI_SCOPE: ${{ steps.scope.outputs.scope }}
+        run: |
+          rs="$RUNNER_TEMP/test-impact/ACE.Database.LoadTest.Tests.runsettings"
+          if [ "${TI_SCOPE:-}" = "narrow" ] && [ "$(cat "$RUNNER_TEMP/test-scope" 2>/dev/null)" = "narrow" ] && [ -f "$rs" ]; then
+            echo "test-impact narrow run: class filter from $rs"
+            dotnet test Source/ACE.Database.LoadTest.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings "$rs" "-p:VSTestTestCaseFilter=TestCategory!=Probe" --logger "trx;LogFileName=ACE.Database.LoadTest.Tests.trx" --results-directory "$RUNNER_TEMP/test-results"
+          else
+            dotnet test Source/ACE.Database.LoadTest.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings --filter "TestCategory!=Probe" --logger "trx;LogFileName=ACE.Database.LoadTest.Tests.trx" --results-directory "$RUNNER_TEMP/test-results"
+          fi
+
+      # Enforce the test budget (per-test time, per-project summed time, skip counts) from the trx files the
+      # steps above wrote. Limits live in .github/test-budget.json. Fails closed when a trx is missing, so a
+      # step that silently stopped running tests cannot pass. Content.Tools.Tests is absent from the public
+      # publish, so it is skipped by name there. Runs only when the test steps ran and succeeded: a failing
+      # test step already fails the job, and a verified-tree short-circuit skips the tests this reads.
+      - name: Check the test budget
         if: steps.verified.outputs.verified != 'true'
-        run: dotnet test Source/ACE.Database.LoadTest.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings
+        shell: bash
+        env:
+          TI_SCOPE: ${{ steps.scope.outputs.scope || 'full' }}
+        run: |
+          # The public publish ships neither tools/ nor the budget file: with BOTH absent there is nothing to
+          # enforce. With only one absent the step fails, so deleting a half cannot turn the gate off.
+          if [ ! -f tools/check-test-budget.py ] && [ ! -f .github/test-budget.json ]; then
+            echo "No test budget in this tree; nothing to enforce."
+            exit 0
+          fi
+          python3 tools/test_check_test_budget.py
+          if [ -f tools/test_test_budget_skips.py ]; then python3 tools/test_test_budget_skips.py; fi
+          skip=()
+          if [ ! -f Source/ACE.Content.Tools.Tests/ACE.Content.Tools.Tests.csproj ]; then skip+=(--skip-project ACE.Content.Tools.Tests); fi
+          python3 tools/check-test-budget.py --results-dir "$RUNNER_TEMP/test-results" "${skip[@]}" --scope "$TI_SCOPE" --selection "$RUNNER_TEMP/selection.json"
+
+      # Defense in depth for the record step below: it records only when this re-read of the scope file
+      # says full, independently of the scope step's output. Missing, unreadable or anything but exactly
+      # "full" leaves the output empty, which refuses the record.
+      - name: Confirm the test scope file reads full (pull_request only)
+        id: scope-file
+        if: success() && github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          s=$(cat "$RUNNER_TEMP/test-scope" 2>/dev/null || true)
+          if [ "$s" = "full" ]; then
+            echo "full=true" >> "$GITHUB_OUTPUT"
+            echo "test scope file reads full: the record step may record."
+          else
+            echo "test scope file reads '$s', not full: the record step will not record."
+          fi
 
       # Last step: record this tree as verified, so the master push that squash-merges it can skip
       # the steps above. Only a successful same-repo pull_request run records (the default
       # success() condition means every step above passed, and no pull_request run ever looks up,
       # so a recording run always EXECUTED the full step set). continue-on-error: a failed upload
-      # only costs the reuse, never the check.
+      # only costs the reuse, never the check. A narrow (test-impact) run never records: both the scope
+      # step's output and the scope file must say full, and an empty scope (a crashed scope step) is not
+      # full. tools/test-impact/test_ci_workflow.py fails CI if either guard is removed.
       - name: Record the verified tree (pull_request only)
-        if: success() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        if: success() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.scope.outputs.scope == 'full' && steps.scope-file.outputs.full == 'true'
         continue-on-error: true
         uses: ./.github/actions/verified-tree
         with:
           mode: record
           names: ${{ steps.vt-key.outputs.name }}
 
+      # Test-impact shadow check (pull_request, mode shadow or narrow): compares this run's trx failures with
+      # the selection at depths 0, 1 and 2 and writes the step summary; then uploads selection.json plus
+      # shadow.json as test-impact-<tree of the tested merge commit>, 30 days (schema "Artifact layout").
+      # Informational only: continue-on-error, audit.py exits 0 on every data problem. The artifact name
+      # never collides with a verified-tree marker (lookup.py accepts only the exact
+      # verified-build-test-<tree> name; the self-test pins that). These four steps use !cancelled(), not
+      # always(): they still run after a failed step, but a run cancelled by a fixup push must not bill the
+      # selector wait or upload partial shadow evidence.
+      - name: Test-impact shadow check (pull_request, mode shadow or narrow)
+        id: ti-shadow
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && (vars.TEST_IMPACT_MODE == 'shadow' || vars.TEST_IMPACT_MODE == 'narrow') && hashFiles('tools/test-impact/audit.py') != '' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/test-impact-artifact"
+          rm -rf "$out"
+          mkdir -p "$out"
+          d="$RUNNER_TEMP/test-impact"
+          if [ -f "$d/selector.launched" ]; then
+            for i in $(seq 1 120); do
+              [ -f "$d/selector.exit" ] && break
+              sleep 1
+            done
+            echo "selector exit: $(cat "$d/selector.exit" 2>/dev/null || echo 'none (still running or never finished)')"
+            echo "----- test-impact selector log -----"
+            tail -c 20000 "$d/selector.log" 2>/dev/null || echo "(no log)"
+            echo "------------------------------------"
+            if [ "$(cat "$d/selector.exit" 2>/dev/null)" != "0" ]; then rm -f "$RUNNER_TEMP/selection.json"; fi
+          fi
+          if [ -f "$RUNNER_TEMP/selection.json" ]; then cp "$RUNNER_TEMP/selection.json" "$out/selection.json"; fi
+          python3 -I tools/test-impact/audit.py shadow --selection "$RUNNER_TEMP/selection.json" --trx-dir "$RUNNER_TEMP/test-results" --out "$out/shadow.json" --summary "$GITHUB_STEP_SUMMARY"
+          tree=$(git rev-parse 'HEAD^{tree}')
+          echo "artifact=test-impact-$tree" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the test-impact shadow artifact (pull_request, mode shadow or narrow)
+        if: ${{ !cancelled() && steps.ti-shadow.outputs.artifact != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.ti-shadow.outputs.artifact }}
+          path: ${{ runner.temp }}/test-impact-artifact/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # Test-impact master audit (push to master, mode shadow or narrow, tests actually ran here): on a red
+      # run it walks back to the last commit whose tests ran and classifies each failure as MISS (no
+      # selection covered it) or covered; a green run makes no API calls. Needs contents: read, actions:
+      # read and checks: read (job permissions above). It never changes the job's conclusion:
+      # continue-on-error, a step timeout, and audit.py exits 0 on every data problem.
+      - name: Test-impact master audit (master push, mode shadow or narrow)
+        id: ti-master
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/master' && (vars.TEST_IMPACT_MODE == 'shadow' || vars.TEST_IMPACT_MODE == 'narrow') && steps.verified.outputs.verified != 'true' && hashFiles('tools/test-impact/audit.py') != '' }}
+        continue-on-error: true
+        timeout-minutes: 8
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          out="$RUNNER_TEMP/test-impact-master"
+          rm -rf "$out"
+          mkdir -p "$out"
+          python3 -I tools/test-impact/audit.py master --sha "$GITHUB_SHA" --trx-dir "$RUNNER_TEMP/test-results" --repo "$GITHUB_REPOSITORY" --out "$out/master.json" --summary "$GITHUB_STEP_SUMMARY"
+          echo "artifact=test-impact-master-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the test-impact master audit artifact (master push, mode shadow or narrow)
+        if: ${{ !cancelled() && steps.ti-master.outputs.artifact != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.ti-master.outputs.artifact }}
+          path: ${{ runner.temp }}/test-impact-master/master.json
+          retention-days: 30
+          if-no-files-found: ignore
+
       - name: Report the verified-tree short-circuit
         if: steps.verified.outputs.verified == 'true'
         shell: bash
         env:
           VT_RUN_URL: ${{ steps.verified.outputs.run-url }}
+          VT_SOURCE: ${{ steps.verified.outputs.source }}
+          VT_COVERING_SHA: ${{ steps.verified.outputs.covering-sha }}
+          VT_MATCHED: ${{ steps.verified.outputs.matched-name }}
+          VT_BASIS: ${{ steps.verified.outputs.basis }}
         run: |
-          echo "Short-circuited: this tree was verified by $VT_RUN_URL; build and tests were skipped."
-          echo "### build-test short-circuited" >> "$GITHUB_STEP_SUMMARY"
-          echo "Tree already verified by $VT_RUN_URL (artifact \`${{ steps.vt-key.outputs.name }}\`); build and test steps skipped." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$VT_SOURCE" = "superseded" ] && [ "$VT_BASIS" = "pending" ]; then
+            echo "Short-circuited (superseded, tip pending): master tip $VT_COVERING_SHA has a full push run queued or in progress at $VT_RUN_URL; this commit's own tree was NOT separately built or tested, and that run had not passed yet."
+            echo "### build-test short-circuited (superseded, tip run pending)" >> "$GITHUB_STEP_SUMMARY"
+            echo "This commit's own tree was NOT separately built or tested. Superseding master tip \`$VT_COVERING_SHA\` had a full push run queued or in progress ($VT_RUN_URL) when this run looked; that run had not passed yet. If it fails, master is red at the tip and this commit is inside its audit range. Build and test steps skipped; this sha is not deployable." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$VT_SOURCE" = "superseded" ]; then
+            echo "Short-circuited (superseded): master tip $VT_COVERING_SHA was verified by $VT_RUN_URL; this commit's own tree was NOT separately built or tested."
+            echo "### build-test short-circuited (superseded)" >> "$GITHUB_STEP_SUMMARY"
+            echo "This commit's own tree was NOT separately built or tested. Superseding master tip \`$VT_COVERING_SHA\` was verified by $VT_RUN_URL (artifact \`$VT_MATCHED\`); build and test steps skipped." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Short-circuited: this tree was verified by $VT_RUN_URL; build and tests were skipped."
+            echo "### build-test short-circuited" >> "$GITHUB_STEP_SUMMARY"
+            echo "Tree already verified by $VT_RUN_URL (artifact \`$VT_MATCHED\`); build and test steps skipped." >> "$GITHUB_STEP_SUMMARY"
+          fi

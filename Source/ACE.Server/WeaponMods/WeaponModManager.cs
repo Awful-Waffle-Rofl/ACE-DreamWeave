@@ -46,6 +46,10 @@ namespace ACE.Server.WeaponMods
     /// this file ever grows a way to choose, replace or reroll a single special, STOP - that invalidates the
     /// power assessment and it has to be re-derived first.
     ///
+    /// EXCEPTION, owner ruling 2026-11-15: Paragon modifiers (weapon levels 51-55) are player-chosen, but they are
+    /// applied by ParagonModManager, not this file, in their own slots outside the specials bound. This file's
+    /// STOP still stands for rolled specials. See Docs/WeaponMods/DESIGN.md section 20.
+    ///
     /// The intercept placement is also why no bypass code is needed for the retail tinker cap: this runs before
     /// VerifyRequirements and GetTinkerChance, so the data-driven "NumTimesTinkered >= 10" gate cannot apply to
     /// it, while retail tinkering stays bound by that gate.
@@ -361,9 +365,11 @@ namespace ACE.Server.WeaponMods
                 return WeenieError.YouDoNotPassCraftingRequirements;
             }
 
-            if (player.FindObject(target.Guid.Full, Player.SearchLocations.MyInventory) == null)
+            var targetInventoryRefusal = TargetInventoryRefusal(player, target);
+
+            if (targetInventoryRefusal != null)
             {
-                SendCraftMessage(player, $"You must remove the {target.Name} and place it in your inventory first.");
+                SendCraftMessage(player, targetInventoryRefusal);
                 return WeenieError.YouDoNotPassCraftingRequirements;
             }
 
@@ -386,41 +392,85 @@ namespace ACE.Server.WeaponMods
             }
 
             // one wiring, shared with every other caller - see the ResolveRefusal(action, target) overload
-            var refusal = ResolveRefusal(action, target);
+            var targetStateRefusal = TargetStateRefusal(source.Name, target, action);
 
-            switch (refusal)
-            {
-                case WeaponModRefusal.None:
-                    return WeenieError.None;
+            if (targetStateRefusal == null)
+                return WeenieError.None;
 
-                case WeaponModRefusal.NotAWeapon:
-                    SendCraftMessage(player, $"The {target.Name} is not a weapon. Only melee weapons, missile weapons and casters can carry weapon mods.");
-                    break;
-
-                case WeaponModRefusal.NoWorkmanship:
-                    SendCraftMessage(player, $"The {target.Name} has no workmanship, so it cannot hold a special modifier.");
-                    break;
-
-                case WeaponModRefusal.NoAvailableSlots:
-                    SendCraftMessage(player, $"Every one of the {target.Name}'s slots is taken by work this salvage cannot undo. There is nothing left to work with.");
-                    break;
-
-                case WeaponModRefusal.DriftStoneLocked:
-                    SendCraftMessage(player, $"The {target.Name} was finished by a Prismatic Drift Stone. Its tinkering is sealed and no salvage will reopen it.");
-                    break;
-
-                case WeaponModRefusal.TinkerLogMismatch:
-                    SendCraftMessage(player, $"The {target.Name}'s tinker log does not account for everything applied to it, so its current tinkers cannot be safely removed.");
-                    break;
-
-                default:
-                    SendCraftMessage(player, $"The {source.Name} cannot be used on the {target.Name}.");
-                    break;
-            }
+            SendCraftMessage(player, targetStateRefusal);
 
             action = WeaponModAction.None;
 
             return WeenieError.YouDoNotPassCraftingRequirements;
+        }
+
+        // ---------------- target-only verification (shared with the Salvage Roller) ----------------
+        //
+        // The target half of VerifyUseRequirements, split out so the Salvage Roller (Docs/SalvageRoller/DESIGN.md
+        // 5.3) refuses a target with EXACTLY the manual path's checks and EXACTLY its words. The bag path still runs
+        // the two halves at their original positions - the inventory check before the fuel check, the state check
+        // after it - so which message a player sees when several things are wrong is unchanged.
+
+        /// <summary>
+        /// The inventory-only rule for the target, or null when it passes. Inventory only, never equipped: see the
+        /// remark at its call site in <see cref="VerifyUseRequirements"/>.
+        /// </summary>
+        internal static string TargetInventoryRefusal(Player player, WorldObject target)
+        {
+            if (player.FindObject(target.Guid.Full, Player.SearchLocations.MyInventory) == null)
+                return $"You must remove the {target.Name} and place it in your inventory first.";
+
+            return null;
+        }
+
+        /// <summary>
+        /// The weapon-state rules for applying <paramref name="action"/> to <paramref name="target"/>, as the refusal
+        /// line the player is sent, or null when the target is eligible. <paramref name="sourceName"/> appears only in
+        /// the catch-all line.
+        /// </summary>
+        internal static string TargetStateRefusal(string sourceName, WorldObject target, WeaponModAction action)
+        {
+            return RefusalMessage(ResolveRefusal(action, target), sourceName, target);
+        }
+
+        /// <summary>The craft-channel line for each refusal, or null for <see cref="WeaponModRefusal.None"/>. Pure.</summary>
+        internal static string RefusalMessage(WeaponModRefusal refusal, string sourceName, WorldObject target)
+        {
+            switch (refusal)
+            {
+                case WeaponModRefusal.None:
+                    return null;
+
+                case WeaponModRefusal.NotAWeapon:
+                    return $"The {target.Name} is not a weapon. Only melee weapons, missile weapons and casters can carry weapon mods.";
+
+                case WeaponModRefusal.NoWorkmanship:
+                    return $"The {target.Name} has no workmanship, so it cannot hold a special modifier.";
+
+                case WeaponModRefusal.NoAvailableSlots:
+                    return $"Every one of the {target.Name}'s slots is taken by work this salvage cannot undo. There is nothing left to work with.";
+
+                case WeaponModRefusal.DriftStoneLocked:
+                    return $"The {target.Name} was finished by a Prismatic Drift Stone. Its tinkering is sealed and no salvage will reopen it.";
+
+                case WeaponModRefusal.TinkerLogMismatch:
+                    return $"The {target.Name}'s tinker log does not account for everything applied to it, so its current tinkers cannot be safely removed.";
+
+                default:
+                    return $"The {sourceName} cannot be used on the {target.Name}.";
+            }
+        }
+
+        /// <summary>
+        /// The whole target-only verify, in the bag path's order: inventory, then weapon state. True when the target
+        /// is eligible; otherwise <paramref name="refusalMessage"/> is the exact line the bag path would have sent.
+        /// Sends nothing itself.
+        /// </summary>
+        internal static bool VerifyTarget(Player player, string sourceName, WorldObject target, WeaponModAction action, out string refusalMessage)
+        {
+            refusalMessage = TargetInventoryRefusal(player, target) ?? TargetStateRefusal(sourceName, target, action);
+
+            return refusalMessage == null;
         }
 
         // ---------------- application ----------------
@@ -742,7 +792,7 @@ namespace ACE.Server.WeaponMods
         /// because the biota's row is the one the tier aura overwrites. A missing template, or a reader that
         /// throws, reads as no base script.
         /// </summary>
-        internal static uint? BaseVisualEffectScript(WorldObject target)
+        internal static uint? BaseVisualEffectScript(WorldObject target, bool requireTemplateSetup = false)
         {
             ACE.Entity.Models.Weenie weenie;
             try
@@ -754,6 +804,15 @@ namespace ACE.Server.WeaponMods
                 return null;
             }
 
+            // requireTemplateSetup: a tailored instance has a different Setup than its template, so the template's
+            // effect no longer belongs to it (VisualEffectManager layering).
+            if (requireTemplateSetup && weenie?.PropertiesDID != null)
+            {
+                weenie.PropertiesDID.TryGetValue(PropertyDataId.Setup, out var templateSetup);
+                if (templateSetup != target.SetupTableId)
+                    return null;
+            }
+
             if (weenie?.PropertiesDID != null && weenie.PropertiesDID.TryGetValue(PropertyDataId.VisualEffectScript, out var script) && script != 0)
                 return script;
 
@@ -763,7 +822,9 @@ namespace ACE.Server.WeaponMods
         /// <summary>
         /// Sets the weapon's VisualEffectScript for a tier change. While the weapon holds a tier, the TIER AURA WINS
         /// over any base script the weenie carries (unchanged behaviour: there is one 9000 slot and the aura takes
-        /// it). When the tier falls back to one with no script (None), the weenie template's own base script is
+        /// it), but the template's base script is NOT lost to clients while the tier is held: VisualEffectManager
+        /// re-emits it beneath the aura on every rebuild (PersistentScripts), so the two LAYER the way a retail
+        /// elemental weapon shows its element plus the aura. When the tier falls back to one with no script (None), the weenie template's own base script is
         /// restored rather than the row being removed, so a reroll cannot permanently erase a baked effect. A weapon
         /// whose template has no 9000 row still ends with no row, exactly as before.
         /// </summary>
@@ -778,7 +839,11 @@ namespace ACE.Server.WeaponMods
             target.VisualEffectScript = scriptAfter ?? BaseVisualEffectScript(target);
         }
 
-        private static void HandleTierTransition(Player player, WorldObject target, WeaponQualityTier tierBefore)
+        /// <remarks>
+        /// Internal so the Salvage Roller can run it once, on the real item, when the chosen candidate is taken
+        /// (Docs/SalvageRoller/DESIGN.md 5.5): its rollers work on scratch copies and never run it.
+        /// </remarks>
+        internal static void HandleTierTransition(Player player, WorldObject target, WeaponQualityTier tierBefore)
         {
             var tierAfter = WeaponQualityTiers.Evaluate(target);
 

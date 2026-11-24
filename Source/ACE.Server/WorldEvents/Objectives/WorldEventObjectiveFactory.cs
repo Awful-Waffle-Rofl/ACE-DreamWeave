@@ -20,6 +20,15 @@ namespace ACE.Server.WorldEvents.Objectives
         {
             error = null;
 
+            // Test seam (see CreateRefusalOverride): a non-null answer refuses this run with that text.
+            var forcedRefusal = CreateRefusalOverride?.Invoke(evt);
+
+            if (forcedRefusal != null)
+            {
+                error = forcedRefusal;
+                return null;
+            }
+
             var goal = evt?.Composition?.Goal;
 
             if (goal == null)
@@ -48,8 +57,14 @@ namespace ACE.Server.WorldEvents.Objectives
                     // serving both the rift theme ("rift"/"rifts") and the element portals
                     // ("pillar"/"pillars"), so the progress line and the MVP sentence read correctly for
                     // whichever theme composed the run.
-                    return new DestroySourceObjective(goal, () => evt.Spawner.SourceGuids,
+                    var destroySource = new DestroySourceObjective(goal, () => evt.Spawner.SourceGuids,
                         evt.Composition?.ObjectiveNoun, evt.Composition?.ObjectiveNounPlural);
+
+                    // Phased sources: the machine is null when world_events_destroy_source_phases_enabled is off, which leaves
+                    // the objective exactly as it was.
+                    destroySource.AttachPhases(DestroySourcePhaseWiring.Create(evt), () => evt.Spawner?.BossGuid ?? 0);
+
+                    return destroySource;
 
                 case GoalType.KillBoss:
 
@@ -146,6 +161,15 @@ namespace ACE.Server.WorldEvents.Objectives
         /// no-op). Production never sets it. Process-wide, so a test that sets it must restore it in a finally.
         /// </summary>
         internal static Func<GoalDef, IWorldEventStartSpotRule> StartSpotRuleOverride;
+
+        /// <summary>
+        /// Test seam: when set, <see cref="Create"/> asks it first and refuses the run with the returned text when that is
+        /// not null (null falls through to the real factory). The composer already refuses kill_boss with no boss and a
+        /// switched-off Hold goal, so a composed fixture rarely reaches a real refusal here; this lets a test drive the
+        /// "built, then discarded" path directly. Production never sets it. Process-wide, so a test that sets it must
+        /// restore it in a finally.
+        /// </summary>
+        internal static Func<WorldEvent, string> CreateRefusalOverride;
 
         /// <summary>
         /// The union of a theme's objective (rift/source) guids and its spawn-time npc guids (WP-16), read

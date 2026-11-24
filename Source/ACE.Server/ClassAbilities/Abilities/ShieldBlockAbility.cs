@@ -9,7 +9,7 @@ namespace ACE.Server.ClassAbilities.Abilities
 {
     /// <summary>
     /// Vanguard T2 game-changer: while a shield is equipped, a chance to reduce an incoming hit to 0
-    /// (8/14/20% by rank), pooled with Parry into one combined avoidance roll (capped). Block chance
+    /// (8/16/24% by rank), pooled with Parry into one combined avoidance roll (capped). Block chance
     /// scales with Armor Tinkering (a maintained shield blocks more). Blocked hits STILL trigger Thorns
     /// (the enemy hit the shield) - the base behaviour that makes Thorns + Shield Block synergise. Subject to
     /// Thorns' own close-range gate (class_ability_thorns_max_range, inside Player.ApplyThornsReflect): a
@@ -27,12 +27,21 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "shieldblock",
             DisplayName = "Shield Block",
-            Description = "While a shield is equipped, 8/14/20% of incoming hits are reduced to 0 (pooled with " +
-                          "Parry, 50% combined cap). Higher Armor Tinkering increases the chance. Blocked hits still trigger Thorns.",
+            // Live text: baseChance + (rank - 1) * stepPerRank (BlockChance / GetReadout); the pooled cap is
+            // class_ability_avoidance_cap.
+            DescriptionTemplate = "While a shield is equipped, some incoming hits are fully blocked. It shares a " +
+                          "{v:class_ability_avoidance_cap|pct}% cap with Parry. Blocked hits still trigger Thorns.",
+            RankTailTemplate = "{ladder:class_ability_shieldblock_base,class_ability_shieldblock_step|pct}% of hits blocked",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
             AffinitySkill = Skill.ArmorTinkering, // the Deception read in GetReadout is Parry's half of the pooled roll, not this ability's rider
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "avoidance", Bounds = CeilingBounds.Total, Source = CeilingSource.Tunable, Key = "class_ability_avoidance_cap", Label = "max combined block and parry chance", Format = "pct" },
+                new ClassAbilityCeiling { Id = "affinity", Bounds = CeilingBounds.Affinity, Source = CeilingSource.Tunable, Key = "class_ability_affinity_chance_cap", Label = "max chance from affinity", Format = "pct" },
+                new ClassAbilityCeiling { Id = "gear", Bounds = CeilingBounds.Gear, Source = CeilingSource.GearStackCap, GearMod = EquipmentModId.ShieldWall, Label = "max from gear", Format = "pct" },
+            },
         };
 
         /// <summary>
@@ -171,6 +180,12 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "block",
                 Per = null,
                 CapNote = capBites ? "avoidance cap" : (affinityCapBites ? "affinity cap" : null),
+                Ceilings = new[]
+                {
+                    ClassAbilityCeilings.Read(Definition, "avoidance", (blockChance + parryChance) * 100.0, rank, ClassAbilityText.Live),
+                    ClassAbilityCeilings.Read(Definition, "affinity", armorTink * 100.0, rank, ClassAbilityText.Live),
+                    ClassAbilityCeilings.Read(Definition, "gear", gearChance * 100.0, rank, ClassAbilityText.Live),
+                },
             };
         }
     }

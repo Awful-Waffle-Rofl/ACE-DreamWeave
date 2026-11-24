@@ -98,14 +98,14 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void Definition_IsVanguardTier2_OneRank_OneCap_ArmorTinkering()
+        public void Definition_IsVanguardTier2_ThreeRanks_OneCapEach_ArmorTinkering()
         {
             var def = ClassAbilityRegistry.Get(ClassAbilityId.CloakedInPower);
 
             Assert.AreEqual(ClassAbilityClass.Vanguard, def.AbilityClass);
             Assert.AreEqual(2, def.Tier);
-            Assert.AreEqual(1, def.MaxRank);
-            CollectionAssert.AreEqual(new[] { 1 }, def.CostPerRank);
+            Assert.AreEqual(3, def.MaxRank, "ranks 2-3 added by the 2026-11-06 Vanguard pass");
+            CollectionAssert.AreEqual(new[] { 1, 1, 1 }, def.CostPerRank);
             Assert.IsTrue(def.AffinitySkill.HasValue, "AffinitySkill must be declared - the planner reads it");
             Assert.AreEqual(Skill.ArmorTinkering, def.AffinitySkill.Value);
             Assert.IsTrue(def.Implemented);
@@ -303,6 +303,107 @@ namespace ACE.Server.Tests
             Assert.AreEqual(readout.Effective, readout.Skill + readout.Affinity + readout.Gear, 1e-6,
                 "Skill + Affinity + Gear must equal Effective exactly");
             Assert.IsNull(readout.CapNote, "nothing was capped at a neutral multiplier");
+        }
+
+        // ---------------------------------------------------------------- Critical Thorns window (2026-11-06)
+
+        [TestMethod]
+        public void CritWindow_DefaultsAreHalfOneAndOneAndAHalfSeconds()
+        {
+            Assert.AreEqual(0.5, PropertyManager.GetDouble("class_ability_cloakedinpower_crit_window_r1").Item, 1e-9);
+            Assert.AreEqual(1.0, PropertyManager.GetDouble("class_ability_cloakedinpower_crit_window_r2").Item, 1e-9);
+            Assert.AreEqual(1.5, PropertyManager.GetDouble("class_ability_cloakedinpower_crit_window_r3").Item, 1e-9);
+        }
+
+        [TestMethod]
+        public void CritWindowSeconds_IsByRank_ZeroAtRankZero_ClampedAboveTheLadder()
+        {
+            Assert.AreEqual(0.0, CloakedInPowerAbility.CritWindowSeconds(0), 1e-9);
+            Assert.AreEqual(0.5, CloakedInPowerAbility.CritWindowSeconds(1), 1e-9);
+            Assert.AreEqual(1.0, CloakedInPowerAbility.CritWindowSeconds(2), 1e-9);
+            Assert.AreEqual(1.5, CloakedInPowerAbility.CritWindowSeconds(3), 1e-9);
+            Assert.AreEqual(1.5, CloakedInPowerAbility.CritWindowSeconds(9), 1e-9, "above the ladder clamps to the top rung");
+        }
+
+        [TestMethod]
+        public void CritWindowSeconds_FollowsTheLiveTunable()
+        {
+            var original = PropertyManager.GetDouble("class_ability_cloakedinpower_crit_window_r2").Item;
+
+            try
+            {
+                Assert.IsTrue(PropertyManager.ModifyDouble("class_ability_cloakedinpower_crit_window_r2", 2.5));
+                Assert.AreEqual(2.5, CloakedInPowerAbility.CritWindowSeconds(2), 1e-9);
+            }
+            finally
+            {
+                PropertyManager.ModifyDouble("class_ability_cloakedinpower_crit_window_r2", original);
+            }
+        }
+
+        [TestMethod]
+        public void WindowEnd_IsNowPlusDuration_AndAProcInsideAnOpenWindowRefreshesRatherThanStacks()
+        {
+            // first proc at t=100 for 1.0 s closes at 101
+            var end = CloakedInPowerAbility.WindowEnd(100.0, 1.0, 0.0);
+            Assert.AreEqual(101.0, end, 1e-9);
+
+            // a second proc at t=100.6 (window still open, 0.4 s left) refreshes to 101.6 - NOT 101 + 1 = 102
+            var refreshed = CloakedInPowerAbility.WindowEnd(100.6, 1.0, end);
+            Assert.AreEqual(101.6, refreshed, 1e-9, "refresh to now + duration, never stacking on the time left");
+
+            // a zero-length duration (rank 0 or a zeroed tunable) leaves the window as it was
+            Assert.AreEqual(end, CloakedInPowerAbility.WindowEnd(100.6, 0.0, end), 1e-9);
+        }
+
+        [TestMethod]
+        public void CritThornsMultiplier_IsTwoTimesTheCritDamageRatingMod()
+        {
+            Assert.AreEqual(2.0, CloakedInPowerAbility.CritThornsBaseMultiplier, 1e-12);
+            Assert.AreEqual(2.0, CloakedInPowerAbility.CritThornsMultiplier(0), 1e-6, "no rating: the bare 2x");
+            Assert.AreEqual(2.0 * 1.5f, CloakedInPowerAbility.CritThornsMultiplier(50), 1e-6, "+50 crit damage rating: x1.5 on the 2x");
+            Assert.AreEqual(2.0 * 2.0f, CloakedInPowerAbility.CritThornsMultiplier(100), 1e-6);
+        }
+
+        [TestMethod]
+        public void ScaleReflect_ComposesStrengthCritAndDamageResistMultiplicatively()
+        {
+            // identity: both multipliers 1.0 is the old Math.Round(base * strength)
+            Assert.AreEqual(100u, ThornsAbility.ScaleReflect(100u, 1.0, 1.0, 1.0));
+            Assert.AreEqual(50u, ThornsAbility.ScaleReflect(100u, 0.5, 1.0, 1.0));
+
+            // critical alone doubles; DRR alone scales; together they multiply (not add)
+            Assert.AreEqual(200u, ThornsAbility.ScaleReflect(100u, 1.0, 2.0, 1.0));
+            Assert.AreEqual(150u, ThornsAbility.ScaleReflect(100u, 1.0, 1.0, 1.5));
+            Assert.AreEqual(300u, ThornsAbility.ScaleReflect(100u, 1.0, 2.0, 1.5), "2.0 x 1.5 = 3.0, not 2.0 + 0.5");
+
+            // no factor can turn a reflect into a heal
+            Assert.AreEqual(0u, ThornsAbility.ScaleReflect(100u, 1.0, -2.0, 1.5));
+        }
+
+        [TestMethod]
+        public void GetReadout_ReportsTheCritWindowAsASecondary()
+        {
+            var handler = (IAbilityReadout)ClassAbilityRegistry.GetHandler(ClassAbilityId.CloakedInPower);
+
+            foreach (var (rank, seconds) in new[] { (1, 0.5), (2, 1.0), (3, 1.5) })
+            {
+                var readout = handler.GetReadout(null, rank);
+
+                Assert.IsNotNull(readout.Secondary, $"rank {rank}: a Secondary carries the window");
+                Assert.AreEqual(1, readout.Secondary.Count);
+                Assert.AreEqual("s", readout.Secondary[0].Unit);
+                Assert.AreEqual(seconds, readout.Secondary[0].Effective, 1e-9, $"rank {rank} window");
+
+                // the primary floor does not climb with rank
+                Assert.AreEqual(10.0, readout.Effective, 1e-6, $"rank {rank}: floor is rank-invariant");
+            }
+        }
+
+        [TestMethod]
+        public void Floor_IsRankInvariant()
+        {
+            Assert.AreEqual(CloakedInPowerAbility.Floor(1, 0.10, 1.5, 0.20), CloakedInPowerAbility.Floor(3, 0.10, 1.5, 0.20), 1e-12);
         }
 
         [TestMethod]

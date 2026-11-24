@@ -223,9 +223,11 @@ namespace ACE.Server.Command.Handlers
 
         /// <summary>
         /// Removes everything occupying a tester slot: the in-memory allegiance/house/cache state first,
-        /// then the player's possessions, the player biota, and the character row. Each parent delete
-        /// cascades to its child tables through real foreign keys, so this is three deletes rather than
-        /// thirty-three.
+        /// then the player's possessions, the player biota, the character row, and the player's stored
+        /// Player Facets. The first three parent deletes cascade to their child tables through real
+        /// foreign keys, so those are three deletes rather than thirty-three. character_facet is NOT an
+        /// FK cascade (it has no foreign key to character or biota), so it is a fourth, explicit delete,
+        /// RemoveCharacterFacets, issued after the character delete and covered by the same ok/fail result.
         ///
         /// Returns true only when every delete it issued reported success. A false return means the slot
         /// may be partly populated, and the caller must NOT copy into it.
@@ -260,7 +262,7 @@ namespace ACE.Server.Command.Handlers
         /// value, not a constrained reference to the player's biota row), but purging in this order
         /// costs nothing and keeps the sequence unsurprising to read.
         /// </summary>
-        private static bool PurgeSlot(uint guid)
+        internal static bool PurgeSlot(uint guid)
         {
             // PlayerManager.HandlePlayerDelete does NOT touch the offline-player cache - it only
             // ENQUEUES AllegianceManager.DoHandlePlayerDelete and HouseManager.DoHandlePlayerDelete
@@ -320,7 +322,12 @@ namespace ACE.Server.Command.Handlers
             var biotaRemoved = DatabaseManager.Shard.BaseDatabase.RemoveBiota(guid);
             var characterRemoved = DatabaseManager.Shard.BaseDatabase.RemoveCharacter(guid);
 
-            var ok = possessionsRemoved && biotaRemoved && characterRemoved;
+            // character_facet has no FK to character, so neither delete above reaches the outgoing
+            // occupant's stored facet builds. Left in place they would be inherited by the next occupant
+            // of this reused guid (and merged with the copied facets DoCopyChar writes).
+            var facetsRemoved = DatabaseManager.Shard.BaseDatabase.RemoveCharacterFacets(guid);
+
+            var ok = possessionsRemoved && biotaRemoved && characterRemoved && facetsRemoved;
 
             if (ok)
             {
@@ -329,7 +336,7 @@ namespace ACE.Server.Command.Handlers
             else
             {
                 log.Error($"[ROSTER] purge of slot 0x{guid:X8} FAILED (possessions: {possessionsRemoved}, " +
-                          $"biota: {biotaRemoved}, character: {characterRemoved}) - the slot may be partly populated " +
+                          $"biota: {biotaRemoved}, character: {characterRemoved}, facets: {facetsRemoved}) - the slot may be partly populated " +
                           "and will not be re-copied this run");
             }
 

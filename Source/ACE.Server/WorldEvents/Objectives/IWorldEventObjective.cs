@@ -188,6 +188,13 @@ namespace ACE.Server.WorldEvents.Objectives
         /// read once by WorldEvent.Finish right after OnFinish. The default hands it back unchanged.
         /// </summary>
         string OutcomeTemplate(string template, bool success) => template;
+
+        /// <summary>
+        /// A source (the theme's objective spawn) is about to enter the world: its health is already scaled and nothing has been sent to
+        /// any client yet. Called by the spawner from the placement, once per source, only for a damageable source (never the inert
+        /// scenery objective), and inside a try/catch at the seam. The default does nothing, so every goal behaves as before.
+        /// </summary>
+        void OnSourceSpawning(Creature source) { }
     }
 
     /// <summary>

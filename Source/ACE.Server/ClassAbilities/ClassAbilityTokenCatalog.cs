@@ -100,7 +100,8 @@ namespace ACE.Server.ClassAbilities
             ClassAbilityId.Taunt,
             ClassAbilityId.PoisonWeapon,
             ClassAbilityId.SpellAoe,
-            ClassAbilityId.BattleHardened,
+            ClassAbilityId.BattleHardened,   // ranks 2-3 added 2026-11-06 (Vanguard pass) mint 1000531-1000532
+                                             // inside this slot's existing 6-wide stride - no renumbering.
             ClassAbilityId.Frenzy,
             ClassAbilityId.NetherRush,
             // Archer
@@ -260,7 +261,7 @@ namespace ACE.Server.ClassAbilities
             ClassAbilityId.Hemomancy,          // Blood Mage T1
             ClassAbilityId.Spellweave,         // Spellsword T1
             ClassAbilityId.PinningShot,        // Archer T2 (the slot Heavy Draw vacated)
-            ClassAbilityId.KillerInstinct,     // Rogue T3
+            ClassAbilityId.KillerInstinct,     // Rogue T2 (T3 until 2026-11-06)
             ClassAbilityId.KineticCharge,      // Vanguard T1 as of 2026-09-29 (entered at T2 2026-09-12)
             ClassAbilityId.ReflectMagic,       // Vanguard T3
             ClassAbilityId.Vengeance,          // RETIRED 2026-10-24 (Berserker pass): slot RESERVED at index
@@ -271,6 +272,8 @@ namespace ACE.Server.ClassAbilities
             // APPENDED 2026-09-29 at index 107, which mints 1002168 for its single rank:
             // WcidOverflowBase 1002000 + (107 - OverflowStartIndex 79) * WcidsPerAbility 6 + (1 - 1).
             // 1002169-1002173 are this slot's unused ranks 2-6 and are NOT free for another ability.
+            // Ranks 2-3 added 2026-11-06 (Vanguard pass) mint 1002169-1002170 inside this slot's existing
+            // 6-wide stride - no renumbering; 1002171-1002173 remain unused.
             ClassAbilityId.CloakedInPower,     // Vanguard T2
             // Berserker pass 2026-10-24: APPENDED at indices 108-110, minted from the overflow block as
             // WcidOverflowBase 1002000 + (index - 79) * 6 + (tier - 1): Heavy Blows 1002174-1002176,
@@ -290,6 +293,14 @@ namespace ACE.Server.ClassAbilities
             // WcidOverflowBase 1002000 + (114 - 79) * 6 + (tier - 1) = 1002210-1002212. Ranks 4-6
             // (1002213-1002215) are reserved spare for this ability.
             ClassAbilityId.VolatileElements,   // Spellsword T2
+            // Archmage 2026-11-03: APPENDED at index 115, minted from the overflow block as WcidOverflowBase 1002000 +
+            // (115 - 79) * 6 + (tier - 1) = 1002216-1002218. Ranks 4-6 (1002219-1002221) are reserved spare for this
+            // ability. The returned Elemental Rend; Elemental Proficiency (id 42) keeps its own slot and wcids 1000818-1000820.
+            ClassAbilityId.ElementalRendVuln,  // Archmage T3
+            // Archer 2026-11-10: APPENDED at index 116, minted from the overflow block as WcidOverflowBase 1002000 +
+            // (116 - 79) * 6 + (tier - 1) = 1002222 for its single rank. 1002223-1002227 are this slot's unused ranks
+            // 2-6 and are NOT free for another ability.
+            ClassAbilityId.HuntersEcho,        // Archer T3
         };
 
         public readonly struct Offering

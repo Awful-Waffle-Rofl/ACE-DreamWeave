@@ -332,6 +332,10 @@ namespace ACE.Server.WorldEvents
 
                 nextTickTime = now + 1.0;
 
+                // The daily scheduler runs every manager second whether or not a run is current, so it sits
+                // before the no-event early return below. It never throws.
+                WorldEventScheduler.TickLive();
+
                 WorldEvent evt;
 
                 lock (sync)
@@ -388,10 +392,96 @@ namespace ACE.Server.WorldEvents
 
             var composed = WorldEventComposer.TryCompose(store, Catalog, request, out composition, out error);
 
+            if (composed)
+                WarnSynthesizedFamilies(store, composition);
+
+            return composed;
+        }
+
+        /// <summary>
+        /// How many composed candidates a RANDOM start tries, in the weighted draw order, before it gives up: a candidate the
+        /// goal's start-spot rule or the objective factory refuses is logged and the next one is tried. A pinned start is
+        /// always one candidate.
+        /// </summary>
+        public const int MaxRandomStartCandidates = 8;
+
+        /// <summary>
+        /// The candidates TryStart walks: for a random request the composer's lazy weighted sequence
+        /// (<see cref="WorldEventComposer.RandomCompositions"/>), else the single result of <see cref="TryCompose"/>. Either
+        /// way the sequence ends with one step whose composition is null and whose error is the composition refusal.
+        /// </summary>
+        private static IEnumerable<WorldEventComposer.RandomComposeStep> StartCandidates(WorldEventRequest request)
+        {
+            if (request == null || !request.Random)
+            {
+                yield return TryCompose(request, out var single, out var singleError)
+                    ? new WorldEventComposer.RandomComposeStep(single, null)
+                    : new WorldEventComposer.RandomComposeStep(null, singleError);
+
+                yield break;
+            }
+
+            var store = Store;
+
+            foreach (var step in WorldEventComposer.RandomCompositions(store, Catalog, request, RandomStartRngOverride?.Invoke()))
+            {
+                if (step.Composition != null)
+                    WarnSynthesizedFamilies(store, step.Composition);
+
+                yield return step;
+            }
+        }
+
+        /// <summary>
+        /// Test seam: when set, a random start's candidate order is drawn from this function's rng instead of a fresh
+        /// ThreadSafeRandom seed, so a test can force which candidate comes first. Production never sets it. Process-wide,
+        /// so a test that sets it must restore it in a finally.
+        /// </summary>
+        internal static Func<Random> RandomStartRngOverride;
+
+        /// <summary>
+        /// The composition a start of <paramref name="request"/> would be built from, as far as composing and the goal's
+        /// duration ceiling go - for "--dry" and the web Admin preview, so they agree with <see cref="TryStart(WorldEventRequest, out WorldEvent, out string)"/>.
+        /// A pinned request is exactly <see cref="TryCompose"/>. A RANDOM request walks the same candidate order TryStart
+        /// does and returns the first composition whose goal passes <see cref="WorldEvent.ValidateDurations"/>; when none
+        /// does, it returns the LAST composed one, so the caller's own duration check reports the refusal the live start
+        /// would end on. Neither the start-spot rule nor the objective factory runs here. False only when nothing composed.
+        /// </summary>
+        public static bool TryComposeForStart(WorldEventRequest request, out WorldEventComposition composition, out string error)
+        {
+            composition = null;
+            error = null;
+
+            if (request == null || !request.Random)
+                return TryCompose(request, out composition, out error);
+
+            foreach (var step in StartCandidates(request))
+            {
+                if (step.Composition == null)
+                {
+                    if (composition != null)
+                        return true;
+
+                    error = step.Error;
+                    return false;
+                }
+
+                composition = step.Composition;
+
+                if (WorldEvent.ValidateDurations(request.MinDurationSeconds,
+                        WorldEvent.ResolveMaxDuration(request.MaxDurationSeconds, composition.Goal?.MaxDurationSeconds ?? 0), out _))
+                    return true;
+            }
+
+            return composition != null;
+        }
+
+        private static void WarnSynthesizedFamilies(WorldEventAxisStore store, WorldEventComposition composition)
+        {
             // A family that exists in the weenie catalog but not in families.json gets a synthesized
             // definition rather than a refusal (so a throwaway flagged clone works without a content edit).
             // The composer is pure, so the warning is emitted here, once per catalog build.
-            if (composed && composition != null && store != null)
+            if (composition != null && store != null)
             {
                 // Every composed family is checked, not just the first: a two-family run can synthesize
                 // either half (or both), and a warning that only ever looked at slot A would go silent on
@@ -408,8 +498,6 @@ namespace ACE.Server.WorldEvents
                     }
                 }
             }
-
-            return composed;
         }
 
         /// <summary>
@@ -417,6 +505,9 @@ namespace ACE.Server.WorldEvents
         /// predictable: disabled, then already-running, then no axes, then composition, then objective.
         ///
         /// A dry run composes, logs one line and returns true with a null event.
+        ///
+        /// A RANDOM request falls back along the composer's weighted order: a candidate refused by the start-spot rule
+        /// or the objective factory is logged and the next is tried, up to <see cref="MaxRandomStartCandidates"/>.
         /// </summary>
         public static bool TryStart(WorldEventRequest request, out WorldEvent evt, out string error)
         {
@@ -473,54 +564,71 @@ namespace ACE.Server.WorldEvents
                 // TECH-DESIGN 2.15, ahead of composition because it is a defect in the REQUEST rather than
                 // in the axes: a run whose minimum duration meets or exceeds its maximum could only ever
                 // end by timing out.
-                if (!WorldEvent.ValidateDurations(
-                        request?.MinDurationSeconds ?? WorldEvent.DefaultMinDurationSeconds,
-                        request?.MaxDurationSeconds ?? WorldEvent.DefaultMaxDurationSeconds, out error))
+                // An explicit maximum is checked up front. With none, the effective maximum depends on the goal
+                // (kill_boss and destroy_source run 900 s), so that check waits for the composition below.
+                if (request?.MaxDurationSeconds != null && !WorldEvent.ValidateDurations(
+                        request.MinDurationSeconds, request.MaxDurationSeconds.Value, out error))
                 {
                     refusal = WorldEventStartRefusal.InvalidDurations;
                     return false;
                 }
 
-                if (!TryCompose(request, out var composition, out error))
+                // A pinned start is one candidate. A RANDOM start walks the composer's weighted order: a candidate the
+                // goal's duration ceiling, the start-spot rule or the objective factory refuses is logged and the next one
+                // is tried, so a scheduled random start does not fail on the first draw alone. When every tried candidate
+                // is refused, the LAST candidate's refusal is returned; when nothing composed at all, the composer's is.
+                //
+                // Only start-spot and objective refusals count toward MaxRandomStartCandidates. A duration refusal is a
+                // pure comparison made before the start-spot rule and before NextRunId, so it costs nothing to skip; the
+                // walk is still bounded by the composer's own attempt budget (WorldEventComposer.ResolveMaxAttempts).
+                // "tried" numbers every candidate in the log; "counted" is the cap.
+                var isRandom = request != null && request.Random;
+
+                WorldEventComposition composition = null;
+                WorldEvent candidate = null;
+
+                var tried = 0;
+                var counted = 0;
+
+                foreach (var step in StartCandidates(request))
                 {
-                    refusal = WorldEventStartRefusal.CompositionFailed;
+                    if (step.Composition == null)
+                    {
+                        // The search is exhausted. With no candidate tried, this is the composition refusal; otherwise the
+                        // last candidate's own refusal (already in error/refusal) says more than "no combination".
+                        if (tried == 0)
+                        {
+                            error = step.Error;
+                            refusal = WorldEventStartRefusal.CompositionFailed;
+                        }
+
+                        return false;
+                    }
+
+                    tried++;
+
+                    if (TryBuildCandidate(request, step.Composition, out candidate, out error, out refusal))
+                    {
+                        // A dry run that passed the start-spot rule ends here, successfully, with no run built.
+                        if (candidate == null)
+                            return true;
+
+                        composition = step.Composition;
+                        break;
+                    }
+
+                    if (!isRandom)
+                        return false;
+
+                    log.Info($"[WORLDEVENT] random candidate {tried} source={step.Composition.Source?.Id} " +
+                             $"goal={step.Composition.Goal?.Id} refused: {error}");
+
+                    if (refusal != WorldEventStartRefusal.InvalidDurations && ++counted >= MaxRandomStartCandidates)
+                        return false;
+                }
+
+                if (candidate == null)
                     return false;
-                }
-
-                // The goal's start-spot rule, before the candidate is built: it may move the composed anchor or
-                // refuse the start outright. Every goal's rule is the no-op today, so the composed spot stands.
-                if (!WorldEventObjectiveFactory.StartSpotRuleFor(composition.Goal).TryResolve(composition, request, out error))
-                {
-                    error ??= $"no start spot for goal '{composition.Goal?.Id}'";
-                    refusal = WorldEventStartRefusal.CompositionFailed;
-                    return false;
-                }
-
-                if (request.DryRun)
-                {
-                    log.Info($"[WORLDEVENT] dry-run compose {composition.ToAxisSummary()}");
-                    return true;
-                }
-
-                // The WP-06 objective factory needs a constructed event to read the composition from, so
-                // the event is built first and the objective attached before it is ever staged. A refusal
-                // here discards the candidate: Current is untouched and nothing was announced.
-                var candidate = new WorldEvent(NextRunId(), composition, request, null,
-                    landblockBridge: LiveWorldEventLandblockBridge.Instance);
-
-                var objective = WorldEventObjectiveFactory.Create(candidate, out var objectiveError);
-
-                if (objective == null)
-                {
-                    error = string.IsNullOrEmpty(objectiveError)
-                        ? $"no objective could be created for goal '{composition.Goal?.Id}'"
-                        : objectiveError;
-
-                    refusal = WorldEventStartRefusal.ObjectiveFailed;
-                    return false;
-                }
-
-                candidate.SetObjective(objective);
 
                 Current = candidate;
 
@@ -571,6 +679,74 @@ namespace ACE.Server.WorldEvents
                 evt = candidate;
                 return true;
             }
+        }
+
+        /// <summary>
+        /// One candidate of <see cref="TryStart(WorldEventRequest, out WorldEvent, out string, out WorldEventStartRefusal, out uint)"/>:
+        /// the goal's duration ceiling, its start-spot rule, then the objective factory. True with a built (not yet current,
+        /// not yet begun) run, or true with a null run for a dry run that passed the start-spot rule; false with the refusal.
+        /// Must be called under <see cref="sync"/>.
+        ///
+        /// A refused candidate leaves nothing behind (traced 2026-11-16): the start-spot rule only writes the composition's
+        /// own anchor copy and AreaPlan; the WorldEvent constructor only builds its own Participation, Spawner and Pace
+        /// objects; and every refusal in WorldEventObjectiveFactory.Create returns before any objective is constructed, so
+        /// no HoldObjective.AttachEvent or DestroySource phase wiring ever runs for a discarded run. Nothing is registered,
+        /// announced, spawned or timed until TryStart sets Current and calls Begin. The one trace is the run id it consumed
+        /// (NextRunId), so the next run's id skips it.
+        /// </summary>
+        private static bool TryBuildCandidate(WorldEventRequest request, WorldEventComposition composition,
+            out WorldEvent candidate, out string error, out WorldEventStartRefusal refusal)
+        {
+            candidate = null;
+            error = null;
+            refusal = WorldEventStartRefusal.None;
+
+            if (!WorldEvent.ValidateDurations(
+                    request?.MinDurationSeconds ?? WorldEvent.DefaultMinDurationSeconds,
+                    WorldEvent.ResolveMaxDuration(request?.MaxDurationSeconds, composition.Goal?.MaxDurationSeconds ?? 0),
+                    out error))
+            {
+                refusal = WorldEventStartRefusal.InvalidDurations;
+                return false;
+            }
+
+            // The goal's start-spot rule, before the candidate is built: it may move the composed anchor (the
+            // composition's own copy, never the request's) or refuse the start outright.
+            if (!WorldEventObjectiveFactory.StartSpotRuleFor(composition.Goal).TryResolve(composition, request, out error))
+            {
+                error ??= $"no start spot for goal '{composition.Goal?.Id}'";
+                refusal = WorldEventStartRefusal.CompositionFailed;
+                return false;
+            }
+
+            if (request.DryRun)
+            {
+                log.Info($"[WORLDEVENT] dry-run compose {composition.ToAxisSummary()}");
+                return true;
+            }
+
+            // The WP-06 objective factory needs a constructed event to read the composition from, so
+            // the event is built first and the objective attached before it is ever staged. A refusal
+            // here discards the candidate: Current is untouched and nothing was announced.
+            var built = new WorldEvent(NextRunId(), composition, request, null,
+                landblockBridge: LiveWorldEventLandblockBridge.Instance);
+
+            var objective = WorldEventObjectiveFactory.Create(built, out var objectiveError);
+
+            if (objective == null)
+            {
+                error = string.IsNullOrEmpty(objectiveError)
+                    ? $"no objective could be created for goal '{composition.Goal?.Id}'"
+                    : objectiveError;
+
+                refusal = WorldEventStartRefusal.ObjectiveFailed;
+                return false;
+            }
+
+            built.SetObjective(objective);
+
+            candidate = built;
+            return true;
         }
 
         /// <summary>Admin stop. A no-op with a log line when nothing is running.</summary>
@@ -907,7 +1083,7 @@ namespace ACE.Server.WorldEvents
                              $"lastClear={(lastClear == null ? "n/a" : $"{lastClear.Value:F0}s")}, " +
                              $"ofChampions={evt.Spawner.OverflowChampionsAlive}, " +
                              $"hpCleared={cleared:F0}, hps={hps:F1}, " +
-                             $"bossMode={(evt.BossThroughputActive ? "throughput" : "power")}{bossThroughput}{bossDamage}";
+                             $"bossMode={WorldEvent.BossModeLabel(evt.BossBudgetActive, evt.BossThroughputActive)}{bossThroughput}{bossDamage}";
 
             // "alive" is wave pressure (what MaxAlive budgets); "total" adds the objective spawns and the
             // champion, which are deliberately not charged against that budget. "decor" is the WP-14 scenery

@@ -86,6 +86,9 @@ namespace ACE.Server.HazardMechanics
         private bool waveActive;
         private float ballZ;
         private int liveBalls;
+
+        /// <summary>Player hits the run has landed (the stop line's hits=).</summary>
+        private int hits;
         private bool scaleChecked;
         private string phase = "starting";
         private readonly Dictionary<int, Ball> balls = new Dictionary<int, Ball>();
@@ -388,7 +391,13 @@ namespace ACE.Server.HazardMechanics
         /// steps of half a reach, lagged by hit_lag), is the pure <see cref="BallHits"/>.
         /// </summary>
         private int Hit(HazardContext ctx, Ball ball, Vector3 centre)
-            => ctx.HitPlayers(ball.Handle, centre, p.BallRadius, HitWindowSeconds, damageType: ctx.DamageType);
+        {
+            var n = ctx.HitPlayers(ball.Handle, centre, p.BallRadius, HitWindowSeconds, damageType: ctx.DamageType);
+
+            hits += n;
+
+            return n;
+        }
 
         public void Tick(HazardContext ctx)
         {
@@ -770,8 +779,8 @@ namespace ACE.Server.HazardMechanics
             cadenceEnded = true;
 
             ctx.Log(cadence != null
-                ? $"balls stop outcome={outcome} waves={cadence.Launched}/{cadence.Waves} (cadence) spawned={cadence.Spawned} lost={cadence.Lost}"
-                : $"balls stop outcome={outcome} waves={clock?.Wave ?? 0} spawned={clock?.Spawned ?? 0} lost={clock?.Lost ?? 0}");
+                ? $"balls stop outcome={outcome} waves={cadence.Launched}/{cadence.Waves} (cadence) spawned={cadence.Spawned} lost={cadence.Lost} hits={hits}"
+                : $"balls stop outcome={outcome} waves={clock?.Wave ?? 0} spawned={clock?.Spawned ?? 0} lost={clock?.Lost ?? 0} hits={hits}");
         }
 
         public string Describe(HazardContext ctx)

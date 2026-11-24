@@ -26,6 +26,9 @@ namespace ACE.Server.WorldEvents
         private static readonly Regex IdPattern = new Regex("^[a-z0-9_]+$", RegexOptions.Compiled);
 
         public IReadOnlyDictionary<string, SourceThemeDef> Sources { get; }
+
+        /// <summary>sources.json randomGroups: valid random-roll bucket weights, keyed by group name.</summary>
+        public IReadOnlyDictionary<string, double> RandomGroups { get; }
         public IReadOnlyDictionary<string, FamilyDef> Families { get; }
         public IReadOnlyDictionary<string, BossDef> Bosses { get; }
         public IReadOnlyDictionary<string, GoalDef> Goals { get; }
@@ -74,6 +77,7 @@ namespace ACE.Server.WorldEvents
 
         private WorldEventAxisStore(
             Dictionary<string, SourceThemeDef> sources,
+            Dictionary<string, double> randomGroups,
             Dictionary<string, FamilyDef> families,
             Dictionary<string, BossDef> bosses,
             Dictionary<string, GoalDef> goals,
@@ -85,6 +89,7 @@ namespace ACE.Server.WorldEvents
             string resolvedFolder)
         {
             Sources = sources;
+            RandomGroups = randomGroups;
             Families = families;
             Bosses = bosses;
             Goals = goals;
@@ -301,11 +306,11 @@ namespace ACE.Server.WorldEvents
             var goals = ParseGoals(goalsJson, diagnostics);
             var rewards = ParseRewards(rewardsJson, diagnostics);
             var anchors = ParseAnchors(anchorsJson, diagnostics);
-            var sources = ParseSources(sourcesJson, diagnostics, goals);
+            var sources = ParseSources(sourcesJson, diagnostics, goals, out var randomGroups);
             var bosses = ParseBosses(bossesJson, diagnostics);
             var speciesTables = ParseSpeciesTables(speciesFiles, diagnostics, notes, families);
 
-            return new WorldEventAxisStore(sources, families, bosses, goals, rewards, anchors, speciesTables,
+            return new WorldEventAxisStore(sources, randomGroups, families, bosses, goals, rewards, anchors, speciesTables,
                 diagnostics, notes, resolvedFolder);
         }
 
@@ -452,6 +457,41 @@ namespace ACE.Server.WorldEvents
                     boss.ThroughputCapHealth = BossDef.DefaultThroughputCapHealth;
                 }
 
+                // The champion HP budget (WorldEventBossBudget): a bad dial turns the budget OFF for this boss
+                // (perPower 0, which leaves the throughput / power-curve sizing in charge) rather than sizing
+                // from a number nobody meant, and the exponent falls back to linear.
+                if (!IsFinite(boss.BudgetHealthPerPower) || boss.BudgetHealthPerPower < 0)
+                {
+                    diagnostics.Add($"bosses.json: boss '{boss.Id}' has an invalid budgetHealthPerPower, the budget is off for it");
+                    boss.BudgetHealthPerPower = 0;
+                }
+
+                if (!IsFinite(boss.BudgetExponent) || boss.BudgetExponent <= 0)
+                {
+                    diagnostics.Add($"bosses.json: boss '{boss.Id}' has an invalid budgetExponent, using the default");
+                    boss.BudgetExponent = BossDef.DefaultBudgetExponent;
+                }
+
+                if (boss.BudgetFloorHealth > int.MaxValue)
+                {
+                    diagnostics.Add($"bosses.json: boss '{boss.Id}' has a budgetFloorHealth above int.MaxValue, " +
+                                    "clamped to int.MaxValue");
+                    boss.BudgetFloorHealth = int.MaxValue;
+                }
+
+                if (boss.BudgetCapHealth > int.MaxValue)
+                {
+                    diagnostics.Add($"bosses.json: boss '{boss.Id}' has a budgetCapHealth above int.MaxValue, " +
+                                    "clamped to int.MaxValue");
+                    boss.BudgetCapHealth = int.MaxValue;
+                }
+
+                if (boss.BudgetHealthPerPower > 0 && boss.BudgetFloorHealth > 0 && boss.BudgetCapHealth <= boss.BudgetFloorHealth)
+                {
+                    diagnostics.Add($"bosses.json: boss '{boss.Id}' has a budgetCapHealth at or below its " +
+                                    "budgetFloorHealth, so the budget always gives exactly the floor");
+                }
+
                 boss.Kind = BossKind.Named;
 
                 result[boss.Id] = boss;
@@ -525,6 +565,19 @@ namespace ACE.Server.WorldEvents
                     continue;
                 }
 
+                if (table.StretchOverscale.HasValue)
+                {
+                    var overscale = table.StretchOverscale.Value;
+
+                    if (double.IsNaN(overscale) || double.IsInfinity(overscale)
+                        || overscale < SpeciesTableDef.MinStretchOverscale
+                        || overscale > SpeciesTableDef.MaxStretchOverscale)
+                    {
+                        diagnostics.Add($"species/{fileName}: stretchOverscale {overscale.ToString(System.Globalization.CultureInfo.InvariantCulture)} outside [1, 4], ignored");
+                        table.StretchOverscale = null;
+                    }
+                }
+
                 if (result.ContainsKey(table.Id))
                 {
                     diagnostics.Add($"species/{fileName}: duplicate species id '{table.Id}', later entry dropped");
@@ -560,7 +613,13 @@ namespace ACE.Server.WorldEvents
 
                 result[table.Id] = table;
 
-                if (families.ContainsKey(table.Id))
+                if (!table.Drawable)
+                {
+                    // enabled false: kept in the table dictionary (band statistics, the authored-top pivot), but never
+                    // registered as a family, so World Events cannot resolve it. No note: the file declares it itself, and
+                    // the shipped-content test pins every note to the families.json-override wording.
+                }
+                else if (families.ContainsKey(table.Id))
                 {
                     notes.Add($"species/{fileName}: family '{table.Id}' also declared in families.json; families.json metadata wins");
                 }
@@ -661,6 +720,12 @@ namespace ACE.Server.WorldEvents
 
             if (!IsFinite(protect.MinDeathSeconds) || protect.MinDeathSeconds < 0)
                 return "has an invalid protect.minDeathSeconds (0 or more; 0 means no cap)";
+
+            if (!IsFinite(protect.DurabilityPerParticipant) || protect.DurabilityPerParticipant < 0 || protect.DurabilityPerParticipant > 1)
+                return "has an invalid protect.durabilityPerParticipant (0 to 1; 0 means no scaling)";
+
+            if (!IsFinite(protect.DurabilityCap) || protect.DurabilityCap < 1 || protect.DurabilityCap > 10)
+                return "has an invalid protect.durabilityCap (1 to 10)";
 
             if (protect.Waves != null && (protect.Waves.Base < 1 || protect.Waves.Cap < protect.Waves.Base
                 || !IsFinite(protect.Waves.PerParticipant) || protect.Waves.PerParticipant < 0))
@@ -1130,6 +1195,27 @@ namespace ACE.Server.WorldEvents
 
             return kept;
         }
+
+        /// <summary>
+        /// protect.healthWisps: a bad block is dropped (the feature goes off) with a diagnostic, never the goal. Null stays null.
+        /// </summary>
+        internal static HealthWispsDef ValidateHealthWisps(string goalId, HealthWispsDef def, List<string> diagnostics)
+        {
+            if (def == null)
+                return null;
+
+            if (def.Wcid == 0 || def.Count < 1 || def.Count > HealthWispsDef.MaxCount
+                || !double.IsFinite(def.Spacing) || def.Spacing <= 0 || def.Spacing > 5
+                || !double.IsFinite(def.Dz) || Math.Abs(def.Dz) > 20 || !double.IsFinite(def.Scale) || def.Scale <= 0 || def.Scale > 5)
+            {
+                diagnostics.Add($"goals.json: goal '{goalId}' protect.healthWisps is invalid (wcid={def.Wcid} count={def.Count} " +
+                                $"spacing={def.Spacing} dz={def.Dz} scale={def.Scale}; count must be 1-{HealthWispsDef.MaxCount}), dropped");
+                return null;
+            }
+
+            return def;
+        }
+
         private static Dictionary<string, GoalDef> ParseGoals(string json, List<string> diagnostics)
         {
             var result = new Dictionary<string, GoalDef>();
@@ -1213,6 +1299,8 @@ namespace ACE.Server.WorldEvents
                     goal.Protect.Decor = ValidateProtectDecor(goal.Id, "decor", goal.Protect.Decor, diagnostics);
                     goal.Protect.TargetDecor = ValidateProtectDecor(goal.Id, "targetDecor", goal.Protect.TargetDecor, diagnostics);
 
+                    goal.Protect.HealthWisps = ValidateHealthWisps(goal.Id, goal.Protect.HealthWisps, diagnostics);
+
                     // Flagged, not dropped: a dead setting someone might otherwise tune.
                     if (goal.Protect.IsTimeScaled && goal.Protect.Health != null)
                         diagnostics.Add($"goals.json: goal '{goal.Id}' sets protect.health, which is ignored because protect.undefendedSeconds makes damage time-based; remove it");
@@ -1225,6 +1313,13 @@ namespace ACE.Server.WorldEvents
                 {
                     diagnostics.Add($"goals.json: goal '{goal.Id}' {reachError}, dropped");
                     continue;
+                }
+
+                if (!IsFinite(goal.RandomWeight) || goal.RandomWeight < 0)
+                {
+                    diagnostics.Add($"goals.json: goal '{goal.Id}' has an invalid randomWeight {goal.RandomWeight} " +
+                                    "(must be a finite value of 0 or more), using 0 (never rolled)");
+                    goal.RandomWeight = 0.0;
                 }
 
                 goal.TypeKind = typeKind;
@@ -1243,6 +1338,14 @@ namespace ACE.Server.WorldEvents
                 {
                     diagnostics.Add($"goals.json: goal '{goal.Id}' has a blank failTemplate, ignored");
                     goal.FailTemplate = null;
+                }
+
+                // Optional per-goal maximum run length: a negative value is repaired to 0 (no goal-specific
+                // length). A value is a floor on the run's maximum, never a ceiling - see WorldEvent.ResolveMaxDuration.
+                if (goal.MaxDurationSeconds < 0)
+                {
+                    diagnostics.Add($"goals.json: goal '{goal.Id}' has a negative maxDurationSeconds, ignored");
+                    goal.MaxDurationSeconds = 0;
                 }
 
                 result[goal.Id] = goal;
@@ -1367,9 +1470,10 @@ namespace ACE.Server.WorldEvents
         }
 
         private static Dictionary<string, SourceThemeDef> ParseSources(string json, List<string> diagnostics,
-            IReadOnlyDictionary<string, GoalDef> goals)
+            IReadOnlyDictionary<string, GoalDef> goals, out Dictionary<string, double> randomGroups)
         {
             var result = new Dictionary<string, SourceThemeDef>();
+            randomGroups = new Dictionary<string, double>();
 
             if (string.IsNullOrEmpty(json))
                 return result;
@@ -1384,6 +1488,26 @@ namespace ACE.Server.WorldEvents
             {
                 diagnostics.Add($"sources.json: malformed JSON - {ex.Message}");
                 return result;
+            }
+
+            foreach (var group in file.RandomGroups ?? new Dictionary<string, double>())
+            {
+                if (!IsValidId(group.Key))
+                {
+                    diagnostics.Add($"sources.json: randomGroups entry with invalid name '{group.Key}' dropped");
+                    continue;
+                }
+
+                if (!IsFinite(group.Value) || group.Value < 0)
+                {
+                    // Kept at 0, NOT dropped: dropping would turn every member into its own full-weight bucket.
+                    diagnostics.Add($"sources.json: randomGroups '{group.Key}' has an invalid weight {group.Value} " +
+                                    "(must be a finite value of 0 or more), using 0 (its members are never rolled)");
+                    randomGroups[group.Key] = 0.0;
+                    continue;
+                }
+
+                randomGroups[group.Key] = group.Value;
             }
 
             foreach (var source in file.Sources ?? new List<SourceThemeDef>())
@@ -1448,6 +1572,21 @@ namespace ACE.Server.WorldEvents
                     diagnostics.Add($"sources.json: source '{source.Id}' has an invalid clearanceRadius {source.ClearanceRadiusOverride} " +
                                     "(must be a finite value of 0 or more), dropped");
                     continue;
+                }
+
+                if (!IsFinite(source.RandomWeight) || source.RandomWeight < 0)
+                {
+                    diagnostics.Add($"sources.json: source '{source.Id}' has an invalid randomWeight {source.RandomWeight} " +
+                                    "(must be a finite value of 0 or more), using 0 (never rolled)");
+                    source.RandomWeight = 0.0;
+                }
+
+                if (!string.IsNullOrEmpty(source.RandomGroup) && !randomGroups.ContainsKey(source.RandomGroup))
+                {
+                    diagnostics.Add($"sources.json: source '{source.Id}' names randomGroup '{source.RandomGroup}' " +
+                                    "which is not a valid entry of randomGroups; using weight 0 (never rolled)");
+                    source.RandomGroup = null;
+                    source.RandomWeight = 0.0;
                 }
 
                 source.GeometryKind = geometryKind;
@@ -1857,6 +1996,7 @@ namespace ACE.Server.WorldEvents
         /// (the theme is kept, with no default hazard) with a diagnostic, because a hazard is dressing on a theme that already
         /// works. kind must be one of wisps, balls, rain, random, none (case-insensitive, normalised to lower case); element,
         /// when given, one of fire, acid, frost, lightning, earth; rainHeight, when given, finite and in (0, 200].
+        /// kinds, when given, is a list of wisps, balls, rain (each run picks one); an unknown entry drops the list alone.
         /// styleElements are index-aligned with decorStyles: each must be a known element and there must be exactly as many as
         /// the source DECLARED decorStyles (before any bad style was dropped, which would shift the alignment). A bad
         /// styleElements alone is dropped, not the whole block.
@@ -1888,6 +2028,28 @@ namespace ACE.Server.WorldEvents
 
             if (hazard.Element != null)
                 hazard.Element = hazard.Element.Trim().ToLowerInvariant();
+
+            if (hazard.Kinds != null)
+            {
+                var known = new[] { "wisps", "balls", "rain" };
+                var cleaned = hazard.Kinds.Select(k => k?.Trim().ToLowerInvariant()).ToList();
+
+                if (cleaned.Count == 0)
+                    hazard.Kinds = null;
+                else if (cleaned.Any(k => k == null || Array.IndexOf(known, k) < 0))
+                {
+                    diagnostics.Add($"sources.json: source '{source.Id}' hazard kinds must each be one of wisps, balls, rain; kinds dropped");
+                    hazard.Kinds = null;
+                }
+                else
+                    hazard.Kinds = cleaned.Distinct().ToList();
+            }
+
+            if (hazard.Kinds != null && kind == "none")
+            {
+                diagnostics.Add($"sources.json: source '{source.Id}' hazard kind is none, so its hazard kinds are ignored");
+                hazard.Kinds = null;
+            }
 
             if (hazard.StyleElements != null)
             {

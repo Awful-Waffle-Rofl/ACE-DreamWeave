@@ -6,6 +6,7 @@ using ACE.Common;
 using ACE.Database.Models.World;
 using ACE.Entity.Enum;
 using ACE.Entity.Models;
+using ACE.Server.Entity;
 using ACE.Server.Factories.Entity;
 using ACE.Server.Factories.Enum;
 using ACE.Server.Factories.Tables;
@@ -410,6 +411,10 @@ namespace ACE.Server.Factories
 
         private static SpellId AdjustForDamageType(WorldObject wo, SpellId spell)
         {
+            // fork addition (Summoner casters): the focus is Undef and would otherwise roll the even War/Life split
+            if (SummonerFocus.IsSummonerFocus(wo))
+                return SpellId.CantripSummoningProwess1;
+
             if (wo.W_DamageType == DamageType.Nether)
                 return SpellId.CantripVoidMagicAptitude1;
 

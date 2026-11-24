@@ -37,6 +37,19 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("geometry")]
         public string Geometry { get; set; }
 
+        /// <summary>
+        /// Optional random-roll bucket (a key of sources.json randomGroups). Null = the source is its own bucket.
+        /// </summary>
+        [JsonPropertyName("randomGroup")]
+        public string RandomGroup { get; set; }
+
+        /// <summary>
+        /// Random-roll weight, default 1. Its share inside <see cref="RandomGroup"/> when grouped, otherwise the
+        /// weight of the source's own bucket. 0 = never rolled (a pinned --source still starts it).
+        /// </summary>
+        [JsonPropertyName("randomWeight")]
+        public double RandomWeight { get; set; } = 1.0;
+
         [JsonPropertyName("geometryRadius")]
         public float GeometryRadius { get; set; }
 
@@ -253,6 +266,16 @@ namespace ACE.Server.WorldEvents.Defs
         /// </summary>
         [JsonPropertyName("webStartable")]
         public bool WebStartable { get; set; } = true;
+
+        /// <summary>
+        /// Whether an UNRESTRICTED random roll (in-game "/worldevent start random" without --source) may land on this source.
+        /// True when the key is absent. "envoy_muster" ships false: it is the web panel's door to defend_envoys, which ambush
+        /// already offers in game, so counting it there too would double Hold's share of in-game rolls (owner ruling
+        /// 2026-11-16: Hold has the same likelihood as every other option). A pinned source, and a roll restricted to the
+        /// web's AllowedSourceIds, ignore this flag.
+        /// </summary>
+        [JsonPropertyName("inGameRandom")]
+        public bool InGameRandom { get; set; } = true;
 
         /// <summary>
         /// Optional per-source override for the GOAL display name used in the run announcements (the

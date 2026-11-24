@@ -26,12 +26,20 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "parry",
             DisplayName = "Parry",
-            Description = "An 8% chance per rank to fully negate an incoming melee hit (pooled with Shield Block, " +
-                          "50% combined cap). Higher Deception increases the chance.",
+            // Live text: rank * class_ability_parry_percent_per_rank (GetReadout); the pooled cap is
+            // class_ability_avoidance_cap. The leading article is {An}, chosen from the rendered per-rank value, so a retune
+            // to 10% reads "A 10%" and the default 8% still reads "An 8%".
+            DescriptionTemplate = "Gives you a chance to fully block an incoming melee hit. It shares a " +
+                          "{v:class_ability_avoidance_cap|pct}% cap with Shield Block.",
+            RankTailTemplate = "+{per:class_ability_parry_percent_per_rank|pct}% chance",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
             AffinitySkill = Skill.Deception, // the Armor Tinkering read in GetReadout is Shield Block's half of the pooled roll, not this ability's rider
+            Ceilings = new[]
+            {
+                new ClassAbilityCeiling { Id = "avoidance", Bounds = CeilingBounds.Total, Source = CeilingSource.Tunable, Key = "class_ability_avoidance_cap", Label = "max combined block and parry chance", Format = "pct" },
+            },
         };
 
         /// <summary>
@@ -132,6 +140,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Label = "parry",
                 Per = null,
                 CapNote = capBites ? "avoidance cap" : null,
+                Ceilings = new[] { ClassAbilityCeilings.Read(Definition, "avoidance", (blockChance + parryChance) * 100.0, rank, ClassAbilityText.Live) },
             };
         }
     }

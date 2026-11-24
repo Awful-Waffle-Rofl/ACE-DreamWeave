@@ -26,7 +26,7 @@ namespace ACE.Server.ThreadDungeons
         // Cadmia...; powders are "Powdered Amber"..., where "Powder" is not a word of its own) gets two real item
         // names the first time it appears in a text. Every example name is verbatim from the Reagent-Steward's
         // create list (Content/sql/weenies/1003602 Reagent-Steward Aya Torimaru.sql) and attunement.json, and the
-        // two powders are NAMED ones (add_or_raise), not the four random ones. Pinned by ThreadGuideWiringTests.
+        // two powders are NAMED ones (add_or_raise), not the three random ones. Pinned by ThreadGuideWiringTests.
 
         public const string ScarabIntro = "a Scarab";
 
@@ -64,7 +64,7 @@ namespace ACE.Server.ThreadDungeons
         public const string Grant50 = "Here is your first Guide Fragment, level 50. " + LeadScarabStep + " Use the fragment on the Scarab, then use it on the Fragment Press to make a working Thread Gem. The Press will not accept it until a Scarab is loaded, and pressing Guide Fragments is free.";
         public const string Grant75 = "Your next Guide Fragment, level 75. This time use the fragment on a Taper. Any colour works except " + ChampionsTaperColour + ", which has nothing to act on at this level. Then press it.";
         public const string Grant100 = "Level 100. Use the fragment on " + HerbIntro + ", then press it.";
-        public const string Grant125 = "Level 125. Use the fragment on " + PowderIntro + ". Choose a named one; Agate, Bloodstone, Carnelian and Moonstone pick at random. Then press it.";
+        public const string Grant125 = "Level 125. Use the fragment on " + PowderIntro + ". Choose a named one; Agate, Carnelian and Moonstone pick at random. Then press it.";
         public const string Grant150 = "Level 150. Use the fragment on a Red Taper, then on a Hazel Talisman, then press it. A Talisman strengthens a modifier that is already there.";
         public const string Grant175 = "Level 175. Use the fragment on " + PotionIntro + ", then press it.";
         public const string GrantPlainFormat = "Your level {0} Guide Fragment. Load whatever components you like and press it. You know the craft now.";
@@ -119,7 +119,7 @@ namespace ACE.Server.ThreadDungeons
                 case 125:
                     return title
                         + "1. Buy " + PowderIntro + " from the Reagent-Steward.\n"
-                        + "Choose a named Powder; Agate, Bloodstone, Carnelian and Moonstone pick at random.\n"
+                        + "Choose a named Powder; Agate, Carnelian and Moonstone pick at random.\n"
                         + "2. Use this fragment on the Powder.\n"
                         + press + closing;
 

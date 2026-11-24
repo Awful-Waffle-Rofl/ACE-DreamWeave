@@ -72,9 +72,9 @@ namespace ACE.Server.Tests
         /// that trainer's wcid, derived from ClassAbilityTokenCatalog.TokenAbilities filtered by AbilityClass.
         /// </summary>
         [TestMethod]
-        public void Parse_ArcherTrainer_ResolvesElevenArcherAbilities()
+        public void Parse_ArcherTrainer_ResolvesTwelveArcherAbilities()
         {
-            const string trainerAbilities = "multishot,archer_training,enhanced_missileweapons,enhanced_coordination,hunters_mark,deadeye,fastaim,pinning_shot,crit_rating,doublevolley,longdraw";
+            const string trainerAbilities = "multishot,archer_training,enhanced_missileweapons,enhanced_coordination,hunters_mark,deadeye,fastaim,pinning_shot,crit_rating,doublevolley,longdraw,hunters_echo";
 
             var skills = ClassAbilityTrainer.ParseTrainerAbilities(trainerAbilities);
 
@@ -82,8 +82,9 @@ namespace ACE.Server.Tests
             // Hunter's Mark (T1) and Pinning Shot (T2, the slot Heavy Draw vacated). enhanced_missiledefense
             // was RETIRED 2026-09-16 (Missile Defense is owned solely by Archer Training) and removed from
             // the trainer's committed 9008 value along with it, so this string is once again byte-identical
-            // to that value. eagleeye -> fastaim 2026-09-29 (ability id 24 redefined in place).
-            Assert.AreEqual(11, skills.Count);
+            // to that value. eagleeye -> fastaim 2026-09-29 (ability id 24 redefined in place). TWELVE since
+            // 2026-11-10: hunters_echo (Hunter's Echo, Archer T3).
+            Assert.AreEqual(12, skills.Count);
             Assert.IsTrue(skills.All(s => s.AbilityClass == ClassAbilityClass.Archer));
         }
 
@@ -149,11 +150,11 @@ namespace ACE.Server.Tests
         /// dropped it from this string, so every ability it stocks is once again an Archmage ability.
         /// </summary>
         [TestMethod]
-        public void Parse_ArchmageTrainer_ResolvesThirteenArchmageAbilities()
+        public void Parse_ArchmageTrainer_ResolvesFourteenArchmageAbilities()
         {
             // 2026-10-24 Archmage pass: quickened_casting and flatcastspeed retired; elemental_inversion,
             // arcane_hollow and volatile_wall added (twelve -> thirteen). The exact value now committed for Kaori Tenma.
-            const string trainerAbilities = "spellaoe,archmage_training,enhanced_warmagic,enhanced_focus,elemental_inversion,enhanced_mana,arcane_hollow,overchannel,enhanced_magicdefense,manabarrier,echocast,elementalrend,volatile_wall";
+            const string trainerAbilities = "spellaoe,archmage_training,enhanced_warmagic,enhanced_focus,elemental_inversion,enhanced_mana,arcane_hollow,overchannel,enhanced_magicdefense,manabarrier,echocast,elementalrend,volatile_wall,elementalrendvuln";
 
             var skills = ClassAbilityTrainer.ParseTrainerAbilities(trainerAbilities);
 
@@ -161,7 +162,9 @@ namespace ACE.Server.Tests
             // it had been UN-HOMED by the 2026-09-12 overhaul, still registered and stocked - see the
             // Berserker note). It is now included here because it counts as an Archmage entry again, alongside
             // quickened_casting (added 2026-09-12, new-ability wave), which this string had been missing.
-            Assert.AreEqual(13, skills.Count);
+            // FOURTEEN since 2026-11-03: elementalrendvuln (the returned Elemental Rend) joins elementalrend (Elemental
+            // Proficiency, whose internal Name is unchanged).
+            Assert.AreEqual(14, skills.Count);
             Assert.IsTrue(skills.All(s => s.AbilityClass == ClassAbilityClass.Archmage));
         }
 
@@ -203,8 +206,8 @@ namespace ACE.Server.Tests
             var trainerLists = new[]
             {
                 // Archer trainer (Content/realms/driftnetwork_hub.sql, NPC 1001000). hunters_mark and
-                // pinning_shot added 2026-09-12 (class ability overhaul, new-ability wave).
-                "multishot,archer_training,enhanced_missileweapons,enhanced_coordination,hunters_mark,deadeye,fastaim,pinning_shot,crit_rating,doublevolley,longdraw",
+                // pinning_shot added 2026-09-12 (class ability overhaul, new-ability wave); hunters_echo 2026-11-10.
+                "multishot,archer_training,enhanced_missileweapons,enhanced_coordination,hunters_mark,deadeye,fastaim,pinning_shot,crit_rating,doublevolley,longdraw,hunters_echo",
                 // Rogue trainer (Content/realms/driftnetwork_hub.sql, NPC 1001001). Verbatim copy of that
                 // weenie's PropertyString.ClassAbilityTrainerAbilities (9008) value. enhanced_meleedefense
                 // was added back here 2026-09-12 when the class ability overhaul returned it from Spellsword
@@ -221,7 +224,7 @@ namespace ACE.Server.Tests
                 // enhanced_mana re-homed here 2026-09-14 (owner ruling).
                 // 2026-10-24 Archmage pass: quickened_casting and flatcastspeed retired; elemental_inversion,
                 // arcane_hollow and volatile_wall added.
-                "spellaoe,archmage_training,enhanced_warmagic,enhanced_focus,enhanced_mana,elemental_inversion,arcane_hollow,overchannel,enhanced_magicdefense,manabarrier,echocast,elementalrend,volatile_wall",
+                "spellaoe,archmage_training,enhanced_warmagic,enhanced_focus,enhanced_mana,elemental_inversion,arcane_hollow,overchannel,enhanced_magicdefense,manabarrier,echocast,elementalrend,volatile_wall,elementalrendvuln",
                 // VoidSummon trainer (NPC 1001005). umbral_siphon and soul_jump added 2026-09-12 (new-ability
                 // wave).
                 "netherrush,void_training,enhanced_voidmagic,enhanced_self,umbral_siphon,empoweredsummons,enhanced_summoning,summon2x,voiddamage,withering,soul_jump,netherbloom,soultether",

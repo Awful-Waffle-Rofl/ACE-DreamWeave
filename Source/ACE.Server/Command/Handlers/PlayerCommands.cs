@@ -15,6 +15,7 @@ using ACE.Server.Managers;
 using ACE.Server.Network;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
+using ACE.Server.Avatars.Gauntlet;
 using ACE.Server.WorldObjects;
 
 
@@ -707,6 +708,52 @@ namespace ACE.Server.Command.Handlers
         }
 
         /// <summary>
+        /// Per-character toggle for summon aggro: when on, your never-initiates summons (the Archer and every caster)
+        /// may start fights with monsters that are not attacking you (CombatPet.NeverInitiates). Off by default.
+        /// With no argument, reports the current setting. A change rushes the next save, as /summonattackontarget
+        /// does.
+        /// </summary>
+        [CommandHandler("summonaggro", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, 0,
+            "Toggle whether your ranged and caster summons start fights with monsters that are not attacking you.", "on | off")]
+        public static void HandleSummonAggro(Session session, params string[] parameters)
+        {
+            var player = session.Player;
+            if (player == null)
+                return;
+
+            void Msg(string text) => session.Network.EnqueueSend(new GameMessageSystemChat(text, ChatMessageType.Broadcast));
+
+            if (parameters.Length == 0)
+            {
+                if (player.SummonAggro)
+                    Msg("Summon aggro is currently on. Use /summonaggro off to turn it off.");
+                else
+                    Msg("Summon aggro is currently off. Use /summonaggro on to turn it on.");
+
+                return;
+            }
+
+            switch (parameters[0].ToLowerInvariant())
+            {
+                case "on":
+                    player.SummonAggro = true;
+                    player.RushNextPlayerSave(5);
+                    Msg("Summon aggro is now on. Your ranged and caster summons will attack monsters near you, even ones that are not attacking you.");
+                    break;
+
+                case "off":
+                    player.SummonAggro = false;
+                    player.RushNextPlayerSave(5);
+                    Msg("Summon aggro is now off. Your ranged and caster summons will only attack monsters already fighting you or your pets.");
+                    break;
+
+                default:
+                    Msg("Usage: /summonaggro on | off");
+                    break;
+            }
+        }
+
+        /// <summary>
         /// Force resend of all visible objects known to this player. Can fix rare cases of invisible object bugs.
         /// Can only be used once every 5 mins max.
         /// </summary>
@@ -944,7 +991,7 @@ namespace ACE.Server.Command.Handlers
             session.Network.EnqueueSend(new GameMessageSystemChat(msg, ChatMessageType.AdminTell));
         }
 
-        [CommandHandler("top", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, "Show a leaderboard (top 20).", "dps | defense | wave | speed | speed winners | level | bank | cap | stamp | thread | title | knot | 1v1 | 2v2 | tugak | bg")]
+        [CommandHandler("top", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, "Show a leaderboard (top 20).", "dps | defense | wave | gauntlet | speed | speed winners | level | bank | cap | stamp | thread | title | knot | 1v1 | 2v2 | tugak | bg")]
         public static void HandleTop(Session session, params string[] parameters)
         {
             var player = session.Player;
@@ -1101,6 +1148,10 @@ namespace ACE.Server.Command.Handlers
                     return;
                 }
 
+                // Allegiance Gauntlet: one row per Avatar (per allegiance), served from the in-memory record cache.
+                case "gauntlet":
+                    session.Network.EnqueueSend(new GameMessageSystemChat(GauntletRecords.RenderBoard(GauntletRecords.Board()), ChatMessageType.System));
+                    return;
                 // PvP arena ladders, ranked by rating: the same board /arena top prints, reachable here
                 // because /top is where players look for leaderboards. "/top 1v1 [count]" passes through.
                 case var ladder when PvpArenaCommands.IsLadderWord(ladder):
@@ -1113,6 +1164,7 @@ namespace ACE.Server.Command.Handlers
                 + "/top dps - Attack arena: highest damage dealt in the 60s trial\n"
                 + "/top defense - Defense arena: longest survival against the Squall\n"
                 + "/top wave - Wave gauntlet: highest wave reached (cleared waves + % of the next wave's health destroyed)\n"
+                + "/top gauntlet - Allegiance Gauntlet: best wave reached by each allegiance, with how many fought\n"
                 + "/top speed - Speed trial: fastest run of the current season's dungeon\n"
                 + "/top speed winners - Speed trial: the winner of each of the 20 most recent seasons\n"
                 + "/top level - Highest character level\n"
@@ -1734,6 +1786,21 @@ namespace ACE.Server.Command.Handlers
                     Msg("Usage: /summondamage [on|off]");
                     break;
             }
+        }
+
+        /// <summary>
+        /// "/telesummon" - teleports the player's active summons to them (Player.HandleTeleSummon). Each pet is
+        /// moved on its own landblock thread; pets in another instance or too far to share a tick thread are
+        /// refused, never forced. Cooldown pet_telesummon_cooldown_seconds (default 10, 0 disables), per player.
+        /// </summary>
+        [CommandHandler("telesummon", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, 0,
+            "Teleport your active summons to you.",
+            "\n"
+            + "Brings your summoned pets to your side, for example when one is stuck behind a corner.\n"
+            + "Pets that are too far away or in another instance cannot be called. Short cooldown.")]
+        public static void HandleTeleSummon(Session session, params string[] parameters)
+        {
+            session.Player.HandleTeleSummon();
         }
     }
 }

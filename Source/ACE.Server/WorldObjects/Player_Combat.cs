@@ -68,7 +68,17 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public override Skill GetCurrentWeaponSkill()
         {
-            var weapon = GetEquippedWeapon();
+            return GetCurrentWeaponSkill(mainHandOnly: false);
+        }
+
+        /// <summary>
+        /// <see cref="GetCurrentWeaponSkill()"/>, with <paramref name="mainHandOnly"/> true skipping the dual-wield
+        /// alternation (the off-hand swing's min(weapon skill, Dual Wield)), so a read that is not a swing answers the
+        /// same whichever hand swings next. Writes nothing.
+        /// </summary>
+        public Skill GetCurrentWeaponSkill(bool mainHandOnly)
+        {
+            var weapon = GetEquippedWeapon(forceMainHand: mainHandOnly);
 
             if (weapon?.WeaponSkill == null)
                 return GetHighestMeleeSkill();
@@ -76,7 +86,7 @@ namespace ACE.Server.WorldObjects
             var skill = ConvertToMoASkill(weapon.WeaponSkill);
 
             // DualWieldAlternate will be TRUE if *next* attack is offhand
-            if (IsDualWieldAttack && !DualWieldAlternate)
+            if (!mainHandOnly && IsDualWieldAttack && !DualWieldAlternate)
             {
                 var weaponSkill = GetCreatureSkill(skill);
                 var dualWield = GetCreatureSkill(Skill.DualWield);
@@ -110,6 +120,11 @@ namespace ACE.Server.WorldObjects
 
         public override CombatType GetCombatType()
         {
+            // Hunter's Echo: inside an Echo volley or arrow (Creature.HuntersEchoWeaponScope) the attack is a missile
+            // attack, even when the snapshot weapon is no longer wielded (its CurrentWieldedLocation is then cleared)
+            if (HuntersEchoWeaponScope != null)
+                return CombatType.Missile;
+
             // this is an unsafe function, move away from this
             var weapon = GetEquippedWeapon();
 
@@ -263,6 +278,10 @@ namespace ACE.Server.WorldObjects
             }
             else
             {
+                // Balance Trials recorder: this player's own miss against a trial creature (one field read otherwise).
+                if (target.P_TrialRep != null)
+                    ACE.Server.BalanceTrials.TrialHooks.OnMissOut(this, target, damageEvent.CombatType);
+
                 if (damageEvent.LifestoneProtection)
                     Session.Network.EnqueueSend(new GameMessageSystemChat($"The Lifestone's magic protects {target.Name} from the attack!", ChatMessageType.Magic));
 
@@ -283,7 +302,17 @@ namespace ACE.Server.WorldObjects
                 var intDamage = AttackerNotificationDamage(digsiteImmuneBlocked, objectiveDealt, damageEvent.Damage);
 
                 if (!SquelchManager.Squelches.Contains(this, ChatMessageType.CombatSelf))
-                    Session.Network.EnqueueSend(new GameEventAttackerNotification(Session, target.Name, damageEvent.DamageType, (float)intDamage / target.Health.MaxValue, intDamage, damageEvent.IsCritical, damageEvent.AttackConditions));
+                {
+                    // Hunter's Echo: its arrow's hit is reported as the Echo's ("<owner>'s Echo deals N points of ..."),
+                    // not as the client-built "You singe ..." line. The name rides the arrow (HuntersEchoShot), so a
+                    // destroyed Echo is never read. Every other hit keeps the attacker notification.
+                    var echoShot = damageSource?.HuntersEchoShot;
+
+                    if (echoShot != null)
+                        Session.Network.EnqueueSend(new GameMessageSystemChat(HuntersEchoMath.FormatEchoHitMessage(echoShot.EchoName, intDamage, damageEvent.DamageType, target.Name, damageEvent.IsCritical, damageEvent.AttackConditions), ChatMessageType.CombatSelf));
+                    else
+                        Session.Network.EnqueueSend(new GameEventAttackerNotification(Session, target.Name, damageEvent.DamageType, (float)intDamage / target.Health.MaxValue, intDamage, damageEvent.IsCritical, damageEvent.AttackConditions));
+                }
 
                 // splatter effects - suppressed for a digsite-immune hit (owner ruling, follow-up to the
                 // 0-damage report above): a hit notification says 0, so the hit sound, pain sound and blood
@@ -346,10 +375,21 @@ namespace ACE.Server.WorldObjects
 
         public override uint GetEffectiveAttackSkill()
         {
-            var weapon = GetEquippedWeapon();
-            var attackSkill = GetCreatureSkill(GetCurrentWeaponSkill()).Current;
-            var offenseMod = GetWeaponOffenseModifier(this);
-            var accuracyMod = GetAccuracyMod(weapon);
+            return GetEffectiveAttackSkill(null, null, mainHandOnly: false);
+        }
+
+        /// <summary>
+        /// The parameterless form's arithmetic with three overrides, none of which writes anything:
+        /// <paramref name="stance"/> (null = the live CombatMode) for the offense modifier, <paramref name="accuracyBar"/>
+        /// (null = the live AccuracyLevel) for the missile accuracy modifier, and <paramref name="mainHandOnly"/> to skip
+        /// the dual-wield alternation (see <see cref="GetCurrentWeaponSkill(bool)"/>). Character Details reads this.
+        /// </summary>
+        public uint GetEffectiveAttackSkill(CombatMode? stance, float? accuracyBar, bool mainHandOnly)
+        {
+            var weapon = GetEquippedWeapon(forceMainHand: mainHandOnly);
+            var attackSkill = GetCreatureSkill(GetCurrentWeaponSkill(mainHandOnly)).Current;
+            var offenseMod = GetWeaponOffenseModifier(this, stance);
+            var accuracyMod = GetAccuracyMod(weapon, accuracyBar);
 
             attackSkill = (uint)Math.Round(attackSkill * accuracyMod * offenseMod);
 
@@ -362,6 +402,44 @@ namespace ACE.Server.WorldObjects
             return attackSkill;
         }
 
+        /// <summary>
+        /// Dual wield only: the effective attack skill of an OFF-HAND swing, read without touching DualWieldAlternate or any
+        /// state. The off weapon's own skill, capped at Dual Wield when that is lower (<see cref="GetCurrentWeaponSkill(bool)"/>'s
+        /// alternation branch), times the same offense modifier every swing uses (the better of the two weapons). Zero and
+        /// <paramref name="skillUsed"/> None when no off-hand weapon is wielded; an off weapon without a WeaponSkill reads the highest melee skill. Character Details reads this.
+        /// </summary>
+        public uint GetEffectiveOffHandAttackSkill(CombatMode? stance, out Skill skillUsed)
+        {
+            var offWeapon = GetDualWieldWeapon();
+
+            if (offWeapon == null)
+            {
+                skillUsed = Skill.None;
+                return 0;
+            }
+
+            // a weapon with no WeaponSkill falls back to the highest melee skill, uncapped, as GetCurrentWeaponSkill does
+            var skill = offWeapon.WeaponSkill == null ? GetHighestMeleeSkill() : ConvertToMoASkill(offWeapon.WeaponSkill);
+
+            if (offWeapon.WeaponSkill == null)
+            {
+                skillUsed = skill;
+                return (uint)Math.Round(GetCreatureSkill(skill).Current * GetWeaponOffenseModifier(this, stance));
+            }
+
+            var weaponSkill = GetCreatureSkill(skill);
+            var dualWield = GetCreatureSkill(Skill.DualWield);
+
+            if (dualWield.Current < weaponSkill.Current)
+                skill = Skill.DualWield;
+
+            skillUsed = skill;
+
+            var offenseMod = GetWeaponOffenseModifier(this, stance);
+
+            return (uint)Math.Round(GetCreatureSkill(skill).Current * offenseMod);
+        }
+
         public uint GetTargetEffectiveDefenseSkill(WorldObject target)
         {
             var creature = target as Creature;
@@ -370,7 +448,12 @@ namespace ACE.Server.WorldObjects
             var attackType = GetCombatType();
             var defenseSkill = attackType == CombatType.Missile ? Skill.MissileDefense : Skill.MeleeDefense;
             var defenseMod = defenseSkill == Skill.MeleeDefense ? GetWeaponMeleeDefenseModifier(creature) : 1.0f;
-            var effectiveDefense = (uint)Math.Round(creature.GetCreatureSkill(defenseSkill).Current * defenseMod);
+            var current = creature.GetCreatureSkill(defenseSkill).Current;
+            var effectiveDefense = (uint)Math.Round(current * defenseMod);
+
+            // Same Threads melee defense bound as Creature.GetEffectiveDefenseSkill (the evade roll).
+            if (defenseSkill == Skill.MeleeDefense && creature is not Player)
+                effectiveDefense = ACE.Server.ThreadDungeons.DungeonCombatNormalizer.BoundWeaponLiftedDefense(effectiveDefense, current, creature.GetMeleeDefenseWeaponBound());
 
             if (creature.IsExhausted) effectiveDefense = 0;
 
@@ -383,16 +466,20 @@ namespace ACE.Server.WorldObjects
         /// <summary>
         /// Returns a modifier to the player's defense skill, based on current motion state
         /// </summary>
-        /// <returns></returns>
-        public float GetDefenseStanceMod()
+        /// <param name="stance">
+        /// Null reads the live CombatMode, and the live jump. A stance override (Character Details) answers a steady
+        /// combat-stance value (owner ruling): it skips the jump penalty as well as the peace-mode posture branch
+        /// (crouch, sit, sleep). Logging out still applies; a logging-out character is never read for Character Details.
+        /// </param>
+        public float GetDefenseStanceMod(CombatMode? stance = null)
         {
-            if (IsJumping)
+            if (stance == null && IsJumping)
                 return 0.5f;
 
             if (IsLoggingOut)
                 return 0.8f;
 
-            if (CombatMode != CombatMode.NonCombat)
+            if ((stance ?? CombatMode) != CombatMode.NonCombat)
                 return 1.0f;
 
             var forwardCommand = CurrentMovementData.MovementType == MovementType.Invalid && CurrentMovementData.Invalid != null ?
@@ -417,6 +504,11 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public override void OnEvade(WorldObject attacker, CombatType attackType)
         {
+            // Balance Trials recorder: an evade of a trial creature's melee or missile attack (Monster_Melee and
+            // ProjectileCollisionHelper both reach here). First, before the lifestone return. One field read otherwise.
+            if (TrialActive)
+                ACE.Server.BalanceTrials.TrialHooks.OnEvadeIn(this, attacker, attackType);
+
             var creatureAttacker = attacker as Creature;
 
             if (creatureAttacker != null)
@@ -486,9 +578,19 @@ namespace ACE.Server.WorldObjects
             if (creatureAttacker == null)
                 return;
 
-            var difficulty = creatureAttacker.GetCreatureSkill(creatureAttacker.GetCurrentWeaponSkill()).Current;
+            var difficulty = creatureAttacker.GetCreatureSkill(EvadeProficiencySkill(creatureAttacker, attackType)).Current;
             // attackMod?
             Proficiency.OnSuccessUse(this, defenseSkill, difficulty);
+        }
+
+        /// <summary>
+        /// The attacker skill whose value is the difficulty of an evade's defense-skill proficiency: the skill the
+        /// attacker rolled for THIS hit, so a monster's melee hit reads its melee skill even while it still wields a
+        /// launcher (Creature.GetWeaponSkillForHit), and a player attacker its own GetCurrentWeaponSkill unchanged.
+        /// </summary>
+        internal static Skill EvadeProficiencySkill(Creature attacker, CombatType attackType)
+        {
+            return attacker.GetWeaponSkillForHit(attackType);
         }
 
         public BaseDamageMod GetBaseDamageMod(WorldObject damageSource)
@@ -529,12 +631,21 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public override float GetAccuracyMod(WorldObject weapon)
         {
+            return GetAccuracyMod(weapon, null);
+        }
+
+        /// <summary>
+        /// <see cref="GetAccuracyMod(WorldObject)"/> at <paramref name="accuracyBar"/> (0..1) instead of the live
+        /// AccuracyLevel when given. Writes nothing.
+        /// </summary>
+        public float GetAccuracyMod(WorldObject weapon, float? accuracyBar)
+        {
             if (weapon == null || !weapon.IsRanged)
                 return 1.0f;
 
             var low = 0.6f + GetFastAimLowEndBonus();
 
-            return low + AccuracyLevel * (1.6f - low);
+            return low + (accuracyBar ?? AccuracyLevel) * (1.6f - low);
         }
 
         public float GetPowerAccuracyBar()
@@ -560,6 +671,14 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public override void TakeDamageOverTime(float _amount, DamageType damageType)
         {
+            // Hunter's Echo: incoming damage reads the owner's real equipment (see TakeDamage). Not known to be
+            // reachable from inside an Echo hit today (DoT ticks run from the enchantment tick); kept for safety
+            if (HuntersEchoWeaponScope != null)
+            {
+                TakeDamageOverTimeOutsideHuntersEchoScope(_amount, damageType);
+                return;
+            }
+
             if (Invincible || IsDead) return;
 
             // check lifestone protection
@@ -627,6 +746,42 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// Hunter's Echo: TakeDamageOverTime re-entered with the Echo weapon scope suspended. A separate method, so the
+        /// unscoped path (every DoT tick) allocates no closure.
+        /// </summary>
+        private void TakeDamageOverTimeOutsideHuntersEchoScope(float amount, DamageType damageType)
+        {
+            var previous = EnterHuntersEchoWeaponScope(null);
+
+            try
+            {
+                TakeDamageOverTime(amount, damageType);
+            }
+            finally
+            {
+                RestoreHuntersEchoWeaponScope(previous);
+            }
+        }
+
+        /// <summary>
+        /// Hunter's Echo: TakeDamage re-entered with the Echo weapon scope suspended. A separate method, so the unscoped
+        /// path (every incoming hit) allocates no closure.
+        /// </summary>
+        private int TakeDamageOutsideHuntersEchoScope(WorldObject source, DamageType damageType, float amount, BodyPart bodyPart, bool crit, AttackConditions attackConditions, bool sendDefenderNotification, bool isHazard, DamageAttackKind? attackKind)
+        {
+            var previous = EnterHuntersEchoWeaponScope(null);
+
+            try
+            {
+                return TakeDamage(source, damageType, amount, bodyPart, crit, attackConditions, sendDefenderNotification, isHazard, attackKind);
+            }
+            finally
+            {
+                RestoreHuntersEchoWeaponScope(previous);
+            }
+        }
+
+        /// <summary>
         /// THE ONLY player-damage entry point that still carries the attack's CombatType - the overload it
         /// forwards to takes a DamageType and has already lost it. Monster melee (Monster_Melee) and monster
         /// missile (ProjectileCollisionHelper) both arrive through this overload with CombatType intact, so
@@ -637,7 +792,8 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public int TakeDamage(WorldObject source, DamageEvent damageEvent)
         {
-            return TakeDamage(source, damageEvent.DamageType, damageEvent.Damage, damageEvent.BodyPart, damageEvent.IsCritical, damageEvent.AttackConditions);
+            return TakeDamage(source, damageEvent.DamageType, damageEvent.Damage, damageEvent.BodyPart, damageEvent.IsCritical, damageEvent.AttackConditions,
+                attackKind: DamageAttackKindNames.Of(damageEvent.CombatType));
         }
 
         /// <summary>
@@ -647,8 +803,17 @@ namespace ACE.Server.WorldObjects
         /// TRUE only from HazardContext.HitPlayers: every ward (PreWriteDamageContext.IsHazard lists them) skips the hit
         /// (owner ruling R3). Every other caller leaves it false and nothing changes for them.
         /// </param>
-        public int TakeDamage(WorldObject source, DamageType damageType, float _amount, BodyPart bodyPart, bool crit = false, AttackConditions attackConditions = AttackConditions.None, bool sendDefenderNotification = true, bool isHazard = false)
+        /// <param name="attackKind">
+        /// What kind of attack this is, for player_death_event only (stamped on the DamageHistory entry; nothing in the
+        /// damage path reads it). Null resolves through DamageAttackKindNames.Default.
+        /// </param>
+        public int TakeDamage(WorldObject source, DamageType damageType, float _amount, BodyPart bodyPart, bool crit = false, AttackConditions attackConditions = AttackConditions.None, bool sendDefenderNotification = true, bool isHazard = false, DamageAttackKind? attackKind = null)
         {
+            // Hunter's Echo: damage reaching the owner from inside an Echo hit (a Reflect monster's damage back) is
+            // DEFENSIVE, so it reads the owner's real equipment, never the Echo's bow; the re-entry runs unscoped
+            if (HuntersEchoWeaponScope != null)
+                return TakeDamageOutsideHuntersEchoScope(source, damageType, _amount, bodyPart, crit, attackConditions, sendDefenderNotification, isHazard, attackKind);
+
             if (Invincible || IsDead) return 0;
 
             if (source is Creature creatureAttacker)
@@ -666,6 +831,11 @@ namespace ACE.Server.WorldObjects
                 log.Error($"{Name}.TakeDamage({source?.Name} ({source?.Guid}), {damageType}, {_amount}) - negative damage, this shouldn't happen");
                 return 0;
             }
+
+            // Summoner casters (Docs/SummonerCasters/DESIGN.md): the wielder cut on a physical hit a focus wielder lands on a
+            // player, the player-victim mirror of Creature.TakeDamage's read; read at the hit, applies in PvP. Past the Echo
+            // re-entry above, so a re-entered call is cut once. 1 for every non-player source.
+            _amount *= SummonerFocus.WielderDamageMod(source, this);
 
             var amount = (uint)Math.Round(_amount);
             var percent = (float)amount / Health.MaxValue;
@@ -715,9 +885,37 @@ namespace ACE.Server.WorldObjects
                 percent = (float)amount / Health.MaxValue;
             }
 
+            // THE CLOAK SPELL PROC IS ROLLED HERE, AHEAD OF THE HEALTH WRITE AND AHEAD OF THORNS, AND CAST AT THE END.
+            // Ahead of Thorns since the Vanguard pass (2026-11-06): a successful roll opens Cloaked in Power's
+            // Critical Thorns window, and the reflect of THIS hit must see it open. Ahead of the WRITE since Hunter's
+            // Echo (2026-11-10): a winning roll may hand this very hit to the Echo, which has to happen before the hit
+            // reaches Health. The cast (Cloak.CompleteSpellProc, further down) still sits after the death check, so a
+            // killing blow never casts.
+            //
+            // THE GATE IS THE OLD POST-WRITE "Health.Current > 0", TAKEN ONE STATEMENT EARLIER. UpdateVitalDelta clamps
+            // at zero, so health after the write is above zero exactly when it is above `amount` now
+            // (HuntersEchoMath.ShouldRollCloakProc). A player who can reserve an Echo absorb also rolls on a hit that
+            // would kill; for everyone else the decision is unchanged. A HAZARD hit never reserves one (owner ruling R3:
+            // no ward soaks a hazard), so isHazard is passed through. The cheap tests (a spell-proc cloak, then the
+            // ability actually held) run before any setting lookup, since this runs on every incoming hit.
+            var canReserveEchoAbsorb = equippedCloak != null && Cloak.HasProcSpell(equippedCloak) && CanReserveHuntersEchoAbsorb(source, isHazard);
+
+            var cloakSpellProcRolled = equippedCloak != null && Cloak.HasProcSpell(equippedCloak) && HuntersEchoMath.ShouldRollCloakProc(Health.Current, amount, canReserveEchoAbsorb)
+                && Cloak.RollSpellProc(this, equippedCloak, cloakProcPercent);
+
+            // Hunter's Echo cloak absorb: the Echo is summoned (or renewed) first and takes the hit as this player would
+            // have, already mitigated; only then is the hit zeroed here. A failed summon leaves the hit as it was.
+            if (HuntersEchoMath.ShouldAbsorb(cloakSpellProcRolled, canReserveEchoAbsorb) && amount > 0
+                && TryHuntersEchoAbsorb(source, damageType, amount, equippedCloak))
+            {
+                amount = 0;
+                percent = 0.0f;
+            }
+
             // update health
             var damageTaken = (uint)-UpdateVitalDelta(Health, (int)-amount);
-            DamageHistory.Add(source, damageType, damageTaken, thrown: amount);
+            var recordedKind = attackKind ?? DamageAttackKindNames.Default(isHazard, sendDefenderNotification);
+            DamageHistory.Add(source, damageType, damageTaken, thrown: amount, kind: recordedKind, isCritical: DamageAttackKindNames.CritFor(recordedKind, crit));
 
             // World Events measured boss damage scaling (TECH-DESIGN 2.16). This is the melee and missile
             // site: monster melee (Monster_Melee) and monster missile (ProjectileCollisionHelper) both
@@ -726,6 +924,9 @@ namespace ACE.Server.WorldObjects
             // controller has to steer. Inert - two field reads - for every hit not dealt by a world-event
             // boss, which is all of them outside a run.
             ACE.Server.WorldEvents.WorldEventHooks.NoteBossHit(source, this, (int)damageTaken, crit);
+
+            // (the cloak spell proc was rolled above the health write - see there)
+
 
             // class abilities that react to a landed incoming hit (e.g. Thorns) - placed before the
             // death check so they still fire on a killing blow
@@ -757,6 +958,9 @@ namespace ACE.Server.WorldObjects
             if (!BodyParts.Indices.TryGetValue(bodyPart, out var iDamageLocation))
             {
                 log.Warn($"{Name}.TakeDamage({source.Name}, {damageType}, {amount}, {bodyPart}, {crit}): avoided crash for bad damage location");
+
+                // the cloak proc is never completed on this return, so a Hunter's Echo absorb mark must not linger
+                ClearHuntersEchoAbsorb();
                 return 0;
             }
             var damageLocation = (DamageLocation)iDamageLocation;
@@ -791,8 +995,8 @@ namespace ACE.Server.WorldObjects
                 EnqueueBroadcast(new GameMessageSound(Guid, woundSound, 1.0f));
             }
 
-            if (equippedCloak != null && Cloak.HasProcSpell(equippedCloak))
-                Cloak.TryProcSpell(this, source, equippedCloak, cloakProcPercent);
+            if (cloakSpellProcRolled)
+                Cloak.CompleteSpellProc(this, source, equippedCloak);
 
             // if player attacker, update PK timer
             if (source is Player attacker)
@@ -895,7 +1099,7 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public bool IsRecklessAttackQualifying()
         {
-            if (CombatMode != CombatMode.Melee && CombatMode != CombatMode.Missile)
+            if (RecklessnessCombatMode != CombatMode.Melee && RecklessnessCombatMode != CombatMode.Missile)
                 return false;
 
             if (GetCreatureSkill(Skill.Recklessness).AdvancementClass < SkillAdvancementClass.Trained)
@@ -913,7 +1117,7 @@ namespace ACE.Server.WorldObjects
         public float GetRecklessnessMod(/*float powerAccuracyBar*/)
         {
             // ensure melee or missile combat mode
-            if (CombatMode != CombatMode.Melee && CombatMode != CombatMode.Missile)
+            if (RecklessnessCombatMode != CombatMode.Melee && RecklessnessCombatMode != CombatMode.Missile)
                 return 1.0f;
 
             var skill = GetCreatureSkill(Skill.Recklessness);

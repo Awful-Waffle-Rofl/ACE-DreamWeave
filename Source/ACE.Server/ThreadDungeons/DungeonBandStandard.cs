@@ -126,6 +126,13 @@ namespace ACE.Server.ThreadDungeons
         /// </summary>
         public IReadOnlyDictionary<Skill, uint> EffectiveDefenseMedians { get; }
 
+        /// <summary>
+        /// Lower median of the sample's authored CritResistRating (<see cref="DungeonStatProfile.CritResistRating"/>),
+        /// ZEROS INCLUDED: a creature with no rating genuinely has none, unlike the "0 = no data" axes above. Not on any
+        /// stat curve (a curve standard carries its anchor's value), and read only by the Character Details baseline.
+        /// </summary>
+        public uint CritResistRatingMedian { get; }
+
         /// <summary>How many distinct wcids with usable data the sample held. 0 means "no standard".</summary>
         public int SampleCount { get; }
 
@@ -140,8 +147,9 @@ namespace ACE.Server.ThreadDungeons
         private DungeonBandStandard(IReadOnlyDictionary<Skill, uint> skillMedians, uint maxBodyDamage, uint maxBaseArmor,
             int spellTier, int sampleCount, double sampleLowRatio, double healthRate = 0.0,
             IReadOnlyDictionary<PropertyAttribute, uint> attributeMedians = null,
-            IReadOnlyDictionary<Skill, uint> effectiveSkillMedians = null)
+            IReadOnlyDictionary<Skill, uint> effectiveSkillMedians = null, uint critResistRatingMedian = 0)
         {
+            CritResistRatingMedian = critResistRatingMedian;
             SkillMedians = skillMedians ?? new Dictionary<Skill, uint>();
             MaxBodyDamage = maxBodyDamage;
             MaxBaseArmor = maxBaseArmor;
@@ -169,7 +177,7 @@ namespace ACE.Server.ThreadDungeons
             int spellTier = 0, double healthRate = 0.0, int sampleCount = MinSample,
             IReadOnlyDictionary<PropertyAttribute, uint> attributeMedians = null,
             IReadOnlyDictionary<Skill, uint> effectiveDefenseMedians = null,
-            IReadOnlyDictionary<Skill, uint> effectiveSkillMedians = null)
+            IReadOnlyDictionary<Skill, uint> effectiveSkillMedians = null, uint critResistRatingMedian = 0)
         {
             var merged = new Dictionary<Skill, uint>();
 
@@ -181,7 +189,7 @@ namespace ACE.Server.ThreadDungeons
                 foreach (var kvp in effectiveSkillMedians)
                     merged[kvp.Key] = kvp.Value;
 
-            return new DungeonBandStandard(skillMedians, maxBodyDamage, maxBaseArmor, spellTier, sampleCount, 1.0, healthRate, attributeMedians, merged);
+            return new DungeonBandStandard(skillMedians, maxBodyDamage, maxBaseArmor, spellTier, sampleCount, 1.0, healthRate, attributeMedians, merged, critResistRatingMedian);
         }
 
         /// <summary>
@@ -192,9 +200,10 @@ namespace ACE.Server.ThreadDungeons
         /// </summary>
         internal static DungeonBandStandard Create(IReadOnlyDictionary<Skill, uint> skillMedians, uint maxBodyDamage, uint maxBaseArmor,
             int spellTier, int sampleCount, double sampleLowRatio, double healthRate,
-            IReadOnlyDictionary<PropertyAttribute, uint> attributeMedians, IReadOnlyDictionary<Skill, uint> effectiveSkillMedians)
+            IReadOnlyDictionary<PropertyAttribute, uint> attributeMedians, IReadOnlyDictionary<Skill, uint> effectiveSkillMedians,
+            uint critResistRatingMedian = 0)
             => new DungeonBandStandard(skillMedians, maxBodyDamage, maxBaseArmor, spellTier, sampleCount, sampleLowRatio, healthRate,
-                attributeMedians, effectiveSkillMedians);
+                attributeMedians, effectiveSkillMedians, critResistRatingMedian);
 
         /// <summary>
         /// The "no standard" value, which every consumer must read as "normalize nothing". Returned whenever
@@ -237,7 +246,7 @@ namespace ACE.Server.ThreadDungeons
         /// production one, which reads GameTables.SkillTable.SkillBaseHash and needs a loaded portal.dat).
         ///
         /// <paramref name="maxHighEdge"/> (default no cap) clamps the SAMPLE band's integer high edge. Threads
-        /// never passes it; World Events passes its own 275 audience ceiling so its standard is measured over
+        /// never passes it; World Events passes its own audience ceiling (MaxConsideredLevel, 400; Pinnacles 275) so its standard is measured over
         /// the band its picks are actually drawn from.
         /// </summary>
         public static DungeonBandStandard Compute(IReadOnlyDictionary<string, SpeciesTableDef> tables, int level,
@@ -297,7 +306,8 @@ namespace ACE.Server.ThreadDungeons
                 sample.Count, lowRatio,
                 LowerMedian(sample.Select(p => p.HealthRate).Where(v => v > 0)),
                 AttributeMediansOf(sample),
-                EffectiveSkillMediansOf(sample, formulaOf));
+                EffectiveSkillMediansOf(sample, formulaOf),
+                DungeonRosterSelector.LowerMedian(sample.Select(p => p.CritResistRating)));
         }
 
         /// <summary>
@@ -378,7 +388,7 @@ namespace ACE.Server.ThreadDungeons
         {
             var b = DungeonRosterSelector.TrashBand(level, band);
 
-            // World Events caps the band's high edge at its audience level ceiling (275); Threads passes no cap.
+            // World Events caps the band's high edge at its audience level ceiling (400; Pinnacles 275); Threads passes no cap.
             if (b.High > maxHighEdge)
                 b = new ACE.Server.WorldEvents.LevelBand(b.Low, Math.Max(b.Low, maxHighEdge));
 

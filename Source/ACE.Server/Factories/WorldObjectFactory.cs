@@ -13,6 +13,7 @@ using ACE.Entity.Models;
 using ACE.Server.Entity;
 using ACE.Server.EquipmentMods;
 using ACE.Server.Managers;
+using ACE.Server.ThreadDungeons;
 using ACE.Server.WorldObjects;
 
 using Biota = ACE.Database.Models.Shard.Biota;
@@ -59,6 +60,30 @@ namespace ACE.Server.Factories
             if (!WorldObject.IsValidSetupId(weenieSetupId))
                 ReportBadSetupId(weenie.WeenieClassId, guid.Full, weenie.GetName(), weenieSetupId);
 
+            // Salvage Roller (Docs/SalvageRoller/DESIGN.md 5.1): the shared station, keyed on the PropertyBool opt-in
+            // and NOT on WeenieType, ahead of the type switch. The station weenie stays type 10 (Creature) so an older
+            // image, which only knows the Creature dispatch, never builds it as a retail Vendor (which would destroy
+            // every sold item for a coin). Read at construction only.
+            if (weenie.GetProperty(PropertyBool.SalvageRollerStation) == true)
+                return new SalvageRollerVendor(weenie, guid);
+
+            // Thread Encounters Wandering Peddler: the same opt-in shape as the Salvage Roller station above, keyed on
+            // the PropertyBool and NOT on WeenieType, ahead of the type switch. The peddler weenie stays type 10
+            // (Creature) so an older image, which only knows the Creature dispatch, never builds it as a retail Vendor.
+            // Read at construction only.
+            if (weenie.GetProperty(PropertyBool.ThreadPeddlerVendor) == true)
+                return new ThreadPeddlerVendor(weenie, guid);
+
+            // Allegiance Avatar NPC: the same opt-in shape, keyed on the PropertyBool and NOT on WeenieType. The Avatar weenie
+            // stays type 10 so an image without this arm builds a plain Creature that sells nothing, never a retail Vendor.
+            if (weenie.GetProperty(PropertyBool.AllegianceAvatarVendor) == true)
+                return new ACE.Server.Avatars.AvatarVendor(weenie, guid);
+
+            // Allegiance Gauntlet: the Avatar's in-fight body (wcid 1008504), the same opt-in shape. Its weenie is type 71
+            // (CombatPet), so an image without this arm builds a plain, ownerless CombatPet.
+            if (weenie.GetProperty(PropertyBool.AllegianceGauntletFighter) == true)
+                return new ACE.Server.Avatars.Gauntlet.GauntletAvatarFighter(weenie, guid);
+
             var objWeenieType = weenie.WeenieType;
 
             switch (objWeenieType)
@@ -90,6 +115,7 @@ namespace ACE.Server.Factories
                     // (DESIGN section 9). Read at construction only.
                     if (weenie.GetProperty(PropertyBool.PersonalVendor) == true)
                         return new PersonalVendor(weenie, guid);
+                    // (The Salvage Roller station is built above the switch, whatever its WeenieType.)
                     return new Vendor(weenie, guid);
                 case WeenieType.Coin:
                     return new Coin(weenie, guid);
@@ -194,6 +220,26 @@ namespace ACE.Server.Factories
 
                 ReportBadSetupId(biota.WeenieClassId, biota.Id, biotaName ?? "", biotaSetupId);
             }
+
+            // Salvage Roller: the same opt-in ahead of the type switch as the weenie arm. The station is a static
+            // placement and excluded from shard persistence; handled anyway so a stray row never comes back as a plain
+            // Creature or retail Vendor.
+            if (biota.PropertiesBool != null && biota.PropertiesBool.TryGetValue(PropertyBool.SalvageRollerStation, out var isRollerStation) && isRollerStation)
+                return new SalvageRollerVendor(biota);
+
+            // Thread Encounters Wandering Peddler: the same opt-in ahead of the type switch as the weenie arm, so a stray
+            // shard row never comes back as a plain Creature or retail Vendor.
+            if (biota.PropertiesBool != null && biota.PropertiesBool.TryGetValue(PropertyBool.ThreadPeddlerVendor, out var isThreadPeddler) && isThreadPeddler)
+                return new ThreadPeddlerVendor(biota);
+
+            // Allegiance Avatar NPC: the same opt-in ahead of the type switch as the weenie arm.
+            if (biota.PropertiesBool != null && biota.PropertiesBool.TryGetValue(PropertyBool.AllegianceAvatarVendor, out var isAllegianceAvatar) && isAllegianceAvatar)
+                return new ACE.Server.Avatars.AvatarVendor(biota);
+
+            // Allegiance Gauntlet fighter: the same opt-in ahead of the type switch as the weenie arm. The fighter is never
+            // persisted (CombatPet), so this arm only matters for a biota built in memory.
+            if (biota.PropertiesBool != null && biota.PropertiesBool.TryGetValue(PropertyBool.AllegianceGauntletFighter, out var isGauntletFighter) && isGauntletFighter)
+                return new ACE.Server.Avatars.Gauntlet.GauntletAvatarFighter(biota);
 
             switch (biota.WeenieType)
             {
@@ -401,8 +447,22 @@ namespace ACE.Server.Factories
 
         /// <summary>
         /// This will create a new WorldObject with a new GUID.
+        ///
+        /// <paramref name="rollNewCopy"/> false skips the per-copy CreationRoll. Only a SCRATCH REFERENCE that is compared against a real item may pass false (VaultCollapse): a
+        /// reference that rolls can land on the item's own roll and make a rolled item look pristine, and a pristine
+        /// item is destroyed and re-minted with a fresh roll. Anything a player can receive keeps the default.
         /// </summary>
         public static WorldObject CreateNewWorldObject(Weenie weenie)
+        {
+            return CreateNewWorldObject(weenie, true);
+        }
+
+        /// <summary>
+        /// <see cref="CreateNewWorldObject(Weenie)"/> with control over the per-copy rolls. A separate overload with no
+        /// default argument on purpose: callers pass CreateNewWorldObject as a Func method group (KnotLootService), and
+        /// an optional parameter would break that conversion.
+        /// </summary>
+        public static WorldObject CreateNewWorldObject(Weenie weenie, bool rollNewCopy)
         {
             var guid = GuidManager.NewDynamicGuid();
 
@@ -416,7 +476,8 @@ namespace ACE.Server.Factories
 
             // Per-copy creation roll (PropertyString.CreationRollSpec): roll this copy's stats and strip the spec.
             // Must run BEFORE the stamp below so a rolled gear rating is recorded as born-with.
-            CreationRoll.Apply(worldObject);
+            if (rollNewCopy)
+                CreationRoll.Apply(worldObject);
 
             // Equipment mods: record the gear ratings this item is BORN with, while it still has no owner
             // and no history. Everything a player can be handed passes through here - vendor stock and NPC
@@ -441,12 +502,18 @@ namespace ACE.Server.Factories
         /// </summary>
         public static WorldObject CreateNewWorldObject(uint weenieClassId)
         {
+            return CreateNewWorldObject(weenieClassId, true);
+        }
+
+        /// <summary>The wcid form of <see cref="CreateNewWorldObject(Weenie, bool)"/>.</summary>
+        public static WorldObject CreateNewWorldObject(uint weenieClassId, bool rollNewCopy)
+        {
             var weenie = DatabaseManager.World.GetCachedWeenie(weenieClassId);
 
             if (weenie == null)
                 return null;
 
-            return CreateNewWorldObject(weenie);
+            return CreateNewWorldObject(weenie, rollNewCopy);
         }
 
         /// <summary>

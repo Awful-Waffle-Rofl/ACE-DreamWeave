@@ -5,6 +5,7 @@ using System.Linq;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.Entity;
+using ACE.Server.WeaponMods;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.CombatSimulator
@@ -287,15 +288,19 @@ namespace ACE.Server.CombatSimulator
         /// <summary>
         /// Creature.GetShieldMod's shielded branch up to the shield-skill cap, through
         /// ProfileBuilder.ComposeShieldLevel - the same composition the player profile uses, at the non-PvP,
-        /// full-intensity resolution of ignore-magic-armor. A creature never takes the Defensive Weapon terms (they are
-        /// is Player-only), so no shield means 0, which CalcArmorMod turns into the engine's 1.0.
+        /// full-intensity resolution of ignore-magic-armor. A monster never takes the Defensive Weapon terms, so no shield
+        /// means 0, which CalcArmorMod turns into the engine's 1.0. A combat pet takes its owner's focus Defensive Weapon
+        /// as the engine does (SummonerFocus.PetDefensiveWeaponLevel, read against a target-less monster, so the
+        /// simulator's seam reaches the duel's ownerless pet): the level alone with no shield, and after the Shield-skill
+        /// cap with one (DefensiveWeaponMath.AfterShieldCap, ward 0).
         /// </summary>
         private static ShieldRow BuildShieldRow(Creature creature, DamageType damageType, bool ignoreMagicArmor)
         {
             var shield = creature.GetEquippedShield();
+            var petDefensiveWeapon = SummonerFocus.PetDefensiveWeaponLevel(creature, null);
 
             if (shield == null)
-                return new ShieldRow(0.0f);
+                return new ShieldRow((float)petDefensiveWeapon);
 
             var baseSL = (shield.GetProperty(PropertyInt.ArmorLevel) ?? 0.0f) + ACE.Server.KnotLoot.KnotTraitCombat.ShieldArmorBonus(shield, creature);
             var modSL = shield.EnchantmentManager.GetArmorMod();
@@ -304,10 +309,12 @@ namespace ACE.Server.CombatSimulator
 
             var shieldSkill = creature.GetCreatureSkill(Skill.Shield);
 
-            return new ShieldRow(ProfileBuilder.ComposeShieldLevel(
+            var composed = ProfileBuilder.ComposeShieldLevel(
                 baseSL, modSL, baseRL, modRL, ignoreMagicArmor,
                 shieldSkill.Current,
-                shieldSkill.AdvancementClass == SkillAdvancementClass.Specialized));
+                shieldSkill.AdvancementClass == SkillAdvancementClass.Specialized);
+
+            return new ShieldRow((float)DefensiveWeaponMath.AfterShieldCap(composed, petDefensiveWeapon, 0.0));
         }
     }
 }

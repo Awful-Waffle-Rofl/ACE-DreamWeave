@@ -75,14 +75,17 @@ namespace ACE.Database.SQLFormatters
 
         /// <summary>
         /// If input is null, NULL will be returned.<para />
-        /// If input is not null, a string surrounded in ' will be returned, and any ' found within the string will be replaced wtih ''
+        /// If input is not null, a string surrounded in ' will be returned, with every \ written as \\ and every ' written as ''.<para />
+        /// The backslash is escaped because MySQL's default sql_mode (no NO_BACKSLASH_ESCAPES) reads it as an escape character
+        /// inside a string: unescaped, a value ending in \ or containing \' closed the literal early, and the text after it ran
+        /// as SQL.
         /// </summary>
         protected static string GetSQLString(string input)
         {
             if (input == null)
                 return null;
 
-            return "'" + input.Replace("'", "''") + "'";
+            return "'" + input.Replace("\\", "\\\\").Replace("'", "''") + "'";
         }
 
         /// <summary>

@@ -550,9 +550,11 @@ namespace ACE.Server.EquipmentMods
                 return WeenieError.YouDoNotPassCraftingRequirements;
             }
 
-            if (player.FindObject(target.Guid.Full, Player.SearchLocations.MyInventory) == null)
+            var targetInventoryRefusal = TargetInventoryRefusal(player, target);
+
+            if (targetInventoryRefusal != null)
             {
-                SendCraftMessage(player, $"You must remove the {target.Name} and place it in your inventory first.");
+                SendCraftMessage(player, targetInventoryRefusal);
                 return WeenieError.YouDoNotPassCraftingRequirements;
             }
 
@@ -574,6 +576,46 @@ namespace ACE.Server.EquipmentMods
                 return WeenieError.YouDoNotPassCraftingRequirements;
             }
 
+            var targetStateRefusal = TargetStateRefusal(target, isMaximizer, out action, out count);
+
+            if (targetStateRefusal == null)
+                return WeenieError.None;
+
+            SendCraftMessage(player, targetStateRefusal);
+
+            return WeenieError.YouDoNotPassCraftingRequirements;
+        }
+
+        // ---------------- target-only verification (shared with the Salvage Roller) ----------------
+        //
+        // The target half of VerifyUseRequirements, split out so the Salvage Roller (Docs/SalvageRoller/DESIGN.md
+        // 5.3) refuses a target with EXACTLY the manual path's checks and EXACTLY its words. The bag path still runs
+        // the two halves at their original positions - the inventory check before the fuel check, the state check
+        // after it - so which message a player sees when several things are wrong is unchanged.
+
+        /// <summary>
+        /// The inventory-only rule for the target, or null when it passes. Inventory only, never equipped: see the
+        /// remark at its call site in <see cref="VerifyUseRequirements"/>.
+        /// </summary>
+        internal static string TargetInventoryRefusal(Player player, WorldObject target)
+        {
+            if (player.FindObject(target.Guid.Full, Player.SearchLocations.MyInventory) == null)
+                return $"You must remove the {target.Name} and place it in your inventory first.";
+
+            return null;
+        }
+
+        /// <summary>
+        /// The item-state rules, in the bag path's order (eligible slot, workmanship, then the tiger-eye seal and the
+        /// action table, or the maximize table for the alpha tool), as the refusal line the player is sent - or null
+        /// when the target is eligible, with <paramref name="action"/> and <paramref name="count"/> resolved. Reads
+        /// the item only; sends nothing.
+        /// </summary>
+        internal static string TargetStateRefusal(WorldObject target, bool isMaximizer, out ModAction action, out int count)
+        {
+            action = ModAction.None;
+            count = 0;
+
             if (!IsEligibleTarget(target))
             {
                 // Legacy case: an item modded on a now-excluded slot (cloak, jewelry, trinket) before the
@@ -583,11 +625,9 @@ namespace ACE.Server.EquipmentMods
                 // branch runs before the isMaximizer split below, so it covers Reroll and the alpha Maximize
                 // path identically.
                 if (GetModCount(target) > 0)
-                    SendCraftMessage(player, $"The {target.Name}'s modifications are locked in. Only armor and clothing, excluding underclothes, can be converted or rerolled now.");
-                else
-                    SendCraftMessage(player, $"The {target.Name} cannot carry equipment mods. Only armor and clothing, excluding underclothes, can.");
+                    return $"The {target.Name}'s modifications are locked in. Only armor and clothing, excluding underclothes, can be converted or rerolled now.";
 
-                return WeenieError.YouDoNotPassCraftingRequirements;
+                return $"The {target.Name} cannot carry equipment mods. Only armor and clothing, excluding underclothes, can.";
             }
 
             // ADDED 2026-08-07 with the workmanship term. A mod's stored value is now potency x
@@ -599,10 +639,7 @@ namespace ACE.Server.EquipmentMods
             // and has no item to read, and because this must refuse the maximizer path too - it stamps a
             // fraction of its own.
             if (target.Workmanship == null)
-            {
-                SendCraftMessage(player, $"The {target.Name} has no workmanship, so it cannot hold an equipment mod.");
-                return WeenieError.YouDoNotPassCraftingRequirements;
-            }
+                return $"The {target.Name} has no workmanship, so it cannot hold an equipment mod.";
 
             ModActionRefusal refusal;
 
@@ -625,22 +662,38 @@ namespace ACE.Server.EquipmentMods
             switch (refusal)
             {
                 case ModActionRefusal.None:
-                    return WeenieError.None;
+                    return null;
 
                 case ModActionRefusal.NothingToMaximize:
-                    SendCraftMessage(player, $"The {target.Name} has no mods to maximize. Use obsidian salvage on it first to mint mods.");
-                    break;
+                    return $"The {target.Name} has no mods to maximize. Use obsidian salvage on it first to mint mods.";
 
                 case ModActionRefusal.SealedByTigerEye:
-                    SendCraftMessage(player, $"The {target.Name} was finished with tiger eye. Its tinkering is sealed and no salvage will rework it.");
-                    break;
+                    return $"The {target.Name} was finished with tiger eye. Its tinkering is sealed and no salvage will rework it.";
 
                 default:
-                    SendCraftMessage(player, $"The {target.Name} has no gear ratings to convert and no mods to reroll.");
-                    break;
+                    return $"The {target.Name} has no gear ratings to convert and no mods to reroll.";
             }
+        }
 
-            return WeenieError.YouDoNotPassCraftingRequirements;
+        /// <summary>
+        /// The whole target-only verify for an Obsidian (non-maximizer) source, in the bag path's order: inventory,
+        /// then item state. True when the target is eligible, with <paramref name="action"/> and
+        /// <paramref name="count"/> resolved; otherwise <paramref name="refusalMessage"/> is the exact line the bag
+        /// path would have sent. Sends nothing itself.
+        /// </summary>
+        internal static bool VerifyTarget(Player player, WorldObject target, out ModAction action, out int count, out string refusalMessage)
+        {
+            action = ModAction.None;
+            count = 0;
+
+            refusalMessage = TargetInventoryRefusal(player, target);
+
+            if (refusalMessage != null)
+                return false;
+
+            refusalMessage = TargetStateRefusal(target, isMaximizer: false, out action, out count);
+
+            return refusalMessage == null;
         }
 
         // ---------------- application ----------------
@@ -710,37 +763,15 @@ namespace ACE.Server.EquipmentMods
             }
             else
             {
-                switch (action)
+                // The rating writes are pushed rather than left to the object resend because the client already
+                // knows them, and UpdateProperty is what performs the write as well as the push - see
+                // ApplyConvertOrReroll.
+                applied = ApplyConvertOrReroll(target, action, count, (property, value) => player.UpdateProperty(target, property, value));
+
+                if (applied == null)
                 {
-                    case ModAction.Convert:
-
-                        // The NATURAL ratings are the price - see SpendNaturalRatings, which clears the
-                        // stamps itself and hands back only the client-known rating writes. They are pushed
-                        // rather than left to the object resend because the client already knows them, and
-                        // UpdateProperty is what performs the write as well as the push.
-                        foreach (var write in SpendNaturalRatings(target))
-                            player.UpdateProperty(target, write.Key, write.Value);
-
-                        // defensive: a rated item should never already carry mods, but if content or an
-                        // admin edit produced one, keep it and grow capacity rather than silently dropping it
-                        var existing = EquipmentModDisplay.GetMods(target).Select(m => m.Definition.Id).ToList();
-
-                        applied = MintMods(target, count, existing);
-
-                        target.SetProperty(PropertyInt.GearModCapacity, ComputeConvertedCapacity(existing.Count, count));
-                        break;
-
-                    case ModAction.Reroll:
-
-                        ClearMods(target);
-
-                        applied = MintMods(target, count);
-                        break;
-
-                    default:
-
-                        player.SendUseDoneEvent(WeenieError.CraftGeneralErrorNoUiMsg);
-                        return;
+                    player.SendUseDoneEvent(WeenieError.CraftGeneralErrorNoUiMsg);
+                    return;
                 }
             }
 
@@ -782,6 +813,65 @@ namespace ACE.Server.EquipmentMods
                 SendCraftMessage(player, chargeMessage);
 
             player.SendUseDoneEvent();
+        }
+
+        /// <summary>
+        /// The Obsidian Convert and Reroll mutations, as a pure function of the item: no Player, no network, no
+        /// save and no fuel (Docs/SalvageRoller/DESIGN.md 5.8 and section 9). Returns the applied lines in
+        /// <see cref="EquipmentModDisplay.Describe"/>'s shared format, or null for any other action (nothing is
+        /// changed then).
+        ///
+        /// CONVERT spends the item's NATURAL gear ratings - see SpendNaturalRatings, which clears the stamps
+        /// itself and hands back only the client-known rating writes. Those writes go through
+        /// <paramref name="ratingWrite"/> rather than straight onto the item, because the two callers need
+        /// different things from them: the bag path passes Player.UpdateProperty, which writes AND pushes the
+        /// change to the client that already knows the rating, while the Salvage Roller's scratch copy passes a
+        /// plain property write (<see cref="WriteRatingToItem"/>) - it has no client to tell. The writes happen
+        /// in the same order and at the same point as before the extraction: all of them, then the mint.
+        ///
+        /// REROLL clears the mods and mints the item's existing capacity afresh.
+        /// </summary>
+        public static List<string> ApplyConvertOrReroll(WorldObject target, ModAction action, int count, Action<PropertyInt, int?> ratingWrite)
+        {
+            switch (action)
+            {
+                case ModAction.Convert:
+
+                    foreach (var write in SpendNaturalRatings(target))
+                        ratingWrite(write.Key, write.Value);
+
+                    // defensive: a rated item should never already carry mods, but if content or an
+                    // admin edit produced one, keep it and grow capacity rather than silently dropping it
+                    var existing = EquipmentModDisplay.GetMods(target).Select(m => m.Definition.Id).ToList();
+
+                    var applied = MintMods(target, count, existing);
+
+                    target.SetProperty(PropertyInt.GearModCapacity, ComputeConvertedCapacity(existing.Count, count));
+
+                    return applied;
+
+                case ModAction.Reroll:
+
+                    ClearMods(target);
+
+                    return MintMods(target, count);
+
+                default:
+
+                    return null;
+            }
+        }
+
+        /// <summary>
+        /// The networking-free rating write for <see cref="ApplyConvertOrReroll"/>: what Player.UpdateProperty does to
+        /// the object itself, without the client push. A null value removes the property.
+        /// </summary>
+        public static void WriteRatingToItem(WorldObject target, PropertyInt property, int? value)
+        {
+            if (value == null)
+                target.RemoveProperty(property);
+            else
+                target.SetProperty(property, value.Value);
         }
 
         /// <summary>

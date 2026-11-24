@@ -141,9 +141,23 @@ namespace ACE.Server.ThreadDungeons
                 skillsRetargeted++;
             }
 
+            // 4-5. Melee damage (body parts and any wielded weapon or ammunition) and body armour.
+            var (partsScaled, weaponsScaled) = ScaleDamage(creature, RatioOf(DungeonStatAxis.Damage), RatioOf(DungeonStatAxis.Armor));
+
+            return new Result(attributesScaled, skillsRetargeted, partsScaled, weaponsScaled, attributesSkipped);
+        }
+
+        /// <summary>
+        /// Steps 4 and 5 of <see cref="Apply"/>, shared with the Thread family stretch's overscale
+        /// (ThreadDungeonSpawner.ApplyStretchOverscale): every body part's DVal by <paramref name="damageRatio"/> and BaseArmor
+        /// by <paramref name="armorRatio"/> through <see cref="ScaleBodyParts"/> (which CLONES the collection shared with the
+        /// cached weenie), then every wielded or carried weapon's and ammunition's Damage by <paramref name="damageRatio"/>.
+        /// Returns how many parts and weapons changed.
+        /// </summary>
+        internal static (int Parts, int Weapons) ScaleDamage(Creature creature, double damageRatio, double armorRatio)
+        {
             // 4. Melee damage and body armour.
-            var damageRatio = RatioOf(DungeonStatAxis.Damage);
-            var partsScaled = ScaleBodyParts(creature.Biota, damageRatio, RatioOf(DungeonStatAxis.Armor));
+            var partsScaled = ScaleBodyParts(creature.Biota, damageRatio, armorRatio);
 
             // 5. A wielded weapon or its ammunition replaces the body part's DVal entirely on the monster damage
             //    path (DungeonCombatNormalizer.WeaponDamageTarget's doc comment has the call sites), so it has to
@@ -167,7 +181,7 @@ namespace ACE.Server.ThreadDungeons
                 weaponsScaled++;
             }
 
-            return new Result(attributesScaled, skillsRetargeted, partsScaled, weaponsScaled, attributesSkipped);
+            return (partsScaled, weaponsScaled);
         }
 
         /// <summary>

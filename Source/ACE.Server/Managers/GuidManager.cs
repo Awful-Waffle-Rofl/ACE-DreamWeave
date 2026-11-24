@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 
 using log4net;
@@ -295,6 +296,13 @@ namespace ACE.Server.Managers
                     recycledGuids.Enqueue(new Tuple<DateTime, uint>(DateTime.UtcNow, guid));
             }
 
+            /// <summary>Test seam: whether <paramref name="guid"/> is waiting in the recycle queue.</summary>
+            public bool IsQueuedForRecycle(uint guid)
+            {
+                lock (this)
+                    return recycledGuids.Any(entry => entry.Item2 == guid);
+            }
+
             public override string ToString()
             {
                 lock (this)
@@ -362,6 +370,15 @@ namespace ACE.Server.Managers
         public static void RecycleDynamicGuid(ObjectGuid guid)
         {
             dynamicAlloc.Recycle(guid.Full);
+        }
+
+        /// <summary>
+        /// Test seam: whether a dynamic guid has been handed to the recycle queue (and so will be reissued
+        /// once the recycle time passes). Used to pin that mule display guids are never recycled.
+        /// </summary>
+        internal static bool IsDynamicGuidQueuedForRecycle(ObjectGuid guid)
+        {
+            return dynamicAlloc.IsQueuedForRecycle(guid.Full);
         }
 
 

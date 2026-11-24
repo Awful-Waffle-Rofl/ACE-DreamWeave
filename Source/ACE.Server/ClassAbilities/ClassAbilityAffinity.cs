@@ -8,8 +8,8 @@ namespace ACE.Server.ClassAbilities
     /// class and forwards here.
     ///
     /// Model (user 2026-09-12): "+R of the ability's own bonus per 100 points of the affinity skill".
-    /// The standard rate is 0.12 Trained / 0.17 Specialized, so 200 points of a Specialized affinity skill
-    /// makes the ability's bonus 1.34x what rank alone would give.
+    /// The standard rate is 0.09 Trained / 0.14 Specialized (class_ability_affinity_rate_per_trained / _per_spec), so 200 points of a Specialized affinity skill
+    /// makes the ability's bonus 1.28x what rank alone would give.
     ///
     /// CONTRAST WITH <see cref="ClassAbilityScaling"/>.Compute, which this is replacing one ability at a
     /// time and which still runs at every un-migrated call site. The two are NOT interchangeable:

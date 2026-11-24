@@ -1979,9 +1979,14 @@ namespace ACE.Server.Command.Handlers
         /// including the name: IsCharacterNameAvailable runs below and will refuse the copy if the
         /// previous occupant's row is still present. Used by tester roster seeding, where reusing a
         /// fixed guid is what keeps the player guid allocator's floor from ratcheting on every refresh.
+        ///
+        /// options, when supplied, adds a BeforeSave hook on the built copy and can turn off publishing;
+        /// see <see cref="CopyCharOptions"/>. Null behaves exactly as before the parameter existed.
         /// </summary>
-        internal static void DoCopyChar(Session session, string existingCharName, uint existingCharId, bool isDeletedChar, string newCharacterName = null, uint newAccountId = 0, uint targetGuid = 0)
+        internal static void DoCopyChar(Session session, string existingCharName, uint existingCharId, bool isDeletedChar, string newCharacterName = null, uint newAccountId = 0, uint targetGuid = 0, Action<bool> onDone = null, CopyCharOptions options = null)
         {
+            options ??= new CopyCharOptions();
+
             DatabaseManager.Shard.GetCharacter(existingCharId, existingCharacter =>
             {
                 if (existingCharacter != null)
@@ -1996,6 +2001,7 @@ namespace ACE.Server.Command.Handlers
                         if (existingPossessions == null)
                         {
                             CommandHandlerHelper.WriteOutputInfo(session, $"Could not read {existingCharName}'s possessions, so nothing was {(isDeletedChar ? "restored" : "copied")}. Check the server log.", ChatMessageType.Broadcast);
+                            onDone?.Invoke(false);
                             return;
                         }
 
@@ -2004,10 +2010,31 @@ namespace ACE.Server.Command.Handlers
                             if (!isAvailable)
                             {
                                 CommandHandlerHelper.WriteOutputInfo(session, $"{newCharName} is not available to use for the {(isDeletedChar ? "restored" : "copied")} character name, try another name.", ChatMessageType.Broadcast);
+                                onDone?.Invoke(false);
                                 return;
                             }
 
                             var newPlayerGuid = targetGuid != 0 ? new ObjectGuid(targetGuid) : GuidManager.NewPlayerGuid();
+
+                            // Player Facets (character_facet) are not part of the Character graph and have no FK to
+                            // it, so they are read here and written after the character save succeeds. Read through
+                            // BaseDatabase, synchronously, matching the GetBiota read above: this blocks the shard
+                            // worker for a few small round trips, which is the same cost that read already pays.
+                            //
+                            // A failed read does not stop the copy - the character is the valuable part - but it is
+                            // logged and reported in the command output, so a roster refresh cannot silently produce
+                            // facet-less copies.
+                            List<Database.Models.Shard.CharacterFacet> existingFacets = null;
+                            var facetReadFailed = false;
+                            try
+                            {
+                                existingFacets = DatabaseManager.Shard.BaseDatabase.GetCharacterFacets(existingCharId);
+                            }
+                            catch (Exception ex)
+                            {
+                                facetReadFailed = true;
+                                log.Error($"[COPYCHAR] Reading facets of 0x{existingCharId:X8} failed: {ex}");
+                            }
 
                             var newCharacter = new Database.Models.Shard.Character
                             {
@@ -2241,6 +2268,24 @@ namespace ACE.Server.Command.Handlers
                                 }
                             }
 
+                            // The caller's last word on the built copy, after every id swap above and before the
+                            // possessions are gathered for the save, so a strip it makes is what gets saved. Any
+                            // strip lives in the delegate, never in this body (CopyCharItemPropertyCarryTests).
+                            if (options.BeforeSave != null)
+                            {
+                                try
+                                {
+                                    options.BeforeSave(newPlayer);
+                                }
+                                catch (Exception ex)
+                                {
+                                    log.Error($"[COPYCHAR] BeforeSave for the copy of 0x{existingCharId:X8} onto 0x{newPlayerGuid.Full:X8} threw, nothing was saved: {ex}");
+                                    CommandHandlerHelper.WriteOutputInfo(session, $"Failed to {(isDeletedChar ? "restore" : "copy")} {existingCharName}: preparing the copy failed, so nothing was saved. Check the server log.", ChatMessageType.Broadcast);
+                                    onDone?.Invoke(false);
+                                    return;
+                                }
+                            }
+
                             var possessions = newPlayer.GetAllPossessions();
                             var possessedBiotas = new Collection<(Biota biota, ReaderWriterLockSlim rwLock)>();
                             foreach (var possession in possessions)
@@ -2253,30 +2298,60 @@ namespace ACE.Server.Command.Handlers
                                 {
                                     //CommandHandlerHelper.WriteOutputInfo(session, $"Failed to copy the character \"{(existingCharacter.IsPlussed ? "+" : "")}{existingCharacter.Name}\" to a new character \"{newPlayer.Name}\" for the account \"{newPlayer.Account.AccountName}\"! Does the character exist _AND_ is not currently logged in? Is the new character name already taken, or is the account out of free character slots?", ChatMessageType.Broadcast);
                                     CommandHandlerHelper.WriteOutputInfo(session, $"Failed to {(isDeletedChar ? "restore" : "copy")} the character \"{(existingCharacter.IsPlussed ? "+" : "")}{existingCharacter.Name}\" to a new character \"{newPlayer.Name}\" for the account \"{newPlayer.Account.AccountName}\"! Does the character exist? Is the new character name already taken, or is the account out of free character slots?", ChatMessageType.Broadcast);
+                                    onDone?.Invoke(false);
                                     return;
                                 }
 
-                                PlayerManager.AddOfflinePlayer(newPlayer);
-
-                                // AddCharacterToSession, not a bare Add. When targetGuid reuses a guid the
-                                // session already has a Character for - a tester sitting at character select
-                                // while the roster is refreshed underneath them - a bare Add leaves both the
-                                // stale entry and the new one in the list, and the character shows up twice.
-                                // The online check upstream only looks for an in-world player, so a
-                                // char-select session slips past it.
-                                if (newAccountId == 0)
-                                    AddCharacterToSession(session, newPlayer.Character);
-                                else
+                                // Facets go in immediately after the character save is confirmed and BEFORE the player is
+                                // published (AddOfflinePlayer / the session list), so nothing can observe or log in the
+                                // copy while its facet rows are still missing.
+                                var facetNote = "";
+                                if (facetReadFailed)
                                 {
-                                    var foundActiveSession = Network.Managers.NetworkManager.Find(newAccountId);
+                                    facetNote = " WARNING: the source's facets could not be read, so NO facets were copied (see the server log).";
+                                }
+                                else if (existingFacets != null && existingFacets.Count > 0)
+                                {
+                                    var failedFacetSlots = new List<byte>();
+                                    var newFacets = ACE.Server.Entity.Facets.FacetCarry.Remap(existingFacets, newPlayerGuid.Full, idSwaps);
+                                    var savedFacets = ACE.Server.Entity.Facets.FacetCarry.SaveAll(newFacets, DatabaseManager.Shard.BaseDatabase.SaveCharacterFacet, failedFacetSlots);
 
-                                    if (foundActiveSession != null)
-                                        AddCharacterToSession(foundActiveSession, newPlayer.Character);
+                                    if (failedFacetSlots.Count > 0)
+                                    {
+                                        log.Error($"[COPYCHAR] Facet slot(s) {string.Join(", ", failedFacetSlots)} of 0x{newPlayerGuid.Full:X8} failed to save.");
+                                        facetNote = $" Copied {savedFacets} of {newFacets.Count} facet slot(s); WARNING: slot(s) {string.Join(", ", failedFacetSlots)} failed to save (see the server log).";
+                                    }
+                                    else
+                                        facetNote = $" Copied {savedFacets} facet slot(s).";
                                 }
 
-                                var msg = $"Successfully {(isDeletedChar ? "restored" : "copied")} the character \"{(existingCharacter.IsPlussed ? "+" : "")}{existingCharacter.Name}\" to a new character \"{newPlayer.Name}\" for the account \"{newPlayer.Account.AccountName}\".";
+                                // Publish=false parks the copy: saved, but never handed to PlayerManager or to any
+                                // session's character list, so nothing can find it by name or log into it.
+                                if (options.Publish)
+                                {
+                                    PlayerManager.AddOfflinePlayer(newPlayer);
+
+                                    // AddCharacterToSession, not a bare Add. When targetGuid reuses a guid the
+                                    // session already has a Character for - a tester sitting at character select
+                                    // while the roster is refreshed underneath them - a bare Add leaves both the
+                                    // stale entry and the new one in the list, and the character shows up twice.
+                                    // The online check upstream only looks for an in-world player, so a
+                                    // char-select session slips past it.
+                                    if (newAccountId == 0)
+                                        AddCharacterToSession(session, newPlayer.Character);
+                                    else
+                                    {
+                                        var foundActiveSession = Network.Managers.NetworkManager.Find(newAccountId);
+
+                                        if (foundActiveSession != null)
+                                            AddCharacterToSession(foundActiveSession, newPlayer.Character);
+                                    }
+                                }
+
+                                var msg = $"Successfully {(isDeletedChar ? "restored" : "copied")} the character \"{(existingCharacter.IsPlussed ? "+" : "")}{existingCharacter.Name}\" to a new character \"{newPlayer.Name}\" for the account \"{newPlayer.Account.AccountName}\".{facetNote}";
                                 CommandHandlerHelper.WriteOutputInfo(session, msg, ChatMessageType.Broadcast);
                                 PlayerManager.BroadcastToAuditChannel(session?.Player, msg);
+                                onDone?.Invoke(true);
                             });
                         });
                     });
@@ -2284,6 +2359,7 @@ namespace ACE.Server.Command.Handlers
                 else
                 {
                     CommandHandlerHelper.WriteOutputInfo(session, $"Failed to {(isDeletedChar ? "restore" : "copy")} the character \"{existingCharName}\" to a new character \"{newCharacterName}\" for the account \"{session?.Account}\"! Does the character exist? Is the new character name already taken, or is the account out of free character slots?", ChatMessageType.Broadcast);
+                    onDone?.Invoke(false);
                 }
             });
         }
