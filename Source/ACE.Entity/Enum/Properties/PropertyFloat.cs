@@ -549,5 +549,9 @@ namespace ACE.Entity.Enum.Properties
 
         // Knot treasure tables (ACE.Server.KnotLoot): Harbinger Celerity trait position u in [0,1] on the Arm Guard of the Harbinger.
         KnotTraitHarbingerCelerity      = 9024,
+
+        // Perennial dyes (Docs/Pvp/DYES.md): on an armor piece, the shade of its SECOND colour layer (ClothingTable sub-palette region 1,
+        // the Olthoi Amuli/Koujia shell and Celdon inlay). Absent = the second layer follows Shade. Set by a shell dye, copied by tailoring.
+        DyeShellShade                   = 9025,
     }
 }

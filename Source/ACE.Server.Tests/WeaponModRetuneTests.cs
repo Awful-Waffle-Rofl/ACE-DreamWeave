@@ -46,7 +46,7 @@ namespace ACE.Server.Tests
     [TestClass]
     public class WeaponModRetuneTests
     {
-        private static readonly WeaponClass[] Classes = { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster };
+        private static readonly WeaponClass[] Classes = { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster, WeaponClass.Shield };
 
         [ClassInitialize]
         public static void TestSetup(TestContext context)
@@ -127,7 +127,8 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void Change1_RollTinkerNeverReturnsTheExcludedMaterial()
         {
-            foreach (var weaponClass in Classes)
+            // Shield is skipped on purpose: the tinker-material pools get no Shield entry, so there is nothing to draw
+            foreach (var weaponClass in Classes.Where(c => c != WeaponClass.Shield))
             {
                 foreach (var excluded in WeaponTinkerTable.Pool(weaponClass))
                 {

@@ -637,7 +637,8 @@ namespace ACE.Server.Tests.ThreadDungeons
             CollectionAssert.AreEqual(new[] { "AddBonusTradeNotes", "AddBonusLegendaryKey", "AddBonusFoolproof", "AddBonusSalvageBags", "AddBonusLegendaryItems" }, one, "the one-argument steps");
             CollectionAssert.AreEqual(one, two, "the two builders' ordered step names match");
 
-            StringAssert.Contains(PooledLootSourceText.MethodBody(src, "public static List<WorldObject> BuildBossBonusItems(ThreadDungeonRun run)"),
+            // the deletion note is a comment, so it is read from the raw source
+            StringAssert.Contains(PooledLootSourceText.MethodBody(PooledLootSourceText.ReadRaw("Source/ACE.Server/ThreadDungeons/ThreadDungeonRewardSpawner.cs"), "public static List<WorldObject> BuildBossBonusItems(ThreadDungeonRun run)"),
                 "AND its twin in the two-argument", "the one-argument deletion note names its twin");
         }
 

@@ -68,9 +68,11 @@ namespace ACE.Server.BalanceTrials
         /// <summary>
         /// Creates, shapes and places one trial creature at its plan point in <paramref name="instance"/>. Returns the creature
         /// that entered the world, or null (every refusal destroys what it created). Must be called on <paramref name="lb"/>'s
-        /// action queue: it enters the world synchronously and does not enqueue.
+        /// action queue: it enters the world synchronously and does not enqueue. <paramref name="holdUntil"/> above 0 (wave 0 of a rep
+        /// with a start grace) is set as the creature's <see cref="Creature.P_TrialHoldUntil"/> BEFORE EnterWorld, so the spawn scan
+        /// EnterWorld schedules (Creature.CheckTargets) already finds it held.
         /// </summary>
-        internal static Creature Spawn(DungeonSpawnPlan plan, DungeonSpawnPlanEntry e, uint observedMaxNonBoss, TrialRep rep, Landblock lb, uint instance, string tag)
+        internal static Creature Spawn(DungeonSpawnPlan plan, DungeonSpawnPlanEntry e, uint observedMaxNonBoss, TrialRep rep, Landblock lb, uint instance, string tag, double holdUntil = 0.0)
         {
             if (plan == null || e?.Point == null || lb == null)
                 return null;
@@ -128,6 +130,9 @@ namespace ACE.Server.BalanceTrials
                 try { creature.Destroy(); } catch { }
                 return null;
             }
+
+            if (holdUntil > 0)
+                creature.P_TrialHoldUntil = holdUntil;
 
             var pred = Predict(creature, e, rep, tag);
 

@@ -3,13 +3,14 @@ using System.Collections.Generic;
 using System.Linq;
 
 using ACE.Entity.Enum;
+using ACE.Server.Entity;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.WeaponMods
 {
     /// <summary>
-    /// The one place a weapon mod becomes player-facing text. Both the appraisal panel's "Property Details:"
-    /// block and the craft-success chat lines render through here.
+    /// The one place a weapon mod becomes player-facing text. Both the appraisal panel's "Weapon Mods:"
+    /// section and the craft-success chat lines render through here.
     ///
     /// The native properties these modifiers feed are already rendered by the client's own panels (ratings, the
     /// weapon profile). This block exists so a player can tell WHICH part of those numbers came from this
@@ -80,8 +81,13 @@ namespace ACE.Server.WeaponMods
         ///
         /// The bracket is dropped entirely when <see cref="IntensityPercent"/> cannot report one, so a line
         /// that cannot compute an honest figure loses the figure and keeps the modifier.
+        ///
+        /// <paramref name="tagSummonerRoute"/> is true ONLY from the appraisal lines (WeaponModParagonDisplay.ModLines):
+        /// on a Summoner focus it inserts " (Summon)" / " (You + Summon)" between the name and the bracket
+        /// (SummonerFocusDisplay.RouteTag). Every other caller (craft-success chat, salvage roller) leaves it false and
+        /// keeps the plain name-only text.
         /// </summary>
-        public static string Describe(WeaponModDefinition definition, double magnitude, double scale, WorldObject item = null)
+        public static string Describe(WeaponModDefinition definition, double magnitude, double scale, WorldObject item = null, bool tagSummonerRoute = false)
         {
             if (definition == null)
                 return string.Empty;
@@ -89,7 +95,9 @@ namespace ACE.Server.WeaponMods
             var percent = IntensityPercent(definition, magnitude, scale, item);
             var intensity = percent > 0 ? $" [{percent}%]" : string.Empty;
 
-            return $"{definition.DisplayName}{intensity}: {Effect(definition, magnitude)}";
+            var tag = tagSummonerRoute ? SummonerFocusDisplay.RouteTag(item, definition) : string.Empty;
+
+            return $"{definition.DisplayName}{tag}{intensity}: {Effect(definition, magnitude)}";
         }
 
         /// <summary>Describe against the live weapon_mod_magnitude_scale tunable.</summary>
@@ -133,7 +141,8 @@ namespace ACE.Server.WeaponMods
             if (weapon == null)
                 return lines;
 
-            // Tourmaline specials, then Paragon-only mods; a Paragon weapon's lines carry the combined magnitude.
+            // Every mod line, Tourmaline and Paragon-only alike, alphabetical by name (WeaponModParagonDisplay.ByName);
+            // a Paragon weapon's lines carry the combined magnitude.
             // All Paragon formatting lives in WeaponModParagonDisplay.
             lines.AddRange(WeaponModParagonDisplay.ModLines(weapon, WeaponModValue.MagnitudeScale()));
 

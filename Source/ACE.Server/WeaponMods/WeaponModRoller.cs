@@ -107,10 +107,9 @@ namespace ACE.Server.WeaponMods
         ///
         /// THE SLOT TERM IS GONE (2026-08-06). This used to also clamp against "the slots left after imbues",
         /// because a special cost a tinker slot. Since the decoupling it does not: specials have their own
-        /// budget and are bounded by <see cref="WeaponModRegistry.MaxSpecials"/> alone. A weapon whose ten
-        /// slots are ENTIRELY reserved still never reaches here, because
-        /// <see cref="WeaponModManager.ResolveRefusal"/> refuses the whole use with NoAvailableSlots first -
-        /// that refusal, not this clamp, is what keeps an unworkable weapon unworkable.
+        /// budget and are bounded by <see cref="WeaponModRegistry.MaxSpecials"/> alone. Since 2026-11-25 the
+        /// tinker budget has no bearing on a reroll at all: a weapon whose ten slots are ENTIRELY reserved is
+        /// rerolled like any other.
         /// </summary>
         public static int ClampSpecialCount(int rolled) => Math.Clamp(rolled, 0, WeaponModRegistry.MaxSpecials);
 

@@ -16,14 +16,15 @@ namespace ACE.Server.WorldEvents
     /// quantity with stochastic rounding, "bags" pays stochastically-rounded Full Bags (a full set of bags
     /// collapses back to the item), "chance" awards the whole quantity with probability f and otherwise
     /// redraws among the non-chance entries. When the fractional roll is the ONLY roll and rounds to
-    /// nothing, one unit is given so a present player is never paid zero. Duplicate wcids in the output are
-    /// merged by summing quantity.
+    /// nothing, one unit is given so a present player is never paid zero. Duplicate (wcid, itemMaxLevel) rows in
+    /// the output are merged by summing quantity. An entry with a wcids list resolves to one uniformly chosen
+    /// member per pick.
     /// </summary>
     public static class WorldEventRewardRoller
     {
-        public static List<(uint Wcid, int Qty)> Roll(IReadOnlyList<RewardPoolEntryDef> pool, double m, Random rng)
+        public static List<RolledReward> Roll(IReadOnlyList<RewardPoolEntryDef> pool, double m, Random rng)
         {
-            var output = new List<(uint Wcid, int Qty)>();
+            var output = new List<RolledReward>();
 
             if (pool == null || pool.Count == 0 || double.IsNaN(m) || m <= 0)
                 return output;
@@ -38,7 +39,7 @@ namespace ACE.Server.WorldEvents
                 var pick = WeightedPick(pool, rng, includeChance: true);
 
                 if (pick != null)
-                    Give(output, pick.Wcid, pick.Qty);
+                    Give(output, pick, pick.Qty, rng);
             }
 
             if (f > 0)
@@ -53,7 +54,7 @@ namespace ACE.Server.WorldEvents
                     {
                         if (rng.NextDouble() < f)
                         {
-                            Give(output, pick.Wcid, pick.Qty);
+                            Give(output, pick, pick.Qty, rng);
                         }
                         else
                         {
@@ -62,7 +63,7 @@ namespace ACE.Server.WorldEvents
                             if (redraw != null)
                                 Scaled(output, redraw, f, onlyRoll, rng);
                             else if (onlyRoll)
-                                Give(output, pick.Wcid, pick.Qty);   // a pool of nothing but chance entries: never pay zero
+                                Give(output, pick, pick.Qty, rng);   // a pool of nothing but chance entries: never pay zero
                         }
                     }
                     else
@@ -76,18 +77,18 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>Applies a non-chance entry's scale at fraction f, with the minimum-1 rule for a lone roll.</summary>
-        private static void Scaled(List<(uint Wcid, int Qty)> output, RewardPoolEntryDef e, double f, bool onlyRoll, Random rng)
+        private static void Scaled(List<RolledReward> output, RewardPoolEntryDef e, double f, bool onlyRoll, Random rng)
         {
             if (e.Scale == RewardPoolEntryDef.ScaleBags && e.BagWcid.HasValue && e.BagsPerUnit >= 1)
             {
                 var b = StochasticRound(e.BagsPerUnit * f, rng);
 
                 if (b >= e.BagsPerUnit)
-                    Give(output, e.Wcid, 1);
+                    Give(output, e, 1, rng);
                 else if (b >= 1)
-                    Give(output, e.BagWcid.Value, b);
+                    GiveRaw(output, e.BagWcid.Value, b, null);
                 else if (onlyRoll)
-                    Give(output, e.BagWcid.Value, 1);
+                    GiveRaw(output, e.BagWcid.Value, 1, null);
 
                 return;
             }
@@ -99,7 +100,7 @@ namespace ACE.Server.WorldEvents
                 q = 1;
 
             if (q >= 1)
-                Give(output, e.Wcid, q);
+                Give(output, e, q, rng);
         }
 
         /// <summary>floor(x) plus 1 with probability equal to the remainder.</summary>
@@ -147,29 +148,48 @@ namespace ACE.Server.WorldEvents
             return e != null && e.Weight > 0 && (includeChance || e.Scale != RewardPoolEntryDef.ScaleChance);
         }
 
-        private static void Give(List<(uint Wcid, int Qty)> output, uint wcid, int qty)
+        /// <summary>
+        /// Adds qty of the entry's item. An entry with a wcids list resolves to one member, uniformly with rng,
+        /// on every call (so two picks of one entry can differ). The entry's itemMaxLevel rides along.
+        /// </summary>
+        private static void Give(List<RolledReward> output, RewardPoolEntryDef e, int qty, Random rng)
         {
-            if (qty > 0)
-                output.Add((wcid, qty));
+            var wcid = e.Wcid;
+
+            if (e.Wcids != null && e.Wcids.Count > 0)
+                wcid = e.Wcids[rng.Next(e.Wcids.Count)];
+
+            GiveRaw(output, wcid, qty, e.ItemMaxLevel, e.KnotItem);
         }
 
-        private static List<(uint Wcid, int Qty)> Merge(List<(uint Wcid, int Qty)> items)
+        private static void GiveRaw(List<RolledReward> output, uint wcid, int qty, int? itemMaxLevel, string knotItem = null)
         {
-            var merged = new List<(uint Wcid, int Qty)>();
-            var index = new Dictionary<uint, int>();
+            if (qty > 0)
+                output.Add(new RolledReward(wcid, qty, itemMaxLevel, knotItem));
+        }
 
-            foreach (var (wcid, qty) in items)
+        private static List<RolledReward> Merge(List<RolledReward> items)
+        {
+            var merged = new List<RolledReward>();
+            var index = new Dictionary<(uint, int?, string), int>();
+
+            foreach (var r in items)
             {
-                if (index.TryGetValue(wcid, out var at))
-                    merged[at] = (wcid, merged[at].Qty + qty);
+                var key = (r.Wcid, r.ItemMaxLevel, r.KnotItem);
+
+                if (index.TryGetValue(key, out var at))
+                    merged[at] = merged[at] with { Qty = merged[at].Qty + r.Qty };
                 else
                 {
-                    index[wcid] = merged.Count;
-                    merged.Add((wcid, qty));
+                    index[key] = merged.Count;
+                    merged.Add(r);
                 }
             }
 
             return merged;
         }
     }
+
+    /// <summary>One rolled output row. ItemMaxLevel and KnotItem, when set, are stamped on every object created for the row.</summary>
+    public record RolledReward(uint Wcid, int Qty, int? ItemMaxLevel = null, string KnotItem = null);
 }

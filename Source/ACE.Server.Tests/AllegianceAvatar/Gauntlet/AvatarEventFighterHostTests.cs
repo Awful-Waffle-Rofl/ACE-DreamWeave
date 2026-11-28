@@ -148,6 +148,8 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             Assert.AreEqual(evt.Composition.AnchorPosition.Cell, at.Cell, "placed at the event anchor");
             Assert.AreEqual(evt.Composition.AnchorPosition.PositionX, fighter.Anchor.PositionX, "leashed to the anchor");
             Assert.AreEqual(60.0f, fighter.LeashRadius, "the 60 m event radius");
+            Assert.IsNull(fighter.TauntScope, "the Warden taunt pulse is the Gauntlet's: a private event's fighter is never armed");
+            Assert.AreEqual(0.0, fighter.SummonTauntInterval);
             Assert.IsNotNull(fighter.Participants);
             Assert.IsNotNull(fighter.Audience);
             Assert.AreEqual(150, fighter.Stamp.Level, "no band yet and nobody near: the Avatar's level");

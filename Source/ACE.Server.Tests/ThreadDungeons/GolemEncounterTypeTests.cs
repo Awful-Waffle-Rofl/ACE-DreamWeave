@@ -1382,7 +1382,8 @@ namespace ACE.Server.Tests.ThreadDungeons
         [TestMethod]
         public void The_shrine_guardian_comment_sits_directly_above_the_bonus_kill_route()
         {
-            var src = PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadDungeonManager.cs").Replace("\r\n", "\n");
+            // pins the comment text itself, so the raw (comment-bearing) source
+            var src = PooledLootSourceText.ReadRaw("Source/ACE.Server/ThreadDungeons/ThreadDungeonManager.cs").Replace("\r\n", "\n");
             StringAssert.Contains(src, "// clear - no RecordKill, no armed notice, no progress line. Its pooled loot was already banked by Die.\n            if (TryRecordBonusKill(run, creature))");
             StringAssert.Contains(src, "// it takes the bonus-kill route like any encounter creature.\n            ThreadEncounterPass.OnTrackedCreatureDied(creature);");
         }

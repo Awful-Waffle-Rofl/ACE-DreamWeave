@@ -59,7 +59,7 @@ namespace ACE.Server.Entity
     public enum DuoAbsorbResult { Absorbed, Bound, Refused, NotInPack, GemUnreadable, TooLarge, ConsumeFailed }
 
     /// <summary>
-    /// The Duo Summon Gem (Custom Summons Task 7). A PetDevice weenie flagged PropertyBool.DuoSummonGem, bought blank
+    /// The Duo Summon Essence (Custom Summons Task 7). A PetDevice weenie flagged PropertyBool.DuoSummonGem, bought blank
     /// with a use-on-target cursor and no PetClass, charges or cooldown, so it summons nothing.
     ///
     /// Used on a completed summon item (retail or custom; never a blank caster still carrying SummonSpellBinder, never
@@ -83,7 +83,7 @@ namespace ACE.Server.Entity
         /// <summary>
         /// The gem texture drawn as the gem's IconUnderlay (PropertyDataId.IconUnderlay) and, while nothing is absorbed,
         /// as its Icon too, so an empty gem reads as a bare gem. The owner picks the final look: change it here, in the
-        /// content row (1007741 Duo Summon Gem.sql, Icon and IconUnderlay) and nowhere else.
+        /// content row (1007741 Duo Summon Essence.sql, Icon and IconUnderlay) and nowhere else.
         /// </summary>
         public const uint GemIcon = 0x06002B9B;
 
@@ -108,14 +108,14 @@ namespace ACE.Server.Entity
         /// <summary>The retail essence cooldown, used when neither absorbed item carries one.</summary>
         public const double DefaultCooldownSeconds = 45.0;
 
-        public const string UnboundText = "This Duo Summon Gem must absorb two summoning items before it can summon.";
-        public const string NotASummonText = "A Duo Summon Gem can only absorb a combat summoning item.";
-        public const string BlankCasterText = "That summon has not been given its two spells yet, so the gem cannot absorb it.";
-        public const string DuoGemText = "A Duo Summon Gem cannot absorb another Duo Summon Gem.";
-        public const string FullText = "This Duo Summon Gem already holds two summons. Break it with a Summon Gem Hammer to free them.";
-        public const string SameItemText = "The gem has already absorbed that summon.";
-        public const string StackedText = "Separate the stack first: the gem works on one item at a time.";
-        public const string PetOutText = "Dismiss or wait out that summon's creature before the gem absorbs it.";
+        public const string UnboundText = "This Duo Summon Essence must absorb two summoning items before it can summon.";
+        public const string NotASummonText = "A Duo Summon Essence can only absorb a combat summoning item.";
+        public const string BlankCasterText = "That summon has not been given its two spells yet, so the essence cannot absorb it.";
+        public const string DuoGemText = "A Duo Summon Essence cannot absorb another Duo Summon Essence.";
+        public const string FullText = "This Duo Summon Essence already holds two summons. Break it with a Summon Gem Hammer to free them.";
+        public const string SameItemText = "The essence has already absorbed that summon.";
+        public const string StackedText = "Separate the stack first: the essence works on one item at a time.";
+        public const string PetOutText = "Dismiss or wait out that summon's creature before the essence absorbs it.";
 
         /// <summary>
         /// The WeenieType of a pet wcid, from the world weenie cache. A hook so tests need no database. Only a CombatPet
@@ -459,16 +459,16 @@ namespace ACE.Server.Entity
                     Say(player, RefusalText(decision));
                     return;
                 case DuoAbsorbResult.NotInPack:
-                    Say(player, "Both the gem and the summoning item must be in your pack.");
+                    Say(player, "Both the essence and the summoning item must be in your pack.");
                     return;
                 case DuoAbsorbResult.GemUnreadable:
-                    Say(player, "The gem's first summon cannot be read. Nothing was absorbed.");
+                    Say(player, "The essence's first summon cannot be read. Nothing was absorbed.");
                     return;
                 case DuoAbsorbResult.TooLarge:
-                    Say(player, "That summon carries too much to fit in the gem.");
+                    Say(player, "That summon carries too much to fit in the essence.");
                     return;
                 case DuoAbsorbResult.ConsumeFailed:
-                    Say(player, "The gem could not take the summon.");
+                    Say(player, "The essence could not take the summon.");
                     return;
             }
 
@@ -482,8 +482,8 @@ namespace ACE.Server.Entity
             player.EnqueueBroadcast(new GameMessageUpdateObject(gem));
 
             Say(player, result == DuoAbsorbResult.Bound
-                ? $"The {target.Name} is drawn into the gem. The {gem.Name} now holds two summons and is ready to use."
-                : $"The {target.Name} is drawn into the gem. One more summon to go.");
+                ? $"The {target.Name} is drawn into the essence. The {gem.Name} now holds two summons and is ready to use."
+                : $"The {target.Name} is drawn into the essence. One more summon to go.");
         }
 
         internal static void Say(Player player, string text)

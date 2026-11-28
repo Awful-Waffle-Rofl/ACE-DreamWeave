@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Collections.Generic;
 
 using ACE.Entity;
@@ -189,6 +190,71 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.IsNull(creature.MagicAttackSkillCeiling);
         }
 
+        /// <summary>
+        /// Checks, on comment-stripped CreatureSkill source, that the clamp at <paramref name="clampIndex"/> sits in a
+        /// branch that excludes a player. The nearest preceding "creature != null" must be in a live condition, with no
+        /// closing brace between it and the clamp, and either (Current) the condition also says "player == null", or
+        /// (Base) it is the else of a "creature is Player" block. Returns null when sound, else why not.
+        /// </summary>
+        internal static string ClampGuardFault(string skill, int clampIndex)
+        {
+            var guard = skill.LastIndexOf("creature != null", clampIndex, StringComparison.Ordinal);
+
+            if (guard < 0 || skill.IndexOf('}', guard, clampIndex - guard) >= 0)
+                return "the clamp is not inside a creature != null branch";
+
+            var condStart = skill.LastIndexOf("if (", guard, StringComparison.Ordinal);
+            var condEnd = skill.IndexOf(')', guard);
+
+            if (condStart < 0 || condEnd < 0)
+                return "no if-condition around the guard";
+
+            var cond = skill.Substring(condStart, condEnd - condStart);
+
+            if (cond.Contains("player == null"))
+                return null;
+
+            var before = skill.Substring(0, condStart).TrimEnd();
+
+            if (!before.EndsWith("else", StringComparison.Ordinal))
+                return "the guard neither says player == null nor is the else of a Player branch: " + cond;
+
+            var playerIf = skill.LastIndexOf("if (creature is Player", condStart, StringComparison.Ordinal);
+
+            if (playerIf < 0)
+                return "the else has no preceding `if (creature is Player` branch";
+
+            var between = skill.Substring(playerIf, condStart - playerIf);
+
+            if (between.Count(c => c == '{') != between.Count(c => c == '}') || between.Count(c => c == '{') == 0)
+                return "the else is not the else of the Player block";
+
+            return null;
+        }
+
+        [TestMethod]
+        public void The_clamp_guard_check_discriminates_a_player_not_excluded()
+        {
+            var skill = PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/Entity/CreatureSkill.cs");
+            var calls = System.Text.RegularExpressions.Regex.Matches(skill, @"ClampToDefenseCeiling\(total, creature\.GetMagicAttackSkillCeiling\(Skill\)\)");
+            Assert.AreEqual(2, calls.Count);
+
+            foreach (System.Text.RegularExpressions.Match call in calls)
+                Assert.IsNull(ClampGuardFault(skill, call.Index), "positive control: the real source passes");
+
+            var baseDropsElse = skill.Replace("else if (creature != null)", "if (creature != null)");
+            var currentDropsPlayer = skill.Replace("if (player == null && creature != null)", "if (creature != null)");
+            Assert.AreNotEqual(skill, baseDropsElse, "the Base mutation anchor must exist");
+            Assert.AreNotEqual(skill, currentDropsPlayer, "the Current mutation anchor must exist");
+
+            foreach (var mutated in new[] { baseDropsElse, currentDropsPlayer })
+            {
+                var faults = System.Text.RegularExpressions.Regex.Matches(mutated, @"ClampToDefenseCeiling\(total, creature\.GetMagicAttackSkillCeiling\(Skill\)\)")
+                    .Select(m => ClampGuardFault(mutated, m.Index)).ToList();
+                Assert.IsTrue(faults.Any(f => f != null), "a branch that no longer excludes a player must fault");
+            }
+        }
+
         [TestMethod]
         public void The_ceiling_sits_before_enchantments_and_never_applies_to_a_player()
         {
@@ -207,7 +273,8 @@ namespace ACE.Server.Tests.ThreadDungeons
             foreach (System.Text.RegularExpressions.Match call in calls)
             {
                 Assert.IsTrue(call.Index < multiplier, "each clamp precedes the enchantment multiplier, so a player debuff lands on top");
-                Assert.IsTrue(skill.Substring(call.Index - 700, 700).Contains("creature != null"), "each clamp sits in a non-player creature branch");
+                var fault = MagicAttackCapTests.ClampGuardFault(skill, call.Index);
+                Assert.IsNull(fault, "each clamp sits in a branch that excludes a player: " + fault);
             }
         }
         // ---- 3. the dial ----------------------------------------------------------------------------------

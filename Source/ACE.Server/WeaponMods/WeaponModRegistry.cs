@@ -287,7 +287,7 @@ namespace ACE.Server.WeaponMods
                 MaxRoll = 6,
                 NativeDefault = 0,
                 AffectsSingleTargetDamage = true,
-                Classes = WeaponClass.All,
+                Classes = WeaponClass.All | WeaponClass.Shield,
                 DisplayFormat = "+{0:0} critical damage rating",
             },
             new WeaponModDefinition
@@ -311,7 +311,7 @@ namespace ACE.Server.WeaponMods
                 MaxRoll = 3,
                 NativeDefault = 0,
                 AffectsSingleTargetDamage = true,
-                Classes = WeaponClass.All,
+                Classes = WeaponClass.All | WeaponClass.Shield,
                 DisplayFormat = "+{0:0} critical chance rating",
             },
             new WeaponModDefinition
@@ -328,7 +328,7 @@ namespace ACE.Server.WeaponMods
                 MaxRoll = 6,
                 NativeDefault = 0,
                 AffectsSingleTargetDamage = true,
-                Classes = WeaponClass.All,
+                Classes = WeaponClass.All | WeaponClass.Shield,
                 DisplayFormat = "+{0:0} damage rating",
             },
             // WeaponModId.Cleave (id 4, PropertyFloat.WeaponModCleave 8133) sat here until 2026-08-07, when it
@@ -515,7 +515,7 @@ namespace ACE.Server.WeaponMods
                 MaxRoll = 22,
                 NativeDefault = 0,
                 AffectsSingleTargetDamage = true,
-                Classes = WeaponClass.Melee | WeaponClass.Missile,
+                Classes = WeaponClass.Melee | WeaponClass.Missile | WeaponClass.Shield,
                 DisplayFormat = "+{0:0.##} damage",
             },
             new WeaponModDefinition
@@ -530,7 +530,8 @@ namespace ACE.Server.WeaponMods
                 NativeDefault = 0,
                 AffectsSingleTargetDamage = true,
                 Classes = WeaponClass.Missile,
-                DisplayFormat = "+{0:0.##} damage mod",
+                DisplayFormat = "+{0:0.##}% damage mod",
+                DisplayScale = 100.0,
             },
             new WeaponModDefinition
             {
@@ -543,7 +544,8 @@ namespace ACE.Server.WeaponMods
                 NativeDefault = 0,
                 AffectsSingleTargetDamage = true,
                 Classes = WeaponClass.Melee,
-                DisplayFormat = "+{0:0.##} damage mod",
+                DisplayFormat = "+{0:0.##}% damage mod",
+                DisplayScale = 100.0,
             },
             new WeaponModDefinition
             {
@@ -557,7 +559,8 @@ namespace ACE.Server.WeaponMods
                 NativeDefault = 0,
                 AffectsSingleTargetDamage = true,
                 Classes = WeaponClass.Caster,
-                DisplayFormat = "+{0:0.##} elemental damage mod",
+                DisplayFormat = "+{0:0.##}% elemental damage mod",
+                DisplayScale = 100.0,
             },
             new WeaponModDefinition
             {
@@ -572,7 +575,7 @@ namespace ACE.Server.WeaponMods
                 MaxRoll = 0.25,
                 NativeDefault = 0,
                 AffectsSingleTargetDamage = true,
-                Classes = WeaponClass.All,
+                Classes = WeaponClass.All | WeaponClass.Shield,
                 DisplayFormat = "+{0:0.##}% critical chance",
                 DisplayScale = 100.0,
             },
@@ -600,7 +603,7 @@ namespace ACE.Server.WeaponMods
                 MaxRoll = 0.50,
                 NativeDefault = 0,
                 AffectsSingleTargetDamage = true,
-                Classes = WeaponClass.All,
+                Classes = WeaponClass.All | WeaponClass.Shield,
                 DisplayFormat = "+{0:0.##}% critical damage",
                 DisplayScale = 100.0,
             },
@@ -848,6 +851,7 @@ namespace ACE.Server.WeaponMods
             { WeaponClass.Melee,   mods.Where(m => m.Tier == WeaponModTier.A && m.AppliesTo(WeaponClass.Melee)).ToArray() },
             { WeaponClass.Missile, mods.Where(m => m.Tier == WeaponModTier.A && m.AppliesTo(WeaponClass.Missile)).ToArray() },
             { WeaponClass.Caster,  mods.Where(m => m.Tier == WeaponModTier.A && m.AppliesTo(WeaponClass.Caster)).ToArray() },
+            { WeaponClass.Shield,  mods.Where(m => m.Tier == WeaponModTier.A && m.AppliesTo(WeaponClass.Shield)).ToArray() },
         };
 
         private static readonly Dictionary<WeaponClass, WeaponModDefinition[]> bothTierPools = new Dictionary<WeaponClass, WeaponModDefinition[]>
@@ -855,6 +859,7 @@ namespace ACE.Server.WeaponMods
             { WeaponClass.Melee,   mods.Where(m => m.AppliesTo(WeaponClass.Melee)).ToArray() },
             { WeaponClass.Missile, mods.Where(m => m.AppliesTo(WeaponClass.Missile)).ToArray() },
             { WeaponClass.Caster,  mods.Where(m => m.AppliesTo(WeaponClass.Caster)).ToArray() },
+            { WeaponClass.Shield,  mods.Where(m => m.AppliesTo(WeaponClass.Shield)).ToArray() },
         };
 
         private static readonly Dictionary<WeaponClass, WeaponModDefinition[]> tierADamagePools = new Dictionary<WeaponClass, WeaponModDefinition[]>
@@ -862,6 +867,7 @@ namespace ACE.Server.WeaponMods
             { WeaponClass.Melee,   mods.Where(m => m.Tier == WeaponModTier.A && m.AffectsSingleTargetDamage && m.AppliesTo(WeaponClass.Melee)).ToArray() },
             { WeaponClass.Missile, mods.Where(m => m.Tier == WeaponModTier.A && m.AffectsSingleTargetDamage && m.AppliesTo(WeaponClass.Missile)).ToArray() },
             { WeaponClass.Caster,  mods.Where(m => m.Tier == WeaponModTier.A && m.AffectsSingleTargetDamage && m.AppliesTo(WeaponClass.Caster)).ToArray() },
+            { WeaponClass.Shield,  mods.Where(m => m.Tier == WeaponModTier.A && m.AffectsSingleTargetDamage && m.AppliesTo(WeaponClass.Shield)).ToArray() },
         };
 
         private static readonly Dictionary<WeaponClass, WeaponModDefinition[]> bothTierDamagePools = new Dictionary<WeaponClass, WeaponModDefinition[]>
@@ -869,6 +875,7 @@ namespace ACE.Server.WeaponMods
             { WeaponClass.Melee,   mods.Where(m => m.AffectsSingleTargetDamage && m.AppliesTo(WeaponClass.Melee)).ToArray() },
             { WeaponClass.Missile, mods.Where(m => m.AffectsSingleTargetDamage && m.AppliesTo(WeaponClass.Missile)).ToArray() },
             { WeaponClass.Caster,  mods.Where(m => m.AffectsSingleTargetDamage && m.AppliesTo(WeaponClass.Caster)).ToArray() },
+            { WeaponClass.Shield,  mods.Where(m => m.AffectsSingleTargetDamage && m.AppliesTo(WeaponClass.Shield)).ToArray() },
         };
 
         private static readonly WeaponModDefinition[] emptyPool = new WeaponModDefinition[0];
@@ -878,8 +885,11 @@ namespace ACE.Server.WeaponMods
         /// Pool depth is the arithmetic the design's pricing rests on, so both states are asserted in the tests
         /// rather than left to inspection:
         ///
-        ///   gate OFF (the default) - melee 4, missile 4, caster 3
-        ///   gate ON                - melee 17, missile 18, caster 16
+        ///   gate OFF (the default) - melee 4, missile 4, caster 3, shield 3
+        ///   gate ON                - melee 17, missile 18, caster 16, shield 6
+        ///
+        /// The shield pool is the six rows whose Classes field names WeaponClass.Shield explicitly (Devastation,
+        /// Weak Point, Bloodthirst, Heft, Precision, Execution); Shield is outside WeaponClass.All.
         ///
         /// UNCHANGED AT THE GATE-OFF DEPTHS BY EVERY TIER B EXPANSION SO FAR (v3 2026-08-06, v4 2026-08-17):
         /// every row each expansion adds is Tier B (see TierBExpansionBandStart, TierBV4BandStart), so none
@@ -920,7 +930,8 @@ namespace ACE.Server.WeaponMods
         ///
         /// IT CAN BE EMPTY and callers MUST handle that rather than assume the depths below. The depths are
         /// melee 3 / missile 3 / caster 3 with the gate off (Tier A only, unchanged since the retired rows
-        /// were never damage-relevant), and melee 9 / missile 10 / caster 7 with it on: the six v3 rows are
+        /// were never damage-relevant), and melee 9 / missile 10 / caster 7 with it on (shield 3 off / 6 on, every
+        /// shield row being damage-relevant): the six v3 rows are
         /// all damage-relevant (adding 4/4/3 on top of surviving v2's 2/2/1), and of the nine v4 rows only
         /// Panic Reload is (adding 0/1/0, missile only) - but the subset is a per-row flag, not a promise: a
         /// future class whose rows are all utility would empty it, and <see cref="WeaponModRoller.RollSpecial"/>

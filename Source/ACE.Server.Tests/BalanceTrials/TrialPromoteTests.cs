@@ -272,13 +272,13 @@ namespace ACE.Server.Tests.BalanceTrials
         }
 
         [TestMethod]
-        public void Promote_refuses_a_rep_index_outside_1_to_8_first()
+        public void Promote_refuses_a_rep_index_outside_1_to_12_first()
         {
-            foreach (var bad in new[] { 0, 9 })
+            foreach (var bad in new[] { 0, 13 })
             {
                 var f = Healthy(2);
                 Assert.IsFalse(TrialPromote.TryPromote(null, null, Archetype(), bad, f.Build(), out var refusal, out _));
-                StringAssert.Contains(refusal, "1..8", "the index is checked before the caller");
+                StringAssert.Contains(refusal, "1..12", "the index is checked before the caller");
                 Assert.AreEqual(0, f.Calls.Count);
             }
         }
@@ -321,7 +321,12 @@ namespace ACE.Server.Tests.BalanceTrials
             var failed = g.Build();
             failed.RepPurgeFailed = TrialRepSetup.PurgeFailed;
             Assert.IsFalse(TrialPromote.TryPromote(null, CallerGuid, Archetype(), repIndex, failed, out refusal, out _));
-            StringAssert.Contains(refusal, "failed at its purge");
+            StringAssert.Contains(refusal, "failed at its purge or copy");
+
+            // A rebuild whose copy failed marks the rep the same way, and promote names both causes.
+            TrialRepSetup.ResetBlock(rep.Guid);
+            TrialRepSetup.MarkRebuildRequired(rep.Guid, "the last rebuild's copy failed", purgeFailed: true);
+            Assert.IsTrue(TrialRepSetup.PurgeFailed(rep.Guid));
         }
 
         // ================================================================ purge and copy outcomes, the gate, the broken flag
@@ -376,6 +381,14 @@ namespace ACE.Server.Tests.BalanceTrials
             silent.Clock = TrialCopyGate.HoldSeconds + 1;
             Assert.IsFalse(silent.Gate.IsBusy(Master), "an unreleased hold lapses after HoldSeconds");
 
+            // The hold has lapsed, but the copy has not reported and may still land: the shared tail waits for it until its
+            // mark is 3 x HoldSeconds old, so nothing is purged under it.
+            Assert.IsFalse(Promote(silent, repIndex, out refusal, out _));
+            StringAssert.Contains(refusal, "has not reported; wait for it or restart");
+            Assert.AreEqual(1, silent.Purges);
+            Assert.IsFalse(silent.Gate.IsBusy(Master), "the refusal released the gate");
+
+            silent.Clock = TrialPromote.CopyInFlightWaitSeconds + 1;
             Assert.IsTrue(Promote(silent, repIndex, out refusal, out _), refusal);
             Assert.AreEqual(2, silent.PendingDone.Count);
             Assert.IsTrue(silent.Gate.IsBusy(Master), "the second promote holds the master");
@@ -878,8 +891,7 @@ namespace ACE.Server.Tests.BalanceTrials
         {
             var rep = TrialRoster.RepSlots[3];
 
-            TrialRepSetup.MarkRebuildRequired(rep.Guid, "drift");
-            Assert.IsFalse(TrialRepSetup.PurgeFailed(rep.Guid), "drift alone");
+            Assert.IsFalse(TrialRepSetup.PurgeFailed(rep.Guid), "nothing marked yet");
 
             var f = Healthy(2);
             var lookups = f.RebuildLookups(4);
@@ -904,14 +916,56 @@ namespace ACE.Server.Tests.BalanceTrials
             Assert.IsNull(error);
             Assert.AreEqual("unpromote", verb);
 
-            Assert.AreEqual("usage: @trial promote <archetype> <1-8>", TrialCommandParser.Parse(new[] { "promote", "archmage-400" }).Error);
-            StringAssert.Contains(TrialCommandParser.Parse(new[] { "promote", "archmage-400", "9" }).Error, "1..8");
+            Assert.AreEqual("usage: @trial promote <archetype> <1-12>", TrialCommandParser.Parse(new[] { "promote", "archmage-400" }).Error);
+            StringAssert.Contains(TrialCommandParser.Parse(new[] { "promote", "archmage-400", "13" }).Error, "1..12");
+            Assert.IsNull(TrialCommandParser.Parse(new[] { "promote", "archmage-400", "12" }).Error, "rep 12 is a valid slot");
             Assert.AreEqual("usage: @trial unpromote <archetype>", TrialCommandParser.Parse(new[] { "unpromote" }).Error);
             Assert.AreEqual("usage: @trial unpromote <archetype>", TrialCommandParser.Parse(new[] { "unpromote", "a", "1" }).Error);
-            Assert.AreEqual("usage: @trial rebuild <archetype> <1-8>", TrialCommandParser.Parse(new[] { "rebuild" }).Error, "rebuild's usage line is unchanged");
+            Assert.AreEqual("usage: @trial rebuild <archetype> <1-12>", TrialCommandParser.Parse(new[] { "rebuild" }).Error, "rebuild's usage line tracks RepCount");
 
-            StringAssert.Contains(TrialCommandParser.Usage, "promote <archetype> <1-8>");
+            StringAssert.Contains(TrialCommandParser.Usage, "promote <archetype> <1-12>");
+            var handler = (ACE.Server.Command.CommandHandlerAttribute)Attribute.GetCustomAttribute(typeof(TrialCommands).GetMethod(nameof(TrialCommands.HandleTrial)), typeof(ACE.Server.Command.CommandHandlerAttribute));
+            StringAssert.Contains(handler.Usage, $"rebuild <archetype> <1-{TrialRoster.RepCount}> | promote <archetype> <1-{TrialRoster.RepCount}>", "the handler usage text (a literal, attributes need constants) tracks RepCount");
             StringAssert.Contains(TrialCommandParser.Usage, "unpromote <archetype>");
+        }
+
+        [TestMethod]
+        public void Unpromote_waits_for_an_unreported_copy_for_three_hold_lengths()
+        {
+            var f = new Fake();
+            f.Stamps[Master] = TrialRebuild.PromotedStamp(ArchSha, CalSha, Now);
+            f.Gate.MarkBroken(Master, "a promote's copy has not landed", ArchSha, CalSha, copyInFlight: true);
+
+            // +301 s: no hold, but the copy has not reported: refused, nothing purged, the gate released.
+            f.Clock = TrialCopyGate.HoldSeconds + 1;
+            Assert.IsFalse(TrialPromote.TryUnpromote(Archetype(), f.Build(), out var refusal, out _));
+            StringAssert.Contains(refusal, "a copy onto this master started 301 s ago and has not reported; wait for it or restart");
+            Assert.AreEqual(0, f.Purges);
+            Assert.IsFalse(f.Gate.IsBusy(Master));
+
+            // +15 min +1 s: the mark is old enough, so the unpromote purges.
+            f.Clock = TrialPromote.CopyInFlightWaitSeconds + 1;
+            Assert.IsTrue(TrialPromote.TryUnpromote(Archetype(), f.Build(), out refusal, out _), refusal);
+            Assert.AreEqual(1, f.Purges);
+            Assert.IsFalse(f.Gate.IsBroken(Master, out _));
+        }
+
+        [TestMethod]
+        public void Gate_clears_a_broken_record_by_generation_only_while_no_newer_mark_exists()
+        {
+            var gate = new TrialCopyGate(() => 0);
+
+            var first = gate.MarkBroken(Master, "first", ArchSha, CalSha, copyInFlight: true);
+            Assert.IsTrue(gate.ClearBrokenIfGeneration(Master, first));
+            Assert.IsFalse(gate.IsBroken(Master, out _));
+
+            var old = gate.MarkBroken(Master, "old", ArchSha, CalSha, copyInFlight: true);
+            var newer = gate.MarkBroken(Master, "newer");
+            Assert.IsTrue(newer > old, "every mark bumps the generation");
+            Assert.IsFalse(gate.ClearBrokenIfGeneration(Master, old), "a stale generation clears nothing");
+            Assert.IsTrue(gate.IsBroken(Master, out var why));
+            Assert.AreEqual("newer", why);
+            Assert.IsFalse(gate.ClearBrokenIfGeneration(TrialRoster.MasterSlot(4), newer), "another master is untouched");
         }
 
         // ================================================================ source pins

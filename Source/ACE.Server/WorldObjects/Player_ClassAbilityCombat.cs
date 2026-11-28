@@ -259,7 +259,7 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// Reflects a fraction of the equipped shield's effective armor level (plus the Defensive Weapon weapon
-        /// mod's level, since 2026-10-25) back at the attacker via the
+        /// mod's level, since 2026-10-25), plus the shield's Heft, back at the attacker via the
         /// Thorns class ability (and/or the Thorns equipment mod), at strengthMultiplier of full (1.0 for
         /// every trigger today; Shield Check's scaled parry reflect was retired on 2026-09-12). No-op without
         /// Thorns learned or the mod equipped, without a shield equipped, or when the attacker is out of
@@ -272,6 +272,15 @@ namespace ACE.Server.WorldObjects
         /// SpellProjectile.DamageTarget, HandleCastSpell_Boost and HandleCastSpell_Transfer), and a projectile
         /// Reflect bounced (TryReflectProjectile), which never reaches any of the others. A spell hit Reflect's
         /// immunity window blocks to 0 needs no site of its own: the magic sites run after the write either way.
+        ///
+        /// THE FORMULA (shield weapon mods, Docs/WeaponMods/SHIELDS-DESIGN.md, 2026-11-25). A reflect is an attack made
+        /// with the shield: base = ComputeReflectDamage(...) + Heft on the shield; reflect = round(base x strength x the
+        /// total Damage Rating mod (Thread Shrine blessing taken out) x the crit multiplier x the Damage Resist Rating
+        /// multiplier). It crits while Cloaked in Power's window is open, or on a weapon crit roll with the shield as the
+        /// weapon and the Shield skill (10% base, Critical Strike, Crit Rating, Precision, the attacker's crit resist);
+        /// a crit multiplies by (1 + the shield's crit damage mod, Crippling Blow raising it) x (1 + Execution), and on a
+        /// crit the Damage Rating and Crit Damage Rating mods combine additively (Creature.AdditiveCombine) the way a
+        /// weapon crit combines them. The rank-0 equipment-mod path gets every term, since it reaches this same method.
         ///
         /// CLOSE-RANGE PUNISH (user ruling 2026-10-07, mirroring the monster reflect effect's on=hit ruling):
         /// the attacker must be within class_ability_thorns_max_range metres of this player when the hit
@@ -328,6 +337,18 @@ namespace ACE.Server.WorldObjects
 
             var baseReflect = ThornsAbility.ComputeReflectDamage(reflectArmorLevel, rank, percentPerRank, shieldScale, gearMod);
 
+            // Heft on the shield (shield weapon mods, 2026-11-25): flat damage added to the base before every multiplier,
+            // the way Heft enters a weapon's base damage. Suppression and the master switch zero it inside the read.
+            var heft = WeaponModCombat.ReadWeaponOnlyWieldedBy(shield, WeaponModId.Heft, this);
+
+            if (baseReflect == 0 && heft <= 0.0)
+                return;
+
+            // the player's TOTAL Damage Rating, from all gear, augs and grants, read WITHOUT the Thread Shrine damage blessing
+            // and the Gauntlet Avatar's aura (one blessing-free read, on the Damage Resist Rating precedent below): a blessing
+            // is not a rating the player built.
+            var damageRatingMod = GetPositiveRatingMod(GetDamageRatingWithoutBlessings());
+
             // Damage Resist Rating (Vanguard, 2026-11-06): the reflect is scaled by 1 + fraction x the player's
             // TOTAL Damage Resist Rating / 100, the fraction coming from the rank recovered off the granted
             // rating (so suppression, which zeroes the grant, leaves 1.0). This is the single reflect site, so
@@ -337,20 +358,38 @@ namespace ACE.Server.WorldObjects
             // there is a grant to convert with, so a player without the rating pays one cached read.
             //
             // Thread Shrine mitigation blessing: GetDamageResistRating now carries it too (+25 at 1.25), but it is a
-            // damage-taken blessing, not Damage Resist Rating the player built, so it is taken back out here and never
-            // grows the reflect. One volatile read when no run holds a blessing.
+            // damage-taken blessing, not Damage Resist Rating the player built, so it is left out here and never
+            // grows the reflect. The Gauntlet Avatar's aura resist rating is left out the same way. Both are skipped inside
+            // ONE blessing-free read, never subtracted after it, so the reflect cannot catch a blessing that changed between
+            // two reads.
             var drrGrant = GetClassAbilityRating(ClassAbilityId.DamageResistRating);
             var drrMultiplier = drrGrant > 0
-                ? RatingAbility.DamageResistRatingThornsMultiplier(drrGrant, GetDamageResistRating() - ACE.Server.ThreadDungeons.ThreadBoons.DamageResistRatingFor(this))
+                ? RatingAbility.DamageResistRatingThornsMultiplier(drrGrant, GetDamageResistRatingWithoutBlessings())
                 : 1.0;
 
-            // Cloaked in Power's Critical Thorns window: while it is open EVERY reflect is critical (2.0 x the
-            // wearer's Critical Damage Rating mod). The window is opened by the cloak spell proc roll BEFORE the
-            // reflect of the very hit that triggered it - see Cloak.RollSpellProc and the call sites.
-            var critical = IsCriticalThornsWindowOpen(Time.GetUnixTime());
-            var critMultiplier = critical ? CloakedInPowerAbility.CritThornsMultiplier(GetCritDamageRating()) : 1.0;
+            // A Thorns reflect is an attack made with the shield. It crits when Cloaked in Power's Critical Thorns window
+            // is open (opened by the cloak spell proc roll BEFORE the reflect of the very hit that triggered it - see
+            // Cloak.RollSpellProc and the call sites), or when the weapon crit roll succeeds: the physical crit pipeline
+            // with the SHIELD as the weapon, the Shield skill as the skill and the attacker as the target, so it starts
+            // from the 10% default frequency and takes Critical Strike, Crit Rating, Precision and the attacker's crit
+            // resist. The window short-circuits, so no draw is taken while it is open. A Thorns crit fires no on-crit
+            // procs or class-ability hooks; it only scales this reflect and picks the chat line below.
+            var shieldSkill = GetCreatureSkill(Skill.Shield);
 
-            var reflect = ThornsAbility.ScaleReflect(baseReflect, strengthMultiplier, critMultiplier, drrMultiplier);
+            var critical = IsCriticalThornsWindowOpen(Time.GetUnixTime())
+                || ThornsAbility.RollsCritical(WorldObject.GetWeaponCriticalChance(shield, this, shieldSkill, attacker), ThornsAbility.CritDraw());
+
+            // on a crit: (1 + the shield's crit damage mod, Crippling Blow raising it) x (1 + Execution on the shield), and
+            // the Damage Rating and Crit Damage Rating combine additively (Creature.AdditiveCombine), exactly as a weapon
+            // crit combines them in DamageEvent (owner ruling 2026-11-25). Without a crit the Damage Rating mod stands alone.
+            var damageRatingMultiplier = ThornsAbility.DamageRatingMultiplier(damageRatingMod, critical, critical ? GetCritDamageRating() : 0);
+
+            var critMultiplier = critical
+                ? ThornsAbility.CritDamageMultiplier(WorldObject.GetWeaponCritDamageMod(shield, this, shieldSkill, attacker),
+                    WeaponModCombat.ReadWeaponOnlyWieldedBy(shield, WeaponModId.Execution, this))
+                : 1.0;
+
+            var reflect = ThornsAbility.ScaleReflect(baseReflect, heft, strengthMultiplier, damageRatingMultiplier, critMultiplier, drrMultiplier);
 
             if (reflect == 0)
                 return;

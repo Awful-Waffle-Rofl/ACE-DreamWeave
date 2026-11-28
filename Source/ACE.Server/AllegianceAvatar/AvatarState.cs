@@ -22,7 +22,8 @@ public sealed record AvatarSeat(uint HouseGuid, Position Position);
 /// Favor reservation API instead.
 ///
 /// Persisted fields round-trip through ShardAvatarStore. ReservedFavor, KeeperGuid, KeeperIsActing, Active
-/// and Version are memory only and are rebuilt (or start at zero) after a restart.
+/// and Version are memory only and are rebuilt (or start at zero) after a restart, and so are the pending daily
+/// claims (AvatarManager.TryClaimDaily), which live in the manager, not here.
 /// </summary>
 public sealed class AvatarState
 {
@@ -78,6 +79,20 @@ public sealed class AvatarState
     /// look that does not parse (AvatarLookJson.Parse logs the warning), which then spawns the default look.
     /// </summary>
     internal AvatarLook Look { get; set; }
+
+    // ---- daily purchases (2026-11-25-02). Persisted; written only by AvatarManager.CommitDaily; do NOT bump Version. ----
+
+    /// <summary>UTC instant the Allegiance Blessing was last bought. Null = never. Counts as used while it falls on today's Avatar day or later.</summary>
+    public DateTime? BlessingBoughtUtc { get; internal set; }
+
+    /// <summary>UTC instant a private World Event last reached Active. Null = never.</summary>
+    public DateTime? LastEventUtc { get; internal set; }
+
+    /// <summary>
+    /// Private World Events that reached Active on the Avatar day of <see cref="LastEventUtc"/>. Read as 0 once that day has
+    /// passed (AvatarManager.UsedToday), so it is never reset by a job.
+    /// </summary>
+    public byte EventsOnDay { get; internal set; }
 
     /// <summary>Who holds the Keeper's rights, from the last recompute. The monarch until a recompute says otherwise.</summary>
     public uint KeeperGuid { get; internal set; }

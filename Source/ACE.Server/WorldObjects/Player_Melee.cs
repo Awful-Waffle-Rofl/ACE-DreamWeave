@@ -178,6 +178,63 @@ namespace ACE.Server.WorldObjects
         public const float StickyDistance = 4.0f;
         public const float RepeatDistance = 16.0f;
 
+        /// <summary>
+        /// Furthest a repeat attack will reacquire after a nudge. Below RepeatDistance because the charge
+        /// MoveTo in HandleActionTargetedMeleeAttack_Inner fails beyond its FailDistance of 15.
+        /// </summary>
+        public const float ReacquireDistance = 15.0f;
+
+        public enum MeleeRepeatDecision
+        {
+            Stop,
+            Continue,
+            Reacquire
+        }
+
+        /// <summary>
+        /// Decides what a player's auto-repeat melee does after a swing. Continue = swing again in place,
+        /// Reacquire = the player was nudged out of sticky range, so close back in and swing, Stop = end the attack.
+        /// Only range / visibility failures within ReacquireDistance reacquire, and only when the client is not
+        /// moving (see ClientIsMoving: a nudge, not a deliberate walk away); any other failure stops.
+        /// meleeVisible is lazy: it is a physics transition and is only needed between MeleeDistance and StickyDistance.
+        /// </summary>
+        public static MeleeRepeatDecision DecideMeleeRepeat(float dist, Func<bool> meleeVisible, bool targetAlive, bool autoRepeat, bool isBusy, bool attackCancelled, bool clientMoving)
+        {
+            if (!targetAlive || !autoRepeat || isBusy || attackCancelled)
+                return MeleeRepeatDecision.Stop;
+
+            if (dist <= MeleeDistance || dist <= StickyDistance && meleeVisible())
+                return MeleeRepeatDecision.Continue;
+
+            if (dist <= ReacquireDistance && !clientMoving)
+                return MeleeRepeatDecision.Reacquire;
+
+            return MeleeRepeatDecision.Stop;
+        }
+
+        /// <summary>
+        /// The guards a delayed Reacquire must pass before it re-enters the attack path, mirroring the ones
+        /// Attack() applies to a Continue plus the sequence / cancel / target checks, and a fresh client-movement
+        /// check (a key pressed during the refill delay after the Reacquire decision).
+        /// </summary>
+        /// <summary>
+        /// True when the client is deliberately moving, so a reacquire must not drag the player back: the last
+        /// MoveToState still carries a forward / turn / sidestep command (a key held, including one held since
+        /// before the swing, because MoveToState fires on key CHANGE), or a MoveToState arrived after swingStartTime
+        /// (a key tapped and released inside the window). Known limitation: a jump is not stamped (it does not
+        /// leave a held movement command), so a player who only jumps away can still be reacquired.
+        /// </summary>
+        private bool ClientIsMoving(double swingStartTime)
+        {
+            return LastMoveToState?.RawMotionState?.HasMovement() == true || LastMoveToStateTime > swingStartTime;
+        }
+
+        public static bool ShouldResumeMeleeRepeat(bool sequenceCurrent, bool attackCancelled, bool targetIsMeleeTarget, bool targetAlive, bool inMeleeCombat, bool isBusy, bool playerAlive, bool teleporting, bool suicideInProgress, bool inLandblock, bool clientMoving)
+        {
+            return sequenceCurrent && !attackCancelled && targetIsMeleeTarget && targetAlive && inMeleeCombat
+                && !isBusy && playerAlive && !teleporting && !suicideInProgress && inLandblock && !clientMoving;
+        }
+
         public void HandleActionTargetedMeleeAttack_Inner(WorldObject target, int attackSequence)
         {
             var dist = GetCylinderDistance(target);
@@ -206,6 +263,7 @@ namespace ACE.Server.WorldObjects
                     //log.Info($"{Name}.MoveTo({target.Name})");
 
                     // charge attack
+                    ChargeAttackSequence = attackSequence;
                     MoveTo(target);
                 }
                 else
@@ -216,12 +274,15 @@ namespace ACE.Server.WorldObjects
                     {
                         if (success)
                             Attack(target, attackSequence);
-                        else
+                        else if (AttackSequence == attackSequence)
                             OnAttackDone();
                     });
                 }
             }
         }
+
+        /// <summary>The attack sequence the last charge MoveTo was started for, so a stale move failure can be ignored.</summary>
+        public int ChargeAttackSequence;
 
         public void OnAttackDone(WeenieError error = WeenieError.None)
         {
@@ -282,6 +343,8 @@ namespace ACE.Server.WorldObjects
                 OnAttackDone();
                 return;
             }
+
+            var swingStartTime = ACE.Common.Time.GetUnixTime();
 
             var animLength = DoSwingMotion(target, out var attackFrames);
             if (animLength == 0)
@@ -431,7 +494,9 @@ namespace ACE.Server.WorldObjects
 
                 var dist = GetCylinderDistance(target);
 
-                if (creature.IsAlive && GetCharacterOption(CharacterOption.AutoRepeatAttacks) && (dist <= MeleeDistance || dist <= StickyDistance && IsMeleeVisible(target)) && !IsBusy && !AttackCancelled)
+                var repeatDecision = DecideMeleeRepeat(dist, () => IsMeleeVisible(target), creature.IsAlive, GetCharacterOption(CharacterOption.AutoRepeatAttacks), IsBusy, AttackCancelled, ClientIsMoving(swingStartTime));
+
+                if (repeatDecision == MeleeRepeatDecision.Continue)
                 {
                     // client starts refilling power meter
                     Session.Network.EnqueueSend(new GameEventAttackDone(Session));
@@ -440,6 +505,32 @@ namespace ACE.Server.WorldObjects
                     nextAttack.AddDelaySeconds(nextRefillTime);
                     nextAttack.AddAction(this, () => Attack(target, attackSequence, true));
                     nextAttack.EnqueueChain();
+                }
+                else if (repeatDecision == MeleeRepeatDecision.Reacquire)
+                {
+                    // the player was nudged (or the target moved) out of sticky range: keep the chain going.
+                    // same refill signal as Continue, then re-enter the initial-attack path, which rotates /
+                    // moves back to the target and swings.
+                    Session.Network.EnqueueSend(new GameEventAttackDone(Session));
+
+                    var reacquire = new ActionChain();
+                    reacquire.AddDelaySeconds(nextRefillTime);
+                    reacquire.AddAction(this, () =>
+                    {
+                        var sequenceCurrent = AttackSequence == attackSequence;
+
+                        if (!ShouldResumeMeleeRepeat(sequenceCurrent, AttackCancelled, MeleeTarget == target, creature.IsAlive, CombatMode == CombatMode.Melee, IsBusy, IsAlive, Teleporting, suicideInProgress, CurrentLandblock != null, ClientIsMoving(swingStartTime)))
+                        {
+                            // a newer attack owns the state now - leave it alone
+                            if (sequenceCurrent)
+                                OnAttackDone();
+
+                            return;
+                        }
+
+                        HandleActionTargetedMeleeAttack_Inner(target, attackSequence);
+                    });
+                    reacquire.EnqueueChain();
                 }
                 else
                     OnAttackDone();

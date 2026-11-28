@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 
 using ACE.Entity.Enum;
+using ACE.Entity.Enum.Properties;
 using ACE.Server.WorldEvents.Hold;
 
 // World Events Hold H4b: the pure heal, shrine, pacing and cosmetic rules (D6 - no clock, no world, no settings: every
@@ -200,11 +201,25 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>
-        /// The only spells a player may cast on a knight (pure): a beneficial Boost that raises HEALTH. Every other spell -
-        /// buffs, other vitals, anything harmful - stays refused.
+        /// A health heal a player may cast on a knight (pure): a beneficial Boost that raises HEALTH. It is queued through the
+        /// knight's heal conversion (ApplyHoldKnightHeal), never written raw. A beneficial non-heal spell is a buff
+        /// (<see cref="IsKnightBuffSpell"/>); anything harmful stays refused.
         /// </summary>
         public static bool IsKnightHealSpell(bool isBeneficial, SpellType type, DamageType vital, int boost, int maxBoost)
             => isBeneficial && type == SpellType.Boost && vital == DamageType.Health && Math.Max(boost, maxBoost) > 0;
+
+        /// <summary>
+        /// A buff a player may cast on a knight (pure), a WHITELIST: a beneficial Enchantment that does not restore or raise
+        /// health outside the heal converter. Refused: heal-over-time (<paramref name="isDamageOverTime"/>), a max-health
+        /// enchantment (SecondAtt on MaxHealth), a health-regeneration enchantment (Float on HealthRate), and every other spell
+        /// type (Transfer, Dispel, PortalSending, the Fellow* types, Boost). Callers test <see cref="IsKnightHealSpell"/> first.
+        /// </summary>
+        public static bool IsKnightBuffSpell(bool isBeneficial, SpellType type, bool isDamageOverTime, EnchantmentTypeFlags statModType, uint statModKey)
+            => isBeneficial
+               && type == SpellType.Enchantment
+               && !isDamageOverTime
+               && !(statModType.HasFlag(EnchantmentTypeFlags.SecondAtt) && statModKey == (uint)PropertyAttribute2nd.MaxHealth)
+               && !(statModType.HasFlag(EnchantmentTypeFlags.Float) && statModKey == (uint)PropertyFloat.HealthRate);
 
         /// <summary>The line a player gets for a heal on a knight (pure). ASCII.</summary>
         public static string PlayerHealLine(string knightName, int healed, HoldHealOutcome outcome, bool critical, string kitRemaining)

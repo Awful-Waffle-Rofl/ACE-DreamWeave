@@ -134,12 +134,14 @@ namespace ACE.Server.BalanceTrials
 
                 pending.TryRemove(rep, out _);
 
+                AnalyticsDatabase.TrialRunRow row = null;
+
                 try
                 {
                     if (!ReferenceEquals(rep.Recorder, recorder))
                         return;
 
-                    var row = recorder.Finish(endState, endedAt, endedUtc, Facts(session, rep));
+                    row = recorder.Finish(endState, endedAt, endedUtc, Facts(session, rep));
                     rep.Recorder = null;
                     RunSink(row);
                 }
@@ -147,6 +149,10 @@ namespace ACE.Server.BalanceTrials
                 {
                     rep.Recorder = null;
                     log.Error($"[TRIAL] trial {session.TrialUuid} rep {rep.Number}: writing the run row threw", ex);
+                }
+                finally
+                {
+                    Tee(session, rep, row);
                 }
             }
 
@@ -160,6 +166,22 @@ namespace ACE.Server.BalanceTrials
             {
                 log.Error($"[TRIAL] trial {session.TrialUuid} rep {rep.Number}: deferring the run row threw; writing it now", ex);
                 Write();
+            }
+        }
+
+        /// <summary>
+        /// The session's run-row tee (a campaign member's tallies, TrialCampaigns.OnRunRow): the row just written, or null when the
+        /// write failed. Once per rep, on the writing thread, after the row went to the sink. A throw is logged and swallowed.
+        /// </summary>
+        private static void Tee(TrialSession session, TrialRep rep, AnalyticsDatabase.TrialRunRow row)
+        {
+            try
+            {
+                session.RunRowWritten?.Invoke(rep, row);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[TRIAL] trial {session.TrialUuid} rep {rep.Number}: the run-row tee threw", ex);
             }
         }
 
@@ -179,7 +201,7 @@ namespace ACE.Server.BalanceTrials
                 ArchetypeChecksum = session.ArchetypeSha,
                 StateDigest = rep.StateDigest,
                 DigestDrift = rep.DigestDrift,
-                Driver = "manual",
+                Driver = session.Driver ?? "manual",
                 ClientCount = 1,
                 CharacterId = session.PlayerGuid,
                 CharLevel = rep.CharLevelAtStart,

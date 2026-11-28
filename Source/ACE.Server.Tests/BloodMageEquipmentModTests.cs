@@ -181,9 +181,18 @@ namespace ACE.Server.Tests
             Assert.AreEqual(2.05, WeakenedBloodMath.ResistanceMod(1, 2.00, 2.50, 3.10, gear), 1e-9);
 
             // CONTROL - read as a percentage the mod would be 3.10 * 1.05 = 3.255, which is 2.1x its
-            // intended value. This is the unit confusion the registry row's DisplayScale of 1.0 encodes.
+            // intended value. The display reads "+5pp", percentage POINTS of the multiplier (3.10 -> 3.15),
+            // shown as "pp" so it is never read as a 5% scaling of the mark.
             Assert.AreNotEqual(3.10 * (1.0 + gear), WeakenedBloodMath.ResistanceMod(3, 2.00, 2.50, 3.10, gear), 1e-4,
                 "Hemorrhage adds to a bare multiplier; it is not a percentage of it");
+        }
+
+        [TestMethod]
+        public void Hemorrhage_DisplaysItsMultiplierPointsAsPercentagePoints()
+        {
+            var hemorrhage = EquipmentModRegistry.Get(EquipmentModId.Hemorrhage);
+
+            Assert.AreEqual("+5pp life vulnerability on marked targets", hemorrhage.Format(0.05));
         }
 
         [TestMethod]

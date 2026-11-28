@@ -236,7 +236,7 @@ namespace ACE.Server.WeaponMods
             if (!targetInPack)
                 return ParagonModRefusal.TargetNotInPack;
 
-            if (weaponClass == WeaponClass.None)
+            if (weaponClass == WeaponClass.None || weaponClass == WeaponClass.Shield)
                 return ParagonModRefusal.NotAWeapon;
 
             if (!IsParagonSet(setId))
@@ -287,7 +287,7 @@ namespace ACE.Server.WeaponMods
             if (!targetInPack)
                 return ParagonModRefusal.TargetNotInPack;
 
-            if (weaponClass == WeaponClass.None)
+            if (weaponClass == WeaponClass.None || weaponClass == WeaponClass.Shield)
                 return ParagonModRefusal.NotAWeapon;
 
             if (!IsParagonSet(setId))
@@ -662,7 +662,7 @@ namespace ACE.Server.WeaponMods
             {
                 // The level is read only once the target is known to be a Paragon weapon, and through CurrentLevel,
                 // which cannot throw on a never-leveled item (WorldObject.ItemLevel does).
-                var level = weaponClass != WeaponClass.None && IsParagonSet(setId) ? CurrentLevel(target) : null;
+                var level = weaponClass != WeaponClass.None && weaponClass != WeaponClass.Shield && IsParagonSet(setId) ? CurrentLevel(target) : null;
 
                 return ResolveGemRefusal(enabled, sourceInPack, targetInPack, weaponClass, setId, target.ItemMaxLevel, level,
                     filled, source.GetProperty(PropertyInt.ParagonModGemModifier), target.ItemXpStyle,

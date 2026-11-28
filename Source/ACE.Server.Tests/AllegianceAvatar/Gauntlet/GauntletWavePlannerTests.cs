@@ -380,8 +380,17 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
 
                 CollectionAssert.AreEqual(thread.Entries.Select(e => (e.Wcid, e.Role)).ToList(), wave.Plan.Entries.Select(e => (e.Wcid, e.Role)).ToList(), "the same picks");
 
+                // The Gauntlet spawns its own trash count, so its per-creature multiplier is E x count(1) / count(20) (owner ruling
+                // 2026-11-26), not the Thread's E / C_thread. The twin gets that value from literals (E 20, counts 8 + 2 x 1 = 10 and
+                // 8 + 2 x 20 = 48), so the shaped creatures prove the consumer receives it; control below: the unadjusted twin differs.
+                var threadHealthUnadjusted = ShapeThread(thread, wave.Group, 500);
+                var baseMult = thread.HealthMultiplier / thread.GroupHealthMult;
+                thread.HealthMultiplier = baseMult * (20.0 * 10 / 48);
+                thread.GroupHealthMult = 20.0 * 10 / 48;
+
                 var gauntletHealth = ShapeGauntlet(wave, owner);
                 var threadHealth = ShapeThread(thread, wave.Group, 500);
+                CollectionAssert.AreNotEqual(threadHealthUnadjusted, gauntletHealth, "control: the Thread's own E / C_thread would shape different health");
 
                 Assert.IsTrue(gauntletHealth.Count > 0 && gauntletHealth.All(h => h > 0), "positive control: shaped health");
                 CollectionAssert.AreEqual(threadHealth, gauntletHealth, "a level-500 Gauntlet wave's shaped health is the Thread fixture's");

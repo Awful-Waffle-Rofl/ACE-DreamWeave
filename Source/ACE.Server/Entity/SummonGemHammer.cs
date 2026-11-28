@@ -16,7 +16,7 @@ namespace ACE.Server.Entity
 
     /// <summary>
     /// The Summon Gem Hammer (Custom Summons Task 7). A non-wieldable Gem flagged PropertyBool.SummonGemHammer. Used on
-    /// a BOUND Duo Summon Gem it breaks the gem and restores the two absorbed summon items exactly as they were when
+    /// a BOUND Duo Summon Essence it breaks the gem and restores the two absorbed summon items exactly as they were when
     /// absorbed (charges, dagger-applied ratings, inscription), each with a new guid; the gem's own charge pool is
     /// lost. A blank or half-filled gem, and anything that is not a Duo Gem, is refused and nothing is consumed.
     ///
@@ -36,12 +36,12 @@ namespace ACE.Server.Entity
     {
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
-        public const string NoTargetText = "The Summon Gem Hammer must be used on a Duo Summon Gem.";
-        public const string NotADuoGemText = "The Summon Gem Hammer only breaks a Duo Summon Gem.";
-        public const string UnboundText = "That Duo Summon Gem has not absorbed two summons yet, so there is nothing to break free.";
-        public const string StackedText = "Separate the stack first: the hammer breaks one gem at a time.";
-        public const string PetOutText = "Dismiss or wait out the gem's creatures before you break it.";
-        public const string NoPackSpaceText = "You need room in your pack for two summoning items before you break the gem.";
+        public const string NoTargetText = "The Summon Gem Hammer must be used on a Duo Summon Essence.";
+        public const string NotADuoGemText = "The Summon Gem Hammer only breaks a Duo Summon Essence.";
+        public const string UnboundText = "That Duo Summon Essence has not absorbed two summons yet, so there is nothing to break free.";
+        public const string StackedText = "Separate the stack first: the hammer breaks one essence at a time.";
+        public const string PetOutText = "Dismiss or wait out the essence's creatures before you break it.";
+        public const string NoPackSpaceText = "You need room in your pack for two summoning items before you break the essence.";
 
         public static bool IsHammer(WorldObject wo) => wo != null && wo.GetProperty(PropertyBool.SummonGemHammer) == true;
 
@@ -254,7 +254,7 @@ namespace ACE.Server.Entity
 
             if (PetDevice.VerifyUseRequirements(player, hammer, target) != WeenieError.None)
             {
-                DuoSummonGem.Say(player, "Both the hammer and the gem must be in your pack.");
+                DuoSummonGem.Say(player, "Both the hammer and the essence must be in your pack.");
                 player.SendUseDoneEvent(WeenieError.YouDoNotPassCraftingRequirements);
                 return;
             }
@@ -293,10 +293,10 @@ namespace ACE.Server.Entity
                             DuoSummonGem.Say(player, NoPackSpaceText);
                             break;
                         case HammerResult.NotInPack:
-                            DuoSummonGem.Say(player, "Both the hammer and the gem must be in your pack.");
+                            DuoSummonGem.Say(player, "Both the hammer and the essence must be in your pack.");
                             break;
                         default:
-                            DuoSummonGem.Say(player, "The gem will not break. Nothing was lost.");
+                            DuoSummonGem.Say(player, "The essence will not break. Nothing was lost.");
                             break;
                     }
                 }

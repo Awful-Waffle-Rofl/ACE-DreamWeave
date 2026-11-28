@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 using ACE.Entity.Enum.Properties;
 using ACE.Server.ClassAbilities;
@@ -129,8 +130,25 @@ namespace ACE.Server.EquipmentMods
             ClassAbilityRegistry.Abilities.TryGetValue(definition.LinkedAbility, out var linked) ? linked.DisplayName : definition.DisplayName;
 
         /// <summary>
-        /// The mod bullet lines for an item's appraisal panel, including its mod capacity when set.
-        /// Empty when the item carries nothing - the caller decides whether a block is worth printing.
+        /// The one ordering every player-facing equipment mod list uses: DisplayName, case-insensitive, then id as
+        /// a tie-break so the order is total. <see cref="GetMods"/> stays in registry order for the crafting code;
+        /// the appraisal lines, the market rows (and so the search text built from them) and the Salvage Roller
+        /// summary sort through this, so the same mods always read in the same order (owner ruling 2026-11-25).
+        /// </summary>
+        public static readonly IComparer<EquipmentModDefinition> ByName = Comparer<EquipmentModDefinition>.Create((a, b) =>
+        {
+            var byName = StringComparer.OrdinalIgnoreCase.Compare(a?.DisplayName, b?.DisplayName);
+
+            return byName != 0 ? byName : ((int)(a?.Id ?? 0)).CompareTo((int)(b?.Id ?? 0));
+        });
+
+        /// <summary><see cref="GetMods"/> in display order (<see cref="ByName"/>).</summary>
+        public static List<(EquipmentModDefinition Definition, double Potency)> GetModsByName(WorldObject item) =>
+            GetMods(item).OrderBy(m => m.Definition, ByName).ToList();
+
+        /// <summary>
+        /// The mod bullet lines for an item's appraisal panel, alphabetical by mod name, then its mod capacity
+        /// when set. Empty when the item carries nothing - the caller decides whether a block is worth printing.
         /// </summary>
         public static List<string> GetAppraisalLines(WorldObject item)
         {
@@ -139,7 +157,7 @@ namespace ACE.Server.EquipmentMods
             if (item == null)
                 return lines;
 
-            foreach (var (definition, potency) in GetMods(item))
+            foreach (var (definition, potency) in GetModsByName(item))
                 lines.Add($"- {Describe(definition, potency)} ({AbilityRequirement(definition)})");
 
             var capacity = item.GetProperty(PropertyInt.GearModCapacity) ?? 0;

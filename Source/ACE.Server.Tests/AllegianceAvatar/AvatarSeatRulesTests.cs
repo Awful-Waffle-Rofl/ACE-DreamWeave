@@ -52,22 +52,33 @@ namespace ACE.Server.Tests.Avatars
         [TestMethod]
         public void Reseat_InsideCooldown_Refused()
         {
-            var days = T.ReseatCooldownDays;
+            var days = 7L;
+            var t7 = T with { ReseatCooldownDays = days };
 
-            Assert.IsTrue(AvatarSeatRules.CanReseat(null, Now, T), "never seated");
-            Assert.IsFalse(AvatarSeatRules.CanReseat(Now, Now, T), "just seated");
-            Assert.IsFalse(AvatarSeatRules.CanReseat(Now.AddDays(-days).AddSeconds(1), Now, T), "one second inside the cooldown");
-            Assert.IsTrue(AvatarSeatRules.CanReseat(Now.AddDays(-days), Now, T), "exactly the cooldown");
+            Assert.IsTrue(AvatarSeatRules.CanReseat(null, Now, t7), "never seated");
+            Assert.IsFalse(AvatarSeatRules.CanReseat(Now, Now, t7), "just seated");
+            Assert.IsFalse(AvatarSeatRules.CanReseat(Now.AddDays(-days).AddSeconds(1), Now, t7), "one second inside the cooldown");
+            Assert.IsTrue(AvatarSeatRules.CanReseat(Now.AddDays(-days), Now, t7), "exactly the cooldown");
 
-            Assert.AreEqual(days, AvatarSeatRules.DaysUntilReseat(Now, Now, T));
-            Assert.AreEqual(1, AvatarSeatRules.DaysUntilReseat(Now.AddDays(-days).AddSeconds(1), Now, T), "a part day still reads as one day");
-            Assert.AreEqual(0, AvatarSeatRules.DaysUntilReseat(Now.AddDays(-days), Now, T));
+            Assert.AreEqual(days, AvatarSeatRules.DaysUntilReseat(Now, Now, t7));
+            Assert.AreEqual(1, AvatarSeatRules.DaysUntilReseat(Now.AddDays(-days).AddSeconds(1), Now, t7), "a part day still reads as one day");
+            Assert.AreEqual(0, AvatarSeatRules.DaysUntilReseat(Now.AddDays(-days), Now, t7));
+        }
+
+        [TestMethod]
+        public void Reseat_ZeroCooldown_AlwaysAllowed()
+        {
+            Assert.AreEqual(0L, T.ReseatCooldownDays, "fixture: the default is no cooldown");
+            Assert.IsTrue(AvatarSeatRules.CanReseat(null, Now, T));
+            Assert.IsTrue(AvatarSeatRules.CanReseat(Now, Now, T), "just seated");
+            Assert.AreEqual(0L, AvatarSeatRules.DaysUntilReseat(Now, Now, T), "never a '0 more days' refusal");
         }
 
         [TestMethod]
         public void SeatPrompt_CarriesTheCooldownTunable()
         {
-            Assert.AreEqual("Seat the Avatar here? You can't move it again for 7 days.", AvatarSeatRules.SeatPrompt(T));
+            Assert.AreEqual("Seat the Avatar here?", AvatarSeatRules.SeatPrompt(T), "the default is no cooldown");
+            Assert.AreEqual("Seat the Avatar here? You can't move it again for 7 days.", AvatarSeatRules.SeatPrompt(T with { ReseatCooldownDays = 7 }));
             Assert.AreEqual("Seat the Avatar here? You can't move it again for 3 days.", AvatarSeatRules.SeatPrompt(T with { ReseatCooldownDays = 3 }));
             Assert.AreEqual("The Avatar has left the mansion at 1.0N, 2.0E and wanders again.", AvatarSeatRules.UnseatLine("the mansion at 1.0N, 2.0E"));
         }

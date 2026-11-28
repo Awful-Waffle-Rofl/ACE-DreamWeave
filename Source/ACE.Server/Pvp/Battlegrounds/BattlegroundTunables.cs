@@ -115,9 +115,9 @@ namespace ACE.Server.Pvp.Battlegrounds
         // pvp_bg_marks_win / _loss / _draw - Marks of the Hopeslayer paid to each battleground winner / loser who did not
         // forfeit / participant of a drawn match (Docs/Pvp/BATTLEGROUNDS.md "Rewards"). Paid only while the arena's master switch
         // pvp_arena_blood_enabled is on (it lives in PvpArenaDials). 0 or negative pays nothing. Read when the match resolves.
-        int MarksWin = 2,
-        int MarksLoss = 1,
-        int MarksDraw = 1,
+        int MarksWin = 5,
+        int MarksLoss = 2,
+        int MarksDraw = 2,
         // pvp_bg_marks_scale - multiplies the win / loss / draw amount: paid = max(0, round(base x scale)). NaN or infinite
         // = 1.0 (unchanged), negative = 0 (pays nothing); sanitized where it is applied (PvpArenaRewards.SanitizeMarksScale).
         double MarksScale = 1.0,
@@ -236,9 +236,9 @@ namespace ACE.Server.Pvp.Battlegrounds
             AdDefenderDrRadius: 5.0,
             AdDefenderDrWindowSeconds: 10.0,
             SnakeDraft: true,
-            MarksWin: 2,
-            MarksLoss: 1,
-            MarksDraw: 1,
+            MarksWin: 5,
+            MarksLoss: 2,
+            MarksDraw: 2,
             MarksScale: 1.0,
             MarksDailyCap: 0,
             KothPerfNearMargin: 6.0,

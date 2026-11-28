@@ -37,7 +37,14 @@ public sealed record GauntletRunInfo(
     int Headcount,
     int Fought,
     string LastRefusal,
-    string NpcAt = null);
+    string NpcAt = null,
+    GauntletAuraInfo Aura = null);
+
+/// <summary>
+/// The run's aura as the status command shows it: its tuned radius and ratings (the run's snapshot), and, while the fighter
+/// is fallen, the whole seconds until it returns (null while it stands).
+/// </summary>
+public sealed record GauntletAuraInfo(double Radius, int DamageRating, int ResistRating, int? FallenSecondsLeft = null);
 
 // ---- the world seams (Task 7) ---------------------------------------------------------------------------------------
 
@@ -161,7 +168,9 @@ internal interface IGauntletFighterHooks
     void Spawn(GauntletRun run);
 
     /// <summary>
-    /// Restamp the fighter from <paramref name="wave"/>'s plan (null when that plan was refused). The run calls it with
+    /// The fighter's stats are fixed once, at the run's start, from the first plan it is given (wave 1's); a later call never
+    /// changes them (the hooks only clear buffs and keep the shown level at the Avatar's own level). <paramref name="wave"/> is
+    /// the wave's plan (null when that plan was refused). The run calls it with
     /// <paramref name="clearBuffs"/> true at each Intermission start, from the next wave's plan, so buffs cast during the break
     /// carry into the wave; and with false when a wave's stats arrive without a break (wave 1 at the end of Staging, or a
     /// refused wave whose re-plan succeeded mid-wave), so those never wipe buffs.
@@ -195,6 +204,12 @@ internal interface IGauntletDeathHooks
 
     /// <summary>The run closed or aborted: end every hold it owns (the eviction follows).</summary>
     void ReleaseAll(GauntletRun run);
+
+    /// <summary>
+    /// The run stopped fighting (Rewarding began, caches placed): end every hold now and send each held player who is online
+    /// in the arena to <paramref name="caches"/>, the cache area. Anyone else is just dropped.
+    /// </summary>
+    void ReleaseToCaches(GauntletRun run, Position caches);
 }
 
 /// <summary>Task 12, the caches and claims. World thread, outside the run's lock.</summary>
@@ -251,6 +266,7 @@ internal sealed class NoGauntletHooks : IGauntletFighterHooks, IGauntletDeathHoo
 
     public double HoldSecondsLeft(GauntletRun run, Player player) => 0;
     public void ReleaseAll(GauntletRun run) { }
+    public void ReleaseToCaches(GauntletRun run, Position caches) { }
 
     public int BeginRewarding(GauntletRun run) => DefaultClaimWindowSeconds;
     public void DeliverDirect(GauntletRun run) { }

@@ -441,6 +441,39 @@ namespace ACE.Server.Tests
             Assert.AreSame(GreenJadeManager.DefaultNext, savedGreenJadeNext);
         }
 
+        /// <summary>
+        /// Candidate summary lines read alphabetically by mod name (owner ruling 2026-11-25). Both fixtures carry mods
+        /// whose registry order is NOT alphabetical, so a registry-order walk fails here.
+        /// </summary>
+        [TestMethod]
+        public void SummaryLines_AreAlphabeticalByModName()
+        {
+            var sword = Weapon();
+
+            foreach (var id in new[] { WeaponModId.WeakPoint, WeaponModId.Bloodthirst, WeaponModId.Ambush })
+            {
+                var definition = WeaponModRegistry.Get(id);
+                WeaponModTinkerSet.ApplySpecial(sword, definition, WeaponModValue.MaxMagnitude(definition));
+            }
+
+            CollectionAssert.AreEqual(new[] { "Weak Point", "Bloodthirst", "Ambush" },
+                WeaponModTinkerSet.ReadSpecials(sword).Select(m => m.Definition.DisplayName).ToArray(), "fixture: registry order is not alphabetical");
+
+            var weaponNames = SalvageRollerEngine.WeaponSummary(sword).Lines.Select(l => l.Substring(0, l.IndexOf(" [", System.StringComparison.Ordinal))).ToArray();
+            CollectionAssert.AreEqual(new[] { "Ambush", "Bloodthirst", "Weak Point" }, weaponNames);
+
+            var plate = Armor(new Dictionary<PropertyInt, int>());
+            plate.SetProperty(EquipmentModRegistry.Get(EquipmentModId.LongDraw).Property, 0.5);
+            plate.SetProperty(EquipmentModRegistry.Get(EquipmentModId.Splitshot).Property, 0.5);
+            plate.SetProperty(EquipmentModRegistry.Get(EquipmentModId.DoubleVolley).Property, 0.5);
+
+            CollectionAssert.AreEqual(new[] { "Long Draw", "Splitshot", "Double Volley" },
+                EquipmentModDisplay.GetMods(plate).Select(m => m.Definition.DisplayName).ToArray(), "fixture: registry order is not alphabetical");
+
+            var armorNames = SalvageRollerEngine.ObsidianSummary(plate).Lines.Select(l => l.Substring(0, l.IndexOf(" [", System.StringComparison.Ordinal))).ToArray();
+            CollectionAssert.AreEqual(new[] { "Double Volley", "Long Draw", "Splitshot" }, armorNames);
+        }
+
         [TestMethod]
         public void ObsidianCandidateLines_CarryRequirementSuffix()
         {
@@ -453,6 +486,7 @@ namespace ACE.Server.Tests
             for (var i = 0; i < candidates.Count; i++)
             {
                 var expected = EquipmentModDisplay.GetMods(copies[i])
+                    .OrderBy(m => m.Definition.DisplayName, System.StringComparer.OrdinalIgnoreCase)
                     .Select(m => $"{EquipmentModDisplay.Describe(m.Definition, m.Potency)} ({EquipmentModDisplay.AbilityRequirement(m.Definition)})").ToList();
 
                 CollectionAssert.AreEqual(expected, candidates[i].Summary.Lines);

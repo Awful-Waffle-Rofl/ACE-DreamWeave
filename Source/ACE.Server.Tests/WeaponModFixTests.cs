@@ -200,18 +200,15 @@ namespace ACE.Server.Tests
             Assert.AreEqual(10, WeaponModTinkerSet.ReadReservedSlots(tenOak), "all ten slots must be reserved");
             Assert.AreEqual(0, WeaponModTinkerSet.AvailableSlots(WeaponModTinkerSet.ReadReservedSlots(tenOak)));
 
-            Assert.AreEqual(WeaponModManager.WeaponModRefusal.NoAvailableSlots,
-                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Reroll, WeaponClass.Melee, true, true,
-                    WeaponModTinkerSet.ReadReservedSlots(tenOak)),
-                "a weapon whose whole budget is unreversible must be refused, not refilled");
-
-            // ... but only the REROLL is refused. Since 2026-08-07 the same ten-Oak weapon is Amethyst-able,
-            // because Amethyst neither reverses nor writes a tinker and so cannot be harmed by a budget it
-            // cannot touch. The trap this test guards is the reroll silently refilling on top of Oak; the swap
-            // was never capable of that.
+            // Owner ruling 2026-11-25: no tinker state refuses either tool. The ten-Oak weapon that Fix 2 once
+            // guarded against being refilled is now simply rerolled, special-only, with every tinker untouched
+            // (WeaponModTests.TourmalineIgnoresTinkerState pins the reroll leaving the records identical).
             Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
-                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Swap, WeaponClass.Melee, true, true,
-                    WeaponModTinkerSet.ReadReservedSlots(tenOak)),
+                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Reroll, tenOak),
+                "ten Oak must NOT refuse a reroll - the tinker budget has no bearing on Tourmaline");
+
+            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
+                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Swap, tenOak),
                 "ten Oak must NOT refuse a swap - the tinker budget has no bearing on Amethyst");
         }
 
@@ -458,12 +455,9 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void Fix5_CanApplyCoversEveryBailOutInBothFlows()
         {
-            foreach (var weaponClass in new[] { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster })
+            foreach (var weaponClass in new[] { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster, WeaponClass.Shield })
             {
-                var itemType = weaponClass == WeaponClass.Missile ? ItemType.MissileWeapon
-                    : weaponClass == WeaponClass.Caster ? ItemType.Caster : ItemType.MeleeWeapon;
-
-                var combatUse = weaponClass == WeaponClass.Missile ? CombatUse.Missile : CombatUse.Melee;
+                var (itemType, combatUse) = WeaponModTestKit.Shape(weaponClass);
 
                 // a fresh weapon: the reroll can always proceed, the swap has nothing to take away
                 var fresh = MakeWeapon(itemType, combatUse);
@@ -524,14 +518,13 @@ namespace ACE.Server.Tests
         // ================= drift stone: an explicit refusal, not a gate coincidence =================
 
         /// <summary>
-        /// A Prismatic Drift Stone weapon is refused today only because it carries NumTimesTinkered 10 against a
-        /// 2..6 entry log, which the integrity gate rejects on the count mismatch. That is a coincidence of the
-        /// stone's current MinBoosts/MaxBoosts tuning: raise MaxBoosts to 9 and the log reaches ten entries, the
-        /// gate passes, and a weapon the game promised "can never be tinkered again" opens to a full reroll.
+        /// A Prismatic Drift Stone weapon is refused by the EXPLICIT drift-stone check alone. Until 2026-11-25 the
+        /// integrity gate also refused it, by coincidence of the stone's MinBoosts/MaxBoosts tuning (NumTimesTinkered
+        /// 10 against a 2..6 entry log); that gate no longer refuses anything, so the explicit check is the sole
+        /// refusal and must hold whatever the tuning.
         ///
-        /// The independence is proved by suppressing the gate: PassesIntegrityGate returns true unconditionally
-        /// on a weapon carrying WeaponModTinkerCount, so a drift-stoned weapon with that marker sails past the
-        /// coincidence. The refusal must still fire. The signature's own length window is derived from
+        /// The independence is still proved with a weapon the retail integrity query passes: PassesIntegrityGate
+        /// returns true unconditionally on a weapon carrying WeaponModTinkerCount. The refusal must still fire. The signature's own length window is derived from
         /// MinBoosts/MaxBoosts, so it tracks a retuning of the stone automatically.
         /// </summary>
         [TestMethod]
@@ -545,13 +538,13 @@ namespace ACE.Server.Tests
                     { PropertyInt.NumTimesTinkered, PrismaticDriftStone.LockedTinkerCount },
                     { PropertyInt.DamageType, (int)DamageType.Slash },
                     { PropertyInt.ImbuedEffect, (int)ImbuedEffectType.SlashRending },
-                    // suppresses the integrity gate, which is the only thing refusing this weapon today
+                    // makes the retail integrity query pass, so only the explicit drift-stone check can refuse it
                     { PropertyInt.WeaponModTinkerCount, 0 },
                 },
                 strings: new Dictionary<PropertyString, string> { { PropertyString.TinkerLog, Log(materials.ToArray()) } });
 
             Assert.IsTrue(WeaponModTinkerSet.PassesIntegrityGate(stoned),
-                "precondition: the gate is suppressed here, so it cannot be what refuses the weapon");
+                "precondition: the integrity query passes here, so it cannot be what refuses the weapon");
 
             Assert.IsTrue(PrismaticDriftStone.MatchesAppliedSignature(stoned));
 
@@ -587,9 +580,9 @@ namespace ACE.Server.Tests
         /// A life caster stoned BEFORE GetRend grew its Health branch was stamped with the old mapping's
         /// CriticalStrike fallback (BlackOpal closing the log). The signature must keep matching that legacy
         /// stamp: recomputing only the new HealthRending shape would silently unseal every pre-fix life wand,
-        /// and the Swap path has no integrity-gate backstop (PassesIntegrityGate is reroll-only by the
-        /// 2026-08-07 policy), so an unsealed wand would open to Amethyst on a weapon the game promised
-        /// "can never be tinkered again".
+        /// and neither the reroll nor the swap path has an integrity-gate backstop since 2026-11-25 (the explicit
+        /// drift-stone check is the only seal), so an unsealed wand would open to Tourmaline and Amethyst on a
+        /// weapon the game promised "can never be tinkered again".
         /// </summary>
         [TestMethod]
         public void DriftStone_StillRefusesALifeWandStonedUnderTheOldCriticalStrikeMapping()
@@ -731,12 +724,9 @@ namespace ACE.Server.Tests
 
                 // no class carries a binary modifier since the 2026-08-07 Cleave removal, so at a muted scale
                 // NOTHING may be held on any of them
-                foreach (var weaponClass in new[] { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster })
+                foreach (var weaponClass in new[] { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster, WeaponClass.Shield })
                 {
-                    var itemType = weaponClass == WeaponClass.Missile ? ItemType.MissileWeapon
-                        : weaponClass == WeaponClass.Caster ? ItemType.Caster : ItemType.MeleeWeapon;
-
-                    var combatUse = weaponClass == WeaponClass.Missile ? CombatUse.Missile : CombatUse.Melee;
+                    var (itemType, combatUse) = WeaponModTestKit.Shape(weaponClass);
 
                     for (var i = 1; i <= 40; i++)
                     {
@@ -976,7 +966,7 @@ namespace ACE.Server.Tests
             {
                 foreach (var scale in new[] { 1.0, 0.0 })
                 {
-                    foreach (var weaponClass in new[] { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster })
+                    foreach (var weaponClass in new[] { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster, WeaponClass.Shield })
                     {
                         // seed at least one special via a forced-odds reroll at scale 1, THEN switch to the
                         // scale under test - a muted scale can never seed a non-binary special in the first

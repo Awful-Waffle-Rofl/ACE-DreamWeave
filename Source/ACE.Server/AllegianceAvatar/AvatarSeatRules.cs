@@ -73,7 +73,9 @@ public static class AvatarSeatRules
     }
 
     public static string SeatPrompt(AvatarTuning t) =>
-        $"Seat the Avatar here? You can't move it again for {Math.Max(0, t.ReseatCooldownDays)} days.";
+        t.ReseatCooldownDays <= 0
+            ? "Seat the Avatar here?"
+            : $"Seat the Avatar here? You can't move it again for {t.ReseatCooldownDays} days.";
 
     public static string ReseatCooldownMessage(long days) =>
         $"The Avatar can't be moved again for {days} more {(days == 1 ? "day" : "days")}.";

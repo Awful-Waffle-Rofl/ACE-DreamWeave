@@ -438,6 +438,7 @@ public static class AvatarNpcs
 
             npc.Location = new Position(seat.Position);
             npc.Home = new Position(seat.Position);
+            npc.IsSeated = true;
 
             bool ok;
             try
@@ -793,6 +794,7 @@ public static class AvatarNpcs
 
         npc.Location = new Position(old.Location ?? seat.Position);
         npc.Home = new Position(seat.Position);
+        npc.IsSeated = true;
 
         old.Destroy();
 
@@ -865,6 +867,10 @@ public static class AvatarNpcs
         }
 
         npc.AvatarId = avatarId;
+
+        // Hand-placed with no generator and no Lifespan, so without this the landblock heartbeat rots it after 300 s
+        // (WorldObject.IsDecayable). The seated NPC then vanished until the 10-minute seat re-check respawned it.
+        npc.TimeToRot = -1;
 
         try
         {

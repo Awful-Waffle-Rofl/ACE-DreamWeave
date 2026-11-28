@@ -47,11 +47,12 @@ namespace ACE.Server.Factories.Tables
         /// <summary>
         /// The second most common ItemProfile
         /// </summary>
+        // FORK CHANGE (caster drop rate, 2026-11-25): Weapon x1.015, difference taken from Scroll.
         private static ChanceTable<TreasureItemType> itemProfile8 = new ChanceTable<TreasureItemType>()
         {
-            ( TreasureItemType.Weapon,      0.125f ),
+            ( TreasureItemType.Weapon,      0.126875f ),
             ( TreasureItemType.Armor,       0.125f ),
-            ( TreasureItemType.Scroll,      0.125f ),
+            ( TreasureItemType.Scroll,      0.123125f ),
             ( TreasureItemType.Clothing,    0.125f ),
             ( TreasureItemType.Jewelry,     0.125f ),
             ( TreasureItemType.Gem,         0.125f ),
@@ -62,11 +63,12 @@ namespace ACE.Server.Factories.Tables
         /// <summary>
         /// The most common ItemProfile
         /// </summary>
+        // FORK CHANGE (caster drop rate, 2026-11-25): Weapon x1.015, difference taken from Scroll.
         private static ChanceTable<TreasureItemType> itemProfile9 = new ChanceTable<TreasureItemType>()
         {
-            ( TreasureItemType.Weapon,      0.20f ),
+            ( TreasureItemType.Weapon,      0.203f ),
             ( TreasureItemType.Armor,       0.20f ),
-            ( TreasureItemType.Scroll,      0.20f ),
+            ( TreasureItemType.Scroll,      0.197f ),
             ( TreasureItemType.Clothing,    0.05f ),
             ( TreasureItemType.Jewelry,     0.05f ),
             ( TreasureItemType.Gem,         0.05f ),
@@ -74,11 +76,12 @@ namespace ACE.Server.Factories.Tables
             ( TreasureItemType.PetDevice,   0.20f ),
         };
 
+        // FORK CHANGE (caster drop rate, 2026-11-25): Weapon x1.015, difference taken from Scroll.
         private static ChanceTable<TreasureItemType> itemProfile10 = new ChanceTable<TreasureItemType>()
         {
-            ( TreasureItemType.Weapon,      0.30f ),
+            ( TreasureItemType.Weapon,      0.3045f ),
             ( TreasureItemType.Armor,       0.30f ),
-            ( TreasureItemType.Scroll,      0.20f ),
+            ( TreasureItemType.Scroll,      0.1955f ),
             ( TreasureItemType.PetDevice,   0.20f ),
         };
 

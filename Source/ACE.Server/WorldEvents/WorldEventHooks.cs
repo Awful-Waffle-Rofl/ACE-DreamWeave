@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.CompilerServices;
 
 using ACE.Entity;
@@ -255,6 +256,13 @@ namespace ACE.Server.WorldEvents
         /// start that threw after the run took hold must not refund the price the run will settle itself).
         /// </summary>
         public static bool IsCurrentRequest(WorldEventRequest request) => request != null && ReferenceEquals(WorldEventManager.Current?.Request, request);
+
+        /// <summary>Test seam: a character's allegiance monarch guid (their own guid when they have none), for the quiet private event reward gate.</summary>
+        internal static Func<uint, uint> CharacterMonarchSource = ACE.Server.Avatars.AvatarRights.AdmissionMonarchGuidOf;
+
+        /// <summary>Test seam: the character guids of the allegiance led by a monarch guid (empty when unknown), the candidates the quiet private event reward snapshot tests.</summary>
+        internal static Func<uint, IEnumerable<uint>> AllegianceMemberSource = monarch =>
+            ACE.Server.Avatars.AvatarRosters.ForMonarch(monarch)?.Members.Select(m => m.Guid) ?? Array.Empty<uint>();
 
         /// <summary>
         /// Test seam: settles a private Avatar event's reserved Favor (avatar id, price, commit). Defaults to
@@ -582,6 +590,13 @@ namespace ACE.Server.WorldEvents
         public static int ConvertPlayerHeal(double rawHeal, uint maxHealth, double maxHealPerTenSeconds, ref double tokens, ref double lastAt, double now)
             => WorldEventHoldRules.ConvertPlayerHeal(rawHeal, maxHealth, maxHealPerTenSeconds, ref tokens, ref lastAt, now);
 
+        /// <summary>
+        /// Allegiance Gauntlet, Blood Mage Transfusion on the Avatar fighter (GauntletAvatarFighter.TransfusionDemand): the raw
+        /// heal points whose conversion fits <paramref name="health"/>, WorldEventHoldRules.RawPointsForHealth at no heal
+        /// multiplier and no after-hit factor. Pure.
+        /// </summary>
+        public static uint RawPointsForHealth(int health, uint maxHealth) => WorldEventHoldRules.RawPointsForHealth(health, maxHealth, 1.0, 1.0);
+
         /// <summary>The raw points of a typical player heal (the conversion's scale), for the Gauntlet kit tests. Pure.</summary>
         public const double TypicalPlayerHeal = WorldEventHoldRules.TypicalPlayerHeal;
 
@@ -616,6 +631,13 @@ namespace ACE.Server.WorldEvents
 
             return monster.TrySelectHoldTarget();
         }
+
+        /// <summary>
+        /// True for a creature carrying a Hold tag (a seeker, hunter, knight or finale boss): the same single field read that
+        /// gates <see cref="TrySelectHoldTarget"/>. The Vanguard on-hit taunt skips these so a Hold monster keeps its own
+        /// targeting. False for every creature with no tag.
+        /// </summary>
+        public static bool HasHoldObjective(Creature monster) => monster?.WorldEventHold != null;
 
         /// <summary>
         /// The seeker lock (AlertMonster, MonsterOnAttackMonster, AlertFriendly, Player.OnAttackMonster): a seeker woken or
@@ -756,13 +778,27 @@ namespace ACE.Server.WorldEvents
             return Math.Min(demand, WorldEventHoldRules.RawPointsForHealth(room, max, t.PlayerHealMult, factor));
         }
 
-        /// <summary>Pure core of <see cref="IsInvalidHoldSpellTarget"/>: only a health heal, and only while the knight accepts player heals.</summary>
+        /// <summary>
+        /// Pure core of <see cref="IsInvalidHoldSpellTarget"/>: a health heal is valid only while the knight accepts player heals;
+        /// any other spell is valid only when it is a whitelisted buff and the knight accepts buffs (alive, active run, player_heal on).
+        /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static bool IsInvalidHoldKnightSpell(bool acceptsPlayerHeal, bool isHealSpell) => !(acceptsPlayerHeal && isHealSpell);
+        public static bool IsInvalidHoldKnightSpell(bool acceptsPlayerHeal, bool isHealSpell, bool acceptsBuff, bool isBuffSpell)
+            => isHealSpell ? !acceptsPlayerHeal : !(acceptsBuff && isBuffSpell);
+
+        /// <summary>
+        /// Player.CheckPKStatusVsTarget, ahead of the creature PK-type rule: true when <paramref name="target"/> is a Hold knight
+        /// and <paramref name="spell"/> is a non-harmful spell. A knight is RubberGlue, so without this a heal or buff from a
+        /// caster of a different PK status was refused as NotSamePKType. Harmful spells and a null spell (the melee and missile
+        /// probes) stay with the rules, as does every other target. Whether the knight is a valid spell target at all is
+        /// <see cref="IsInvalidHoldSpellTarget"/>'s call.
+        /// </summary>
+        public static bool SkipsPkTypeRule(WorldObject target, Spell spell)
+            => spell != null && !spell.IsHarmful && target is Creature c && IsHoldKnight(c);
 
         /// <summary>
         /// Player.IsInvalidTarget: true when <paramref name="target"/> is a knight, with <paramref name="invalid"/> the decision
-        /// (a health heal while player_heal is on is the one valid spell). False - decide as before - after one field read for
+        /// (a health heal while player_heal is on, or a buff on a living knight of an active run). False - decide as before - after one field read for
         /// every other target.
         /// </summary>
         public static bool IsInvalidHoldSpellTarget(Creature target, Spell spell, out bool invalid)
@@ -775,7 +811,8 @@ namespace ACE.Server.WorldEvents
 
             var isHeal = spell != null && WorldEventHoldRules.IsKnightHealSpell(spell.IsBeneficial, spell.MetaSpellType, spell.VitalDamageType, spell.Boost, spell.MaxBoost);
 
-            invalid = IsInvalidHoldKnightSpell(target.AcceptsHoldPlayerHeal, isHeal);
+            invalid = IsInvalidHoldKnightSpell(target.AcceptsHoldPlayerHeal, isHeal, target.AcceptsHoldBuff,
+                spell != null && WorldEventHoldRules.IsKnightBuffSpell(spell.IsBeneficial, spell.MetaSpellType, spell.IsDamageOverTime, spell.StatModType, spell.StatModKey));
             return true;
         }
 

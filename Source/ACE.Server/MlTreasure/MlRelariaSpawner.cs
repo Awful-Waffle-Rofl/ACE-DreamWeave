@@ -79,6 +79,15 @@ namespace ACE.Server.MlTreasure
         public const PropertyInt BossMarker = PropertyInt.TreasureMapBossWcid;
 
         /// <summary>
+        /// Where the digger's character guid is recorded on the boss: PropertyInstanceId.Creator, an
+        /// existing standard property nothing else in ACE.Server reads or writes on a creature, so no new
+        /// custom property id is needed. The boss is never persisted (see the NO SHARD ROWS note above), so
+        /// the value lives only as long as the creature. Read by MlRelariaTrophy.TryDropTrophy; absent on a
+        /// boss spawned by the admin command, which therefore pays no rewards.
+        /// </summary>
+        public const PropertyInstanceId DiggerGuidProperty = PropertyInstanceId.Creator;
+
+        /// <summary>
         /// Metres between a boss_ok dig site and the nearest landblock whose boss_ok flag is 0. The
         /// catalogue clears boss_ok for the five town landblocks AND their 8 neighbours
         /// (TREASURE-HUNT-PLAN.md section 6), so a boss_ok cell is at least one whole landblock away from
@@ -319,6 +328,12 @@ namespace ACE.Server.MlTreasure
             boss.Location = anchor;
 
             PrepareBoss(boss, bossWcid);
+
+            // Owner decision (Discord "ML Aun Relaria Map loot"): the kill rewards belong to whoever DUG the
+            // map, not the top damager. Recorded here, before EnterWorld like every other stamp, and NOT in
+            // PrepareBoss, so the /relariaspawn admin command (which has no digger) leaves it absent and
+            // MlRelariaTrophy awards nothing for that boss.
+            boss.SetProperty(DiggerGuidProperty, player.Guid.Full);
 
             if (!boss.EnterWorld())
             {

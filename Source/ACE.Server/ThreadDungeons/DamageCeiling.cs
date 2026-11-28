@@ -648,7 +648,7 @@ namespace ACE.Server.ThreadDungeons
         public int WithheldMelee { get; set; }
         public int WithheldMissile { get; set; }
 
-        /// <summary>The creature's withheld group rating: the larger of its two axes (the budget a later step spends).</summary>
+        /// <summary>The group rating the damage clamp withholds from this creature (against the damage G): the larger of its two axes. A diagnostic only; the family ability budget is predicted by FamilyAbilityPlanner against the ability group rating.</summary>
         public int Withheld => Math.Max(WithheldMelee, WithheldMissile);
     }
 

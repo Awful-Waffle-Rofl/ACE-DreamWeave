@@ -61,6 +61,44 @@ public sealed class GauntletRules
         return (int)Math.Max(1, count);
     }
 
+    /// <summary>
+    /// The per-trash health multiplier that keeps the wave's total trash pool at <paramref name="effort"/> times the solo pool
+    /// (owner ruling 2026-11-26, the way Threads do it): E x count(1) / count(H), so count(H) x mult = count(1) x E and every
+    /// member carries the same load at any group size. Both counts are this wave type's (a boss wave uses its boss-wave trash
+    /// count on both sides) and the cap on count(H) is already in them, so past max_alive the multiplier rises to compensate.
+    /// With either count at 0 (a boss wave whose trash fraction is 0) there is no pool to hold and it reads as
+    /// <paramref name="effort"/>. A non-finite or sub-1 effort reads as 1.
+    /// </summary>
+    public double TrashHealthMultiplier(int headcount, bool boss, double effort)
+    {
+        var e = double.IsFinite(effort) && effort >= 1.0 ? effort : 1.0;
+        var solo = TrashCount(1, boss);
+        var group = TrashCount(headcount, boss);
+
+        if (solo <= 0 || group <= 0)
+            return e;
+
+        return e * solo / group;
+    }
+
+    /// <summary>
+    /// The felt loss of a fallen fighter (owner direction 2026-11-25): the seconds it is held out after its death, given how
+    /// many times it had already fallen this run. min(fighter_respawn_max_seconds, fighter_respawn_seconds +
+    /// fighter_respawn_step_seconds x prior deaths), saturating, never below 0. Defaults: 60, 80, 100, 120, 120, ...
+    /// </summary>
+    public long FighterRespawnSeconds(int priorDeaths)
+    {
+        var prior = Math.Max(0, priorDeaths);
+        var baseSeconds = Math.Max(0L, t.FighterRespawnSeconds);
+        var step = Math.Max(0L, t.FighterRespawnStepSeconds);
+        var max = Math.Max(baseSeconds, t.FighterRespawnMaxSeconds);
+
+        // saturating: a garbled step must not wrap the product negative
+        var grown = step > 0 && prior > (max - baseSeconds) / step ? max : baseSeconds + step * prior;
+
+        return Math.Min(max, grown);
+    }
+
     /// <summary>The headcount a wave scales with: [1, headcount_cap].</summary>
     public int ClampHeadcount(int headcount) => (int)Math.Clamp((long)headcount, 1L, Math.Max(1L, t.HeadcountCap));
 

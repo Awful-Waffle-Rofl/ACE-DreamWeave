@@ -611,7 +611,7 @@ namespace ACE.Server.Tests
             // a weapon salvage on something that is not a weapon
             var rock = Named("Rock");
             Assert.AreEqual(WeaponModManager.RefusalMessage(WeaponModManager.WeaponModRefusal.NotAWeapon, hammer.Name, rock), Refusal(Basket(rock, hammer)));
-            Assert.AreEqual("The Rock is not a weapon. Only melee weapons, missile weapons and casters can carry weapon mods.", Refusal(Basket(rock, hammer)));
+            Assert.AreEqual("The Rock is not a weapon or shield. Only melee weapons, missile weapons, casters and shields can carry weapon mods.", Refusal(Basket(rock, hammer)));
 
             // a weapon with no workmanship
             var plain = Weapon("Plain Sword");

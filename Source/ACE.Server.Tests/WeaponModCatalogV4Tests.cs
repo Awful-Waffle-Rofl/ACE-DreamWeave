@@ -183,7 +183,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(8, caster, "v4 rows reachable from the caster pool with the gate on");
 
             // and none is reachable with the gate off, since every v4 row is Tier B
-            foreach (var weaponClass in new[] { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster })
+            foreach (var weaponClass in new[] { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster, WeaponClass.Shield })
             {
                 Assert.IsFalse(WeaponModRegistry.Pool(weaponClass, false).Any(m => v4Ids.Contains(m.Id)),
                     $"a v4 row is reachable from the {weaponClass} pool with the gate off");

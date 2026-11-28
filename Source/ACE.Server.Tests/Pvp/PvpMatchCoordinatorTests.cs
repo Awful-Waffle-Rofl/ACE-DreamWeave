@@ -364,6 +364,9 @@ namespace ACE.Server.Tests.Pvp
             public PvpPairingDials Pairing = PvpPairingTunables.Defaults;
             public Action<string> AuditSink;
 
+            /// <summary>The pvp_bg_* dials the coordinator reads (the Double Marks windows live there); null is hermetic by default (the shipped defaults, never live PropertyManager statics).</summary>
+            public Func<ACE.Server.Pvp.Battlegrounds.BattlegroundDials> BgSource = () => ACE.Server.Pvp.Battlegrounds.BattlegroundTunables.Defaults;
+
             /// <summary>The Arena Crier seam; null keeps the coordinator's live announcer (the pre-existing tests never read it).</summary>
             public IPvpArenaCrierAnnouncer Announcer;
 
@@ -380,7 +383,7 @@ namespace ACE.Server.Tests.Pvp
 
             public Rig Build(bool loadRatings = true)
             {
-                Coordinator = new PvpMatchCoordinator(Gateway, Spaces, Sink, () => Clock.Now, () => Dials, Intents, arenaAnnouncer: Announcer, pairingDialSource: () => Pairing, conductDialSource: () => Conduct, auditSink: AuditSink);
+                Coordinator = new PvpMatchCoordinator(Gateway, Spaces, Sink, () => Clock.Now, () => Dials, Intents, arenaAnnouncer: Announcer, pairingDialSource: () => Pairing, conductDialSource: () => Conduct, bgDialSource: BgSource, auditSink: AuditSink);
                 // Team colours: pinned so the lineup's colour tags are fixed (true: team 0 Red; Tugak all Red).
                 Coordinator.TeamColourCoin = () => ColourCoin;
                 Gateway.Intents = Intents;

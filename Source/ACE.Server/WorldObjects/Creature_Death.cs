@@ -1078,16 +1078,16 @@ namespace ACE.Server.WorldObjects
                 {
                     MlTreasureDrop.TryDropTreasureMap(corpse, lootKiller, corpseLandblock, corpseRealm, Level ?? 0);
 
-                    // ML Treasure Hunt step 11: a dug-up Aun Relaria leaves its CAP trophy on the corpse the
-                    // first time a given character kills it. Inside the same realm/box gate as the map drop,
-                    // so a death anywhere else never enters the file; the first thing it reads is the 9066
-                    // marker only the dig spawn stamps, so an ordinary Marae Lassel kill costs one property
-                    // read. There is still never a second trophy, and the boss weenie still carries no
-                    // DeathTreasureType or create-list rows - XP and luminance still come from its own
-                    // XpOverride/LuminanceAward, which the ordinary death path already pays. A repeat kill
-                    // (the killer has already claimed the trophy) additionally pays a guaranteed handful of
-                    // ML Doubloons and rolls a low chance at a permanent player aura, via
-                    // MlRelariaTrophy.TryAwardRepeatKillRewards - see MlRelariaTrophy.cs's own header.
+                    // ML Treasure Hunt step 11: a dug-up Aun Relaria pays its CAP trophy the first time a given
+                    // character's dig is killed, and a repeat payout (ML Doubloons plus a low-chance permanent aura)
+                    // after that. The credited player is the DIGGER, recorded on the boss at spawn - not the top
+                    // damager. lootKiller only picks the route: the corpse when the digger is the loot killer,
+                    // otherwise the digger's own inventory (a corpse keyed to someone else is one they cannot
+                    // loot). A boss with no recorded or no online digger pays nothing; who the top damager was never gates payment, so a monster, an ownerless pet or an Olthoi player as top damager still pays the digger by inventory. Inside the same realm/box
+                    // gate as the map drop, so a death anywhere else never enters the file; the first read is the
+                    // 9066 marker only the dig spawn stamps. There is still never a second trophy and the boss
+                    // weenie still carries no DeathTreasureType or create-list rows - XP and luminance still come
+                    // from its XpOverride/LuminanceAward via the ordinary death path.
                     MlRelariaTrophy.TryDropTrophy(this, corpse, lootKiller);
                 }
 

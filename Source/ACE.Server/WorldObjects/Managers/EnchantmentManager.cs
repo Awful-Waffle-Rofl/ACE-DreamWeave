@@ -340,7 +340,10 @@ namespace ACE.Server.WorldObjects.Managers
                 // calculate runtime StatModValue for enchantment
                 if (caster != null)
                 {
-                    entry.StatModValue = caster.CalculateDotEnchantment_StatModValue(spell, WorldObject, weapon, entry.StatModValue);
+                    entry.StatModValue = caster.CalculateDotEnchantment_StatModValue(spell, WorldObject, weapon, entry.StatModValue, out var netherWielderCut);
+
+                    // the Summoner wielder cut stays in the damage; GetNetherDotDamageRating divides it back out of the debuff
+                    NetherDotWielderCuts.Set(entry, netherWielderCut);
                 }
                 //Console.WriteLine($"enchantment_statModVal: {entry.StatModValue}");
             }
@@ -1500,12 +1503,21 @@ namespace ACE.Server.WorldObjects.Managers
                 // normally we could just use netherDot.StatModValue here,
                 // but in case WorldObject has a non-default HeartbeatInterval,
                 // we want this value to still be based on the damage per default heartbeat interval
-                totalBaseDamage += GetDamagePerTick(netherDot, 5.0);
+                totalBaseDamage += NetherDotDebuffDamagePerTick(GetDamagePerTick(netherDot, 5.0), NetherDotWielderCuts.Get(netherDot));
             }
             var rating = (int)Math.Round(totalBaseDamage / 8.0f);   // thanks to Xenocide for this formula!
             //Console.WriteLine($"{WorldObject.Name}.NetherDotDamageRating: {rating}");
             return rating;
         }
+
+        /// <summary>
+        /// FORK: the per-tick damage a void curse contributes to the nether debuff. The Summoner wielder cut baked into
+        /// the curse's StatModValue (<paramref name="wielderCut"/>, NetherDotWielderCuts) cuts the damage only, so it is
+        /// divided back out here: a curse cast with a focus debuffs exactly as the uncut curse would. 1.0 (no cut, or no
+        /// record) leaves the value unchanged; a cut of 0 leaves nothing to recover, so it contributes 0.
+        /// </summary>
+        internal static float NetherDotDebuffDamagePerTick(float damagePerTick, float wielderCut) =>
+            wielderCut == 1.0f ? damagePerTick : (float)SummonerFocusMath.BeforeWielderCut(damagePerTick, wielderCut);
 
         /// <summary>
         ///  Returns the damage over time (DoT) enchantment mod

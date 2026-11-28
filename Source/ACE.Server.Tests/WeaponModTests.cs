@@ -282,7 +282,7 @@ namespace ACE.Server.Tests
         {
             Assert.IsFalse(WeaponTinkerTable.IsKnown(MaterialType.Oak), "Oak must not be a known layer 1 material - it cannot be reversed");
 
-            foreach (var weaponClass in new[] { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster })
+            foreach (var weaponClass in new[] { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster, WeaponClass.Shield })
             {
                 Assert.IsFalse(WeaponTinkerTable.Pool(weaponClass).Any(m => m.Material == MaterialType.Oak),
                     $"Oak is in the {weaponClass} tinker pool");
@@ -372,25 +372,63 @@ namespace ACE.Server.Tests
             Assert.AreEqual(WeaponClass.Missile, WeaponClassifier.Classify(ItemType.MissileWeapon, CombatUse.Missile));
             Assert.AreEqual(WeaponClass.Caster, WeaponClassifier.Classify(ItemType.Caster, CombatUse.Melee));
 
-            // shields carry ItemType.MeleeWeapon, ammunition carries ItemType.MissileWeapon
-            Assert.AreEqual(WeaponClass.None, WeaponClassifier.Classify(ItemType.MeleeWeapon, CombatUse.Shield));
+            // shields classify as their own class, ammunition carries ItemType.MissileWeapon
+            Assert.AreEqual(WeaponClass.Shield, WeaponClassifier.Classify(ItemType.MeleeWeapon, CombatUse.Shield));
             Assert.AreEqual(WeaponClass.None, WeaponClassifier.Classify(ItemType.MissileWeapon, CombatUse.Ammo));
 
             Assert.AreEqual(WeaponClass.None, WeaponClassifier.Classify(ItemType.Armor, CombatUse.None));
             Assert.AreEqual(WeaponClass.None, WeaponClassifier.Classify(ItemType.Jewelry, null));
 
             Assert.AreEqual(WeaponClass.Missile, WeaponClassifier.Classify(MakeWeapon(ItemType.MissileWeapon, CombatUse.Missile)));
-            Assert.AreEqual(WeaponClass.None, WeaponClassifier.Classify(MakeWeapon(ItemType.MeleeWeapon, CombatUse.Shield)));
+            Assert.AreEqual(WeaponClass.Shield, WeaponClassifier.Classify(MakeWeapon(ItemType.MeleeWeapon, CombatUse.Shield)));
         }
 
         /// <summary>
-        /// REWRITTEN 2026-08-07 for the Amethyst unblocking (repo-owner directive: "Amethyst should be able to
-        /// be applied basically always... traditional tinkers should have no bearing").
+        /// Owner ruling 2026-11-25: Tourmaline determines the number of mods and traditional tinkers have no
+        /// bearing on it. A ten-Oak weapon (whole budget unreversible) and a weapon whose log disagrees with
+        /// NumTimesTinkered are both rerollable, and the reroll leaves every tinker record exactly as it was.
+        /// </summary>
+        [TestMethod]
+        public void TourmalineIgnoresTinkerState()
+        {
+            var tenOak = MakeWeapon(ItemType.MeleeWeapon, CombatUse.Melee,
+                new Dictionary<PropertyInt, int> { { PropertyInt.Damage, 12 }, { PropertyInt.NumTimesTinkered, 10 } },
+                new Dictionary<PropertyFloat, double> { { PropertyFloat.DamageVariance, 0.4 } });
+            tenOak.SetProperty(PropertyString.TinkerLog, WeaponModTinkerSet.SerializeLog(Enumerable.Repeat(MaterialType.Oak, 10).ToList()));
+
+            // NumTimesTinkered 10 against a 7-entry log: the old log-mismatch refusal shape
+            var mismatched = MakeWeapon(ItemType.MeleeWeapon, CombatUse.Melee,
+                new Dictionary<PropertyInt, int> { { PropertyInt.Damage, 12 }, { PropertyInt.NumTimesTinkered, 10 } },
+                new Dictionary<PropertyFloat, double> { { PropertyFloat.DamageVariance, 0.4 } });
+            mismatched.SetProperty(PropertyString.TinkerLog, WeaponModTinkerSet.SerializeLog(Enumerable.Repeat(MaterialType.Iron, 7).ToList()));
+
+            foreach (var (name, weapon) in new[] { ("ten Oak", tenOak), ("log mismatch", mismatched) })
+            {
+                Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
+                    WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Reroll, weapon), $"{name}: Tourmaline must not refuse on tinker state");
+
+                string Snapshot() => string.Join("|",
+                    weapon.GetProperty(PropertyString.TinkerLog), weapon.GetProperty(PropertyString.WeaponModTinkerLog),
+                    weapon.GetProperty(PropertyInt.NumTimesTinkered), weapon.GetProperty(PropertyInt.WeaponModTinkerCount),
+                    weapon.GetProperty(PropertyInt.ImbuedEffect), weapon.GetProperty(PropertyInt.Damage),
+                    weapon.GetProperty(PropertyFloat.DamageVariance));
+
+                var before = Snapshot();
+
+                Assert.IsNotNull(WeaponModManager.ApplyReroll(weapon, WeaponClass.Melee, 10.0), $"{name}: reroll produced no result");
+
+                Assert.AreEqual(before, Snapshot(), $"{name}: the reroll moved a tinker record");
+            }
+        }
+
+        /// <summary>
+        /// REWRITTEN 2026-08-07 for the Amethyst unblocking and again 2026-11-25 for Tourmaline (repo-owner
+        /// directives: "traditional tinkers should have no bearing").
         ///
-        /// The rule table no longer takes a tinker count or a special count AT ALL - both arguments were
-        /// removed rather than left unread, because a rule table that accepts a value it ignores reads as
-        /// though the value still matters. What remains splits cleanly in two: three conditions that apply to
-        /// BOTH tools, and two tinker-budget conditions that are now REROLL-ONLY.
+        /// The rule table takes no tinker argument and no special count AT ALL - they were removed rather than
+        /// left unread, because a rule table that accepts a value it ignores reads as though the value still
+        /// matters. Three conditions remain and apply to BOTH tools: a recognised mod material, a weapon-class
+        /// target, and workmanship. No tinker-state condition remains for either.
         /// </summary>
         [TestMethod]
         public void Refusal_RulesHoldOverPlainValues()
@@ -398,58 +436,54 @@ namespace ACE.Server.Tests
             // ---- shared by both tools ----
 
             Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
-                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Reroll, WeaponClass.Melee, true, true, 0));
+                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Reroll, WeaponClass.Melee, true));
 
             Assert.AreEqual(WeaponModManager.WeaponModRefusal.NotAModMaterial,
-                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.None, WeaponClass.Melee, true, true, 0));
+                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.None, WeaponClass.Melee, true));
 
             Assert.AreEqual(WeaponModManager.WeaponModRefusal.NotAWeapon,
-                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Reroll, WeaponClass.None, true, true, 0));
+                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Reroll, WeaponClass.None, true));
 
             // a weapon with no workmanship would mint specials worth nothing; refused, never defaulted to zero
             Assert.AreEqual(WeaponModManager.WeaponModRefusal.NoWorkmanship,
-                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Reroll, WeaponClass.Melee, false, true, 0));
+                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Reroll, WeaponClass.Melee, false));
 
             Assert.AreEqual(WeaponModManager.WeaponModRefusal.NoWorkmanship,
-                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Swap, WeaponClass.Melee, false, true, 0),
+                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Swap, WeaponClass.Melee, false),
                 "workmanship is required by BOTH tools - a swap onto a workmanship-less weapon would mint a special worth nothing");
 
-            // ---- reroll-only: the two tinker-budget gates ----
-
-            Assert.AreEqual(WeaponModManager.WeaponModRefusal.NoAvailableSlots,
-                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Reroll, WeaponClass.Melee, true, true, 10));
-
-            Assert.AreEqual(WeaponModManager.WeaponModRefusal.TinkerLogMismatch,
-                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Reroll, WeaponClass.Melee, true, false, 0));
-
-            // THE 2026-08-07 CHANGE, and the asymmetry it deliberately creates: the very same weapon states
-            // that refuse a reroll are now perfectly swappable, because Amethyst touches no tinker, no log and
-            // no counter. A ten-Oak weapon and a log-mismatched weapon are both Amethyst-able.
-            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
-                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Swap, WeaponClass.Melee, true, true, 10),
-                "a fully-reserved tinker budget must NOT refuse a swap - Amethyst never touches tinkers");
+            // ---- no tinker-state gate on either tool (owner ruling 2026-11-25) ----
+            // The rule table takes no tinker argument any more. The ten-Oak and log-mismatch shapes that used
+            // to refuse a reroll resolve None for both tools; TourmalineIgnoresTinkerState pins them against
+            // real weapons.
 
             Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
-                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Swap, WeaponClass.Melee, true, false, 0),
-                "a mismatched tinker log must NOT refuse a swap - Amethyst never reverses a tinker, so the log's accuracy cannot affect it");
+                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Swap, WeaponClass.Melee, true),
+                "Amethyst never touches tinkers, so no tinker state can refuse it");
         }
 
         /// <summary>
-        /// The whole point of the 2026-08-07 directive, stated as a property rather than as cases: NOTHING
-        /// about a weapon's tinker state or special count can refuse an Amethyst. Only being the wrong kind of
-        /// object, or having no workmanship, can - and drift-stone locking, which is checked separately
-        /// because it needs the item rather than plain values.
+        /// The whole point of the 2026-08-07 and 2026-11-25 directives, stated as a property rather than as
+        /// cases: NOTHING about a weapon's tinker state or special count can refuse EITHER tool, over real
+        /// weapons carrying every imbue count. Only being the wrong kind of object, or having no workmanship,
+        /// can - and drift-stone locking, which is checked separately.
         /// </summary>
         [TestMethod]
-        public void Refusal_NoTinkerOrSpecialStateCanEverRefuseASwap()
+        public void Refusal_NoTinkerOrSpecialStateCanEverRefuseEitherTool()
         {
-            foreach (var reserved in new[] { 0, 1, 5, 9, 10 })
+            foreach (var imbues in new[] { 0, 1, 5, 9, 10 })
             {
-                foreach (var integrityGate in new[] { true, false })
+                var mask = imbues == 0 ? 0 : (int)((1u << imbues) - 1);
+
+                var weapon = MakeWeapon(ItemType.MeleeWeapon, CombatUse.Melee,
+                    new Dictionary<PropertyInt, int> { { PropertyInt.NumTimesTinkered, 10 }, { PropertyInt.ImbuedEffect, mask } });
+                weapon.SetProperty(PropertyString.TinkerLog, WeaponModTinkerSet.SerializeLog(Enumerable.Repeat(MaterialType.Oak, 10).ToList()));
+
+                foreach (var action in new[] { WeaponModManager.WeaponModAction.Reroll, WeaponModManager.WeaponModAction.Swap })
                 {
                     Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
-                        WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Swap, WeaponClass.Melee, true, integrityGate, reserved),
-                        $"swap refused at reserved={reserved}, integrityGate={integrityGate} - no tinker state may gate Amethyst");
+                        WeaponModManager.ResolveRefusal(action, weapon),
+                        $"{action} refused at {imbues} imbues over a ten-Oak log - no tinker state may gate either tool");
                 }
             }
         }
@@ -476,7 +510,7 @@ namespace ACE.Server.Tests
             // 2026-08-07 the special count is not an argument to the rule table at all, so this now asserts
             // the stronger form: no special count, cap included, reaches a refusal.
             Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
-                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Swap, WeaponClass.Melee, true, true, 0),
+                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Swap, WeaponClass.Melee, true),
                 "a weapon holding four specials (the cap) must still be swappable - rerolling AT the cap is the tool's purpose");
         }
 
@@ -770,11 +804,13 @@ namespace ACE.Server.Tests
                 { (false, WeaponClass.Melee),   (4, 3) },
                 { (false, WeaponClass.Missile), (4, 3) },
                 { (false, WeaponClass.Caster),  (3, 3) },   // the one case where the subset covers the pool
+                { (false, WeaponClass.Shield),  (3, 3) },
                 // UPDATED AGAIN 2026-10-25: Defensive Weapon (utility) widened to every class, so the melee and
                 // missile gate-ON pools grew by one and the damage subset did not move.
                 { (true,  WeaponClass.Melee),   (17, 9) },
                 { (true,  WeaponClass.Missile), (18, 10) },
                 { (true,  WeaponClass.Caster),  (16, 7) },
+                { (true,  WeaponClass.Shield),  (6, 6) },
             };
 
             foreach (var kvp in depths)
@@ -809,7 +845,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void DamageSubset_TheFirstDrawIsDamageRelevantOnlyWhenTheTunableIsOn()
         {
-            foreach (var weaponClass in new[] { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster })
+            foreach (var weaponClass in new[] { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster, WeaponClass.Shield })
             {
                 var damage = WeaponModRegistry.DamagePool(weaponClass).Select(m => m.Id).ToHashSet();
 
@@ -895,7 +931,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void DamageSubset_AnExhaustedSubsetFallsBackToTheFullPoolRatherThanReturningNull()
         {
-            foreach (var weaponClass in new[] { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster })
+            foreach (var weaponClass in new[] { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster, WeaponClass.Shield })
             {
                 var damage = WeaponModRegistry.DamagePool(weaponClass).Select(m => m.Id).ToList();
 
@@ -927,7 +963,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void Specials_ARolledSetNeverRepeatsAnEntry()
         {
-            foreach (var weaponClass in new[] { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster })
+            foreach (var weaponClass in new[] { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster, WeaponClass.Shield })
             {
                 for (var i = 0; i < 2000; i++)
                 {
@@ -1336,7 +1372,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(2, withWcid.Count);
             Assert.AreEqual(1, WeaponModTinkerSet.KnownOnly(withWcid).Count);
 
-            // genuine garbage fails, which is what the integrity gate refuses on
+            // genuine garbage fails (PassesIntegrityGate treats it as an unreadable log; no production path refuses on that since 2026-11-25)
             Assert.IsFalse(WeaponModTinkerSet.TryParseLog("61,,57", out _));
             Assert.IsFalse(WeaponModTinkerSet.TryParseLog("iron,brass", out _));
         }

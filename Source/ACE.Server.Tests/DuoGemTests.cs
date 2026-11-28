@@ -13,7 +13,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 namespace ACE.Server.Tests
 {
     /// <summary>
-    /// Custom Summons Task 7: the Duo Summon Gem's absorb, binding and summon sources, through the real
+    /// Custom Summons Task 7: the Duo Summon Essence's absorb, binding and summon sources, through the real
     /// DuoSummonGem.Absorb on real PetDevice objects and a logging fake pack. The Player shell
     /// (DuoSummonGem.UseOnTarget, PetDevice.ActOnUse's Summon 2x gate) needs a Session and is an owner in-game check;
     /// the source scans at the bottom pin its wiring order and the Summon 2x gate on the second summon.
@@ -93,7 +93,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void ContentRow_UsesTheGemAsIconUnderlay_AndAsTheEmptyIcon()
         {
-            var sql = File.ReadAllText(FindFile("Content", "sql", "weenies", "1007741 Duo Summon Gem.sql"));
+            var sql = File.ReadAllText(FindFile("Content", "sql", "weenies", "1007741 Duo Summon Essence.sql"));
 
             // literal on purpose: the row and the constant must agree, and the owner may change both together
             Assert.AreEqual(0x06002B9Bu, DuoSummonGem.GemIcon);
@@ -233,8 +233,8 @@ namespace ACE.Server.Tests
             DuoSummonGem.Absorb(pack, gem, alpha, out _);
 
             Assert.AreEqual(1, pack.Count("consume:"));
-            Assert.AreEqual(1, pack.Count("save:Duo Summon Gem"));
-            Assert.IsTrue(pack.IndexOf("consume:Alpha") < pack.IndexOf("save:Duo Summon Gem"),
+            Assert.AreEqual(1, pack.Count("save:Duo Summon Essence"));
+            Assert.IsTrue(pack.IndexOf("consume:Alpha") < pack.IndexOf("save:Duo Summon Essence"),
                 "the item's delete is enqueued before the gem's save, so a crash can lose it but never keep it in both places");
         }
 

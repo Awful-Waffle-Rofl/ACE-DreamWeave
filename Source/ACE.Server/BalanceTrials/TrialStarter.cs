@@ -13,6 +13,7 @@ using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Factories;
 using ACE.Server.Managers;
+using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Realms;
 using ACE.Server.ThreadDungeons;
 using ACE.Server.WorldObjects;
@@ -68,7 +69,11 @@ namespace ACE.Server.BalanceTrials
         /// <summary>True when <paramref name="guid"/> is one of the rep characters (TrialRoster.RepSlots).</summary>
         public static bool IsRepGuid(uint guid) => TrialRoster.RepSlots.Any(r => r.Guid == guid);
 
-        public static bool TryStart(Player player, string scenarioId, string archetypeId, out string refusal)
+        /// <summary>
+        /// <paramref name="campaign"/> is a campaign member's start (TrialCampaigns.Join); null is a plain start, which is unchanged:
+        /// both campaign steps below are skipped.
+        /// </summary>
+        public static bool TryStart(Player player, string scenarioId, string archetypeId, out string refusal, TrialCampaignStart campaign = null)
         {
             refusal = null;
 
@@ -120,16 +125,22 @@ namespace ACE.Server.BalanceTrials
                 if (string.IsNullOrWhiteSpace(archetypeId))
                     return Refuse("name an archetype", out refusal);
 
-                var archetypes = TrialArchetypeLoader.LoadDirectory(Path.Combine(dataDir, ArchetypesFolder));
-                var a = archetypes.FirstOrDefault(x => string.Equals(x.Archetype.Id, archetypeId, StringComparison.Ordinal));
-                if (a.Archetype == null)
-                    return Refuse($"unknown archetype '{archetypeId}'", out refusal);
-                (archetype, archetypeSha) = a;
+                // The seeded files first, then the curated masters (TrialArchetypeResolver; a fresh stamp scan every start).
+                var a = TrialArchetypeResolver.Resolve(Path.Combine(dataDir, ArchetypesFolder), archetypeId);
+                if (a == null)
+                    return Refuse($"unknown archetype '{archetypeId}' (no archetype file and no curated master); adopt it first", out refusal);
+                archetype = a.Archetype;
+                archetypeSha = a.Sha;
             }
             catch (TrialArchetypeException ex)
             {
                 return Refuse($"trial data: {ex.Message}", out refusal);
             }
+
+            // 5b. A campaign member only: the campaign's refusal over the scenario (TrialCampaigns.ScenarioRefusal).
+            var campaignRefusal = campaign?.Precheck?.Invoke(scenario);
+            if (campaignRefusal != null)
+                return Refuse(campaignRefusal, out refusal);
 
             // 6. The room must fit the scenario.
             var fits = TrialRoomLoader.CheckFits(room, scenario);
@@ -148,6 +159,20 @@ namespace ACE.Server.BalanceTrials
             var copyRefusal = MasterCopyRefusal(TrialCopyGate.Shared, TrialRoster.MasterSlot(archetype.Slot));
             if (copyRefusal != null)
                 return Refuse(copyRefusal, out refusal);
+
+            // 6d. A rotation's every entry must build a plan at the scenario's level, refused here (naming the entry) rather than
+            // at the rep that reaches it.
+            var unchecked_ = TrialRotation.UncheckedReps(scenario);
+            if (unchecked_ > 0)
+                log.Warn($"[TRIAL] rotation start check covers the first {TrialRotation.MaxStepChecks} reps of scenario {scenario.Id}; {unchecked_} reps are left unchecked");
+
+            var rotationRefusal = TrialRotation.Precheck(scenario, (g, k) => RotationShortfalls(scenario, g, k), out var rotationFull,
+                TrialRepSetup.PeekSeedRep(player.Guid.Full, scenarioSha, archetype.Id));
+            if (rotationRefusal != null)
+            {
+                log.Warn($"[TRIAL] start refused: {rotationFull}");
+                return Refuse(rotationRefusal, out refusal);
+            }
 
             // 7. The private copy. Realm 0 always (a realm-1 character would otherwise get its home realm's copy). From the
             // create to the register, any throw sends the copy to the destruction queue and undoes the bind, so a throw leaks
@@ -192,13 +217,21 @@ namespace ACE.Server.BalanceTrials
                 // through TrialManager.Enqueue, which finds the session once it is registered below.
                 var consumableWcids = TrialDigest.ConsumableWcids(archetype);
                 var repSetup = new TrialRepSetup(player.Guid.Full, TrialRoster.MasterSlot(archetype.Slot), scenario.HardCopyEvery, TrialManager.Now,
-                    (master, callback) => MasterSnapshotLoader(master, consumableWcids, callback), action => TrialManager.Enqueue(session, action), scenarioSha, buffProfile);
+                    (master, callback) => MasterSnapshotLoader(master, consumableWcids, callback), action => TrialManager.Enqueue(session, action), scenarioSha, buffProfile, archetype.Id);
 
                 // The gem rolls with the rep character's seed-walk index (it outlives this session), not this session's rep number.
                 session = new TrialSession(Guid.NewGuid().ToString("N"), scenario, scenarioSha, archetype, archetypeSha, room,
                     player.Guid.Full, world, n => PrepareRep(scenario, room, n, tag, () => PreSpawn(session, repSetup, archetype), repSetup.SeedRep()));
 
-                session.RepEnded += (_, _) => repSetup.OnRepEnded();
+                // A campaign member only, before anything else subscribes: its RepEnded handler reads the rep's recorder before the
+                // run log finishes it (TrialCampaigns.Configure).
+                campaign?.Configure?.Invoke(session);
+
+                session.RepEnded += (_, _) => repSetup.OnRepEnded(session.Phase == TrialPhase.Done && scenario.Rotation != null);
+
+                // However the session ends (Done, an abort, a stop), an online rep's consumables go back to the session baseline, so the
+                // next session captures a clean baseline instead of this one's last-rep residue.
+                session.Ended += _ => ClosingReset(session, archetype, player);
 
                 // Task 10: each rep's recorder (created at RepStarted) and its trial_run row (written at RepEnded).
                 TrialRunLog.Attach(session);
@@ -266,7 +299,9 @@ namespace ACE.Server.BalanceTrials
         {
             try
             {
-                var gem = TrialGemRoller.RollLive(scenario.Gem, seedRep ?? n);
+                // The rotation walks on the same index as the seed, so one rep's family and seed come from one place.
+                var repIndex = seedRep ?? n;
+                var gem = TrialGemRoller.RollLive(TrialRotation.GemFor(scenario.Gem, scenario.Rotation, repIndex), repIndex);
                 var plan = TrialWavePlan.BuildPlan(gem.Spec, ThreadDungeonSpawner.LivePlanSources.Live, out _);
                 var picked = TrialWavePlan.Select(plan, scenario.Waves, out var shortfalls);
 
@@ -276,8 +311,8 @@ namespace ACE.Server.BalanceTrials
                 var waves = picked.Select(w => TrialWavePlan.Repoint(w, room)).ToList();
 
                 // Task 7: the pre-spawn rep steps, in order: the HardCopyEvery schedule, the soft reset, the digest, the drift
-                // check (TrialRepSetup.Before). A schedule hit refuses with RebuildRequired; a pending master refuses; drift
-                // runs this rep flagged and the session requires a rebuild before the next.
+                // check (TrialRepSetup.Before). A schedule hit or a failed purge refuses with RebuildRequired; drift is recorded and
+                // never blocks, and a master digest not in hand runs the rep with drift unknown.
                 var setup = preSpawn?.Invoke() ?? default;
 
                 if (setup.RebuildRequired)
@@ -287,17 +322,33 @@ namespace ACE.Server.BalanceTrials
                     return new TrialRep { Gem = gem, Plan = plan, Waves = waves, Refusal = setup.Refusal };
 
                 if (setup.Drift)
-                    log.Warn($"[TRIAL] {tag} rep {n} state digest drift: {setup.DriftReason}; this rep runs flagged and the next needs @trial rebuild");
+                    log.Warn($"[TRIAL] {tag} rep {n} differs from the master ({setup.DriftReason}); recorded, not blocking");
+                else if (setup.DriftUnknown)
+                    log.Warn($"[TRIAL] {tag} rep {n} ran with drift unknown: {setup.DriftReason}; recorded, not blocking");
 
                 var observed = TrialSpawner.ObservedMaxNonBoss(plan, wcid => WorldObjectFactory.CreateNewWorldObject(wcid) as Creature, tag);
 
-                return new TrialRep { Gem = gem, Plan = plan, Waves = waves, ObservedMaxNonBoss = observed, StateDigest = setup.Digest?.Core, DigestDrift = setup.Drift };
+                return new TrialRep { Gem = gem, Plan = plan, Waves = waves, ObservedMaxNonBoss = observed, StateDigest = setup.DriftUnknown ? null : setup.Digest?.Core, DigestDrift = setup.Drift };
             }
             catch (Exception ex)
             {
                 log.Error($"[TRIAL] {tag} preparing rep {n} threw", ex);
                 return new TrialRep { Refusal = $"rep {n} setup failed: {ex.Message}" };
             }
+        }
+
+        /// <summary>
+        /// One rotation entry's start-time check: the live roll and plan for <paramref name="gem"/> at walk index
+        /// <paramref name="index"/>, selected against the scenario's waves. The shortfall lines (empty when the plan is good), with the
+        /// first family or band note appended when there is a shortfall (TrialRotation.ShortfallLines); a plan that drew another family than the forced one is a shortfall too.
+        /// </summary>
+        internal static IReadOnlyList<string> RotationShortfalls(TrialScenario scenario, TrialGem gem, int index)
+        {
+            var roll = TrialGemRoller.RollLive(gem, index);
+            var plan = TrialWavePlan.BuildPlan(roll.Spec, ThreadDungeonSpawner.LivePlanSources.Live, out _);
+            TrialWavePlan.Select(plan, scenario.Waves, out var shortfalls);
+
+            return TrialRotation.ShortfallLines(shortfalls, gem.Family, plan.FamilyId, plan.Notes);
         }
 
         /// <summary>
@@ -354,9 +405,115 @@ namespace ACE.Server.BalanceTrials
 
             TrialReset.EnsureAttackable(player);
 
-            // The master's consumable counts are in hand whenever Before reaches the soft reset (it refuses until the snapshot is).
+            // The soft reset restocks and trims to the rep's OWN consumable counts, captured once per session at the first reset
+            // (BaselineConsumables), never to the master's: a customized rep keeps what it carries, whether or not the master's digest is in hand.
             var consumableWcids = TrialDigest.ConsumableWcids(archetype);
-            return setup.Before(() => TrialReset.Soft(player, archetype, setup.MasterConsumables, buffProfile), () => TrialDigest.Compute(player, consumableWcids));
+            var result = setup.Before(() => SoftReset(player, archetype, BaselineConsumables(session, () => OwnConsumablesReader(player, consumableWcids)), buffProfile), () => DigestOf(player, consumableWcids));
+
+            // One short note per session, on the first drifting rep only. Information, not a refusal.
+            if (result.Drift && !session.DriftNoted)
+            {
+                session.DriftNoted = true;
+                player.Session?.Network?.EnqueueSend(new GameMessageSystemChat(DriftNote(result.DriftReason), ChatMessageType.Broadcast));
+            }
+
+            return result;
+        }
+
+        /// <summary>Test seam: runs work on the player's own landblock action queue (live: Player.EnqueueAction, which runs it on the player's current landblock; a detached player's work goes to the world queue).</summary>
+        internal static Action<Player, Action> EnqueueOnPlayer = (p, work) => p.EnqueueAction(new ActionEventDelegate(work));
+
+        /// <summary>Test seam: the closing consumables-only reset (live: TrialReset.RestoreConsumables).</summary>
+        internal static Func<Player, TrialArchetype, IReadOnlyDictionary<uint, long>, (int Restocked, int Trimmed)> ClosingConsumableReset = TrialReset.RestoreConsumables;
+
+        /// <summary>True when <paramref name="bound"/> is still the session's rep: the same Player object, online, and not logging out.</summary>
+        internal static bool IsBoundPlayerOnline(TrialSession session, Player bound)
+            => bound != null && ReferenceEquals(TrialManager.OnlinePlayer(session.PlayerGuid), bound) && !bound.IsLoggingOut;
+
+        /// <summary>
+        /// The session's closing reset: consumables only (no buffs, no recharge), restored to the session baseline on the player the
+        /// session was started with (<paramref name="boundPlayer"/>). It always goes through that player's own action queue, so no thread
+        /// touches a player it does not own, and it runs only while the bound player is still the online rep and not logging out: checked
+        /// when the session ends and again when the queued work runs (a rep that logged off and back in is a new Player object and is left
+        /// alone). Skipped when no soft reset ever ran (nothing was changed) or when the rep is offline: an offline rep keeps its last-rep
+        /// residue, and the next session's baseline picks that up (the runbook notes the edge).
+        /// </summary>
+        internal static void ClosingReset(TrialSession session, TrialArchetype archetype, Player boundPlayer)
+        {
+            try
+            {
+                var baseline = session?.ConsumableBaseline;
+
+                if (baseline == null)
+                    return;
+
+                if (!IsBoundPlayerOnline(session, boundPlayer))
+                {
+                    log.Info($"[TRIAL] trial {session.TrialUuid} ended with its rep offline or replaced: the closing consumables reset is skipped");
+                    return;
+                }
+
+                void Restore()
+                {
+                    try
+                    {
+                        if (!IsBoundPlayerOnline(session, boundPlayer))
+                            return;
+
+                        var (restocked, trimmed) = ClosingConsumableReset(boundPlayer, archetype, baseline);
+                        log.Debug($"[TRIAL] trial {session.TrialUuid} closing consumables reset: restocked {restocked}, trimmed {trimmed}");
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error($"[TRIAL] the closing consumables reset of trial {session.TrialUuid} threw", ex);
+                    }
+                }
+
+                EnqueueOnPlayer(boundPlayer, Restore);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[TRIAL] the closing consumables reset of trial {session?.TrialUuid} threw", ex);
+            }
+        }
+
+        /// <summary>Test seam: the soft reset (live: TrialReset.Soft).</summary>
+        internal static Func<Player, TrialArchetype, IReadOnlyDictionary<uint, long>, string, TrialSoftResetSummary> SoftReset = TrialReset.Soft;
+
+        /// <summary>Test seam: the rep's state digest (live: TrialDigest.Compute).</summary>
+        internal static Func<Player, IReadOnlyCollection<uint>, TrialDigest> DigestOf = TrialDigest.Compute;
+
+        /// <summary>Test seam: the rep's own consumable counts by wcid (live: OwnConsumables).</summary>
+        internal static Func<Player, IReadOnlyCollection<uint>, IReadOnlyDictionary<uint, long>> OwnConsumablesReader = OwnConsumables;
+
+        /// <summary>The player's own consumable counts by wcid, summed over every stack.</summary>
+        internal static IReadOnlyDictionary<uint, long> OwnConsumables(Player player, IReadOnlyCollection<uint> consumableWcids)
+            => TrialDigest.Project(player, consumableWcids).Consumables ?? new Dictionary<uint, long>();
+
+        /// <summary>
+        /// The session's consumable baseline: <paramref name="readOwn"/> is asked once, at the first soft reset, and the answer is kept on the
+        /// session for every later rep. Burn in a rep is therefore restocked next rep, and anything the rep did not start with is trimmed.
+        /// </summary>
+        internal static IReadOnlyDictionary<uint, long> BaselineConsumables(TrialSession session, Func<IReadOnlyDictionary<uint, long>> readOwn)
+            => session.ConsumableBaseline ??= readOwn();
+
+        /// <summary>
+        /// The one-per-session chat note for a drifting rep, in words: which half differed (TrialDigest.IsDrift's reason says it; the hash
+        /// text stays in the log). Under 200 characters whatever the reason, and no guids or hashes.
+        /// </summary>
+        internal static string DriftNote(string reason)
+        {
+            var parts = new List<string>();
+
+            if (reason != null && reason.StartsWith("core ", StringComparison.Ordinal))
+                parts.Add("gear, pack or class abilities differ from the master");
+
+            if (reason != null && reason.Contains("enchantments ", StringComparison.Ordinal))
+                parts.Add("buffs differ from the first rep");
+
+            var what = parts.Count == 0 ? "state differs from the master" : string.Join(" and ", parts);
+
+            return $"[TRIAL] this rep differs from its master: {what}; results are recorded as custom";
         }
 
         private static bool Refuse(string reason, out string refusal)

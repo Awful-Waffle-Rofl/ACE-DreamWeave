@@ -94,8 +94,8 @@ namespace ACE.Server.Tests.ThreadDungeons
         [TestMethod]
         public void The_warm_up_now_walks_the_scroll_path_and_the_scroll_cache_it_writes_is_concurrent()
         {
-            var src = PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadLootWeenieWarmup.cs");
-            var code = string.Join("\n", src.Split('\n').Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal) && !l.TrimStart().StartsWith("///", StringComparison.Ordinal)));
+            var src = PooledLootSourceText.ReadRaw("Source/ACE.Server/ThreadDungeons/ThreadLootWeenieWarmup.cs"); // the doc text pin below needs comments
+            var code = PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadLootWeenieWarmup.cs");
 
             StringAssert.Contains(code, "WarmScrolls(DatabaseManager.World.GetScrollWeenie, wcid => DatabaseManager.World.GetCachedWeenie(wcid) != null)");
             StringAssert.Contains(code, "scrollSpells={scrolls.Spells}", "the warm-up line reports the scroll counts separately");
@@ -106,7 +106,8 @@ namespace ACE.Server.Tests.ThreadDungeons
             // The background task writes scrollsBySpellID through GetScrollWeenie, and the landblock threads already
             // did; a plain Dictionary there was a real race.
             var db = PooledLootSourceText.Read("Source/ACE.Database/WorldDatabaseWithEntityCache.cs");
-            StringAssert.Contains(db, "private readonly ConcurrentDictionary<uint /* Spell ID */, ACE.Entity.Models.Weenie> scrollsBySpellID");
+            // the declaration carries an inline `/* Spell ID */` block comment, which Read blanks, so the type is matched around it
+            StringAssert.Matches(db, new System.Text.RegularExpressions.Regex(@"private readonly ConcurrentDictionary<uint\s*,\s*ACE\.Entity\.Models\.Weenie> scrollsBySpellID"));
 
             var scroll = PooledLootSourceText.Read("Source/ACE.Server/Factories/LootGenerationFactory_Scroll.cs");
             StringAssert.Contains(scroll, "DatabaseManager.World.GetScrollWeenie((uint)spellId)", "the path the warm-up mirrors");

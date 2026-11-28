@@ -7,6 +7,7 @@ using log4net;
 
 using ACE.Common;
 using ACE.Database.Models.Shard;
+using ACE.Server.Avatars.Gauntlet;
 
 namespace ACE.Server.Avatars;
 
@@ -19,7 +20,7 @@ public enum AvatarFeedSource
 }
 
 /// <summary>
-/// One XP grant offered to an allegiance's Avatar. Amount is raw received XP. The ledger's raw column stores
+/// One XP grant offered to an allegiance's Avatar. Amount is the received XP after the offline bonus (before the alt bonus and the Thread boon). The ledger's raw column stores
 /// contribution POINTS before the daily curve (the same unit as credited and LifetimeXp), not this raw XP.
 /// </summary>
 public readonly record struct AvatarFeedEvent(uint MonarchGuid, uint AccountId, uint CharacterGuid, long Amount, AvatarFeedSource Source);
@@ -119,6 +120,9 @@ public static partial class AvatarManager
 
     private static IAvatarStore store;
     private static Func<AvatarTuning> tuning;
+
+    /// <summary>The live Gauntlet tunables, read for the Gauntlet price that sets the per-Avatar Favor cap. Production passes GauntletPurchase.Tuning; the test seam defaults to the shipped defaults.</summary>
+    private static Func<GauntletTuning> gauntletTuning = () => GauntletTuning.Defaults;
     private static Func<double> clock;
     private static Func<AccountActivityIndex> activitySource;
     private static Func<IReadOnlyList<AvatarRoster>> rosterSource;
@@ -178,7 +182,8 @@ public static partial class AvatarManager
             () => AccountActivityIndex.FromPlayerManager(Time.GetUnixTime()),
             () => AvatarRosters.FromAllegianceManager(),
             monarchGuid => AvatarRosters.ForMonarch(monarchGuid),
-            AvatarLifecycle.LiveMonarchStatus);
+            AvatarLifecycle.LiveMonarchStatus,
+            () => Gauntlet.GauntletPurchase.Tuning());
     }
 
     /// <summary>
@@ -188,11 +193,12 @@ public static partial class AvatarManager
     /// <paramref name="rosters"/>". <paramref name="monarchStatus"/> feeds the recompute's binding repair; null leaves it off.
     /// </summary>
     public static void Initialize(IAvatarStore store, Func<AvatarTuning> tuning, Func<double> clockUnix, Func<AccountActivityIndex> activity, Func<IReadOnlyList<AvatarRoster>> rosters,
-        Func<uint, AvatarRoster> rosterFor = null, Func<uint, AvatarMonarchStatus> monarchStatus = null)
+        Func<uint, AvatarRoster> rosterFor = null, Func<uint, AvatarMonarchStatus> monarchStatus = null, Func<GauntletTuning> gauntlet = null)
     {
         lock (sync)
         {
             enabled = false;
+            gauntletTuning = gauntlet ?? (() => GauntletTuning.Defaults);
             AvatarManager.store = store;
             AvatarManager.tuning = tuning;
             clock = clockUnix;
@@ -209,6 +215,7 @@ public static partial class AvatarManager
             ledgers = new Dictionary<uint, AvatarLedger>();
             caps = new AvatarAccountCaps();
             pending = new Dictionary<(uint, uint, DateTime), Pending>();
+            pendingDaily = new Dictionary<(uint, AvatarDailyKind), int>();
             levelUps.Clear();
             dirtyAvatars = new HashSet<uint>();
             pendingFoundings = new HashSet<uint>();
@@ -382,6 +389,28 @@ public static partial class AvatarManager
 
     // ---- Favor reservation (Task 12) -------------------------------------------------------------------------
 
+    /// <summary>The server's active-account count (S) at the last recompute: what the roster scale and the scaled prices read.</summary>
+    internal static int ServerActiveAccounts()
+    {
+        lock (sync)
+            return serverActiveAccounts;
+    }
+
+    /// <summary>The Avatar's active accounts (R) and the server's (S), read together under one lock so a recompute cannot land between them.</summary>
+    internal static (int R, int S) PriceInputs(AvatarState s)
+    {
+        lock (sync)
+            return (s?.ActiveAccounts ?? 0, serverActiveAccounts);
+    }
+
+    /// <summary>The per-Avatar Favor cap for <paramref name="s"/> under the live tunables (<see cref="AvatarPricing.FavorCap"/>).</summary>
+    internal static ulong FavorCapFor(AvatarState s, AvatarTuning t)
+    {
+        var g = gauntletTuning();
+        lock (sync)
+            return AvatarPricing.FavorCap(t, g, s?.ActiveAccounts ?? 0, serverActiveAccounts);
+    }
+
     /// <summary>Holds <paramref name="price"/> for a purchase. True only when Favor - ReservedFavor covers it.</summary>
     public static bool TryReserveFavor(uint avatarId, ulong price)
     {
@@ -421,21 +450,23 @@ public static partial class AvatarManager
 
     /// <summary>
     /// Credits <paramref name="amount"/> of already-committed Favor back to the Avatar (the Gauntlet admin refund after wave 1).
-    /// Unlike a purchase release this ADDS to Favor, so it respects allegiance_avatar_favor_cap: Favor never ends above the cap,
-    /// so a refund to an Avatar that earned its way back to the cap in the meantime returns less than <paramref name="amount"/>.
+    /// Unlike a purchase release this ADDS to Favor, so it respects the Avatar's Favor cap (<see cref="FavorCapFor"/>): a refund never
+    /// raises Favor above the cap, so a refund to an Avatar that earned its way back to the cap in the meantime returns less than
+    /// <paramref name="amount"/>. Like crediting (<see cref="AvatarCurves.AddFavor"/>), it never lowers Favor.
     /// Marked dirty, so it flushes with the other Favor mutations as the new absolute value. False when the Avatar is unknown
     /// (nothing to credit); true otherwise, including a refund the cap clamped to nothing.
     /// </summary>
     public static bool RefundFavor(uint avatarId, ulong amount)
     {
         var t = tuning();
+        var g = gauntletTuning();
 
         lock (sync)
         {
             if (!byId.TryGetValue(avatarId, out var s))
                 return false;
 
-            var cap = (ulong)Math.Max(0L, t.FavorCap);
+            var cap = AvatarPricing.FavorCap(t, g, s.ActiveAccounts, serverActiveAccounts);
             var total = s.Favor > ulong.MaxValue - amount ? ulong.MaxValue : s.Favor + amount;
             var next = Math.Min(cap, total);
 
@@ -531,6 +562,7 @@ public static partial class AvatarManager
     /// </summary>
     private static void CreditPending(double now, AvatarTuning t, uint? onlyAvatarId = null)
     {
+        var g = gauntletTuning();
         var nowUtc = Time.GetDateTimeFromTimestamp(now);
         var today = DayOf(now);
 
@@ -566,7 +598,7 @@ public static partial class AvatarManager
                 if (credited > 0)
                 {
                     s.LifetimeXp = s.LifetimeXp > ulong.MaxValue - (ulong)credited ? ulong.MaxValue : s.LifetimeXp + (ulong)credited;
-                    s.Favor = AvatarCurves.AddFavor(s.Favor, (ulong)credited, t);
+                    s.Favor = AvatarCurves.AddFavor(s.Favor, (ulong)credited, AvatarPricing.FavorCap(t, g, s.ActiveAccounts, serverActiveAccounts), t);
                     s.LastContributionUtc = nowUtc;
                 }
                 dirtyAvatars.Add(key.AvatarId);

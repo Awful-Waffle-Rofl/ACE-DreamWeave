@@ -8,18 +8,20 @@ namespace ACE.Server.Tests.Avatars
 {
     /// <summary>
     /// The feed call must sit after the fellowship split (so it runs once per receiving member, on the member's own
-    /// share) and before every bonus (offline, alt, Thread boon), or the bonus amounts would be counted.
+    /// share), AFTER the offline bonus (owner ruling 2026-11-25: the offline bank's bonus XP counts toward Favor, for every
+    /// player) and BEFORE the alt bonus and the Thread boon, which must not be counted. It is fed the offline-boosted
+    /// levelAmount, never the raw amount.
     /// </summary>
     [TestClass]
     public class AvatarFeedHookSiteTests
     {
-        private const string Call = "AvatarFeed.Capture(this, amount, xpType);";
+        private const string Call = "AvatarFeed.Capture(this, levelAmount, xpType);";
 
         private static string GrantXpBody() => PooledLootSourceText.MethodBody(PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/Player_Xp.cs"),
             "public void GrantXP(long amount, XpType xpType, ShareType shareType, bool combatShare)");
 
         [TestMethod]
-        public void Capture_IsCalledOnce_AfterTheFellowshipSplit_BeforeAnyBonus()
+        public void Capture_IsCalledOnce_AfterTheSplitAndTheOfflineBonus_BeforeTheAltBonusAndTheBoon()
         {
             var body = GrantXpBody();
 
@@ -35,8 +37,9 @@ namespace ACE.Server.Tests.Avatars
 
             Assert.IsTrue(split >= 0 && levelAmount >= 0 && offline >= 0 && alt >= 0 && boon >= 0, "a landmark in GrantXP was not found");
             Assert.IsTrue(split < first, "Capture must come after Fellowship.SplitXp");
-            Assert.IsTrue(first < levelAmount, "Capture must come before 'var levelAmount = amount;'");
-            Assert.IsTrue(first < offline && first < alt && first < boon, "Capture must come before every bonus");
+            Assert.IsTrue(levelAmount < first && offline < first, "Capture must come after the offline bonus, so offline-bank XP counts toward Favor");
+            Assert.IsTrue(first < alt && first < boon, "Capture must come before the alt bonus and the Thread boon");
+            Assert.AreEqual(-1, body.IndexOf("AvatarFeed.Capture(this, amount,", StringComparison.Ordinal), "the raw, un-boosted amount must not be fed");
         }
 
         [TestMethod]

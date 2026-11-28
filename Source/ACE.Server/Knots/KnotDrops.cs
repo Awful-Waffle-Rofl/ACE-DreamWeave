@@ -296,10 +296,23 @@ namespace ACE.Server.Knots
             if (fiber == null)
                 return null;
 
-            fiber.SetProperty(PropertyInt.KnotLevel, level);
-            fiber.SetProperty(PropertyString.Name, KnotItems.FiberName(level));
+            StampFiber(fiber, level);
 
             return fiber;
+        }
+
+        /// <summary>The Fiber stamp: its level and the level-bearing name. Shared by the Thread drop path and the Gauntlet crate.</summary>
+        public static void StampFiber(WorldObject fiber, int level)
+        {
+            fiber.SetProperty(PropertyInt.KnotLevel, level);
+            fiber.SetProperty(PropertyString.Name, KnotItems.FiberName(level));
+        }
+
+        /// <summary>The Pattern stamp: its pinnacle key and the pinnacle-bearing name. Shared by the Thread drop path and the Gauntlet crate.</summary>
+        public static void StampPattern(WorldObject pattern, PinnacleDef def)
+        {
+            pattern.SetProperty(PropertyString.PinnacleKey, def.Key);
+            pattern.SetProperty(PropertyString.Name, KnotItems.PatternName(def.Name));
         }
 
         internal static WorldObject CreatePattern(PinnacleDef def)
@@ -309,8 +322,7 @@ namespace ACE.Server.Knots
             if (pattern == null)
                 return null;
 
-            pattern.SetProperty(PropertyString.PinnacleKey, def.Key);
-            pattern.SetProperty(PropertyString.Name, KnotItems.PatternName(def.Name));
+            StampPattern(pattern, def);
 
             return pattern;
         }

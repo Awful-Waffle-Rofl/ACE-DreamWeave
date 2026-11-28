@@ -242,6 +242,15 @@ namespace ACE.Server.Managers
                 return;
             }
 
+            // Perennial dyes (WaffleACE): a recipe that copies PaletteTemplate or DyeShellShade (any dye, retail or fork) is refused on armor
+            // that cannot take it: nothing changes and the dye is kept. See ACE.Server.Entity.PerennialDyes.
+            if (PerennialDyes.TryRefuse(recipe, source, target, out var dyeRefusal))
+            {
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat(dyeRefusal, ChatMessageType.Craft));
+                player.SendUseDoneEvent();
+                return;
+            }
+
             // verify requirements
             if (!VerifyRequirements(recipe, player, source, target))
             {
@@ -1782,7 +1791,9 @@ namespace ACE.Server.Managers
         /// <summary>
         /// True if the given wcid is a guaranteed-success ("foolproof") tinkering/imbue material,
         /// retail or fork-added. Used by AppraiseInfo to decide whether to suppress the raw Structure
-        /// property on a salvage/foolproof bag (see foolproofTinkers above and its callers).
+        /// property on a salvage/foolproof bag (see foolproofTinkers above and its callers), by SalvageTool,
+        /// and by ShieldSalvageTargets to recognise the foolproof Black Opal and Fire Opal bags that may
+        /// target shields.
         /// </summary>
         public static bool IsFoolproofTinker(uint wcid) => foolproofTinkers.Contains(wcid);
     }

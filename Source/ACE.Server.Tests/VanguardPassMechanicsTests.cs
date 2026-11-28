@@ -11,7 +11,6 @@ using ACE.Server.ClassAbilities;
 using ACE.Server.ClassAbilities.Abilities;
 using ACE.Server.Managers;
 using ACE.Server.WorldObjects;
-using ACE.Server.WorldObjects.Managers;
 
 namespace ACE.Server.Tests
 {
@@ -34,6 +33,22 @@ namespace ACE.Server.Tests
 
             ThornsCloseRangeTests.EnsurePlayerTypeInitializable();
         }
+
+        private Func<double> savedCritDraw;
+
+        /// <summary>
+        /// Every Thorns reflect now rolls a crit (10% base) outside Cloaked in Power's window; the window cases assert
+        /// exact amounts, so the draw is pinned to 1.0 (never a crit) and restored after each test.
+        /// </summary>
+        [TestInitialize]
+        public void PinCritDraw()
+        {
+            savedCritDraw = ThornsAbility.CritDraw;
+            ThornsAbility.CritDraw = () => 1.0;
+        }
+
+        [TestCleanup]
+        public void RestoreCritDraw() => ThornsAbility.CritDraw = savedCritDraw;
 
         // ---- Crit Resist Rating -> Damage Resist Rating -------------------------------------------------------------
 
@@ -211,8 +226,9 @@ namespace ACE.Server.Tests
 
             StringAssert.Contains(reflect, "GetClassAbilityRating(ClassAbilityId.DamageResistRating)");
             // Thread Shrine (2026-11-09): the mitigation blessing is taken back out of the total, so it never grows the reflect.
-            StringAssert.Contains(reflect, "RatingAbility.DamageResistRatingThornsMultiplier(drrGrant, GetDamageResistRating() - ACE.Server.ThreadDungeons.ThreadBoons.DamageResistRatingFor(this))");
-            StringAssert.Contains(reflect, "ThornsAbility.ScaleReflect(baseReflect, strengthMultiplier, critMultiplier, drrMultiplier)");
+            // The Gauntlet Avatar's aura (2026-11-25) is left out with it, in one blessing-free read.
+            StringAssert.Contains(reflect, "RatingAbility.DamageResistRatingThornsMultiplier(drrGrant, GetDamageResistRatingWithoutBlessings())");
+            StringAssert.Contains(reflect, "ThornsAbility.ScaleReflect(baseReflect, heft, strengthMultiplier, damageRatingMultiplier, critMultiplier, drrMultiplier)");
 
             // after the ownership gate, so it only scales an existing reflect
             Assert.IsTrue(reflect.IndexOf("if (!owned && gearMod <= 0.0)", StringComparison.Ordinal)
@@ -223,11 +239,7 @@ namespace ACE.Server.Tests
 
         private static (Player player, Creature attacker) Pair()
         {
-            var player = ThornsCloseRangeTests.SeededThornsModPlayer();
-
-            // GetCritDamageRating (read only while the window is open) reaches the enchantment manager
-            player.Biota.PropertiesEnchantmentRegistry = new List<ACE.Entity.Models.PropertiesEnchantmentRegistry>();
-            typeof(WorldObject).GetField("EnchantmentManager").SetValue(player, new EnchantmentManagerWithCaching(player));
+            var player = ThornsCloseRangeTests.SeededThornsModPlayer(); // seeds the enchantment manager GetCritDamageRating reaches
 
             var attacker = TestCreatures.CreateDefender(maxHealth: 5000);
             attacker.Health.Current = 5000;

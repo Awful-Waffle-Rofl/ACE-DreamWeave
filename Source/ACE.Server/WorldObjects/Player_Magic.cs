@@ -498,14 +498,15 @@ namespace ACE.Server.WorldObjects
             if (spell.School != MagicSchool.ItemEnchantment && targetCreature == null)
                 return true;
 
-            // World Events Hold: on a knight the one valid spell is a health heal while it accepts player heals, decided here
-            // (ahead of the beneficial-on-creature and CanDamage rules below). One field read for every other target.
-            if (ACE.Server.WorldEvents.WorldEventHooks.IsInvalidHoldSpellTarget(targetCreature, spell, out var holdInvalid))
-                return holdInvalid;
-
             // Allegiance Gauntlet: a member held by the death hold may not heal or buff anyone inside the fight circle.
             if (ACE.Server.Avatars.Gauntlet.GauntletHooks.RefusesHeldSupport(this, target, spell.IsBeneficial))
                 return true;
+
+            // World Events Hold: on a knight the valid spells are a health heal (while it accepts player heals) and a whitelisted buff,
+            // decided here (ahead of the beneficial-on-creature and CanDamage rules below). After the death-hold refusal above, so a
+            // held Gauntlet member cannot buff a knight. One field read for every other target.
+            if (ACE.Server.WorldEvents.WorldEventHooks.IsInvalidHoldSpellTarget(targetCreature, spell, out var holdInvalid))
+                return holdInvalid;
 
             // Allegiance Gauntlet (owner ruling 2026-11-21): members may heal and buff the Avatar fighter, but only while its
             // run's copy is live; every other spell on it is refused. One type test for every other target.

@@ -49,8 +49,8 @@ namespace ACE.Server.BalanceTrials
         /// <summary>What <see cref="Normalize"/> changed, for the log.</summary>
         internal readonly record struct NormalizeResult(int TimedRemoved, int VitaeRemoved, int CastersCleared);
 
-        /// <summary>The world lookups promote and unpromote make, as delegates so tests can fake each one (the shape of TrialRebuild.Lookups).</summary>
-        internal sealed class Lookups
+        /// <summary>The world lookups promote and unpromote make, as delegates so tests can fake each one (the shape of TrialRebuild.Lookups). Not sealed: TrialAdopt.Lookups adds the adopt-only ones.</summary>
+        internal class Lookups
         {
             public Func<uint, bool> IsOnline;
 
@@ -76,6 +76,12 @@ namespace ACE.Server.BalanceTrials
 
             /// <summary>Required. Promote takes the master exclusive and the rep shared; unpromote the master exclusive.</summary>
             public TrialCopyGate Gate;
+
+            /// <summary>Unpromote slot:&lt;n&gt; only: true when a character row exists for the guid (live: the disposed-context stub read).</summary>
+            public Func<uint, bool> HasCharacterRow;
+
+            /// <summary>Unpromote slot:&lt;n&gt; only: the slots the seeded archetype files name, or null when unknown.</summary>
+            public Func<IReadOnlyCollection<int>> SeededSlots;
         }
 
         internal static Lookups Live() => new Lookups
@@ -90,6 +96,7 @@ namespace ACE.Server.BalanceTrials
             Copy = (admin, rep, master, masterName, options, onDone) => AdminCommands.DoCopyChar(admin, rep.Name, rep.Guid, false, masterName, 0, master, onDone, options),
             UtcNow = () => DateTime.UtcNow,
             Gate = TrialCopyGate.Shared,
+            HasCharacterRow = guid => DatabaseManager.Shard.BaseDatabase.GetCharacterStubByGuid(guid) != null,
         };
 
         /// <summary>
@@ -114,7 +121,7 @@ namespace ACE.Server.BalanceTrials
 
         // ================================================================ promote
 
-        /// <summary>Promotes rep <paramref name="repIndex"/> (1..8) over the master of <paramref name="a"/>, live.</summary>
+        /// <summary>Promotes rep <paramref name="repIndex"/> (1..12) over the master of <paramref name="a"/>, live.</summary>
         public static bool TryPromote(Session admin, TrialArchetype a, int repIndex, out string refusal, out IReadOnlyList<string> reply)
             => TryPromote(admin, admin?.Player?.Guid.Full, a, repIndex, Live(), out refusal, out reply);
 
@@ -168,12 +175,12 @@ namespace ACE.Server.BalanceTrials
                 return Refuse($"a copy or purge is already in flight on 0x{busy:X8}; wait for its 'Successfully copied' line (at most {TrialCopyGate.HoldSeconds / 60:0} minutes) and retry", out refusal);
 
             // From the take until lookups.Copy hands the hold to onDone, a throw must not leave the gate held (it would refuse every
-            // copy on this master and rep for HoldSeconds) and, once the purge has started, must leave the master marked broken.
+            // copy on this master and rep for HoldSeconds) and, once the purge has started, must leave the master marked broken
+            // (the shared tail, TryPurgeThenCopy, owns that half).
             TrialPromote.RepFacts facts;
             bool wasBroken;
             string brokenBefore;
             string lineageNote = null;
-            var purgeStarted = false;
             var handedOff = false;
             string masterArchetype = null, masterCalibration = null;
 
@@ -181,7 +188,7 @@ namespace ACE.Server.BalanceTrials
             {
                 // 10. A rep whose last purge failed may be partly populated: drift alone does not refuse, a failed purge does.
                 if (lookups.RepPurgeFailed(rep.Guid))
-                    return Release(gate, token, $"{rep.Name}'s last rebuild failed at its purge, so it may be partly populated; rebuild it before promoting it", out refusal);
+                    return Release(gate, token, $"{rep.Name}'s last rebuild failed at its purge or copy, so it may be partly populated; rebuild it before promoting it", out refusal);
 
                 // 11. The master's lineage, which supplies both shas of the promoted stamp: from its stamp, or, when an earlier
                 // promote or unpromote purged it (the purge deletes the biota and with it the stamp), from that run's broken
@@ -223,67 +230,23 @@ namespace ACE.Server.BalanceTrials
 
                 wasBroken = gate.IsBroken(master, out brokenBefore);
                 var now = lookups.UtcNow().ToUniversalTime();
-                var at = now.ToString(TrialRebuild.PromotedTimeFormat, CultureInfo.InvariantCulture);
 
-                // Broken from the purge until the copy lands: a master in between is in an unknown state, and rebuild refuses it.
-                // The lineage is recorded with it, read before the purge deletes the stamp.
-                gate.MarkBroken(master, $"a promote of rep {repIndex} started at {at} and its copy has not landed", masterArchetype, masterCalibration);
-                purgeStarted = true;
-
-                if (!lookups.Purge(master))
-                {
-                    gate.MarkBroken(master, $"the promote of rep {repIndex} at {at} failed at its purge", masterArchetype, masterCalibration);
-                    gate.Release(token);
-                    return Refuse($"the purge of master 0x{master:X8} failed and nothing was copied; the master is marked broken (rebuild refuses it); {RecoveryHint}", out refusal);
-                }
-
-                var stamp = TrialRebuild.PromotedStamp(masterArchetype, masterCalibration, now);
-                var deleteTime = (ulong)Time.GetUnixTime(now);
-
-                var options = new CopyCharOptions
-                {
-                    Publish = false,
-                    BeforeSave = player =>
-                    {
-                        var result = Normalize(player.Biota, player.GetAllPossessions().Select(p => p.Biota), player.Character, stamp, deleteTime);
-                        log.Info($"[TRIAL] promote normalize 0x{master:X8}: {result.TimedRemoved} timed enchantment(s) and {result.VitaeRemoved} Vitae removed, {result.CastersCleared} foreign caster(s) cleared");
-                    },
-                };
-
-                var lineageArchetype = masterArchetype;
-                var lineageCalibration = masterCalibration;
-
-                lookups.Copy(admin, rep, master, masterName, options, ok =>
-                {
-                    if (ok)
-                    {
-                        if (gate.ReleaseAndClearBroken(token, master))
-                            log.Info($"[TRIAL] promote done: {rep.Name} 0x{rep.Guid:X8} -> master 0x{master:X8} ({a.Id}), stamp {stamp}");
-                        else
-                            log.Warn($"[TRIAL] promote copy landed AFTER its gate hold lapsed: {rep.Name} 0x{rep.Guid:X8} -> master 0x{master:X8} ({a.Id}); the broken flag is left as it is, check the master and re-run @trial promote if in doubt");
-                    }
-                    else
-                    {
-                        gate.MarkBroken(master, $"the promote of rep {repIndex} at {at} failed at its copy", lineageArchetype, lineageCalibration);
-                        gate.Release(token);
-                        log.Warn($"[TRIAL] promote copy FAILED: {rep.Name} 0x{rep.Guid:X8} -> master 0x{master:X8} ({a.Id}); the master was purged and is marked broken; {RecoveryHint}");
-                    }
-                });
+                // The shared tail: mark broken with the lineage, purge the master, copy the rep onto it (stamped from that lineage).
+                if (!TryPurgeThenCopy(lookups, token, master, "promote", $"promote of rep {repIndex}", masterArchetype, masterCalibration, now,
+                        (options, onDone) => lookups.Copy(admin, rep, master, masterName, options, onDone),
+                        $"{rep.Name} 0x{rep.Guid:X8} -> master 0x{master:X8} ({a.Id})", RecoveryHint, out _, out refusal))
+                    return false;
 
                 handedOff = true;
             }
             catch (Exception ex) when (!handedOff)
             {
-                log.Error($"[TRIAL] promote of {rep.Name} 0x{rep.Guid:X8} over master 0x{master:X8} threw{(purgeStarted ? " after its purge started" : "")}; the gate is released", ex);
-
-                if (purgeStarted)
-                    gate.MarkBroken(master, $"a promote of rep {repIndex} threw after its purge started", masterArchetype, masterCalibration);
+                // Only the steps before the tail can throw to here (the tail catches its own), so nothing has been purged.
+                log.Error($"[TRIAL] promote of {rep.Name} 0x{rep.Guid:X8} over master 0x{master:X8} threw; the gate is released", ex);
 
                 gate.Release(token);
 
-                return Refuse(purgeStarted
-                    ? $"the promote threw after the purge of master 0x{master:X8} started ({ex.Message}); the master is marked broken (rebuild refuses it); {RecoveryHint}"
-                    : $"the promote threw before anything was purged ({ex.Message}); check the server log", out refusal);
+                return Refuse($"the promote threw before anything was purged ({ex.Message}); check the server log", out refusal);
             }
 
             log.Info($"[TRIAL] promote queued: {rep.Name} 0x{rep.Guid:X8} -> master 0x{master:X8} ({a.Id})");
@@ -305,6 +268,104 @@ namespace ACE.Server.BalanceTrials
 
             reply = lines;
             return true;
+        }
+
+        /// <summary>How long an unreported copy's "has not landed" mark holds off the next purge of its master: 3 x HoldSeconds (15 minutes).</summary>
+        internal const double CopyInFlightWaitSeconds = 3 * TrialCopyGate.HoldSeconds;
+
+        /// <summary>
+        /// The purge-then-copy tail promote and adopt share, run with the master already held exclusively under
+        /// <paramref name="token"/> and every refusal behind it. In order: mark the master broken with its lineage
+        /// (<paramref name="masterArchetype"/>, <paramref name="masterCalibration"/>), PurgeSlot it, then hand <paramref name="copy"/>
+        /// the options: unpublished, with <see cref="Normalize"/> in BeforeSave writing the promoted stamp built from that lineage.
+        /// The copy's onDone clears the broken flag on success, or re-marks it on failure, and releases the gate either way.
+        ///
+        /// False, with the gate released, when the purge fails or anything throws before the copy is handed off; the master is
+        /// left broken once its purge has started. Never throws. The out stamp is the stamp the copy will carry, or
+        /// null when the purge never succeeded (<paramref name="copyStamp"/>). <paramref name="verb"/> ("promote") and <paramref name="operation"/>
+        /// ("promote of rep 4") word the broken reasons and log lines; <paramref name="description"/> names the copy in the log.
+        /// </summary>
+        internal static bool TryPurgeThenCopy(Lookups lookups, long token, uint master, string verb, string operation, string masterArchetype, string masterCalibration,
+            DateTime now, Action<CopyCharOptions, Action<bool>> copy, string description, string recoveryHint, out string copyStamp, out string refusal)
+        {
+            copyStamp = null;
+            refusal = null;
+
+            var gate = lookups.Gate;
+            var at = now.ToString(TrialRebuild.PromotedTimeFormat, CultureInfo.InvariantCulture);
+            var purgeStarted = false;
+
+            // A copy onto this master that has not reported may still land: its hold lapses after HoldSeconds, but the copy itself
+            // runs on, so purging again under it would race the save. Wait for it until the mark is CopyInFlightWaitSeconds old.
+            if (gate.TryGetCopyInFlight(master, out var inFlightAge) && inFlightAge < CopyInFlightWaitSeconds)
+            {
+                gate.Release(token);
+                return Refuse($"a copy onto this master started {(int)inFlightAge} s ago and has not reported; wait for it or restart", out refusal);
+            }
+
+            try
+            {
+                // Broken from the purge until the copy lands: a master in between is in an unknown state, and rebuild refuses it.
+                // The lineage is recorded with it, read before the purge deletes the stamp.
+                var markGeneration = gate.MarkBroken(master, $"a {operation} started at {at} and its copy has not landed", masterArchetype, masterCalibration, copyInFlight: true);
+                purgeStarted = true;
+
+                if (!lookups.Purge(master))
+                {
+                    gate.MarkBroken(master, $"the {operation} at {at} failed at its purge", masterArchetype, masterCalibration);
+                    gate.Release(token);
+                    return Refuse($"the purge of master 0x{master:X8} failed and nothing was copied; the master is marked broken (rebuild refuses it); {recoveryHint}", out refusal);
+                }
+
+                var stamp = TrialRebuild.PromotedStamp(masterArchetype, masterCalibration, now);
+                var deleteTime = (ulong)Time.GetUnixTime(now);
+                copyStamp = stamp;
+
+                var options = new CopyCharOptions
+                {
+                    Publish = false,
+                    BeforeSave = player =>
+                    {
+                        var result = Normalize(player.Biota, player.GetAllPossessions().Select(p => p.Biota), player.Character, stamp, deleteTime);
+                        log.Info($"[TRIAL] {verb} normalize 0x{master:X8}: {result.TimedRemoved} timed enchantment(s) and {result.VitaeRemoved} Vitae removed, {result.CastersCleared} foreign caster(s) cleared");
+                    },
+                };
+
+                copy(options, ok =>
+                {
+                    if (ok)
+                    {
+                        if (gate.ReleaseAndClearBroken(token, master))
+                            log.Info($"[TRIAL] {verb} done: {description}, stamp {stamp}");
+                        else if (gate.ClearBrokenIfGeneration(master, markGeneration))
+                            log.Info($"[TRIAL] {verb} done AFTER its gate hold lapsed: {description}, stamp {stamp}; no newer mark was made, so the broken flag is cleared");
+                        else
+                            log.Warn($"[TRIAL] {verb} copy landed AFTER its gate hold lapsed: {description}; the broken flag is left as it is, check the master and re-run @trial {verb} if in doubt");
+                    }
+                    else
+                    {
+                        gate.MarkBroken(master, $"the {operation} at {at} failed at its copy", masterArchetype, masterCalibration);
+                        gate.Release(token);
+                        log.Warn($"[TRIAL] {verb} copy FAILED: {description}; the master was purged and is marked broken; {recoveryHint}");
+                    }
+                });
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[TRIAL] {verb}: {description} threw{(purgeStarted ? " after its purge started" : "")}; the gate is released", ex);
+
+                if (purgeStarted)
+                    gate.MarkBroken(master, $"a {operation} threw after its purge started", masterArchetype, masterCalibration);
+
+                gate.Release(token);
+                copyStamp = null;
+
+                return Refuse(purgeStarted
+                    ? $"the {verb} threw after the purge of master 0x{master:X8} started ({ex.Message}); the master is marked broken (rebuild refuses it); {recoveryHint}"
+                    : $"the {verb} threw before anything was purged ({ex.Message}); check the server log", out refusal);
+            }
         }
 
         // ================================================================ unpromote
@@ -335,6 +396,13 @@ namespace ACE.Server.BalanceTrials
 
             if (!gate.TryTake(master, 0, out var token, out var busy))
                 return Refuse($"a copy or purge is already in flight on 0x{busy:X8}; wait for its 'Successfully copied' line (at most {TrialCopyGate.HoldSeconds / 60:0} minutes) and retry", out refusal);
+
+            // As in TryPurgeThenCopy: an unreported copy may still land, so it is waited for, not purged under.
+            if (gate.TryGetCopyInFlight(master, out var inFlightAge) && inFlightAge < CopyInFlightWaitSeconds)
+            {
+                gate.Release(token);
+                return Refuse($"a copy onto this master started {(int)inFlightAge} s ago and has not reported; wait for it or restart", out refusal);
+            }
 
             DateTime? promotedAt;
             var purgeStarted = false;
@@ -377,6 +445,113 @@ namespace ACE.Server.BalanceTrials
             reply = $"master 0x{master:X8} ({a.Id}) purged; run seed-trial-archetypes (mode=seed) to rebuild it from the snapshot";
             return true;
         }
+
+        /// <summary>
+        /// @trial unpromote slot:&lt;n&gt;: the same unpromote, gate and refusals, addressed by master slot rather than by archetype id.
+        /// It is the recovery for a resolver collision (two archetypes on one slot, one curated id in two slots), where resolving the
+        /// id refuses, and for what a broken adopt or promote leaves. With a promoted stamp it is unpromote. With no stamp it clears
+        /// (<see cref="TryClearSlot"/>) a slot whose broken record keeps a curated lineage, or a slot with a leftover character row
+        /// that no seeded file names (a copy that saved its row but never its stamp, then a restart); a seeded file's slot is never
+        /// cleared this way, since the reseed rebuilds it. Only trial master guids (TrialRoster.MasterSlot 0..MasterCount-1) are touched.
+        /// </summary>
+        internal static bool TryUnpromoteSlot(int slot, Lookups lookups, out string refusal, out string reply)
+        {
+            reply = null;
+
+            if (slot < 0 || slot >= TrialRoster.MasterCount)
+                return Refuse($"slot {slot} is outside 0..{TrialRoster.MasterCount - 1}", out refusal);
+
+            var gate = lookups?.Gate ?? throw new ArgumentException("the copy gate is required", nameof(lookups));
+            var master = TrialRoster.MasterSlot(slot);
+
+            // Belt and braces: whatever MasterSlot ever becomes, nothing outside the trial master band is purged from here.
+            if (master < TrialRoster.SlotBase || master >= TrialRoster.SlotBase + (uint)TrialRoster.MasterCount)
+                return Refuse($"0x{master:X8} is not a trial master guid", out refusal);
+
+            if (string.IsNullOrEmpty(lookups.Stamp(master)))
+            {
+                // A curated slot with no stamp but a broken record keeping a curated lineage (an adopt or promote that purged and
+                // never landed): what the resolver lists as a broken curated archetype.
+                if (gate.TryGetBrokenLineage(master, out var lineage, out _) && TrialCurated.TryParseIdentity(lineage, out var curatedId, out _, out _))
+                    return TryClearSlot(slot, $"the broken curated archetype {curatedId}", lookups, out refusal, out reply);
+
+                // A leftover character row with no stamp: cleared only when no seeded file names the slot.
+                if (lookups.HasCharacterRow != null && lookups.HasCharacterRow(master))
+                {
+                    var seeded = lookups.SeededSlots?.Invoke();
+                    if (seeded == null)
+                        return Refuse($"slot {slot} has a character row and no stamp, but the seeded archetype files could not be read; nothing was purged", out refusal);
+
+                    if (seeded.Contains(slot))
+                        return Refuse($"slot {slot} has a character row and no stamp, and a seeded archetype file names it; reseed (seed-trial-archetypes) to rebuild that master, nothing was purged", out refusal);
+
+                    return TryClearSlot(slot, "a leftover character row with no stamp", lookups, out refusal, out reply);
+                }
+            }
+
+            if (!TryUnpromote(SlotArchetype(slot), lookups, out refusal, out _))
+                return false;
+
+            reply = $"master slot {slot} (0x{master:X8}) purged; the slot is free, unless a seeded archetype file names it (then reseed, seed-trial-archetypes, to rebuild that file's master)";
+            return true;
+        }
+
+        /// <summary>
+        /// Clears a stamp-less master slot: the same guards as unpromote (no session on the slot, the master taken exclusively, so no
+        /// copy whose hold is still live) plus the in-flight copy wait, then PurgeSlot and any broken record cleared. On a failed or
+        /// throwing purge the slot is left broken (a curated lineage, if one was recorded, is kept).
+        /// </summary>
+        private static bool TryClearSlot(int slot, string what, Lookups lookups, out string refusal, out string reply)
+        {
+            reply = null;
+
+            var gate = lookups.Gate;
+            var master = TrialRoster.MasterSlot(slot);
+
+            if (lookups.AnySessionForSlot(slot))
+                return Refuse($"a trial session is running archetype slot {slot}; end it before clearing master 0x{master:X8}", out refusal);
+
+            if (!gate.TryTake(master, 0, out var token, out var busy))
+                return Refuse($"a copy or purge is already in flight on 0x{busy:X8}; wait for its 'Successfully copied' line (at most {TrialCopyGate.HoldSeconds / 60:0} minutes) and retry", out refusal);
+
+            // As in TryPurgeThenCopy: an unreported copy may still land, so it is waited for, not purged under.
+            if (gate.TryGetCopyInFlight(master, out var inFlightAge) && inFlightAge < CopyInFlightWaitSeconds)
+            {
+                gate.Release(token);
+                return Refuse($"a copy onto this master started {(int)inFlightAge} s ago and has not reported; wait for it or restart", out refusal);
+            }
+
+            try
+            {
+                gate.MarkBroken(master, $"a slot unpromote's purge of {what} has not completed");
+
+                if (!lookups.Purge(master))
+                {
+                    gate.MarkBroken(master, $"a slot unpromote of {what} failed at its purge");
+                    gate.Release(token);
+                    return Refuse($"the purge of master 0x{master:X8} failed; it stays broken, check the server log and run @trial unpromote {TrialArchetypeResolver.SlotPrefix}{slot} again", out refusal);
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[TRIAL] slot unpromote of master 0x{master:X8} ({what}) threw; the gate is released", ex);
+                gate.MarkBroken(master, $"a slot unpromote of {what} threw after its purge started");
+                gate.Release(token);
+                return Refuse($"the purge of master 0x{master:X8} threw ({ex.Message}); it stays broken, check the server log", out refusal);
+            }
+
+            gate.ReleaseAndClearBroken(token, master);
+
+            log.Info($"[TRIAL] slot unpromote: cleared master 0x{master:X8} ({what})");
+
+            refusal = null;
+            reply = $"master slot {slot} (0x{master:X8}): {what} was cleared and what was left purged; the slot is free";
+            return true;
+        }
+
+        /// <summary>The stand-in archetype unpromote is given for a bare slot: only its slot and its id (for the log) are read.</summary>
+        internal static TrialArchetype SlotArchetype(int slot)
+            => new TrialArchetype($"{TrialArchetypeResolver.SlotPrefix}{slot}", slot, ACE.Server.ClassAbilities.ClassAbilityClass.None, 0, null, null, TrialBuffs.OwnSpellbook);
 
         // ================================================================ pure helpers
 

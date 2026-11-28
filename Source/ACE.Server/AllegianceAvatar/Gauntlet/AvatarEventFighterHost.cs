@@ -492,7 +492,18 @@ internal sealed class AvatarEventFighterHost : IAvatarEventHost
     {
         var (standard, medianHealth, perHitMedian) = WorldEventHooks.AvatarFighterBasisAt(level);
 
-        return GauntletFighterStats.Compute(level, medianHealth, standard, perHitMedian, level, GauntletTuning.FromPropertyManager());
+        return EventStamp(level, medianHealth, standard, perHitMedian, GauntletTuning.FromPropertyManager());
+    }
+
+    /// <summary>
+    /// The private event's stamp (pure): the Gauntlet's stats function, WITHOUT the band armor. The band armor (owner ruling
+    /// 2026-11-25) is scoped to the Gauntlet, so an event fighter keeps its authored (Warden's) armor.
+    /// </summary>
+    internal static GauntletFighterStamp EventStamp(int level, double medianHealth, ACE.Server.ThreadDungeons.DungeonBandStandard standard, double perHitMedian, GauntletTuning tuning)
+    {
+        var stamp = GauntletFighterStats.Compute(level, medianHealth, standard, perHitMedian, level, tuning);
+
+        return stamp == null ? null : stamp with { ArmorTarget = 0 };
     }
 
     // ---- live defaults --------------------------------------------------------------------------------------------------------

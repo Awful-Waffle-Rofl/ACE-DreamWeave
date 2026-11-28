@@ -28,7 +28,7 @@ namespace ACE.Server.Pvp.Battlegrounds
             return (ParseCached(bg?.BonusWindows), ResolveZone(bg?.BonusTimezone));
         }
 
-        /// <summary>Whether a battleground match that went Live at <paramref name="liveSinceUtc"/> is inside a Double Marks window under <paramref name="bg"/>.</summary>
+        /// <summary>Whether a battleground or arena match (any mode) that went Live at <paramref name="liveSinceUtc"/> is inside a Double Marks window under <paramref name="bg"/>.</summary>
         public static bool IsBonusMatch(BattlegroundDials bg, DateTime liveSinceUtc)
         {
             if (bg == null || !bg.BonusEnabled)

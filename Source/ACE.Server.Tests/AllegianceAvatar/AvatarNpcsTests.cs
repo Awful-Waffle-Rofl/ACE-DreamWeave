@@ -269,6 +269,7 @@ namespace ACE.Server.Tests.Avatars
             var second = AvatarNpcs.SummonedNpc(AvatarId);
 
             Assert.AreNotSame(first, second);
+            Assert.IsFalse(first.IsSeated || second.IsSeated, "a summoned NPC is the vendor, never marked seated");
             Assert.IsTrue(first.IsDestroyed, "the first summoned NPC is destroyed by the second summon");
             Assert.IsFalse(second.IsDestroyed);
             CollectionAssert.AreEqual(new[] { first, second }, expiries.Select(e => e.Npc).ToArray());
@@ -292,6 +293,24 @@ namespace ACE.Server.Tests.Avatars
             var idsAtAdd = new List<uint>();
             Assert.AreEqual(1, AvatarNpcs.SpawnSeated(0x0090, 0, npc => { idsAtAdd.Add(npc.AvatarId); return true; }));
             CollectionAssert.AreEqual(new[] { AvatarId }, idsAtAdd, "the seated NPC carries its Avatar's id when it is added to the landblock");
+        }
+
+        [TestMethod]
+        public void SeatedAndSummonedNpcs_NeverRot()
+        {
+            var a = Init();
+
+            Assert.IsTrue(AvatarNpcs.TrySummon(vassal, a, out var r1), r1);
+            var summoned = AvatarNpcs.SummonedNpc(AvatarId);
+            Assert.AreEqual(-1, summoned.TimeToRot, "the summoned NPC never rots; its summon timer removes it");
+
+            houses[Monarch] = HouseA;
+            AvatarNpcs.SeatSiteOf = p => Site(HouseA, Monarch);
+            Assert.IsTrue(AvatarNpcs.TrySeat(monarch, a, out var r2), r2);
+
+            AvatarVendor seated = null;
+            Assert.AreEqual(1, AvatarNpcs.SpawnSeated(0x0090, 0, npc => { seated = npc; return true; }));
+            Assert.AreEqual(-1, seated.TimeToRot, "the seated NPC never rots, or the landblock destroys it after 300 s");
         }
 
         [TestMethod]
@@ -645,7 +664,7 @@ namespace ACE.Server.Tests.Avatars
             AvatarNpcs.RequestSeat(monarch, a);
 
             Assert.AreEqual(1, popups.Count);
-            Assert.AreEqual("Seat the Avatar here? You can't move it again for 7 days.", popups[0].Text);
+            Assert.AreEqual("Seat the Avatar here?", popups[0].Text);
             Assert.IsNull(a.Seat, "nothing is written before the answer");
 
             popups[0].Choice.Dispatch(true, false, DateTime.UtcNow);
@@ -730,6 +749,7 @@ namespace ACE.Server.Tests.Avatars
         public void Seat_Refusals()
         {
             var a = Init();
+            cur = T with { ReseatCooldownDays = 7 };
 
             AvatarNpcs.SeatSiteOf = p => Site(HouseA, Monarch);
             Assert.IsFalse(AvatarNpcs.TrySeat(vassal, a, out var refusal));
@@ -777,7 +797,9 @@ namespace ACE.Server.Tests.Avatars
             Assert.AreEqual(0, AvatarNpcs.SpawnSeated(0x0090, 5, npc => true), "another instance");
 
             AvatarVendor placed = null;
-            Assert.AreEqual(1, AvatarNpcs.SpawnSeated(0x0090, 0, npc => { placed = npc; return true; }));
+            var seatedAtAdd = false;
+            Assert.AreEqual(1, AvatarNpcs.SpawnSeated(0x0090, 0, npc => { placed = npc; seatedAtAdd = npc.IsSeated; return true; }));
+            Assert.IsTrue(seatedAtAdd, "the seated NPC is marked seated before it enters the world, so it never trades");
             Assert.AreEqual(a.Seat.Position.Cell, placed.Location.Cell);
             Assert.AreEqual(a.Seat.Position.Cell, placed.Home.Cell);
             Assert.AreEqual(0, AvatarNpcs.SpawnSeated(0x0090, 0, npc => true), "an NPC already stands at this Seat");

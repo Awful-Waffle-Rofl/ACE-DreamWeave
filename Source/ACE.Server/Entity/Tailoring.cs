@@ -258,6 +258,7 @@ namespace ACE.Server.Entity
             target.ObjScale = source.ObjScale;
 
             target.Shade = source.Shade;
+            target.DyeShellShade = source.DyeShellShade;
 
             // This might not even be needed, but we'll do it anyways
             target.Shade2 = source.Shade2;
@@ -800,6 +801,7 @@ namespace ACE.Server.Entity
             player.UpdateProperty(target, PropertyFloat.DefaultScale, source.ObjScale);
 
             player.UpdateProperty(target, PropertyFloat.Shade, source.Shade);
+            player.UpdateProperty(target, PropertyFloat.DyeShellShade, source.DyeShellShade);
             player.UpdateProperty(target, PropertyFloat.Shade2, source.Shade2);
             player.UpdateProperty(target, PropertyFloat.Shade3, source.Shade3);
             player.UpdateProperty(target, PropertyFloat.Shade4, source.Shade4);

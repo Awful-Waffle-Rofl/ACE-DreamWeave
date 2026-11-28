@@ -65,9 +65,12 @@ namespace ACE.Server.Tests.Avatars
         [TestMethod]
         public void AddFavor_CapsAndAdds()
         {
-            Assert.AreEqual(20_000UL, AvatarCurves.AddFavor(19_999, 50, d));
-            Assert.AreEqual(150UL, AvatarCurves.AddFavor(100, 50, d));
-            Assert.AreEqual(20_000UL, AvatarCurves.AddFavor(ulong.MaxValue, ulong.MaxValue, d));
+            Assert.AreEqual(20_000UL, AvatarCurves.AddFavor(19_999, 50, 20_000UL, d));
+            Assert.AreEqual(30_718UL, AvatarCurves.AddFavor(30_718, 5, 20_000UL, d), "a cap that shrank below Favor never lowers it");
+            Assert.AreEqual(30_718UL, AvatarCurves.AddFavor(30_718, 0, 0UL, d), "even a zero cap");
+            Assert.AreEqual(150UL, AvatarCurves.AddFavor(100, 50, 20_000UL, d));
+            Assert.AreEqual(20_000UL, AvatarCurves.AddFavor(0, ulong.MaxValue, 20_000UL, d));
+            Assert.AreEqual(ulong.MaxValue, AvatarCurves.AddFavor(ulong.MaxValue, ulong.MaxValue, 20_000UL, d), "Favor already above the cap is kept, saturating");
         }
 
         [TestMethod]
@@ -97,7 +100,7 @@ namespace ACE.Server.Tests.Avatars
         [TestMethod]
         public void NonDefaultTuning_IsHonoured()
         {
-            Assert.AreEqual(200UL, AvatarCurves.AddFavor(100, 50, d with { FavorRate = 2.0 }));
+            Assert.AreEqual(200UL, AvatarCurves.AddFavor(100, 50, 20_000UL, d with { FavorRate = 2.0 }));
             Assert.AreEqual(1.0, AvatarCurves.RosterScale(40, 100, d with { RosterExcessExponent = 1.0 }), 0.0);
             // Hard cap 2x: 100 linear + 2475 past, 500 of room under 1000.
             Assert.AreEqual(600L, AvatarCurves.CreditAccountDay(400, 10_000, d with { AccountDailyHardCapMultiple = 2.0 }));
@@ -116,8 +119,8 @@ namespace ACE.Server.Tests.Avatars
         [TestMethod]
         public void AddFavor_SaturatesInsteadOfWrapping()
         {
-            Assert.AreEqual(20_000UL, AvatarCurves.AddFavor(0, ulong.MaxValue, d));
-            Assert.AreEqual(long.MaxValue, (long)AvatarCurves.AddFavor(0, ulong.MaxValue, d with { FavorCap = long.MaxValue }));
+            Assert.AreEqual(20_000UL, AvatarCurves.AddFavor(0, ulong.MaxValue, 20_000UL, d));
+            Assert.AreEqual(long.MaxValue, (long)AvatarCurves.AddFavor(0, ulong.MaxValue, (ulong)long.MaxValue, d));
         }
 
         [TestMethod]

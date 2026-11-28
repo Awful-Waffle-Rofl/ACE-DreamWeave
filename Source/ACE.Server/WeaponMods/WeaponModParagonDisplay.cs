@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 using ACE.Entity.Enum.Properties;
 using ACE.Server.WorldObjects;
@@ -108,17 +109,19 @@ namespace ACE.Server.WeaponMods
         }
 
         /// <summary>
-        /// The mod bullet lines: Tourmaline specials first (registry order), then Paragon-only mods in slot order.
+        /// The mod bullet lines, ALPHABETICAL by mod name (<see cref="ByName"/>) across Tourmaline and Paragon-only
+        /// mods alike, so the same set of mods always reads in the same order and a search pattern such as
+        /// "ambush.*devastation" matches every weapon carrying both (owner ruling 2026-11-25).
         /// Tourmaline-only reads exactly as it always has; a mod held from both sources carries the combined
         /// magnitude and a "(rolled r% + Paragon p%)" tail, with ", capped" when r + p exceeds 100; a Paragon-only
         /// mod carries "(Paragon)".
         /// </summary>
         public static List<string> ModLines(WorldObject weapon, double scale)
         {
-            var lines = new List<string>();
+            var lines = new List<(WeaponModDefinition Definition, string Line)>();
 
             if (weapon == null)
-                return lines;
+                return new List<string>();
 
             var gems = ReadGems(weapon);
 
@@ -134,7 +137,7 @@ namespace ACE.Server.WeaponMods
 
                 if (gemCount == 0)
                 {
-                    lines.Add($"- {WeaponModDisplay.Describe(definition, tourmaline, scale, weapon)}");
+                    lines.Add((definition, $"- {WeaponModDisplay.Describe(definition, tourmaline, scale, weapon, tagSummonerRoute: true)}"));
                     continue;
                 }
 
@@ -144,7 +147,7 @@ namespace ACE.Server.WeaponMods
                     ? ", capped" : string.Empty;
                 var combined = CombinedMagnitude(weapon, definition, scale);
 
-                lines.Add($"- {WeaponModDisplay.Describe(definition, combined, scale, weapon)} (rolled {rolled}% + Paragon {paragon}%{capped})");
+                lines.Add((definition, $"- {WeaponModDisplay.Describe(definition, combined, scale, weapon, tagSummonerRoute: true)} (rolled {rolled}% + Paragon {paragon}%{capped})"));
             }
 
             foreach (var (definition, _) in gems)
@@ -158,15 +161,27 @@ namespace ACE.Server.WeaponMods
                 if (!WeaponModValue.IsLiveMagnitude(definition, magnitude))
                     continue;
 
-                lines.Add($"- {WeaponModDisplay.Describe(definition, magnitude, scale, weapon)} (Paragon)");
+                lines.Add((definition, $"- {WeaponModDisplay.Describe(definition, magnitude, scale, weapon, tagSummonerRoute: true)} (Paragon)"));
             }
 
-            return lines;
+            return lines.OrderBy(l => l.Definition, ByName).Select(l => l.Line).ToList();
         }
 
         /// <summary>
-        /// "Paragon 53/55: Devastation x2, Ambush x1" - each distinct Paragon mod with its gem count, first-slot
-        /// order. Empty when the weapon holds no gems.
+        /// The one ordering every player-facing weapon mod list uses: DisplayName, case-insensitive, then id as a
+        /// tie-break so the order is total. The appraisal lines, the Paragon summary, the market rows (and so the
+        /// search text built from them) and the Salvage Roller summary all sort through this.
+        /// </summary>
+        public static readonly IComparer<WeaponModDefinition> ByName = Comparer<WeaponModDefinition>.Create((a, b) =>
+        {
+            var byName = StringComparer.OrdinalIgnoreCase.Compare(a?.DisplayName, b?.DisplayName);
+
+            return byName != 0 ? byName : ((int)(a?.Id ?? 0)).CompareTo((int)(b?.Id ?? 0));
+        });
+
+        /// <summary>
+        /// "Paragon 53/55: Ambush x1, Devastation x2" - each distinct Paragon mod with its gem count, alphabetical
+        /// (<see cref="ByName"/>). Empty when the weapon holds no gems.
         /// </summary>
         public static string SummaryLine(WorldObject weapon)
         {
@@ -189,7 +204,7 @@ namespace ACE.Server.WeaponMods
             var level = Math.Clamp(weapon.GetProperty(PropertyInt.ItemMaxLevel) ?? BaseLevel + total, BaseLevel, MaxLevel);
             var parts = new List<string>();
 
-            foreach (var (definition, count) in gems)
+            foreach (var (definition, count) in gems.OrderBy(g => g.Definition, ByName))
                 parts.Add($"{definition.DisplayName} x{count}");
 
             return $"- Paragon {level}/{MaxLevel}: {string.Join(", ", parts)}";

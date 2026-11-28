@@ -70,7 +70,7 @@ namespace ACE.Server.BalanceTrials
             Gate = TrialCopyGate.Shared,
         };
 
-        /// <summary>Rebuilds rep <paramref name="repIndex"/> (1..8, TrialRoster.RepSlots[repIndex - 1]) from the master of <paramref name="a"/>.</summary>
+        /// <summary>Rebuilds rep <paramref name="repIndex"/> (1..12, TrialRoster.RepSlots[repIndex - 1]) from the master of <paramref name="a"/>.</summary>
         public static bool TryRebuild(Session admin, TrialArchetype a, string archetypeSha, int repIndex, out string refusal)
             => TryRebuild(admin, a, archetypeSha, repIndex, Live(), out refusal, out _);
 
@@ -156,18 +156,28 @@ namespace ACE.Server.BalanceTrials
                     return Refuse($"the purge of {rep.Name} (0x{rep.Guid:X8}) failed and nothing was copied; the slot may be partly populated, check the server log", out refusal);
                 }
 
-                // 5. The copy. Only a copy that landed starts a new block (and clears NeedsRebuild); a failed copy leaves both.
+                // 5. The copy. Only a copy that landed starts a new block (and clears NeedsRebuild); a failed copy leaves the block and marks the rep blocked.
                 lookups.Copy(admin, master, rep, accountId.Value, ok =>
                 {
-                    gate.Release(token);
-
-                    if (ok)
+                    // The gate is released only AFTER the outcome is recorded, so a promote or start that the release lets in sees the mark.
+                    try
                     {
-                        TrialRepSetup.ResetBlock(rep.Guid);
-                        log.Info($"[TRIAL] rebuild done: master 0x{master:X8} ({a.Id}) -> {rep.Name} 0x{rep.Guid:X8}");
+                        if (ok)
+                        {
+                            TrialRepSetup.ResetBlock(rep.Guid);
+                            log.Info($"[TRIAL] rebuild done: master 0x{master:X8} ({a.Id}) -> {rep.Name} 0x{rep.Guid:X8}");
+                        }
+                        else
+                        {
+                            // The purge already ran, so the rep is empty or partly populated: no rep may run on it until a rebuild completes.
+                            TrialRepSetup.MarkRebuildRequired(rep.Guid, "the last rebuild's copy failed", purgeFailed: true);
+                            log.Warn($"[TRIAL] rebuild copy FAILED: master 0x{master:X8} ({a.Id}) -> {rep.Name} 0x{rep.Guid:X8}; the rep is blocked until a rebuild completes, rebuild again");
+                        }
                     }
-                    else
-                        log.Warn($"[TRIAL] rebuild copy FAILED: master 0x{master:X8} ({a.Id}) -> {rep.Name} 0x{rep.Guid:X8}; the rep block is unchanged, rebuild again");
+                    finally
+                    {
+                        gate.Release(token);
+                    }
                 });
 
                 handedOff = true;

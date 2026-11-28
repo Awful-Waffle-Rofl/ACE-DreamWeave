@@ -110,6 +110,25 @@ namespace ACE.Server.WorldEvents
             }
         }
 
+        /// <summary>The line an outsider gets, once, when a quiet private Avatar event withholds its reward from them.</summary>
+        public const string PrivateEventExclusionLine = "This was a private allegiance event. Only its members receive the spoils.";
+
+        /// <summary>
+        /// The quiet private event reward gate: true when <paramref name="evt"/> withholds its reward from <paramref name="characterGuid"/>
+        /// (<see cref="WorldEvent.ExcludesFromRewards"/>), in which case <see cref="PrivateEventExclusionLine"/> goes to
+        /// <paramref name="send"/> the first time only for that character. False (and nothing sent) for everyone else.
+        /// </summary>
+        internal static bool TryWithhold(WorldEvent evt, uint characterGuid, Action<string> send)
+        {
+            if (evt == null || !evt.ExcludesFromRewards(characterGuid))
+                return false;
+
+            if (evt.MarkRewardExclusionNotified(characterGuid))
+                send?.Invoke(PrivateEventExclusionLine);
+
+            return true;
+        }
+
         private static bool Handle(WorldObject cache, Player player)
         {
             var runId = cache.GetProperty(PropertyInt.WorldEventId);
@@ -145,6 +164,17 @@ namespace ACE.Server.WorldEvents
 
             if (evt.State != WorldEventState.Rewarding || (evt.ClaimWindowEndsAt > 0 && now >= evt.ClaimWindowEndsAt))
                 return Deny(evt, cache, player, ClaimDenial.NotRewarding, characterGuid, accountId, ip);
+
+            // 1b. A quiet private Avatar event pays its allegiance's members only (owner ruling 2026-11-26). An outsider may
+            //     have fought and keeps the kill XP and loot, but takes no cache, extras or pooled share. Nothing is marked
+            //     claimed, and the line goes once per character per run. Any other run withholds from nobody. Membership is
+            //     the snapshot frozen at Rewarding entry, so swearing in during the claim window changes nothing.
+            if (TryWithhold(evt, characterGuid, line => TrySendTransientError(player, line)))
+            {
+                log.Info($"[WORLDEVENT] run={evt.RunId} claim char={player.Name} guid=0x{characterGuid:X8} withheld=quiet-private-non-member");
+
+                return true;
+            }
 
             // 2. Gates. A reward axis can turn any rule off for its own content; the two server properties
             //    are the operator's global override on top of that (C4 - both default ON).

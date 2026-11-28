@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Text.Json.Serialization;
 
 namespace ACE.Server.WorldEvents.Defs
@@ -11,9 +12,31 @@ namespace ACE.Server.WorldEvents.Defs
         public const string ScaleStack = "stack";
         public const string ScaleChance = "chance";
         public const string ScaleBags = "bags";
+        public const string KnotPattern = "pattern";
+        public const string KnotFiber = "fiber";
 
         [JsonPropertyName("wcid")]
         public uint Wcid { get; set; }
+
+        /// <summary>
+        /// Alternative to <see cref="Wcid"/> (then 0/absent): every time the roller picks this entry it resolves
+        /// to ONE member, chosen uniformly, per pick. Not valid with scale "bags".
+        /// </summary>
+        [JsonPropertyName("wcids")]
+        public List<uint> Wcids { get; set; } = new List<uint>();
+
+        /// <summary>Optional 1..5: stamped on every object created for this entry (ItemMaxLevel and the level overlay icon).</summary>
+        [JsonPropertyName("itemMaxLevel")]
+        public int? ItemMaxLevel { get; set; }
+
+        /// <summary>
+        /// Optional "pattern" or "fiber": the created object is a Knot Pattern (stamped with a random available
+        /// pinnacle) or a Knot Fiber (stamped with the opening player's level), the way the Thread drop path
+        /// stamps them. "pattern" needs wcid KnotItems.PatternWcid, "fiber" needs KnotItems.FiberWcid; not
+        /// combinable with wcids or itemMaxLevel.
+        /// </summary>
+        [JsonPropertyName("knotItem")]
+        public string KnotItem { get; set; }
 
         [JsonPropertyName("qty")]
         public int Qty { get; set; }

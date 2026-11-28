@@ -125,7 +125,7 @@ namespace ACE.Server.Tests.BalanceTrials
             Assert.IsNull(noMana.ItemCurMana, "an item with no ItemMaxMana is left alone");
 
             var soft = Body("Source/ACE.Server/BalanceTrials/TrialReset.cs",
-                "public static TrialSoftResetSummary Soft(Player p, TrialArchetype a, IReadOnlyDictionary<uint, long> masterConsumables, string buffProfile)");
+                "public static TrialSoftResetSummary Soft(Player p, TrialArchetype a, IReadOnlyDictionary<uint, long> baseline, string buffProfile)");
             StringAssert.Contains(soft, "var recharged = Recharge(p.GetAllPossessions());", "step 5 walks every possession (GetAllPossessions: pack, side packs and worn)");
         }
 
@@ -160,7 +160,7 @@ namespace ACE.Server.Tests.BalanceTrials
             Assert.IsFalse(TrialReset.NeedsSpellActivation(active, new[] { CastBy(active, 2783) }), "active and in force");
 
             var soft = Body("Source/ACE.Server/BalanceTrials/TrialReset.cs",
-                "public static TrialSoftResetSummary Soft(Player p, TrialArchetype a, IReadOnlyDictionary<uint, long> masterConsumables, string buffProfile)");
+                "public static TrialSoftResetSummary Soft(Player p, TrialArchetype a, IReadOnlyDictionary<uint, long> baseline, string buffProfile)");
             var apply = "var cast = TrialBuffs.Apply(p, buffProfile);";
             var activate = "var activated = p.ActivateTrialItemSpells(); if (activated > 0) Recharge(p.EquippedObjects.Values);";
             StringAssert.Contains(soft, "var recharged = Recharge(p.GetAllPossessions());");
@@ -202,7 +202,7 @@ namespace ACE.Server.Tests.BalanceTrials
             Assert.IsFalse(TrialReset.ItemSpellRemovalPending(active(), NoEntries), "an active item has nothing pending");
 
             var soft = Body("Source/ACE.Server/BalanceTrials/TrialReset.cs",
-                "public static TrialSoftResetSummary Soft(Player p, TrialArchetype a, IReadOnlyDictionary<uint, long> masterConsumables, string buffProfile)");
+                "public static TrialSoftResetSummary Soft(Player p, TrialArchetype a, IReadOnlyDictionary<uint, long> baseline, string buffProfile)");
             StringAssert.Contains(soft, "var removalPending = p.EquippedObjects.Values.Any(i => ItemSpellRemovalPending(i, registryNow)); var activated = p.ActivateTrialItemSpells();",
                 "pending is read BEFORE the activation changes the state");
             StringAssert.Contains(soft, "if (removalPending) RecheckItemSpellsLater(p);");
@@ -262,7 +262,7 @@ namespace ACE.Server.Tests.BalanceTrials
         public void Soft_reset_clears_worn_items_and_lengthens_the_profile_after_casting_it()
         {
             var soft = Body("Source/ACE.Server/BalanceTrials/TrialReset.cs",
-                "public static TrialSoftResetSummary Soft(Player p, TrialArchetype a, IReadOnlyDictionary<uint, long> masterConsumables, string buffProfile)");
+                "public static TrialSoftResetSummary Soft(Player p, TrialArchetype a, IReadOnlyDictionary<uint, long> baseline, string buffProfile)");
 
             var itemClear = "foreach (var item in p.EquippedObjects.Values) { var itemCarried = item.Biota.PropertiesEnchantmentRegistry.Clone(item.BiotaDatabaseLock).Where(e => IsCarriedTimedEnchantment(e, wornGuids)).ToList(); if (itemCarried.Count > 0) item.EnchantmentManager.Dispel(itemCarried);";
             var apply = "var cast = TrialBuffs.Apply(p, buffProfile); var lengthened = LengthenProfileBuffs(p, wornGuids); p.SetMaxVitals();";

@@ -33,7 +33,7 @@ namespace ACE.Server.Tests
             Chance(29295, 1, 4), Chance(46423, 1, 4),
         };
 
-        private static int Total(List<(uint Wcid, int Qty)> r) => r.Sum(x => x.Qty);
+        private static int Total(List<RolledReward> r) => r.Sum(x => x.Qty);
 
         [TestMethod]
         public void NonPositiveMultiplier_OrEmptyPool_RollsNothing()
@@ -78,7 +78,7 @@ namespace ACE.Server.Tests
                 var r = WorldEventRewardRoller.Roll(LivePool(), 1.0, new Random(seed));
 
                 Assert.AreEqual(1, r.Count);
-                var (wcid, qty) = r[0];
+                var wcid = r[0].Wcid; var qty = r[0].Qty;
 
                 if (hammers.Contains(wcid))
                     Assert.AreEqual(1, qty);
@@ -129,7 +129,7 @@ namespace ACE.Server.Tests
         {
             var r = WorldEventRewardRoller.Roll(new List<RewardPoolEntryDef> { Bags(1001910, 1001755) }, 0.5, new Random(9));
 
-            CollectionAssert.AreEqual(new[] { (1001755u, 5) }, r.ToArray());
+            CollectionAssert.AreEqual(new[] { new RolledReward(1001755u, 5) }, r.ToArray());
         }
 
         [TestMethod]
@@ -162,8 +162,9 @@ namespace ACE.Server.Tests
 
                 Assert.IsTrue(r.Count >= 1, "lone fractional roll never pays zero");
 
-                foreach (var (wcid, qty) in r)
+                foreach (var row in r)
                 {
+                    var wcid = row.Wcid; var qty = row.Qty;
                     if (wcid == 3) { stackRolls++; Assert.IsTrue(qty >= 1 && qty <= 10); }
                     else { chanceHits++; Assert.AreEqual(1, qty, "a chance entry is never scaled"); }
                 }
@@ -180,7 +181,7 @@ namespace ACE.Server.Tests
             var pool = new List<RewardPoolEntryDef> { Chance(1, 2, 1) };
 
             for (var seed = 0; seed < 200; seed++)
-                CollectionAssert.AreEqual(new[] { (1u, 2) }, WorldEventRewardRoller.Roll(pool, 0.1, new Random(seed)).ToArray());
+                CollectionAssert.AreEqual(new[] { new RolledReward(1u, 2) }, WorldEventRewardRoller.Roll(pool, 0.1, new Random(seed)).ToArray());
         }
 
         [TestMethod]
@@ -190,6 +191,78 @@ namespace ACE.Server.Tests
             var b = WorldEventRewardRoller.Roll(LivePool(), 1.7, new Random(77));
 
             CollectionAssert.AreEqual(a.ToArray(), b.ToArray());
+        }
+
+        // ---- wcids / itemMaxLevel / merge key ----
+
+        private static RewardPoolEntryDef Pick(IEnumerable<uint> wcids, int? level = null, string scale = "stack", double w = 1)
+            => new RewardPoolEntryDef { Wcids = wcids.ToList(), Qty = 1, Weight = w, Scale = scale, ItemMaxLevel = level };
+
+        [TestMethod]
+        public void WcidsEntry_ResolvesPerPick_ToUniformMembersOnly()
+        {
+            var members = new uint[] { 501, 502, 503 };
+            var pool = new List<RewardPoolEntryDef> { Pick(members) };
+            var rng = new Random(2024);
+            var hits = new Dictionary<uint, int>();
+
+            for (var i = 0; i < 3000; i++)
+            {
+                var r = WorldEventRewardRoller.Roll(pool, 1.0, rng);
+
+                Assert.AreEqual(1, r.Count);
+                Assert.IsTrue(members.Contains(r[0].Wcid), $"wcid {r[0].Wcid} is not a member");
+                hits[r[0].Wcid] = hits.GetValueOrDefault(r[0].Wcid) + 1;
+            }
+
+            foreach (var m in members)
+            {
+                Assert.IsTrue(hits.GetValueOrDefault(m) >= 750 && hits.GetValueOrDefault(m) <= 1260, $"member {m} hit {hits.GetValueOrDefault(m)} of 3000");
+            }
+        }
+
+        [TestMethod]
+        public void WcidsEntry_ResolvesPerPick_TwoPicksInOneRollCanDiffer()
+        {
+            var pool = new List<RewardPoolEntryDef> { Pick(new uint[] { 501, 502, 503 }) };
+            var differed = false;
+
+            for (var seed = 0; seed < 50 && !differed; seed++)
+                differed = WorldEventRewardRoller.Roll(pool, 2.0, new Random(seed)).Count == 2;
+
+            Assert.IsTrue(differed, "two full rolls of one entry never resolved to different members");
+        }
+
+        [TestMethod]
+        public void ItemMaxLevel_SurvivesIntoOutput_AndLevelsOfOneWcidDoNotMerge()
+        {
+            var pool = new List<RewardPoolEntryDef> { Pick(new uint[] { 600 }, level: 4, w: 1), Pick(new uint[] { 600 }, level: 5, w: 1) };
+            var sawBoth = false;
+
+            for (var seed = 0; seed < 100; seed++)
+            {
+                var r = WorldEventRewardRoller.Roll(pool, 4.0, new Random(seed));
+
+                Assert.IsTrue(r.All(x => x.ItemMaxLevel == 4 || x.ItemMaxLevel == 5));
+                Assert.AreEqual(r.Select(x => x.ItemMaxLevel).Distinct().Count(), r.Count, "one row per level");
+                Assert.AreEqual(4, r.Sum(x => x.Qty));
+
+                if (r.Count == 2)
+                    sawBoth = true;
+            }
+
+            Assert.IsTrue(sawBoth, "an L4 and an L5 row of one wcid stayed separate");
+        }
+
+        [TestMethod]
+        public void PlainRowsOfOneWcid_StillMerge_PositiveControl()
+        {
+            var pool = new List<RewardPoolEntryDef> { Stack(700, 3, 1), Stack(700, 3, 1) };
+            var r = WorldEventRewardRoller.Roll(pool, 3.0, new Random(1));
+
+            Assert.AreEqual(1, r.Count);
+            Assert.AreEqual(9, r[0].Qty);
+            Assert.IsNull(r[0].ItemMaxLevel);
         }
     }
 }

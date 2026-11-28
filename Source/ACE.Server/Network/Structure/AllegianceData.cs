@@ -73,7 +73,7 @@ namespace ACE.Server.Network.Structure
                 if (playerIsOnline)
                     bitfield |= AllegianceIndex.LoggedIn;
 
-                if (!node.IsMonarch && node.Player.ExistedBeforeAllegianceXpChanges)
+                if (!node.IsMonarch && AllegianceManager.VassalPassesUp(node.Player.ExistedBeforeAllegianceXpChanges, node.Patron?.Player.Level))
                     bitfield |= AllegianceIndex.MayPassupExperience;
 
                 gender = (Gender)player.Gender;

@@ -6,6 +6,7 @@ using ACE.Database;
 using ACE.DatLoader;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameMessages.Messages;
@@ -125,6 +126,9 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public bool HandleActionTrainSkill(Skill skill, int creditsSpent)
         {
+            if (MuleBlocked(MuleAction.ChangeSkills))
+                return false;
+
             // PvP template (progression lock): no skill credits are spent while templated.
             var templateRefusal = PvpTemplateBlocked(PvpTemplateAction.TrainSkill);
             if (templateRefusal != null)
@@ -910,6 +914,12 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public bool ResetSkill(Skill skill, bool refund = true)
         {
+            // a mule's defense skills are trained and raised by Player_Mule; a reset would refund their credits
+            // and the login top-up would re-train them free, so a mule has nothing to reset
+            // notify: false - the only caller is the UntrainSkill emote, which an NPC can run dozens of times in one script
+            if (MuleBlocked(MuleAction.ChangeSkills, notify: false))
+                return false;
+
             var creatureSkill = GetCreatureSkill(skill, false);
 
             if (creatureSkill == null || creatureSkill.AdvancementClass < SkillAdvancementClass.Trained)

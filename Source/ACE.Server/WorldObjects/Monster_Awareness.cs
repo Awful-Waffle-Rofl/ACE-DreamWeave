@@ -28,6 +28,11 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public void WakeUp(bool alertNearby = true)
         {
+            // Balance Trials start grace (Creature_Trial.cs): a held wave-0 creature refuses every wake until its hold expires or
+            // an attack breaks it. One double compare for every other creature.
+            if (TrialHoldRefusesWake())
+                return;
+
             MonsterState = State.Awake;
             IsAwake = true;
             //DoAttackStance();
@@ -48,6 +53,18 @@ namespace ACE.Server.WorldObjects
         public double TauntExpiry;
 
         /// <summary>
+        /// Until when the current TauntTarget hold is backed by a taunt that is NOT the Vanguard on-hit taunt (the
+        /// AoE proc, Hunter's Echo, the Tank pet pulse); 0 when the hold is on-hit only. Opportunist ignores an
+        /// on-hit hold, since that taunt rides every hit and would otherwise make every struck monster a mark, but
+        /// still counts the stretch a real taunt covers, so the on-hit taunt cannot turn a live AoE mark off.
+        /// Written only by ApplyTaunt: a non-on-hit write sets it to the new expiry; an on-hit write by the same
+        /// taunter whose hold is still live leaves it alone; any other on-hit write sets it to 0. It is only read
+        /// together with a non-null TauntTarget, so the sites that clear TauntTarget need not reset it. Runtime-only,
+        /// never persisted.
+        /// </summary>
+        public double TauntNonOnHitExpiry;
+
+        /// <summary>
         /// Forces this monster to attack the taunter for the given duration, waking it if idle.
         /// Mirrors the retaliate checks in Player_Monster.OnAttackMonster.
         ///
@@ -59,8 +76,16 @@ namespace ACE.Server.WorldObjects
         /// player and a pet, used to bounce one monster between them so it ran instead of fighting). The same
         /// taunter re-applying refreshes its own hold. Returns false, writing nothing, when the taunt is
         /// refused (tolerance exclusion or another taunter's live hold); true when it took.
+        ///
+        /// <paramref name="extendOnly"/> (the Vanguard on-hit taunt) never SHORTENS a hold: when this same
+        /// taunter already holds the monster until at or past the expiry the new duration would give (an AoE
+        /// taunt with Provoke gear, say), nothing is written and true is returned, since the monster is held
+        /// by the taunter either way. Otherwise it behaves exactly as without the flag.
+        ///
+        /// <paramref name="onHit"/> maintains <see cref="TauntNonOnHitExpiry"/> and is separate from extendOnly on
+        /// purpose. The early-return leaves it as it was, so a longer AoE hold stays a non-on-hit hold.
         /// </summary>
-        public bool ApplyTaunt(Creature taunter, double duration)
+        public bool ApplyTaunt(Creature taunter, double duration, bool extendOnly = false, bool onHit = false)
         {
             if ((Tolerance & PlayerCombatPet_RetaliateExclude) != 0)
                 return false;
@@ -68,8 +93,21 @@ namespace ACE.Server.WorldObjects
             if (HasLiveTauntFromOther(taunter))
                 return false;
 
+            var newExpiry = Timers.RunningTime + duration * GetMonsterEffectTauntHoldMultiplier();
+
+            if (extendOnly && taunter != null && ReferenceEquals(TauntTarget, taunter) && TauntExpiry >= newExpiry)
+                return true;
+
+            // A taunt that takes is the player engaging this creature: it ends a Balance Trials start-grace hold (one compare otherwise).
+            BreakTrialHold();
+
+            if (!onHit)
+                TauntNonOnHitExpiry = newExpiry;
+            else if (!(ReferenceEquals(TauntTarget, taunter) && Timers.RunningTime < TauntExpiry))
+                TauntNonOnHitExpiry = 0.0; // a fresh or foreign hold is on-hit only; a live same-taunter hold keeps its AoE backing
+
             TauntTarget = taunter;
-            TauntExpiry = Timers.RunningTime + duration * GetMonsterEffectTauntHoldMultiplier();
+            TauntExpiry = newExpiry;
 
             var prevAttackTarget = AttackTarget;
             AttackTarget = taunter;
@@ -115,10 +153,6 @@ namespace ACE.Server.WorldObjects
         {
             if (DebugMove)
                 Console.WriteLine($"{Name} ({Guid}).Sleep()");
-
-            // Open World Threads (R11c): every return-home leg ends here, in State.Return.
-            if (MonsterState == State.Return && P_OutdoorPerimeter != null)
-                OnOutdoorPerimeterHomeArrival();
 
             SetCombatMode(CombatMode.NonCombat);
 
@@ -506,12 +540,15 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         private static readonly Tolerance ExcludeSpawnScan = Tolerance.NoAttack | Tolerance.Appraise | Tolerance.Provoke | Tolerance.Retaliate;
 
+        /// <summary>CheckTargets' own exclusion, shared with the Balance Trials start-grace release (Monster_Tick).</summary>
+        private bool SpawnScanExcluded => !Attackable && TargetingTactic == TargetingTactic.None || (Tolerance & ExcludeSpawnScan) != 0;
+
         /// <summary>
         /// Called when a monster is first spawning in
         /// </summary>
         public void CheckTargets()
         {
-            if (!Attackable && TargetingTactic == TargetingTactic.None || (Tolerance & ExcludeSpawnScan) != 0)
+            if (SpawnScanExcluded)
                 return;
 
             var actionChain = new ActionChain();

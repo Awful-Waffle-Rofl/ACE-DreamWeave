@@ -70,6 +70,10 @@ namespace ACE.Server.WorldObjects
             if (monster.SameFaction(this))
                 monster.AddRetaliateTarget(this);
 
+            // Balance Trials start grace: the creature the pet attacked (only it) wakes now through the retaliation below.
+            if (monster.P_TrialHoldUntil != 0.0)
+                monster.BreakTrialHold();
+
             if (monster.MonsterState == State.Idle && (monster.Tolerance & PlayerCombatPet_RetaliateExclude) == 0)
             {
                 monster.AttackTarget = this;

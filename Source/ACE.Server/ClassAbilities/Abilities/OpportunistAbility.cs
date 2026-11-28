@@ -1,3 +1,4 @@
+using System;
 using ACE.Common;
 using ACE.Entity.Enum;
 using ACE.Entity.Models;
@@ -22,7 +23,9 @@ namespace ACE.Server.ClassAbilities.Abilities
     ///    is inherently party-wide by its own design (WeakenedBloodAbility's doc comment: "from ANY caster,
     ///    not only the one who applied it"), so there is no narrower caster to check.
     ///  - Taunt: Creature.TauntTarget / TauntExpiry (Monster_Awareness.ApplyTaunt), checked against the
-    ///    attacker/fellow.
+    ///    attacker/fellow. Only the stretch backed by a non-on-hit taunt (Creature.TauntNonOnHitExpiry) counts: Vanguard's
+    ///    on-hit taunt rides every hit, so counting it would make every struck monster a mark (owner ruling 2026-11-25).
+    ///    See <see cref="TauntQualifies"/>.
     ///  - Blindness: Pocket Sand's synthetic attack debuff, filed under
     ///    EnchantmentManager.SpellCategory_ClassAbility_PocketSand (Player_ClassAbilityCombat.TryPocketSand)
     ///    - the only "blindness" this fork's server side actually applies.
@@ -49,7 +52,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             DisplayName = "Opportunist",
             // Live text: rank * class_ability_opportunist_percent_per_rank (ModifyOutgoingDamage / GetReadout).
             DescriptionTemplate = "You deal more damage to any target with a debuff or crowd control from you or a fellow: " +
-                          "Vulnerability, Imperil, blindness, taunts or Weakened Blood.",
+                          "Vulnerability, Imperil, blindness, taunts (not the Taunt ability's on-hit taunt) or Weakened Blood.",
             RankTailTemplate = "+{per:class_ability_opportunist_percent_per_rank|pct}% damage",
             MaxRank = 5,
             CostPerRank = new[] { 1, 1, 1, 1, 1 },
@@ -109,8 +112,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 return true;
 
             // Taunt: Monster_Awareness.ApplyTaunt's forced-attack-target state.
-            if (target.TauntTarget != null && Timers.RunningTime < target.TauntExpiry &&
-                IsAppliedBySelfOrFellow(attacker, target.TauntTarget.Guid.Full))
+            if (TauntQualifies(target, taunter => IsAppliedBySelfOrFellow(attacker, taunter.Guid.Full)))
                 return true;
 
             // Blindness: Pocket Sand's synthetic attack debuff.
@@ -149,6 +151,22 @@ namespace ACE.Server.ClassAbilities.Abilities
 
             return false;
         }
+
+        /// <summary>
+        /// Whether <paramref name="target"/> carries a live taunt hold that counts as a mark: unexpired, from a
+        /// taunter <paramref name="isOwnTaunter"/> accepts, and still inside the non-on-hit backing
+        /// (<see cref="Creature.TauntNonOnHitExpiry"/>), so the Vanguard on-hit hold alone never counts. Pure over its
+        /// inputs so it is testable without a Player.
+        /// </summary>
+        public static bool TauntQualifies(Creature target, Func<Creature, bool> isOwnTaunter) =>
+            TauntQualifies(target, isOwnTaunter, Timers.RunningTime);
+
+        /// <summary><see cref="TauntQualifies(Creature, Func{Creature, bool})"/> at an explicit clock reading, so tests need not wait.</summary>
+        public static bool TauntQualifies(Creature target, Func<Creature, bool> isOwnTaunter, double now) =>
+            target.TauntTarget != null
+            && now < target.TauntExpiry
+            && now < target.TauntNonOnHitExpiry
+            && isOwnTaunter(target.TauntTarget);
 
         private static bool IsAppliedBySelfOrFellow(Player attacker, uint casterGuid)
         {

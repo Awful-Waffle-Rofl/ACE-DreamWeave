@@ -149,7 +149,7 @@ namespace ACE.Server.Command.Handlers
             {
                 Case = "part-tinkered melee",
                 Wcid = 53315,
-                Expected = "reroll SUCCEEDS, swap REFUSES - a swap trades a slot, it cannot fill an empty one.",
+                Expected = "reroll and swap BOTH succeed. Traditional tinkers have no bearing on Tourmaline or Amethyst; the three Iron tinkers stay untouched.",
                 Ints = new (PropertyInt, int?)[]
                 {
                     (PropertyInt.NumTimesTinkered, 3),
@@ -163,7 +163,7 @@ namespace ACE.Server.Command.Handlers
             {
                 Case = "ten-Oak melee",
                 Wcid = 53315,
-                Expected = "REFUSED both ways. All ten slots hold Oak, which this system cannot reverse.",
+                Expected = "reroll and swap SUCCEED. Traditional tinkers have no bearing on Tourmaline or Amethyst; the ten Oak tinkers stay untouched.",
                 Ints = new (PropertyInt, int?)[]
                 {
                     (PropertyInt.NumTimesTinkered, 10),
@@ -338,7 +338,11 @@ namespace ACE.Server.Command.Handlers
             {
                 Case = "shield",
                 Wcid = 1000238,
-                Expected = "REFUSED. A shield is not a weapon.",
+                Expected = "reroll SUCCEEDS. A shield takes weapon mods like a weapon - workmanship 6 here, because the base weenie has none.",
+                Ints = new (PropertyInt, int?)[]
+                {
+                    (PropertyInt.ItemWorkmanship, 6),
+                },
             },
             new WeaponModKitEntry
             {
@@ -567,8 +571,8 @@ namespace ACE.Server.Command.Handlers
     ///   - LongDesc: AppraiseInfo.cs no longer writes it at all (it did when this probe was first run, which is
     ///     why the marker below is still worth stamping - it now passes through completely unmodified).
     ///   - Use: AppraiseInfo.cs overwrites PropertyString.Use for `wo is ManaStone`, and WritePropertyDetails
-    ///     APPENDS the "Property Details:" block to it, but only when propertyDetails.Count > 0 (an active
-    ///     MultiShot/equipment-mod/weapon-mod line exists on this specific item). With no such line active, the
+    ///     APPENDS the "Property Details:" and/or "Weapon Mods:" block to it, but only when either list is
+    ///     non-empty (an active MultiShot/equipment-mod/weapon-mod line exists on this specific item). With no such line active, the
     ///     stored Use marker passes through unmodified, which is the common case for a plain probe target. If
     ///     the target DOES have an active mod line, the marker still appears - as the prefix the block is
     ///     appended to - and is never silently dropped. So a stored property genuinely works for all three

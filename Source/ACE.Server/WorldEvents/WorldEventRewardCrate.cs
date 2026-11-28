@@ -6,7 +6,9 @@ using System.Reflection;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.Factories;
+using ACE.Server.Knots;
 using ACE.Server.Network.GameMessages.Messages;
+using ACE.Server.ThreadDungeons;
 using ACE.Server.WorldEvents.Defs;
 using ACE.Server.WorldObjects;
 
@@ -91,6 +93,51 @@ namespace ACE.Server.WorldEvents
             return Math.Min(2.0, stamped.Value);
         }
 
+        /// <summary>
+        /// Effective roll count: m as-is when the profile has no draws (World Events); otherwise draws - 1 + m, so
+        /// a crate never pays fewer rolls just past a tier boundary (t2 at m 1.9 = 3.9 rolls, t3 at m 1.0 = 4.0). Pure.
+        /// </summary>
+        public static double EffectiveRolls(int? draws, double m) => draws == null ? m : draws.Value - 1 + m;
+
+        /// <summary>
+        /// Stamps a created object from its roll row. itemMaxLevel rows get ItemMaxLevel and the matching level
+        /// overlay icon; knotItem "pattern" rows get a pinnacle picked uniformly from <paramref name="availablePinnacles"/>
+        /// with <paramref name="rng"/>; "fiber" rows get <paramref name="playerLevel"/>. Both Knot stamps are the
+        /// Thread drop path's (KnotDrops.StampPattern / StampFiber). A plain row is untouched. Returns false when a
+        /// Knot row cannot be stamped (no available pinnacle, or no player level): the caller skips that object.
+        /// Pure of any live world: every input is a parameter.
+        /// </summary>
+        public static bool ApplyRollStamps(WorldObject wo, RolledReward row, IReadOnlyList<PinnacleDef> availablePinnacles = null, int? playerLevel = null, Random rng = null)
+        {
+            if (wo == null || row == null)
+                return true;
+
+            if (row.ItemMaxLevel != null)
+            {
+                var level = row.ItemMaxLevel.Value;
+
+                wo.ItemMaxLevel = level;
+                wo.IconOverlayId = LootGenerationFactory.IconOverlay_ItemMaxLevel[level - 1];
+            }
+
+            if (row.KnotItem == RewardPoolEntryDef.KnotPattern)
+            {
+                if (availablePinnacles == null || availablePinnacles.Count == 0)
+                    return false;
+
+                KnotDrops.StampPattern(wo, availablePinnacles[(rng ?? new Random()).Next(availablePinnacles.Count)]);
+            }
+            else if (row.KnotItem == RewardPoolEntryDef.KnotFiber)
+            {
+                if (playerLevel == null || playerLevel.Value < 1)
+                    return false;
+
+                KnotDrops.StampFiber(wo, playerLevel.Value);
+            }
+
+            return true;
+        }
+
         /// <summary>The stamped profile, or <see cref="DefaultProfile"/> when it is missing or blank.</summary>
         public static string ResolveProfile(string stamped) => string.IsNullOrWhiteSpace(stamped) ? DefaultProfile : stamped.Trim();
 
@@ -140,7 +187,7 @@ namespace ACE.Server.WorldEvents
                 return;
             }
 
-            var rolled = WorldEventRewardRoller.Roll(reward.Pool, multiplier, new Random());
+            var rolled = WorldEventRewardRoller.Roll(reward.Pool, EffectiveRolls(reward.Draws, multiplier), new Random());
 
             if (rolled.Count == 0)
             {
@@ -150,56 +197,43 @@ namespace ACE.Server.WorldEvents
             }
 
             var items = new List<WorldObject>();
+            var stampRng = new Random();
+            List<PinnacleDef> pinnacles = null;
 
             try
             {
-                foreach (var (wcid, qty) in rolled)
+                foreach (var row in rolled)
                 {
-                    var first = WorldObjectFactory.CreateNewWorldObject(wcid);
+                    if (row.KnotItem == RewardPoolEntryDef.KnotPattern && pinnacles == null)
+                        pinnacles = KnotPinnacles.Available(ThreadDungeonManager.Store);
 
-                    if (first == null)
+                    var built = BuildRowObjects(row, WorldObjectFactory.CreateNewWorldObject, pinnacles, player.Level, stampRng, items.Count);
+
+                    if (built.Failure != null)
                     {
-                        log.Error($"[WORLDEVENT] crate-open refused for {player.Name}: wcid {wcid} would not create");
+                        log.Error($"[WORLDEVENT] crate-open refused for {player.Name}: {built.Failure}");
                         DestroyAll(items);
                         TrySendError(player, "The Event Crate will not open.");
                         return;
                     }
 
-                    var stackable = first is Stackable && (first.MaxStackSize ?? 1) > 1;
-                    var sizes = SplitStacks(qty, stackable ? first.MaxStackSize ?? 1 : 1);
+                    if (built.Skipped > 0)
+                        log.Error($"[WORLDEVENT] crate-open for {player.Name}: wcid {row.Wcid} ({row.KnotItem}) could not be stamped (no available pinnacle or no player level); {built.Skipped} object(s) skipped");
 
-                    if (items.Count + sizes.Count > MaxObjects)
-                    {
-                        first.Destroy();
-                        log.Error($"[WORLDEVENT] crate-open refused for {player.Name}: the roll would create more than {MaxObjects} objects");
-                        DestroyAll(items);
-                        TrySendError(player, "The Event Crate will not open.");
-                        return;
-                    }
-
-                    for (var i = 0; i < sizes.Count; i++)
-                    {
-                        var wo = i == 0 ? first : WorldObjectFactory.CreateNewWorldObject(wcid);
-
-                        if (wo == null)
-                        {
-                            log.Error($"[WORLDEVENT] crate-open refused for {player.Name}: wcid {wcid} would not create");
-                            DestroyAll(items);
-                            TrySendError(player, "The Event Crate will not open.");
-                            return;
-                        }
-
-                        if (stackable)
-                            wo.SetStackSize(sizes[i]);
-
-                        items.Add(wo);
-                    }
+                    items.AddRange(built.Objects);
                 }
             }
             catch
             {
                 DestroyAll(items);
                 throw;
+            }
+
+            if (items.Count == 0)
+            {
+                log.Error($"[WORLDEVENT] crate-open refused for {player.Name}: every rolled object was skipped (profile '{profile}', mult={multiplier:0.##}); the crate is kept");
+                TrySendError(player, "The Event Crate will not open.");
+                return;
             }
 
             if (!player.CanAddToInventory(items))
@@ -241,7 +275,73 @@ namespace ACE.Server.WorldEvents
 
             player.Session?.Network?.EnqueueSend(new GameMessageSystemChat("You break open the Event Crate.", ChatMessageType.Broadcast));
 
-            log.Info($"[WORLDEVENT] crate-open player={player.Name} mult={multiplier.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)} items={string.Join(",", rolled.Select(r => $"{r.Wcid}:{r.Qty}"))}");
+            log.Info($"[WORLDEVENT] crate-open player={player.Name} mult={multiplier.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)} items={string.Join(",", rolled.Select(DescribeRow))}");
+        }
+
+        /// <summary>Log text for one rolled row: "wcid:qty", plus "(L5)" for an itemMaxLevel row or "(pattern)"/"(fiber)" for a knotItem row.</summary>
+        public static string DescribeRow(RolledReward r)
+            => $"{r.Wcid}:{r.Qty}" + (r.ItemMaxLevel != null ? $"(L{r.ItemMaxLevel})" : "") + (r.KnotItem != null ? $"({r.KnotItem})" : "");
+
+        /// <summary>The outcome of building one rolled row: the objects to give, how many were skipped, or a Failure that refuses the crate.</summary>
+        internal sealed class RowBuild
+        {
+            public List<WorldObject> Objects { get; } = new List<WorldObject>();
+            public int Skipped { get; set; }
+            public string Failure { get; set; }
+        }
+
+        /// <summary>
+        /// Builds the objects for one rolled row: create, split into stacks, stamp, and skip (destroying) an object whose
+        /// Knot stamp is refused. Every object of the row is stamped, not just the first. A Failure (a wcid that will not
+        /// create, or more than <see cref="MaxObjects"/> objects counting <paramref name="alreadyBuilt"/>) destroys what
+        /// this call made and leaves Objects empty. Free of any live world: creation, pinnacles, level and rng are inputs.
+        /// </summary>
+        internal static RowBuild BuildRowObjects(RolledReward row, Func<uint, WorldObject> create, IReadOnlyList<PinnacleDef> pinnacles, int? playerLevel, Random rng, int alreadyBuilt = 0)
+        {
+            var result = new RowBuild();
+            var first = create(row.Wcid);
+
+            if (first == null)
+            {
+                result.Failure = $"wcid {row.Wcid} would not create";
+                return result;
+            }
+
+            var stackable = first is Stackable && (first.MaxStackSize ?? 1) > 1;
+            var sizes = SplitStacks(row.Qty, stackable ? first.MaxStackSize ?? 1 : 1);
+
+            if (alreadyBuilt + sizes.Count > MaxObjects)
+            {
+                first.Destroy();
+                result.Failure = $"the roll would create more than {MaxObjects} objects";
+                return result;
+            }
+
+            for (var i = 0; i < sizes.Count; i++)
+            {
+                var wo = i == 0 ? first : create(row.Wcid);
+
+                if (wo == null)
+                {
+                    DestroyAll(result.Objects);
+                    result.Failure = $"wcid {row.Wcid} would not create";
+                    return result;
+                }
+
+                if (stackable)
+                    wo.SetStackSize(sizes[i]);
+
+                if (!ApplyRollStamps(wo, row, pinnacles, playerLevel, rng))
+                {
+                    wo.Destroy();
+                    result.Skipped++;
+                    continue;
+                }
+
+                result.Objects.Add(wo);
+            }
+
+            return result;
         }
 
         private static void DestroyAll(List<WorldObject> items)

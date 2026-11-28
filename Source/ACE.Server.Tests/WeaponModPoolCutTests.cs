@@ -51,7 +51,7 @@ namespace ACE.Server.Tests
     [TestClass]
     public class WeaponModPoolCutTests
     {
-        private static readonly WeaponClass[] Classes = { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster };
+        private static readonly WeaponClass[] Classes = { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster, WeaponClass.Shield };
 
         /// <summary>
         /// Every PropertyFloat id a removed modifier held, with the name it carried and the date it went. Read

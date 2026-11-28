@@ -14,7 +14,7 @@ using ACE.Server.WorldObjects;
 namespace ACE.Server.Tests
 {
     /// <summary>
-    /// Shared fixtures for the Duo Summon Gem and Summon Gem Hammer tests (Custom Summons Task 7): real PetDevice / Gem
+    /// Shared fixtures for the Duo Summon Essence and Summon Gem Hammer tests (Custom Summons Task 7): real PetDevice / Gem
     /// objects built from in-memory weenies, and a fake pack whose every operation is logged in order and can be made
     /// to fail, so the destroy/create ordering is tested without a Session.
     /// </summary>
@@ -75,7 +75,7 @@ namespace ACE.Server.Tests
             return device;
         }
 
-        /// <summary>A blank Duo Summon Gem as sold: a PetDevice with a use-on-target cursor and no pet, charges or cooldown.</summary>
+        /// <summary>A blank Duo Summon Essence as sold: a PetDevice with a use-on-target cursor and no pet, charges or cooldown.</summary>
         public static PetDevice BlankGem()
         {
             var weenie = new Weenie
@@ -84,7 +84,7 @@ namespace ACE.Server.Tests
                 WeenieType = WeenieType.PetDevice,
                 PropertiesInt = new Dictionary<PropertyInt, int> { { PropertyInt.ItemUseable, (int)Usable.SourceContainedTargetContained } },
                 PropertiesBool = new Dictionary<PropertyBool, bool> { { PropertyBool.DuoSummonGem, true } },
-                PropertiesString = new Dictionary<PropertyString, string> { { PropertyString.Name, "Duo Summon Gem" } },
+                PropertiesString = new Dictionary<PropertyString, string> { { PropertyString.Name, "Duo Summon Essence" } },
             };
 
             return new PetDevice(weenie, NextGuid());

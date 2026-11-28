@@ -98,10 +98,29 @@ namespace ACE.Server.Tests
             }
         }
 
+        private Func<double> savedCritDraw;
+
+        /// <summary>
+        /// Every reflect now rolls a crit (10% base); these tests assert exact amounts, so the draw is pinned to 1.0
+        /// (never a crit) and restored after each test.
+        /// </summary>
         [TestInitialize]
-        public void SeedTunables() => RestoreTunables();
+        public void SeedTunables()
+        {
+            savedCritDraw = ThornsAbility.CritDraw;
+            ThornsAbility.CritDraw = () => 1.0;
+
+            RestoreTunables();
+        }
 
         [TestCleanup]
+        public void RestoreCritDrawAndTunables()
+        {
+            ThornsAbility.CritDraw = savedCritDraw;
+
+            RestoreTunables();
+        }
+
         public void RestoreTunables()
         {
             foreach (var key in SeededDoubles)
@@ -377,7 +396,19 @@ namespace ACE.Server.Tests
             var equipped = new Dictionary<ObjectGuid, WorldObject> { { shield.Guid, shield } };
             SetField(typeof(Creature), player, "<EquippedObjects>k__BackingField", equipped);
 
+            // the reflect reads the total Damage Rating every time and Crit Damage Rating on a crit, both through the
+            // enchantment manager, and rolls its crit with the Shield skill (shield weapon mods, 2026-11-25). The skill
+            // is Inactive at InitLevel 400, so its Base is exactly 400 with no attribute formula (an uninitialized
+            // Player has no attribute table); the reflect only reads it for an imbued shield.
+            player.Biota.PropertiesEnchantmentRegistry = new List<ACE.Entity.Models.PropertiesEnchantmentRegistry>();
+            SetField(typeof(WorldObject), player, "EnchantmentManager", new ACE.Server.WorldObjects.Managers.EnchantmentManagerWithCaching(player));
+            SetField(typeof(Creature), player, nameof(Creature.Skills), new Dictionary<Skill, ACE.Server.WorldObjects.Entity.CreatureSkill>
+            {
+                { Skill.Shield, new ACE.Server.WorldObjects.Entity.CreatureSkill(player, Skill.Shield, new PropertiesSkill { InitLevel = 400, SAC = SkillAdvancementClass.Inactive }) },
+            });
+
             Assert.AreSame(shield, player.GetEquippedShield(), "harness: the seeded shield must be what GetEquippedShield finds");
+            Assert.AreEqual(400u, player.GetCreatureSkill(Skill.Shield).Base, "harness: the seeded Shield skill reads Base 400");
 
             return player;
         }

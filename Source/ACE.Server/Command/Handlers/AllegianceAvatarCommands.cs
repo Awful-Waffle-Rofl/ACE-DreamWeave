@@ -137,7 +137,8 @@ namespace ACE.Server.Command.Handlers
             switch (verb)
             {
                 case AvatarCommandVerb.Status:
-                    foreach (var line in AvatarStatusText.Lines(avatar, AvatarManager.CurrentTuning(), AvatarVendor.AccountDisplayName))
+                    var statusTuning = AvatarManager.CurrentTuning();
+                    foreach (var line in AvatarStatusText.Lines(avatar, statusTuning, AvatarManager.FavorCapFor(avatar, statusTuning), AvatarVendor.AccountDisplayName))
                         AvatarNpcs.Tell(player, line);
                     break;
 

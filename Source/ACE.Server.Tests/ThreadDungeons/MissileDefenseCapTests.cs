@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
 
@@ -206,6 +207,26 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         [TestMethod]
+        public void The_missile_clamp_guard_check_discriminates_a_player_not_excluded()
+        {
+            var skill = PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/Entity/CreatureSkill.cs");
+            const string pattern = @"ClampToDefenseCeiling\(total, creature\.GetMissileDefenseSkillCeiling\(Skill\)\)";
+            Assert.AreEqual(2, Regex.Matches(skill, pattern).Count);
+
+            foreach (Match call in Regex.Matches(skill, pattern))
+                Assert.IsNull(MagicAttackCapTests.ClampGuardFault(skill, call.Index), "positive control: the real source passes");
+
+            var baseDropsElse = skill.Replace("else if (creature != null)", "if (creature != null)");
+            var currentDropsPlayer = skill.Replace("if (player == null && creature != null)", "if (creature != null)");
+            Assert.AreNotEqual(skill, baseDropsElse, "the Base mutation anchor must exist");
+            Assert.AreNotEqual(skill, currentDropsPlayer, "the Current mutation anchor must exist");
+
+            foreach (var mutated in new[] { baseDropsElse, currentDropsPlayer })
+                Assert.IsTrue(Regex.Matches(mutated, pattern).Cast<Match>().Any(m => MagicAttackCapTests.ClampGuardFault(mutated, m.Index) != null),
+                    "a branch that no longer excludes a player must fault");
+        }
+
+        [TestMethod]
         public void The_ceiling_sits_before_enchantments_and_never_applies_to_a_player()
         {
             // A Player cannot be constructed in this harness, so these guarantees are pinned as source text.
@@ -223,7 +244,8 @@ namespace ACE.Server.Tests.ThreadDungeons
             foreach (Match call in calls)
             {
                 Assert.IsTrue(call.Index < multiplier, "each clamp precedes the enchantment multiplier, so a player debuff lands on top");
-                Assert.IsTrue(skill.Substring(call.Index - 900, 900).Contains("creature != null"), "each clamp sits in a non-player creature branch");
+                var fault = MagicAttackCapTests.ClampGuardFault(skill, call.Index);
+                Assert.IsNull(fault, "each clamp sits in a branch that excludes a player: " + fault);
             }
         }
 

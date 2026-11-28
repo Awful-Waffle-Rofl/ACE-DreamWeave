@@ -81,6 +81,7 @@ namespace ACE.Server.Pvp
                 Shade2 = weenie.GetProperty(PropertyFloat.Shade2),
                 Shade3 = weenie.GetProperty(PropertyFloat.Shade3),
                 Shade4 = weenie.GetProperty(PropertyFloat.Shade4),
+                DyeShellShade = weenie.GetProperty(PropertyFloat.DyeShellShade),
                 IgnoreCloIcons = weenie.GetProperty(PropertyBool.IgnoreCloIcons),
             },
             ValidLocations = weenie.GetProperty(PropertyInt.ValidLocations) ?? 0,

@@ -22,8 +22,8 @@ namespace ACE.Server.BalanceTrials
         /// <summary>Number of master slots (one per archetype slot).</summary>
         public const int MasterCount = 32;
 
-        /// <summary>Number of rep characters, one per account trial-01..trial-08.</summary>
-        public const int RepCount = 8;
+        /// <summary>Number of rep characters, one per account trial-01..trial-12.</summary>
+        public const int RepCount = 12;
 
         /// <summary>Guid distance between one slot's item band and the next.</summary>
         public const uint ItemBandStride = 0x00100000;
@@ -33,7 +33,7 @@ namespace ACE.Server.BalanceTrials
 
         private const uint RepBase = SlotBase + 0x100;
 
-        private static readonly string[] RepWords = { "Anvil", "Bastion", "Cairn", "Dirge", "Ember", "Flint", "Gale", "Hearth" };
+        private static readonly string[] RepWords = { "Anvil", "Bastion", "Cairn", "Dirge", "Ember", "Flint", "Gale", "Hearth", "Ingot", "Jasper", "Kiln", "Lantern" };
 
         /// <summary>One rep character: a guid, its display name and the account it logs in on.</summary>
         public readonly record struct RepSlot(uint Guid, string Name, string AccountName);

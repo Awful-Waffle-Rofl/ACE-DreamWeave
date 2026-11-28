@@ -48,11 +48,12 @@ namespace ACE.Server.Pvp
         public double? Shade2 { get; }
         public double? Shade3 { get; }
         public double? Shade4 { get; }
+        public double? DyeShellShade { get; }
         public bool? IgnoreCloIcons { get; }
 
         public HueOriginal(uint? icon, int? paletteTemplate, double? shade,
             uint? setup = null, uint? clothingBase = null, uint? paletteBase = null,
-            double? shade2 = null, double? shade3 = null, double? shade4 = null, bool? ignoreCloIcons = null)
+            double? shade2 = null, double? shade3 = null, double? shade4 = null, bool? ignoreCloIcons = null, double? dyeShellShade = null)
         {
             IgnoreCloIcons = ignoreCloIcons;
             Icon = icon;
@@ -64,6 +65,7 @@ namespace ACE.Server.Pvp
             Shade2 = shade2;
             Shade3 = shade3;
             Shade4 = shade4;
+            DyeShellShade = dyeShellShade;
         }
     }
 
@@ -79,6 +81,7 @@ namespace ACE.Server.Pvp
         public double? Shade2 { get; set; }
         public double? Shade3 { get; set; }
         public double? Shade4 { get; set; }
+        public double? DyeShellShade { get; set; }
         public bool? IgnoreCloIcons { get; set; }
     }
 
@@ -395,7 +398,7 @@ namespace ACE.Server.Pvp
         }
 
         /// <summary>
-        /// The look-field copy/remove plan: Setup, ClothingBase, PaletteBase, PaletteTemplate and Shade 1-4 come from the
+        /// The look-field copy/remove plan: Setup, ClothingBase, PaletteBase, PaletteTemplate, Shade 1-4 and DyeShellShade come from the
         /// source (a field the source lacks is removed from the item; Setup is kept instead, since an item with no Setup
         /// breaks). IgnoreCloIcons is carried: true on the source means the source's own Icon is written (never the table
         /// icon) and the flag is set on the item; false or absent removes it. Otherwise Icon is the ClothingTable icon for
@@ -415,6 +418,7 @@ namespace ACE.Server.Pvp
                     Shade2 = source.Shade2,
                     Shade3 = source.Shade3,
                     Shade4 = source.Shade4,
+                    DyeShellShade = source.DyeShellShade,
                     IgnoreCloIcons = source.IgnoreCloIcons == true ? true : (bool?)null,
                 },
                 KeepSetup = !source.Setup.HasValue,

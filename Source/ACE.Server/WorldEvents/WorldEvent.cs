@@ -599,6 +599,7 @@ namespace ACE.Server.WorldEvents
             Composition = composition;
             Request = request;
             AvatarId = request?.AvatarId;
+            lastMonarch = request?.AvatarMonarchGuid;
             AnnounceServerWide = request?.AnnounceServerWide ?? true;
             avatarFavorPrice = request?.AvatarFavorPrice ?? 0;
             Objective = objective;
@@ -715,7 +716,12 @@ namespace ACE.Server.WorldEvents
 
             try
             {
-                var seats = Participation.Records.Select(r => r.CharacterGuid).OrderBy(g => g).ToList();
+                // A quiet private Avatar event deals no share to a character outside the members frozen at Rewarding entry.
+                SnapshotRewardMembers();
+
+                var seats = Participation.Records.Select(r => r.CharacterGuid)
+                    .Where(g => !ExcludesFromRewards(g))
+                    .OrderBy(g => g).ToList();
                 var offset = seats.Count > 1 ? ThreadSafeRandom.Next(0, seats.Count - 1) : 0;
 
                 var summary = pool.CloseAndDeal(seats, offset);
@@ -4152,6 +4158,7 @@ namespace ACE.Server.WorldEvents
                 // Pooled loot: the seats are frozen and the bank dealt BEFORE the caches exist, so the first claim
                 // can already find its share. The ledger is final here - DestroyEventCreatures below cuts every
                 // back-reference, and contact credit is gated on Active.
+                SnapshotRewardMembers();
                 DealLootPool();
 
                 try

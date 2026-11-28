@@ -44,7 +44,7 @@ namespace ACE.Server.Tests.KnotLoot
         private const int WristWear = 0x30000;
 
         [TestMethod]
-        public void EachItem_TinkerLocked_Level100_NoBondNoRareSet()
+        public void EachItem_TinkerLocked_WieldLevelPinned_NoBondNoRareSet()
         {
             foreach (var wcid in AllWcids)
             {
@@ -55,7 +55,8 @@ namespace ACE.Server.Tests.KnotLoot
                 Assert.AreEqual("True", bools[TinkerLockedProp], $"{wcid} TinkerLocked");
                 Assert.AreEqual("7", ints[WieldRequirementsProp], $"{wcid} WieldRequirements = Level");
                 Assert.AreEqual("1", ints[WieldSkillTypeProp], $"{wcid} WieldSkillType");
-                Assert.AreEqual("100", ints[WieldDifficultyProp], $"{wcid} WieldDifficulty");
+                // Owner ruling 2026-11-26: the Shield of the Rose alone requires level 200.
+                Assert.AreEqual(wcid == Shield ? "200" : "100", ints[WieldDifficultyProp], $"{wcid} WieldDifficulty");
 
                 Assert.IsFalse(ints.ContainsKey(BondedProp), $"{wcid} must not be Bonded");
                 Assert.IsFalse(ints.ContainsKey(AttunedProp), $"{wcid} must not be Attuned");

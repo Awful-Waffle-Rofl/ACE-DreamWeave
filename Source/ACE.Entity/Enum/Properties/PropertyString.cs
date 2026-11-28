@@ -287,10 +287,10 @@ namespace ACE.Entity.Enum.Properties
         // Per-copy creation roll (ACE.Server.Entity.CreationRoll): on a weenie, a v1| spec of stats each created copy rolls; removed from the copy.
         CreationRollSpec                   = 9031,
 
-        // Custom Summons: on a Duo Summon Gem, the stored state of the first absorbed summon item.
+        // Custom Summons: on a Duo Summon Essence, the stored state of the first absorbed summon item.
         DuoSummonSlotA                     = 9032,
 
-        // Custom Summons: on a Duo Summon Gem, the stored state of the second absorbed summon item.
+        // Custom Summons: on a Duo Summon Essence, the stored state of the second absorbed summon item.
         DuoSummonSlotB                     = 9033,
 
         // Balance Trials: on a trial master character, v1|<archetypeSha256>|<calibrationSha256> of the files it was built from.

@@ -67,7 +67,7 @@ namespace ACE.Server.Tests.Knots
             StringAssert.Contains(login, "ACE.Server.Knots.KnotPendingEvents.ScheduleApplyOnLogin(session.Player);");
 
             var store = PooledLootSourceText.Read("Source/ACE.Server/Knots/KnotPendingEvents.cs");
-            StringAssert.Contains(store, "IN MEMORY ONLY");
+            StringAssert.Contains(PooledLootSourceText.ReadRaw("Source/ACE.Server/Knots/KnotPendingEvents.cs"), "IN MEMORY ONLY"); // doc-comment text
             StringAssert.Contains(store, "KnotEncounterEvents.RefundEntry(owner, knotGuid)");
             StringAssert.Contains(store, "KnotEncounterEvents.OnAttemptLost(owner, knotGuid)");
             StringAssert.Contains(store, "KnotEncounterEvents.OnBossKilled(owner, knotGuid)");

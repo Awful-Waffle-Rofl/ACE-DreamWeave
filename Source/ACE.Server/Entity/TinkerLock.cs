@@ -36,9 +36,66 @@ namespace ACE.Server.Entity
     /// message), and - while weapon_mods_enabled is on - the fork's weapon-mod salvage
     /// (Tourmaline and Amethyst, WeaponModManager.IsModMaterial), as if the weapon were loot-dropped.
     /// Everything else is refused, with its own message. Refire stations refuse the weapon outright.
+    ///
+    /// Tinker-locked SHIELDS (owner ruling 2026-11-25; today only the Shield of the Rose, 1007451) are an exception to
+    /// the lock, keyed on properties (TinkerLocked AND IsShield), never on wcid, so it also covers shields already
+    /// held: they admit the four shield salvage materials ShieldSalvageTargets.WidensToShields names (Tourmaline and
+    /// Amethyst only while weapon_mods_enabled is on, Black Opal and Fire Opal regardless). A locked weapon is not
+    /// affected. The workmanship the imbue recipes and WeaponModManager need is data, not code: the Shield of the Rose
+    /// weenie carries ItemWorkmanship 10, and Database/Updates/Shard/2026-11-25-01-Shield-Of-The-Rose-Workmanship.sql
+    /// adds it to Roses created earlier.
     /// </summary>
     public static class TinkerLock
     {
+        /// <summary>
+        /// Pure: does the tinker-locked-shield exception admit this source? Only for a target that is both TinkerLocked
+        /// and a shield, and a source ShieldSalvageTargets.WidensToShields accepts. Tourmaline / Amethyst
+        /// (sourceIsWeaponModMaterial) need weapon mods enabled, as on a Drift Atlan weapon; Black / Fire Opal do not.
+        /// The enabled flag is a parameter so tests never read PropertyManager.
+        /// </summary>
+        public static bool LockedShieldAdmits(bool targetLocked, bool targetIsShield, bool sourceWidensToShields,
+            bool sourceIsWeaponModMaterial, bool weaponModsEnabled)
+        {
+            if (!targetLocked || !targetIsShield || !sourceWidensToShields)
+                return false;
+
+            return !sourceIsWeaponModMaterial || weaponModsEnabled;
+        }
+
+        /// <summary>
+        /// Pure core including the tinker-locked-shield exception: when <paramref name="lockedShieldAdmits"/> is true (the
+        /// answer of <see cref="LockedShieldAdmits(WorldObject, WorldObject)"/> in production), the lock rule stands down
+        /// for the source; the Drift Atlan rule (and, in production, the salvage allow-list mask) still apply on their own
+        /// terms. Otherwise identical to the 7-argument overload.
+        /// </summary>
+        public static bool IsRefused(bool targetLocked, bool lockedShieldAdmits, bool targetIsDriftAtlan, bool sourceIsManaStone, bool hasCookbookRow,
+            bool sourceIsWeaponModMaterial, bool weaponModsEnabled, bool sourceIsParagonModSource)
+        {
+            var lockApplies = targetLocked && !lockedShieldAdmits;
+
+            return IsRefused(lockApplies, targetIsDriftAtlan, sourceIsManaStone, hasCookbookRow, sourceIsWeaponModMaterial, weaponModsEnabled,
+                sourceIsParagonModSource);
+        }
+
+        /// <summary>True for a target the exception covers: TinkerLocked AND a shield (properties, never wcid).</summary>
+        public static bool IsLockedShield(WorldObject target)
+        {
+            return target != null && (target.GetProperty(PropertyBool.TinkerLocked) ?? false) && target.IsShield;
+        }
+
+        /// <summary>
+        /// Production: does the tinker-locked-shield exception admit this source on this target? The single derivation
+        /// of the exception's inputs; production IsRefused(WorldObject, WorldObject) calls exactly this.
+        /// </summary>
+        public static bool LockedShieldAdmits(WorldObject source, WorldObject target)
+        {
+            if (source == null || !IsLockedShield(target))
+                return false;
+
+            return LockedShieldAdmits(true, true, ShieldSalvageTargets.WidensToShields(source), WeaponModManager.IsModMaterial(source),
+                WeaponModRegistry.Enabled());
+        }
+
         /// <summary>
         /// Pure core, injectable so unit tests never touch PropertyManager or the database (a
         /// PropertyManager read throws outside a running server - see
@@ -199,6 +256,12 @@ namespace ACE.Server.Entity
         /// </summary>
         public const string KnotRefusalText = "The glass and thread of this piece will not take salvage.";
 
+        /// <summary>
+        /// Refusal for a Knot item that is a tinker-locked shield (<see cref="IsLockedShield"/>), whose lock admits the four
+        /// shield materials: it replaces <see cref="KnotRefusalText"/> there only. Every other Knot item keeps that text.
+        /// </summary>
+        public const string LockedShieldKnotRefusalText = "The glass and thread of this piece will take only Tourmaline, Amethyst, Black Opal and Fire Opal.";
+
         /// <summary>True when the item carries any Knot trait property (behaviour is keyed on the property, never on wcid).</summary>
         public static bool IsKnotItem(WorldObject item)
         {
@@ -230,7 +293,7 @@ namespace ACE.Server.Entity
             if (mask.HasValue && (source == null || ModSalvageMaskRefusesProduction(mask, source, target)))
                 maskForText = ModSalvageMaskForText(mask.Value, isStation: source == null);
 
-            return RefusalMessage(source?.WeenieClassId, targetIsDriftAtlan, target.Name, IsKnotItem(target), maskForText);
+            return RefusalMessage(source?.WeenieClassId, targetIsDriftAtlan, target.Name, IsKnotItem(target), maskForText, IsLockedShield(target));
         }
 
         /// <summary>
@@ -276,11 +339,12 @@ namespace ACE.Server.Entity
         /// <summary>
         /// Pure message selection, injectable for tests. A Drift target refused an Atlan Drift infusion
         /// (wcid 1007400-1007402) gets the infusion-mismatch text; any other refused source on a Drift
-        /// target gets the Drift material text; a non-Drift locked target gets the Siraluun text.
+        /// target gets the Drift material text; a Knot item gets the Knot text (the locked-shield variant when
+        /// <paramref name="targetIsLockedShield"/>); any other locked target gets the Siraluun text.
         /// The source wcid is null for a refire station, which has no tinker source.
         /// </summary>
         public static string RefusalMessage(uint? sourceWcid, bool targetIsDriftAtlan, string targetName, bool targetIsKnotItem = false,
-            int? modSalvageMask = null)
+            int? modSalvageMask = null, bool targetIsLockedShield = false)
         {
             if (targetIsDriftAtlan)
             {
@@ -294,7 +358,7 @@ namespace ACE.Server.Entity
                 return ModSalvageMaskRefusalText(modSalvageMask.Value);
 
             if (targetIsKnotItem)
-                return KnotRefusalText;
+                return targetIsLockedShield ? LockedShieldKnotRefusalText : KnotRefusalText;
 
             return string.Format(SiraluunRefusalFormat, targetName);
         }
@@ -324,7 +388,9 @@ namespace ACE.Server.Entity
 
             var sourceIsParagonModSource = ParagonModManager.IsParagonSource(source);
 
-            if (IsRefused(targetLocked, targetIsDriftAtlan, sourceIsManaStone, hasCookbookRow, sourceIsWeaponModMaterial, weaponModsEnabled, sourceIsParagonModSource))
+            var lockedShieldAdmits = LockedShieldAdmits(source, target);
+
+            if (IsRefused(targetLocked, lockedShieldAdmits, targetIsDriftAtlan, sourceIsManaStone, hasCookbookRow, sourceIsWeaponModMaterial, weaponModsEnabled, sourceIsParagonModSource))
                 return true;
 
             return ModSalvageMaskRefuses(mask, sourceIsManaStone, hasCookbookRow, ClassifyMaskSource(source.WeenieClassId, source.ItemType, source.MaterialType),

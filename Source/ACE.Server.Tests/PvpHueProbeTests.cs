@@ -322,6 +322,19 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
+        public void PlanLook_CarriesDyeShellShadeLikeShade2To4_AndRemovesItWhenTheSourceLacksIt()
+        {
+            var plan = PvpHueProbe.PlanLook(new LookFields { Setup = 11, ClothingBase = 22, Shade = 1.0, DyeShellShade = 0.0 }, 0);
+            Assert.AreEqual(0.0, plan.Target.DyeShellShade, "a shell shade of 0.0 is a value, carried");
+
+            Assert.IsNull(PvpHueProbe.PlanLook(new LookFields { Setup = 11, ClothingBase = 22, Shade = 1.0 }, 0).Target.DyeShellShade, "absent in the source = removed from the item");
+
+            var original = new HueOriginal(null, 21, 1.0, dyeShellShade: 0.3);
+            Assert.AreEqual(0.3, original.DyeShellShade, "the original remembers it so /pvphue reset can restore it");
+            Assert.IsNull(new HueOriginal(null, 21, 1.0).DyeShellShade);
+        }
+
+        [TestMethod]
         public void PlanLook_AbsentSourceFieldsPlanRemoval()
         {
             var plan = PvpHueProbe.PlanLook(new LookFields { Setup = 11, ClothingBase = 22 }, 0x06000001);

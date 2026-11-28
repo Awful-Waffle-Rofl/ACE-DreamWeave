@@ -114,12 +114,12 @@ namespace ACE.Server.Tests
         /// </summary>
         private static readonly (WeaponModId Id, string Name, PropertyFloat Record, double MaxRoll, WeaponClass Classes)[] Expected =
         {
-            (WeaponModId.Heft,       "Heft",       PropertyFloat.WeaponModHeft,       22,   WeaponClass.Melee | WeaponClass.Missile),
+            (WeaponModId.Heft,       "Heft",       PropertyFloat.WeaponModHeft,       22,   WeaponClass.Melee | WeaponClass.Missile | WeaponClass.Shield),
             (WeaponModId.Tension,    "Tension",    PropertyFloat.WeaponModTension,    0.50, WeaponClass.Missile),
             (WeaponModId.Leverage,   "Leverage",   PropertyFloat.WeaponModLeverage,   0.30, WeaponClass.Melee),
             (WeaponModId.Attunement, "Attunement", PropertyFloat.WeaponModAttunement, 0.28, WeaponClass.Caster),
-            (WeaponModId.Focus,      "Precision",  PropertyFloat.WeaponModFocus,      0.25, WeaponClass.All),
-            (WeaponModId.Execution,  "Execution",  PropertyFloat.WeaponModExecution,  0.50, WeaponClass.All),
+            (WeaponModId.Focus,      "Precision",  PropertyFloat.WeaponModFocus,      0.25, WeaponClass.All | WeaponClass.Shield),
+            (WeaponModId.Execution,  "Execution",  PropertyFloat.WeaponModExecution,  0.50, WeaponClass.All | WeaponClass.Shield),
         };
 
         [TestMethod]

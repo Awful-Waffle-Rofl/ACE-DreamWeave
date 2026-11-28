@@ -40,7 +40,7 @@ namespace ACE.Server.Tests
     [TestClass]
     public class WeaponModRetuneRoundTwoTests
     {
-        private static readonly WeaponClass[] Classes = { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster };
+        private static readonly WeaponClass[] Classes = { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster, WeaponClass.Shield };
 
         /// <summary>The three rating rows carrying a retuned magnitude, each with the maximum it was moved to.</summary>
         private static readonly (WeaponModId Id, double MaxRoll, PropertyInt Native)[] Retuned =
@@ -408,6 +408,56 @@ namespace ACE.Server.Tests
             Assert.IsTrue(properties[PropertyString.Use].Contains(Header), "the block still has to land somewhere");
         }
 
+        /// <summary>Weapon-mod lines get their own "Weapon Mods:" section after the Property Details block, one blank line between.</summary>
+        [TestMethod]
+        public void WeaponMods_RenderAsASeparateSectionAfterPropertyDetails()
+        {
+            var properties = new Dictionary<PropertyString, string>();
+
+            AppraiseInfo.WritePropertyDetails(properties, new[] { "- A", "- B" }, new[] { "- Mod One", "- Mod Two" });
+
+            Assert.AreEqual("Property Details:\n- A\n- B\n\nWeapon Mods:\n- Mod One\n- Mod Two", properties[PropertyString.Use]);
+        }
+
+        [TestMethod]
+        public void WeaponMods_AloneRenderWithoutAnEmptyPropertyDetailsHeader()
+        {
+            var properties = new Dictionary<PropertyString, string>();
+
+            AppraiseInfo.WritePropertyDetails(properties, new string[0], new[] { "- Mod One" });
+
+            Assert.AreEqual("Weapon Mods:\n- Mod One", properties[PropertyString.Use]);
+        }
+
+        [TestMethod]
+        public void NoWeaponMods_IsByteIdenticalToTheSingleBlock()
+        {
+            var withNull = new Dictionary<PropertyString, string>();
+            var withEmpty = new Dictionary<PropertyString, string>();
+            var legacy = new Dictionary<PropertyString, string>();
+
+            AppraiseInfo.WritePropertyDetails(withNull, new[] { "- A" }, null);
+            AppraiseInfo.WritePropertyDetails(withEmpty, new[] { "- A" }, new string[0]);
+            AppraiseInfo.WritePropertyDetails(legacy, new[] { "- A" });
+
+            Assert.AreEqual("Property Details:\n- A", withNull[PropertyString.Use]);
+            Assert.AreEqual(withNull[PropertyString.Use], withEmpty[PropertyString.Use]);
+            Assert.AreEqual(withNull[PropertyString.Use], legacy[PropertyString.Use]);
+        }
+
+        [TestMethod]
+        public void WeaponMods_FollowAnExistingUseStringAfterOneBlankLine()
+        {
+            var properties = new Dictionary<PropertyString, string> { { PropertyString.Use, "Own use text." } };
+
+            AppraiseInfo.WritePropertyDetails(properties, new[] { "- A" }, new[] { "- Mod One" });
+            Assert.AreEqual("Own use text.\n\nProperty Details:\n- A\n\nWeapon Mods:\n- Mod One", properties[PropertyString.Use]);
+
+            var modsOnly = new Dictionary<PropertyString, string> { { PropertyString.Use, "Own use text." } };
+            AppraiseInfo.WritePropertyDetails(modsOnly, new string[0], new[] { "- Mod One" });
+            Assert.AreEqual("Own use text.\n\nWeapon Mods:\n- Mod One", modsOnly[PropertyString.Use]);
+        }
+
         /// <summary>An item with nothing to show is not given an empty block, and gets no Use row invented for it.</summary>
         [TestMethod]
         public void Change4_NoDetailLinesWritesNothingAtAll()
@@ -455,7 +505,9 @@ namespace ACE.Server.Tests
                 Assert.IsTrue(info.PropertiesString.TryGetValue(PropertyString.Use, out var use),
                     "a weapon carrying a rolled special must come back with the block in Use");
 
-                Assert.IsTrue(use.Contains(Header), $"Use does not carry the block: \"{use}\"");
+                // a plain weapon has no other detail lines, so only the Weapon Mods section is written (no empty Property Details header)
+                Assert.IsTrue(use.StartsWith("Weapon Mods:\n- ", StringComparison.Ordinal), $"Use does not carry the Weapon Mods section: \"{use}\"");
+                Assert.IsFalse(use.Contains(Header), $"an empty Property Details header was written: \"{use}\"");
                 Assert.IsTrue(use.Contains(bloodthirst.DisplayName), $"Use does not name the modifier: \"{use}\"");
 
                 Assert.AreEqual("A plain sword, notched from use.", info.PropertiesString[PropertyString.LongDesc],

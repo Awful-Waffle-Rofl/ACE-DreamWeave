@@ -17,6 +17,9 @@ namespace ACE.Server.WeaponMods
         Missile = 2,
         Caster  = 4,
 
+        /// <summary>A shield (armor-slot item with CombatUse.Shield). Deliberately OUTSIDE <see cref="All"/>: a registry row opts in with an explicit | Shield.</summary>
+        Shield  = 8,
+
         All     = Melee | Missile | Caster,
     }
 
@@ -26,17 +29,20 @@ namespace ACE.Server.WeaponMods
     ///
     /// EquipmentMods routes on <see cref="EquipMask"/> because gear ratings are slot-shaped. Weapons are not:
     /// a wand and a bow can share a ready slot, so this routes on <see cref="ItemType"/> instead, with
-    /// <see cref="CombatUse"/> used only to reject the two ItemType.MissileWeapon / ItemType.MeleeWeapon
-    /// impostors - ammunition (arrows, bolts, darts are ItemType.MissileWeapon with CombatUse.Ammo) and shields
-    /// (ItemType.MeleeWeapon with CombatUse.Shield).
+    /// <see cref="CombatUse"/> used to peel off two lookalikes: ammunition (arrows, bolts, darts are
+    /// ItemType.MissileWeapon with CombatUse.Ammo), which is rejected as <see cref="WeaponClass.None"/>, and
+    /// shields (CombatUse.Shield), which route to their own <see cref="WeaponClass.Shield"/>.
     /// </summary>
     public static class WeaponClassifier
     {
         public static WeaponClass Classify(ItemType itemType, CombatUse? combatUse)
         {
-            // ammo carries ItemType.MissileWeapon but is a consumable, not a launcher; shields carry
-            // ItemType.MeleeWeapon but deal no damage of their own
-            if (combatUse == CombatUse.Ammo || combatUse == CombatUse.Shield)
+            // shields first: they can carry ItemType.Armor or ItemType.MeleeWeapon, and are their own class
+            if (combatUse == CombatUse.Shield)
+                return WeaponClass.Shield;
+
+            // ammo carries ItemType.MissileWeapon but is a consumable, not a launcher
+            if (combatUse == CombatUse.Ammo)
                 return WeaponClass.None;
 
             // caster first: a wand is ItemType.Caster only, but checking it first keeps the order total

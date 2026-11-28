@@ -66,7 +66,7 @@ namespace ACE.Server.Tests
             var src = Read("Source", "ACE.Server", "Entity", "TinkerLock.cs");
 
             var compute = Only(src, "var sourceIsParagonModSource = ParagonModManager.IsParagonSource(source);");
-            var call = Only(src, "if (IsRefused(targetLocked, targetIsDriftAtlan, sourceIsManaStone, hasCookbookRow, sourceIsWeaponModMaterial, weaponModsEnabled, sourceIsParagonModSource))");
+            var call = Only(src, "if (IsRefused(targetLocked, lockedShieldAdmits, targetIsDriftAtlan, sourceIsManaStone, hasCookbookRow, sourceIsWeaponModMaterial, weaponModsEnabled, sourceIsParagonModSource))");
 
             Assert.IsTrue(compute < call, "the flag must be computed before the call that consumes it");
         }

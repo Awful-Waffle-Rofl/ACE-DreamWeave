@@ -242,7 +242,7 @@ namespace ACE.Server.ThreadDungeons
     /// ceiling will measure at spawn (<see cref="PredictEntry"/>: the reach-up stamp, the archetype or band uplift, the boss
     /// normalization) and the DamageRating R it will carry before the group bonus (<see cref="PredictOwnRating"/>), compresses
     /// it against the plan's median, cap and top, and reads the group rating the clamp withholds
-    /// (<see cref="DamageCeiling.WithheldRating"/>). The family budget is the MAX over members and axes, so the family's
+    /// (<see cref="DamageCeiling.WithheldRating"/>) against the ability group rating G (<see cref="DungeonSpawnPlan.AbilityGroupRatingBonus"/>, its own dials, not the damage rating). The family budget is the MAX over members and axes, so the family's
     /// hardest hitter sets what the whole family buys. Solo plans (G = 0) withhold nothing and buy nothing.
     ///
     /// STYLE (orchestrator ruling 2026-10-26). ELIGIBILITY reads the UNION of the members' styles (a caster-only kind needs
@@ -286,7 +286,7 @@ namespace ACE.Server.ThreadDungeons
             var info = ThreadDungeonSpawner.ArchetypeInfoFor(entry, plan);
 
             if (info != null)
-                predicted = predicted.UpliftedByArchetype(entry.UpliftLevel, info, ThreadDungeonSpawner.StampedDamageRating(plan, false));
+                predicted = predicted.UpliftedByArchetype(entry.UpliftLevel, info, AbilityGemDamageRating(plan));
             else if (entry.UpliftLevel > 0)
             {
                 // A stretched entry is normalized at its MAPPED level (ThreadDungeonSpawner.UpliftStandardFor), as the spawner does.
@@ -308,6 +308,15 @@ namespace ACE.Server.ThreadDungeons
 
             return predicted;
         }
+
+        /// <summary>
+        /// The plan's additive rating the budget's archetype-uplift prediction reads (the gemDamageRating of
+        /// <see cref="CreaturePerHit.UpliftedByArchetype"/>): the plan rating plus the ABILITY group rating, NOT the damage G
+        /// (<see cref="ThreadDungeonSpawner.StampedDamageRating"/>), so the budget does not move when the damage rating is tuned
+        /// (owner ruling 2026-11-26). Saturates at the int range.
+        /// </summary>
+        internal static int AbilityGemDamageRating(DungeonSpawnPlan plan)
+            => (int)Math.Clamp((long)plan.DamageRating + plan.AbilityGroupRatingBonus, int.MinValue, int.MaxValue);
 
         /// <summary>
         /// The boss normalization as the per-hit read sees it (DungeonCreatureNormalizer.NormalizeBossAttributes,
@@ -381,7 +390,8 @@ namespace ACE.Server.ThreadDungeons
 
             var familyKey = plan.FamilyId ?? "none";
             var median = plan.PerHitMedian;
-            var groupBonus = Math.Max(0, plan.GroupDamageRatingBonus);
+            // The budget's own G (AbilityGroupRatingBonus), NOT the damage path's GroupDamageRatingBonus: owner ruling 2026-11-26.
+            var groupBonus = Math.Max(0, plan.AbilityGroupRatingBonus);
             var members = new List<FamilyAbilityMember>();
 
             var facts = new CreatureAbilityFacts { BandSpellTier = plan.BandStandard?.SpellTier ?? 0 };

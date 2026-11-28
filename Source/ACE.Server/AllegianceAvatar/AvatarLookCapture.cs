@@ -53,6 +53,8 @@ public static class AvatarLookCapture
     public static readonly PropertyFloat[] PieceFloats =
     {
         PropertyFloat.DefaultScale, PropertyFloat.Shade, PropertyFloat.Shade2, PropertyFloat.Shade3, PropertyFloat.Shade4,
+        // Perennial dyes: the shade of the second colour layer (Tailoring copies it next to Shade)
+        PropertyFloat.DyeShellShade,
         PropertyFloat.Translucency,
     };
 

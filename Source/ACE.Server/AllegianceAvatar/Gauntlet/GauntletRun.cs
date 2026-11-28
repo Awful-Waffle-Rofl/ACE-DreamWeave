@@ -102,6 +102,8 @@ public sealed class GauntletRun : IGauntletCreatureOwner, IGauntletContactSink, 
     private DateTime rewardEndsAt;
     private bool rewardingBegun;
     private DateTime? fighterReturnsAt;
+    private DateTime? fighterDownSince;
+    private int fighterDeathsThisRun;
     private DateTime nextFighterCheckAt;
     private DateTime nextGateCheckAt;
     private GauntletEndReason? endReason;
@@ -149,6 +151,9 @@ public sealed class GauntletRun : IGauntletCreatureOwner, IGauntletContactSink, 
         public int Killed;
         public int PlayerDeaths;
         public int FighterDeaths;
+
+        /// <summary>Seconds of this wave the fighter spent fallen (closed spans; an open one is added at the wave's end).</summary>
+        public double FighterDownSeconds;
         public uint? ObservedMax;
         public bool Refused;
         public int ReplanAttempts;
@@ -222,6 +227,11 @@ public sealed class GauntletRun : IGauntletCreatureOwner, IGauntletContactSink, 
     public GauntletState State => Hold.State;
 
     public bool IsTerminal => GauntletStateMachine.IsTerminal(State);
+
+    /// <summary>The fighting is over: Ending, Rewarding or terminal (the death hold sends no one to the pen any more).</summary>
+    public bool FightOver => State == GauntletState.Ending || State == GauntletState.Rewarding || IsTerminal;
+
+    Position IGauntletHoldRun.CachesPosition => CentrePosition;
 
     /// <summary>The database run_Id, or 0 until the insert's callback arrives.</summary>
     public uint RunId => Volatile.Read(ref runId);
@@ -322,7 +332,9 @@ public sealed class GauntletRun : IGauntletCreatureOwner, IGauntletContactSink, 
 
             return new GauntletRunInfo(RunKey, RunId, AvatarId, Site.Id, Instance, State, Volatile.Read(ref currentWave),
                 wave?.Plan?.Level ?? (wave != null ? rules.LevelOf(wave.Number) : 0), wavesCleared, (int)Math.Max(0, Math.Ceiling(secondsLeft)),
-                wave?.Headcount ?? 0, FoughtCount, lastRefusal, NpcLocationText(NpcLocation));
+                wave?.Headcount ?? 0, FoughtCount, lastRefusal, NpcLocationText(NpcLocation),
+                new GauntletAuraInfo(Tuning.FighterAuraRadius, (int)Tuning.FighterAuraDamageRating, (int)Tuning.FighterAuraResistRating,
+                    fighterReturnsAt is { } back ? (int)Math.Max(0, Math.Ceiling((back - nowUtc).TotalSeconds)) : null));
         }
     }
 
@@ -564,11 +576,13 @@ public sealed class GauntletRun : IGauntletCreatureOwner, IGauntletContactSink, 
 
     /// <summary>
     /// Task 8: the fighter fell. Counted on the current wave's row; the arena is told; <see cref="IGauntletFighterHooks.Respawn"/>
-    /// is called after allegiance_gauntlet_fighter_respawn_seconds. Never ends the run.
+    /// is called after <see cref="GauntletRules.FighterRespawnSeconds"/>, which grows with each death this run (the felt
+    /// loss: 60, 80, 100, 120 s by default, and it stays there). Never ends the run.
     /// </summary>
     public void OnFighterDied()
     {
         var now = env.UtcNow();
+        long seconds;
 
         lock (sync)
         {
@@ -578,11 +592,30 @@ public sealed class GauntletRun : IGauntletCreatureOwner, IGauntletContactSink, 
             if (wave != null)
                 wave.FighterDeaths++;
 
-            fighterReturnsAt = now.AddSeconds(Tuning.FighterRespawnSeconds);
+            seconds = rules.FighterRespawnSeconds(fighterDeathsThisRun);
+            fighterDeathsThisRun++;
+            fighterReturnsAt = now.AddSeconds(seconds);
+            fighterDownSince ??= now;
         }
 
-        SafeTell($"The Avatar has fallen. It returns in {Tuning.FighterRespawnSeconds} seconds.");
+        SafeTell(FighterDeathLine(seconds, Tuning));
     }
+
+    /// <summary>The death line: the respawn time, and the aura's fading while the aura is on (pure).</summary>
+    internal static string FighterDeathLine(long seconds, GauntletTuning t)
+    {
+        var line = $"The Avatar has fallen. It returns in {seconds} seconds.";
+
+        return t != null && GauntletAura.IsOn(t.FighterAuraRadius, t.FighterAuraDamageRating, t.FighterAuraResistRating)
+            ? line + GauntletAura.FallenSuffix
+            : line;
+    }
+
+    /// <summary>The fighter's deaths this run so far (the respawn's step count).</summary>
+    public int FighterDeathsThisRun { get { lock (sync) return fighterDeathsThisRun; } }
+
+    /// <summary>The run's fighter tallies for the per-wave telemetry line; every fighter of the run writes here.</summary>
+    internal GauntletFighterLedger FighterLedger { get; } = new GauntletFighterLedger();
 
     /// <summary>
     /// A claim paid one of this run's crates (GauntletClaims, through GauntletRunClaimAdapter). Counted on the run row's
@@ -1318,6 +1351,7 @@ public sealed class GauntletRun : IGauntletCreatureOwner, IGauntletContactSink, 
         prePlanNeeded = (w.Number + 1, NextHeadcountLocked());
 
         QueueWaveRow(w, elapsed, outcome: 0, fractionCenti: 100);
+        LogFighterWaveLocked(w, now);
 
         var cleared = wavesCleared;
         var fought = FoughtCount;
@@ -1390,6 +1424,7 @@ public sealed class GauntletRun : IGauntletCreatureOwner, IGauntletContactSink, 
         {
             var elapsed = Math.Max(0.0, (now - wave.ClockStart).TotalSeconds);
             QueueWaveRow(wave, elapsed, outcome: 1, fractionCenti: (int)Math.Min(100, Math.Floor(fraction * 100)));
+            LogFighterWaveLocked(wave, now);
         }
 
         eligibleAtEnd = EligibleCharacters().Count;
@@ -1455,6 +1490,16 @@ public sealed class GauntletRun : IGauntletCreatureOwner, IGauntletContactSink, 
             {
                 rewardEndsAt = now.AddSeconds(Math.Max(0, window));
                 rewardingBegun = true;
+            }
+
+            // The fight is over: members still in the death pen go to the cache area now, not when their hold runs out.
+            try
+            {
+                env.Hooks.Death.ReleaseToCaches(this, CentrePosition);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[GAUNTLET] run {RunKey} releasing the death hold to the caches threw", ex);
             }
 
             try
@@ -1646,9 +1691,47 @@ public sealed class GauntletRun : IGauntletCreatureOwner, IGauntletContactSink, 
             return;
 
         fighterReturnsAt = null;
+        CloseFighterDownLocked(now);
         after.Add(() => env.Hooks.Fighter.Respawn(this));
         after.Add(() => env.World.TellInside(this, "The Avatar rejoins the fight."));
     }
+
+    /// <summary>The fighter is back (its respawn fired): its fallen span ends, counted on the wave it fell in or the current one.</summary>
+    private void CloseFighterDownLocked(DateTime now)
+    {
+        if (fighterDownSince is { } since && wave != null)
+            wave.FighterDownSeconds += DownSecondsWithin(since, now, wave.StartedAt);
+
+        fighterDownSince = null;
+    }
+
+    /// <summary>Pure: the seconds of [<paramref name="since"/>, <paramref name="now"/>] that fall after <paramref name="waveStart"/>.</summary>
+    internal static double DownSecondsWithin(DateTime since, DateTime now, DateTime waveStart)
+    {
+        var from = since > waveStart ? since : waveStart;
+        return Math.Max(0.0, (now - from).TotalSeconds);
+    }
+
+    /// <summary>
+    /// Plan step 7: one [GAUNTLET] line per wave end with the fighter's intake (requested and after the cap), heals, deaths
+    /// and seconds alive in the wave. Under sync; the ledger is taken (zeroed) here.
+    /// </summary>
+    private void LogFighterWaveLocked(WaveRun w, DateTime now)
+    {
+        if (w == null)
+            return;
+
+        var waveSeconds = Math.Max(0.0, (now - w.StartedAt).TotalSeconds);
+        var down = w.FighterDownSeconds + (fighterDownSince is { } since ? DownSecondsWithin(since, now, w.StartedAt) : 0.0);
+        var (requested, taken, healed) = FighterLedger.Take();
+
+        var line = GauntletFighterLedger.WaveLine(RunKey, w.Number, requested, taken, healed, w.FighterDeaths, Math.Max(0.0, waveSeconds - down), waveSeconds);
+        LastFighterWaveLine = line;
+        log.Info(line);
+    }
+
+    /// <summary>The last per-wave fighter line logged (what the log received). Guarded by sync on write.</summary>
+    internal string LastFighterWaveLine { get; private set; }
 
     // ---- history writes -------------------------------------------------------------------------------------------------------
 

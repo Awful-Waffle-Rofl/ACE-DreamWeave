@@ -39,16 +39,16 @@ namespace ACE.Server.BalanceTrials
         IReadOnlyDictionary<uint, long> Consumables = null);
 
     /// <summary>
-    /// What a session reads off the offline master, once: its digest, and its consumable stacks by wcid (the counts the soft
-    /// reset restores the rep's consumables to).
+    /// What a session reads off the offline master, once: its digest. The consumable wcids only decide what the Core leaves out;
+    /// the master's consumable counts are not used (the soft reset restores to the rep's own baseline).
     /// </summary>
-    public sealed record TrialMasterSnapshot(TrialDigest Digest, IReadOnlyDictionary<uint, long> Consumables)
+    public sealed record TrialMasterSnapshot(TrialDigest Digest)
     {
         /// <summary>The LoadOfflinePlayerAsync projection. Reads only.</summary>
         public static TrialMasterSnapshot Project(Player p, IReadOnlyCollection<uint> consumableWcids)
         {
             var input = TrialDigest.Project(p, consumableWcids);
-            return new TrialMasterSnapshot(TrialDigest.Of(input), input.Consumables);
+            return new TrialMasterSnapshot(TrialDigest.Of(input));
         }
     }
 

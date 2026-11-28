@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -112,12 +113,13 @@ namespace ACE.Server.Tests
 
             CollectionAssert.AreEqual(new[]
             {
-                "- Devastation [67%]: +4 critical damage rating",
                 "- Ambush [50%]: +15% damage against a full-health target",
+                "- Devastation [67%]: +4 critical damage rating",
             }, lines);
 
-            // byte-identical to the pre-Paragon construction
+            // byte-identical to the pre-Paragon construction, then alphabetical by name (owner ruling 2026-11-25)
             var legacy = WeaponModTinkerSet.ReadSpecials(weapon)
+                .OrderBy(s => s.Definition.DisplayName, StringComparer.OrdinalIgnoreCase)
                 .Select(s => $"- {WeaponModDisplay.Describe(s.Definition, s.Magnitude, WeaponModValue.MagnitudeScale(), weapon)}")
                 .ToList();
 
@@ -208,12 +210,13 @@ namespace ACE.Server.Tests
         // ================= summary line =================
 
         [TestMethod]
-        public void Summary_UsesItemMaxLevel_AndFirstSlotOrder()
+        public void Summary_UsesItemMaxLevel_AndAlphabeticalOrder()
         {
+            // slot order is Heft first; the summary still reads alphabetically
             var weapon = Weapon(WeaponModId.Heft, WeaponModId.Ambush, WeaponModId.Heft, WeaponModId.Heft);
             weapon.SetProperty(PropertyInt.ItemMaxLevel, 54);
 
-            Assert.AreEqual("- Paragon 54/55: Heft x3, Ambush x1", WeaponModParagonDisplay.SummaryLine(weapon));
+            Assert.AreEqual("- Paragon 54/55: Ambush x1, Heft x3", WeaponModParagonDisplay.SummaryLine(weapon));
         }
 
         [TestMethod]
@@ -227,7 +230,7 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void Block_OrderIsSpecialsThenParagonOnlyThenSummaryThenTinkers()
+        public void Block_OrderIsModsAlphabeticalThenSummaryThenTinkers()
         {
             var weapon = WeaponAtLevel(53, WeaponModId.Ambush, WeaponModId.Devastation, WeaponModId.Devastation);
             WeaponModTinkerSet.ApplySpecial(weapon, Row(WeaponModId.Devastation), 3);
@@ -245,8 +248,9 @@ namespace ACE.Server.Tests
             var lines = Lines(weapon);
 
             Assert.AreEqual(4, lines.Count, string.Join(" | ", lines));
-            Assert.AreEqual("- Devastation [83%]: +5 critical damage rating (rolled 50% + Paragon 40%)", lines[0]);
-            Assert.AreEqual("- Ambush [20%]: +6% damage against a full-health target (Paragon)", lines[1]);
+            // Ambush (Paragon-only) sorts ahead of Devastation (Tourmaline + Paragon): name order, not source order
+            Assert.AreEqual("- Ambush [20%]: +6% damage against a full-health target (Paragon)", lines[0]);
+            Assert.AreEqual("- Devastation [83%]: +5 critical damage rating (rolled 50% + Paragon 40%)", lines[1]);
             Assert.AreEqual("- Paragon 53/55: Ambush x1, Devastation x2", lines[2]);
             Assert.AreEqual("- Tinkers: " + WeaponModDisplay.DescribeComposition(composition), lines[3], "Tinkers is present and last");
             Assert.IsTrue(lines[3].StartsWith("- Tinkers: 4 Iron"), lines[3]);
@@ -395,9 +399,9 @@ namespace ACE.Server.Tests
             var lines = Lines(weapon);
 
             Assert.AreEqual(3, lines.Count, string.Join(" | ", lines));
-            Assert.IsTrue(lines[0].StartsWith("- Heft [20%]") && lines[0].EndsWith("(Paragon)"), lines[0]);
-            Assert.AreEqual("- Ambush [20%]: +6% damage against a full-health target (Paragon)", lines[1]);
-            Assert.AreEqual("- Paragon 53/55: Heft x1, Ambush x1", lines[2]);
+            Assert.AreEqual("- Ambush [20%]: +6% damage against a full-health target (Paragon)", lines[0]);
+            Assert.IsTrue(lines[1].StartsWith("- Heft [20%]") && lines[1].EndsWith("(Paragon)"), lines[1]);
+            Assert.AreEqual("- Paragon 53/55: Ambush x1, Heft x1", lines[2]);
 
             Assert.AreEqual(0, Lines(Weapon((WeaponModId)9999)).Count);
         }

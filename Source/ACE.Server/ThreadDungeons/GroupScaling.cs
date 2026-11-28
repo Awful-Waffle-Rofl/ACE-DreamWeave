@@ -30,8 +30,16 @@ namespace ACE.Server.ThreadDungeons
         public const double DefaultEffortPerMember = 1.0;
         public const double DefaultCountShare = 0.5;
         public const int DefaultGroupMaxMonsters = 180;
-        public const int DefaultDamageRatingPerMember = 15;
-        public const int DefaultDamageRatingCap = 300;
+        public const int DefaultDamageRatingPerMember = 5;
+        public const int DefaultDamageRatingCap = 100;
+
+        /// <summary>
+        /// The family ability budget's own group rating dials (owner ruling 2026-11-26: no impact to family abilities when the
+        /// damage dials went 15/300 -> 5/100). Same formula as the damage rating, read from their own tunables, defaulting to
+        /// the values the damage dials had before that change, so the abilities a roster buys are what they were.
+        /// </summary>
+        public const int DefaultAbilityRatingPerMember = 15;
+        public const int DefaultAbilityRatingCap = 300;
         public const double DefaultRewardBonusPerMember = 0.05;
         public const double DefaultRewardBonusCap = 1.5;
         public const int DefaultLootHoldMinutes = 30;
@@ -45,10 +53,10 @@ namespace ACE.Server.ThreadDungeons
         /// 0 here, but a solo run IS held for loot (owner ruling 2026-10-10): its hold lives on ThreadDungeonRun.LootHold,
         /// stamped by TryStart, so this shared snapshot stays the one Solo instance.
         /// </summary>
-        public static readonly GroupScaling Solo = new GroupScaling(1, 1.0, 1.0, 0, 0, 1.0, 1.0, 0);
+        public static readonly GroupScaling Solo = new GroupScaling(1, 1.0, 1.0, 0, 0, 1.0, 1.0, 0, 0);
 
         private GroupScaling(int rosterSize, double effort, double countTarget, int groupMaxMonsters, int damageRatingBonus, double rewardBonus, double shareTotal,
-            int lootHoldMinutes)
+            int lootHoldMinutes, int abilityRatingBonus)
         {
             RosterSize = rosterSize;
             Effort = effort;
@@ -58,6 +66,7 @@ namespace ACE.Server.ThreadDungeons
             RewardBonus = rewardBonus;
             ShareTotal = shareTotal;
             LootHoldMinutes = lootHoldMinutes;
+            AbilityRatingBonus = abilityRatingBonus;
         }
 
         /// <summary>N, owner included. 1 for <see cref="Solo"/>.</summary>
@@ -74,6 +83,13 @@ namespace ACE.Server.ThreadDungeons
 
         /// <summary>Damage rating added to trash AND boss after the boss floor. 0 for <see cref="Solo"/>.</summary>
         public int DamageRatingBonus { get; }
+
+        /// <summary>
+        /// The group rating G the family ability budget is bought from (carried onto the plan as AbilityGroupRatingBonus): the
+        /// same min(d(N - 1), cap) as <see cref="DamageRatingBonus"/> on its own dials (DefaultAbilityRatingPerMember /
+        /// DefaultAbilityRatingCap), so lowering the damage rating does not shrink the abilities. 0 for <see cref="Solo"/>.
+        /// </summary>
+        public int AbilityRatingBonus { get; }
 
         /// <summary>B, in [1.0, bonusCap].</summary>
         public double RewardBonus { get; }
@@ -104,7 +120,8 @@ namespace ACE.Server.ThreadDungeons
         /// </summary>
         public static GroupScaling Compute(int rosterSize, double effortPerMember, double countShare, long groupMaxMonsters,
             long damageRatingPerMember, long damageRatingCap, double rewardBonusPerMember, double rewardBonusCap, double sharePlateau,
-            long lootHoldMinutes = DefaultLootHoldMinutes)
+            long lootHoldMinutes = DefaultLootHoldMinutes, long abilityRatingPerMember = DefaultAbilityRatingPerMember,
+            long abilityRatingCap = DefaultAbilityRatingCap)
         {
             var n = ClampRoster(rosterSize);
 
@@ -120,7 +137,9 @@ namespace ACE.Server.ThreadDungeons
 
             var hold = SanitiseLootHold(lootHoldMinutes);
 
-            return new GroupScaling(n, effort, countTarget, groupMax, damage, bonus, share, hold);
+            var ability = AbilityRatingBonusFor(n, abilityRatingPerMember, abilityRatingCap);
+
+            return new GroupScaling(n, effort, countTarget, groupMax, damage, bonus, share, hold, ability);
         }
 
         /// <summary>E = 1 + g(N - 1). g NaN, infinite or negative reads as <see cref="DefaultEffortPerMember"/>.</summary>
@@ -152,13 +171,23 @@ namespace ACE.Server.ThreadDungeons
         /// int.MaxValue rather than overflowing. 0 for a roster of one.
         /// </summary>
         public static int DamageRatingBonusFor(int rosterSize, long perMember, long cap)
+            => RatingBonusFor(rosterSize, perMember, cap, DefaultDamageRatingPerMember, DefaultDamageRatingCap);
+
+        /// <summary>
+        /// The ability budget's G: <see cref="DamageRatingBonusFor"/>'s formula, a negative d or cap reading as
+        /// <see cref="DefaultAbilityRatingPerMember"/> / <see cref="DefaultAbilityRatingCap"/> instead.
+        /// </summary>
+        public static int AbilityRatingBonusFor(int rosterSize, long perMember, long cap)
+            => RatingBonusFor(rosterSize, perMember, cap, DefaultAbilityRatingPerMember, DefaultAbilityRatingCap);
+
+        private static int RatingBonusFor(int rosterSize, long perMember, long cap, long defaultPerMember, long defaultCap)
         {
             var n = ClampRoster(rosterSize);
             if (n == 1)
                 return 0;
 
-            if (perMember < 0) perMember = DefaultDamageRatingPerMember;
-            if (cap < 0) cap = DefaultDamageRatingCap;
+            if (perMember < 0) perMember = defaultPerMember;
+            if (cap < 0) cap = defaultCap;
 
             var others = n - 1;
             var raw = perMember > long.MaxValue / others ? long.MaxValue : perMember * others;

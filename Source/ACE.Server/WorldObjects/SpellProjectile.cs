@@ -1718,7 +1718,7 @@ namespace ACE.Server.WorldObjects
                 // must never leech off damage dealt to a person.
                 if (ProjectileSource is Pet castingPet)
                 {
-                    castingPet.NotifyOwnerOfDamage(target, (int)amount);
+                    castingPet.NotifyOwnerOfDamage(target, (int)amount, critical);
 
                     if (targetPlayer == null)
                     {

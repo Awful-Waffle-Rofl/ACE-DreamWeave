@@ -198,13 +198,14 @@ namespace ACE.Server.WorldObjects
                 }
 
                 // a multi-charge salvage Hammer carries a workmanship and a MaterialType like loot does, so
-                // nothing else refuses it - and salvaging it would turn a bought tool back into salvage
-                if (SalvageTool.IsSalvageTool(item))
+                // nothing else refuses it - and salvaging it would turn a bought tool back into salvage.
+                // A foolproof tinkering bag is refused the same way: it carries a workmanship and a
+                // MaterialType too, and salvaging it destroys the foolproof bag
+                if (SalvageTool.TryRefuseForSalvage(item, ref toolRefusalSent, out var refusalMessage))
                 {
-                    if (!toolRefusalSent)
-                        Session.Network.EnqueueSend(new GameMessageSystemChat($"The {item.Name} cannot be salvaged.", ChatMessageType.Broadcast));
+                    if (refusalMessage != null)
+                        Session.Network.EnqueueSend(new GameMessageSystemChat(refusalMessage, ChatMessageType.Broadcast));
 
-                    toolRefusalSent = true;
                     continue;
                 }
 

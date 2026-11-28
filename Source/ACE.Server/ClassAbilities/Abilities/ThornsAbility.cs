@@ -1,5 +1,6 @@
 using System;
 
+using ACE.Common;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.EquipmentMods;
@@ -49,7 +50,8 @@ namespace ACE.Server.ClassAbilities.Abilities
             // class_ability_thorns_max_range, read in Player.ApplyThornsReflect (Player_ClassAbilityCombat).
             DescriptionTemplate = "While you have a shield equipped, creatures within {v:class_ability_thorns_max_range|num} metres " +
                           "that hit you with melee, missiles or spells take damage back, based on your shield's armor level. While " +
-                          "a Runic Ward or Sanguine Ward stands, its shield level adds to that armor level.",
+                          "a Runic Ward or Sanguine Ward stands, its shield level adds to that armor level. " +
+                          "Shield modifiers and the Critical Strike and Crippling Blow imbues on your shield apply to the reflect, which uses your Damage Rating and can land critical hits.",
             RankTailTemplate = "+{per:class_ability_thorns_percent_per_rank|pct}% of shield armor",
             TunableSourceFiles = new[] { "WorldObjects/Player_ClassAbilityCombat.cs" },
             MaxRank = 3,
@@ -80,6 +82,62 @@ namespace ACE.Server.ClassAbilities.Abilities
             var scaled = baseReflect * Math.Max(0.0, strengthMultiplier) * Math.Max(0.0, critMultiplier) * Math.Max(0.0, drrMultiplier);
 
             return (uint)Math.Round(scaled);
+        }
+
+        /// <summary>
+        /// The shield Thorns reflect (Docs/WeaponMods/SHIELDS-DESIGN.md "The Thorns formula after this change"):
+        /// (baseReflect + Heft) x strength x the total Damage Rating mod x the crit multiplier x the Damage Resist
+        /// Rating multiplier, rounded to the nearest whole point. Heft is flat damage on the shield, added BEFORE the
+        /// multipliers the way Heft enters a weapon's base damage. Heft and every factor are floored at 0, so nothing
+        /// turns a reflect into a heal. With no Heft and a neutral damage rating this equals the four-factor overload.
+        /// </summary>
+        public static uint ScaleReflect(uint baseReflect, double heft, double strengthMultiplier, double damageRatingMultiplier, double critMultiplier, double drrMultiplier)
+        {
+            var scaled = (baseReflect + Math.Max(0.0, heft)) * Math.Max(0.0, strengthMultiplier) * Math.Max(0.0, damageRatingMultiplier)
+                * Math.Max(0.0, critMultiplier) * Math.Max(0.0, drrMultiplier);
+
+            return (uint)Math.Round(scaled);
+        }
+
+        /// <summary>
+        /// Test seam: the Thorns crit draw, uniform in [0, 1) (ThreadSafeRandom.Next(float, float) excludes its max), drawn the same way a weapon hit draws its crit
+        /// (DamageEvent). Production never reassigns it.
+        /// </summary>
+        internal static Func<double> CritDraw = () => ThreadSafeRandom.Next(0.0f, 1.0f);
+
+        /// <summary>
+        /// The crit comparison a weapon hit uses (DamageEvent: <c>CriticalChance &gt; ThreadSafeRandom.Next(0.0f, 1.0f)</c>):
+        /// strictly greater, same as DamageEvent. Production never draws 1.0 (the draw's max is exclusive), so a roll
+        /// of 1.0 is only a test value meaning "never crits".
+        /// </summary>
+        public static bool RollsCritical(double critChance, double roll) => critChance > roll;
+
+        /// <summary>
+        /// The crit multiplier of a critical Thorns reflect: (1 + the shield's crit damage mod) x (1 + Execution).
+        /// <paramref name="weaponCritDamageMod"/> is WorldObject.GetWeaponCritDamageMod with the shield as the weapon
+        /// (1.0 base, Crippling Blow raises it), the same term DamageEvent adds 1.0 to. With no Crippling Blow and no
+        /// Execution this is 2.0. The Crit Damage Rating is NOT in here: on a crit it combines additively with the Damage
+        /// Rating in <see cref="DamageRatingMultiplier"/> (owner ruling 2026-11-25). A negative Execution is floored at 0.
+        /// </summary>
+        public static double CritDamageMultiplier(float weaponCritDamageMod, double execution)
+        {
+            return (1.0 + weaponCritDamageMod) * (1.0 + Math.Max(0.0, execution));
+        }
+
+        /// <summary>
+        /// The rating multiplier of a Thorns reflect. Without a crit it is the Damage Rating mod alone. On a crit the
+        /// Damage Rating mod and the Crit Damage Rating mod combine through Creature.AdditiveCombine, the same helper
+        /// DamageEvent uses to combine DamageRatingBaseMod and CriticalDamageRatingMod on a weapon crit (owner ruling
+        /// 2026-11-25): each mod is turned back into a rating (Creature.ModToRating), the ratings are summed, and the sum
+        /// becomes one mod again, so DR 20 and CDR 20 give 1.4 rather than 1.2 x 1.2 = 1.44.
+        /// <paramref name="damageRatingMod"/> is the positive rating mod of the total Damage Rating (blessing taken out).
+        /// </summary>
+        public static double DamageRatingMultiplier(float damageRatingMod, bool critical, int critDamageRating)
+        {
+            if (!critical)
+                return damageRatingMod;
+
+            return Creature.AdditiveCombine(damageRatingMod, Creature.GetPositiveRatingMod(critDamageRating));
         }
 
         /// <summary>

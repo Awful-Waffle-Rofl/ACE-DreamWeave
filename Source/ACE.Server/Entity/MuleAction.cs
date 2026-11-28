@@ -33,8 +33,15 @@ namespace ACE.Server.Entity
         StartChallenge,
 
         /// <summary>
+        /// Training or resetting a skill. A mule's defense skills are held at 'mule_defense_skill_level' by
+        /// Player_Mule, and a reset refunds skill credits that the login top-up would not take back, so a mule
+        /// must not reach either path.
+        /// </summary>
+        ChangeSkills,
+
+        /// <summary>
         /// Switching to another Player Facet slot. A mule has TotalSkillCredits 0 and every untrainable
-        /// skill forced to Untrained (Player_Mule), so letting one switch would capture that zeroed state
+        /// skill except the three defense skills forced to Untrained (Player_Mule), so letting one switch would capture that zeroed state
         /// into a slot row as if it were a build. Unreachable at stock config, because mule_level (180) is
         /// below facet_slot2_level (300), but both are live tunables and neither knows about the other.
         /// </summary>

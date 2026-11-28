@@ -31,7 +31,7 @@ namespace ACE.Server.Tests
     [TestClass]
     public class WeaponModInteractionTests
     {
-        private static readonly WeaponClass[] AllClasses = { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster };
+        private static readonly WeaponClass[] AllClasses = { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster, WeaponClass.Shield };
 
         /// <summary>Real ImbuedEffectType bits, high bits first so every popcount sweep exercises them.</summary>
         private static readonly ImbuedEffectType[] ImbueBits =
@@ -75,8 +75,8 @@ namespace ACE.Server.Tests
         /// REWRITTEN 2026-08-07 FOR THE SPECIAL-ONLY REROLL. The sweep used to end each iteration on
         /// "bits + tinkers == 10", which held only because the reroll refilled the budget on every use. It no
         /// longer lays down a tinker at all, so the assertion that replaces it is that the SLOT ARITHMETIC is
-        /// still exactly right - ReservedImbueSlots and AvailableSlots are pure and unchanged, and they are
-        /// what the refusal gate still reads - while the reroll itself provably spends none of it.
+        /// still exactly right - ReservedImbueSlots and AvailableSlots are pure and unchanged (no refusal reads
+        /// them since 2026-11-25) - while the reroll itself provably spends none of it.
         ///
         /// The name is unchanged because the subject is unchanged: this is still the reserved-slot sweep.
         /// </summary>
@@ -220,7 +220,8 @@ namespace ACE.Server.Tests
         /// <summary>
         /// RENAMED 2026-08-07 (was Imbues_TenReservedSlotsAreRefusedRatherThanProducingANegativeTinkerCount).
         ///
-        /// THE REFUSALS ARE UNCHANGED AND ARE STILL THE SUBJECT. What changed is the second half: the old name
+        /// RENAMED AGAIN 2026-11-25: ten imbues no longer refuse either tool (owner ruling), so the test now
+        /// pins acceptance. The 2026-08-07 rename addressed the second half: the old name
         /// promised a negative tinker count was the hazard being avoided, and pinned WeaponModTinkerCount at 0
         /// on the direct path to show the subtraction had bottomed out safely. The special-only reroll does not
         /// compute a tinker count at all, so there is no subtraction left to go negative - the hazard is gone
@@ -228,22 +229,22 @@ namespace ACE.Server.Tests
         /// and it fails against any implementation that starts computing a budget here again.
         /// </summary>
         [TestMethod]
-        public void Imbues_TenReservedSlotsAreRefusedAndNoTinkerBudgetIsEverWritten()
+        public void Imbues_TenReservedSlotsRefuseNothingAndNoTinkerBudgetIsEverWritten()
         {
             var mask = ImbueMask(10);
             var weapon = WeaponModTestKit.MakeUntinkered(WeaponClass.Melee, mask);
 
-            Assert.AreEqual(WeaponModManager.WeaponModRefusal.NoAvailableSlots,
+            // INVERTED 2026-11-25: the tinker budget gates neither tool, so ten imbues refuse neither the
+            // reroll nor the swap. Both add or reroll SPECIALS, which have their own budget.
+            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
                 WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Tourmaline), weapon),
-                "a weapon whose imbues take all ten slots has nothing to reroll");
+                "ten imbues must not refuse a reroll - the tinker budget has no bearing on Tourmaline");
 
-            // INVERTED 2026-08-07: the tinker budget no longer gates Amethyst, so ten imbues refuse the
-            // reroll and permit the swap. Amethyst adds or rerolls a SPECIAL, which has its own budget.
             Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
                 WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Amethyst), weapon),
                 "ten imbues must not refuse a swap - the tinker budget has no bearing on Amethyst");
 
-            // and the application path is still safe if it is ever reached directly, bypassing those refusals
+            // and the application path writes no tinker budget
             Assert.IsNotNull(WeaponModManager.ApplyReroll(weapon, WeaponClass.Melee, 10.0));
 
             Assert.IsNull(weapon.GetProperty(PropertyInt.WeaponModTinkerCount),
@@ -252,11 +253,11 @@ namespace ACE.Server.Tests
             Assert.IsNull(weapon.GetProperty(PropertyInt.NumTimesTinkered),
                 "the reroll wrote NumTimesTinkered on a weapon that was never tinkered");
 
-            // SINCE THE 2026-08-06 DECOUPLING a special no longer needs a free slot, so reaching this path
-            // directly CAN mint one. That is not a hole: the two NoAvailableSlots refusals asserted above are
-            // what make the path unreachable from play, and they are the guard - the arithmetic below never was.
+            // SINCE THE 2026-08-06 DECOUPLING a special no longer needs a free slot, and since 2026-11-25 no
+            // refusal depends on the tinker budget, so this path is reachable and mints specials. The
+            // permanent special bound is what limits it.
             Assert.IsTrue(WeaponModTinkerSet.SpecialCount(weapon) <= WeaponModRegistry.MaxSpecials,
-                "even on the unreachable path the permanent special bound holds");
+                "the permanent special bound holds");
 
             Assert.AreEqual(mask, weapon.GetProperty(PropertyInt.ImbuedEffect));
         }
@@ -330,10 +331,10 @@ namespace ACE.Server.Tests
 
         /// <summary>
         /// The retail-era shape the integrity gate exists for: a tinker count that the log does not account for.
-        /// Reversing a set you cannot fully see corrupts the item, so BOTH flows refuse.
+        /// Since 2026-11-25 (owner ruling) it refuses neither flow: the reroll is special-only and never reverses a tinker.
         /// </summary>
         [TestMethod]
-        public void Retail_ATenTinkerWeaponWithASevenEntryLogIsRefusedByBothFlows()
+        public void Retail_ATenTinkerWeaponWithASevenEntryLogIsRefusedByNeitherFlow()
         {
             var weapon = WeaponModTestKit.MakeWeapon(ItemType.MeleeWeapon, CombatUse.Melee,
                 new Dictionary<PropertyInt, int> { { PropertyInt.NumTimesTinkered, 10 }, { PropertyInt.Damage, 22 } });
@@ -342,16 +343,17 @@ namespace ACE.Server.Tests
 
             Assert.IsFalse(WeaponModTinkerSet.PassesIntegrityGate(weapon), "seven entries against NumTimesTinkered 10 must not pass");
 
-            Assert.AreEqual(WeaponModManager.WeaponModRefusal.TinkerLogMismatch,
-                WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Tourmaline), weapon));
+            // INVERTED 2026-11-25: neither tool reads or reverses a tinker set any more, so a log that does not
+            // account for the counter refuses neither.
+            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
+                WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Tourmaline), weapon),
+                "a mismatched log must not refuse a reroll - Tourmaline never reverses a tinker");
 
-            // INVERTED 2026-08-07: only the REROLL reverses a tinker set, so only the reroll needs the log
-            // to be trustworthy. Amethyst never reads or reverses one.
             Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
                 WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Amethyst), weapon),
                 "a mismatched log must not refuse a swap - Amethyst never reverses a tinker");
 
-            // an unreadable log is refused the same way, rather than being treated as empty
+            // an unreadable log still fails the (now informational) retail integrity query, and still refuses nothing
             weapon.SetProperty(PropertyString.TinkerLog, "61,iron,57");
             Assert.IsFalse(WeaponModTinkerSet.PassesIntegrityGate(weapon), "a log that does not parse must not pass the gate");
         }
@@ -447,8 +449,8 @@ namespace ACE.Server.Tests
             // TEST DEFECT, fixed 2026-07-30: this helper asserted against ReadReservedImbueSlots, which is the
             // imbue popcount ALONE and by construction knows nothing about the log - so it could never have
             // observed the behaviour this test exists to pin, and the "ten Oak reserves ten" case read 0.
-            // ReadReservedSlots is the accessor that carries the rule (imbues plus the unreversible log entries)
-            // and the one production budgets and refuses against (WeaponModManager.cs, ResolveRefusal/ApplyReroll).
+            // ReadReservedSlots is the accessor that carries the rule (imbues plus the unreversible log entries;
+            // no production refusal reads it since 2026-11-25, it is kept as a pure query).
             Assert.AreEqual(expected, WeaponModTinkerSet.ReadReservedSlots(weapon),
                 $"reserved slots for log [{string.Join(",", log)}] with imbues 0x{(imbuedEffect ?? 0):X}: {why}");
 
@@ -460,25 +462,25 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// CONFIRMED DEFECT (asserts the CORRECT behaviour and therefore fails). The end-to-end consequence of
-        /// the reserved-slot arithmetic above: a ten-Oak weapon must be refused outright rather than being handed
-        /// a second full budget.
+        /// The end-to-end consequence of the reserved-slot arithmetic above, as of 2026-11-25: a ten-Oak weapon
+        /// is rerolled (special-only) rather than refused, and is never handed a second full tinker budget.
+        /// The original defect (the pre-2026-08-07 reroll refilling the budget on top of the Oak) is gone by
+        /// construction, not by refusal.
         /// </summary>
         [TestMethod]
-        public void Refusal_ATenOakWeaponIsRefusedRatherThanBeingHandedTwentySlots()
+        public void Refusal_ATenOakWeaponIsRerolledWithoutBeingHandedTwentySlots()
         {
             var weapon = WeaponModTestKit.MakeWeapon(ItemType.MeleeWeapon, CombatUse.Melee,
                 new Dictionary<PropertyInt, int> { { PropertyInt.NumTimesTinkered, 10 }, { PropertyInt.WeaponTime, 0 }, { PropertyInt.Damage, 18 } });
 
             weapon.SetProperty(PropertyString.TinkerLog, "75,75,75,75,75,75,75,75,75,75");
 
-            Assert.AreEqual(WeaponModManager.WeaponModRefusal.NoAvailableSlots,
+            // INVERTED 2026-11-25: the "second free budget" hazard was a pre-2026-08-07 reroll hazard - that reroll
+            // refilled slots. The reroll is special-only now and issues no tinker budget, so ten unreversible
+            // tinkers refuse neither tool.
+            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
                 WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Tourmaline), weapon),
-                "a weapon whose ten tinkers are all unreversible has no slots to offer, so a reroll would be a second free budget on top of the first");
-
-            // INVERTED 2026-08-07: the "second free budget" hazard above is a REROLL hazard - it is the reroll
-            // that would refill slots. Amethyst adds or rerolls a special and never issues a tinker budget at
-            // all, so ten unreversible tinkers are simply not its problem.
+                "ten unreversible tinkers must not refuse a reroll - Tourmaline never hands out a tinker budget");
             Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
                 WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Amethyst), weapon),
                 "ten unreversible tinkers must not refuse a swap - Amethyst never hands out a tinker budget");
@@ -1287,8 +1289,8 @@ namespace ACE.Server.Tests
             var tourmaline = WeaponModTestKit.MakeBag(MaterialType.Tourmaline);
             var amethyst = WeaponModTestKit.MakeBag(MaterialType.Amethyst);
 
-            // --- the target is not a weapon ---
-            Assert.AreEqual(WeaponModManager.WeaponModRefusal.NotAWeapon,
+            // --- a shield is its own class and is accepted; the target is not a weapon otherwise ---
+            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
                 WeaponModTestKit.Refusal(tourmaline, WeaponModTestKit.MakeWeapon(ItemType.MeleeWeapon, CombatUse.Shield)), "shield");
 
             Assert.AreEqual(WeaponModManager.WeaponModRefusal.NotAWeapon,
@@ -1371,8 +1373,8 @@ namespace ACE.Server.Tests
             // --- ten imbues ---
             var imbued = WeaponModTestKit.MakeUntinkered(WeaponClass.Melee, ImbueMask(10));
 
-            Assert.AreEqual(WeaponModManager.WeaponModRefusal.NoAvailableSlots, WeaponModTestKit.Refusal(tourmaline, imbued), "ten imbues");
-            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None, WeaponModTestKit.Refusal(amethyst, imbued), "ten imbues, swap - the tinker budget is reroll-only since 2026-08-07");
+            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None, WeaponModTestKit.Refusal(tourmaline, imbued), "ten imbues, reroll - the tinker budget gates nothing since 2026-11-25");
+            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None, WeaponModTestKit.Refusal(amethyst, imbued), "ten imbues, swap - the tinker budget gates nothing");
         }
 
         /// <summary>

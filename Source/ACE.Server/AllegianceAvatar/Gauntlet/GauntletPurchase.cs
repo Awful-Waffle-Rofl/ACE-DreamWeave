@@ -128,7 +128,9 @@ public static class GauntletPurchase
 
         var permitted = avatar != null && AvatarRights.IsMember(buyer, avatar) && AvatarRights.CanSpend(buyer, avatar);
         var active = avatar != null && avatar.State == AvatarBindState.Bound && avatar.Active;
-        var price = (ulong)Math.Max(0, t.Price);
+        // The price reserved here is what the run commits at wave 1 or releases; it is never recomputed later.
+        var (rosterAccounts, serverAccounts) = AvatarManager.PriceInputs(avatar);
+        var price = AvatarPricing.Gauntlet(at, t, rosterAccounts, serverAccounts);
 
         var refusal = Check(permitted, active, avatar?.Level(at) ?? 0, NpcInInstance(npc.Location), t.Enabled, avatar?.AvailableFavor ?? 0, price, t);
 

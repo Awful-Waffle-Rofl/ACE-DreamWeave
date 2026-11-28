@@ -14,7 +14,22 @@ namespace ACE.Server.Tests.ThreadDungeons
     /// </summary>
     internal static class PooledLootSourceText
     {
+        /// <summary>
+        /// Returns the file with every <c>//</c> and <c>/* */</c> comment (doc comments included) blanked to
+        /// spaces, line breaks kept. This is the default so a pin cannot be satisfied by a call that survives
+        /// only in a comment. Applies to <c>.cs</c> files only: SQL, JSON and TSV have other comment and quote
+        /// rules (an apostrophe in SQL is not a char literal), so they come back verbatim. Use
+        /// <see cref="ReadRaw"/> for the rare test that asserts on comment text itself.
+        /// </summary>
         public static string Read(string repoRelativePath)
+        {
+            var text = ReadRaw(repoRelativePath);
+
+            return repoRelativePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) ? StripComments(text) : text;
+        }
+
+        /// <summary>Returns the file verbatim (comments included). Only for pins on comment or doc-comment text.</summary>
+        public static string ReadRaw(string repoRelativePath)
         {
             for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
             {
@@ -26,6 +41,275 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             Assert.Fail($"Could not find {repoRelativePath} by walking up from {AppContext.BaseDirectory}");
             return null;
+        }
+
+        /// <summary>
+        /// Returns the C# source with every <c>//</c> and <c>/* */</c> comment replaced by spaces, keeping every
+        /// line break (and so every line number and brace position relative to line starts). String and char
+        /// literals are skipped correctly, so <c>"http://x"</c> survives: regular, verbatim (<c>@"..."</c>),
+        /// interpolated (<c>$"..."</c>, <c>$@"..."</c>, including nested literals inside <c>{...}</c> holes) and
+        /// raw (<c>"""..."""</c>) strings, and char literals such as <c>'"'</c> and <c>'/'</c>. Doc comments are comments.
+        /// </summary>
+        public static string StripComments(string source)
+        {
+            var sb = new System.Text.StringBuilder(source.Length);
+            var i = 0;
+            CopyCode(source, ref i, sb, untilCloseBrace: false);
+            return sb.ToString();
+        }
+
+        // Copies code from source[i..] to sb, blanking comments. When untilCloseBrace is set (inside an
+        // interpolation hole) it stops after the unmatched '}' and leaves i past it.
+        private static void CopyCode(string s, ref int i, System.Text.StringBuilder sb, bool untilCloseBrace)
+        {
+            var depth = 0;
+
+            while (i < s.Length)
+            {
+                var c = s[i];
+                var next = i + 1 < s.Length ? s[i + 1] : '\0';
+
+                if (c == '/' && next == '/')
+                {
+                    while (i < s.Length && s[i] != '\n' && s[i] != '\r')
+                    {
+                        sb.Append(' ');
+                        i++;
+                    }
+                }
+                else if (c == '/' && next == '*')
+                {
+                    sb.Append("  ");
+                    i += 2;
+
+                    while (i < s.Length && !(s[i] == '*' && i + 1 < s.Length && s[i + 1] == '/'))
+                    {
+                        sb.Append(s[i] == '\n' || s[i] == '\r' ? s[i] : ' ');
+                        i++;
+                    }
+
+                    if (i < s.Length)
+                    {
+                        sb.Append("  ");
+                        i += 2;
+                    }
+                }
+                else if (c == '\'')
+                {
+                    // char literal: 'x', '\'', '\\', 'A'
+                    sb.Append(c);
+                    i++;
+
+                    while (i < s.Length && s[i] != '\'' && s[i] != '\n')
+                    {
+                        if (s[i] == '\\' && i + 1 < s.Length)
+                        {
+                            sb.Append(s[i]);
+                            i++;
+                        }
+
+                        sb.Append(s[i]);
+                        i++;
+                    }
+
+                    if (i < s.Length && s[i] == '\'')
+                    {
+                        sb.Append('\'');
+                        i++;
+                    }
+                }
+                else if (c == '"' || ((c == '$' || c == '@') && IsStringPrefix(s, i)))
+                {
+                    CopyString(s, ref i, sb);
+                }
+                else
+                {
+                    if (untilCloseBrace)
+                    {
+                        if (c == '{')
+                            depth++;
+                        else if (c == '}')
+                        {
+                            if (depth == 0)
+                            {
+                                sb.Append(c);
+                                i++;
+                                return;
+                            }
+
+                            depth--;
+                        }
+                    }
+
+                    sb.Append(c);
+                    i++;
+                }
+            }
+        }
+
+        // True when s[i] begins a $ / @ / $@ / @$ prefix that ends in a double quote.
+        private static bool IsStringPrefix(string s, int i)
+        {
+            var j = i;
+
+            while (j < s.Length && (s[j] == '$' || s[j] == '@'))
+                j++;
+
+            return j < s.Length && s[j] == '"' && j - i <= 3;
+        }
+
+        // Copies one whole string literal (any flavour) starting at its prefix or opening quote.
+        private static void CopyString(string s, ref int i, System.Text.StringBuilder sb)
+        {
+            var dollars = 0;
+            var verbatim = false;
+
+            while (i < s.Length && (s[i] == '$' || s[i] == '@'))
+            {
+                if (s[i] == '$')
+                    dollars++;
+                else
+                    verbatim = true;
+
+                sb.Append(s[i]);
+                i++;
+            }
+
+            var quotes = 0;
+
+            // A raw string cannot carry an @ prefix, so a verbatim string consumes exactly one opening quote
+            // (@"""" is a verbatim string holding one escaped quote, not a raw string).
+            while (i < s.Length && s[i] == '"' && !(verbatim && quotes == 1))
+            {
+                quotes++;
+                sb.Append('"');
+                i++;
+            }
+
+            if (quotes == 2)
+            {
+                // empty string "" (the second quote closes it)
+                return;
+            }
+
+            if (quotes >= 3)
+            {
+                // raw string: ends at a run of >= quotes double quotes. With N dollars, N braces open a hole.
+                while (i < s.Length)
+                {
+                    if (s[i] == '"')
+                    {
+                        var run = 0;
+
+                        while (i + run < s.Length && s[i + run] == '"')
+                            run++;
+
+                        sb.Append('"', run);
+                        i += run;
+
+                        if (run >= quotes)
+                            return;
+                    }
+                    else if (dollars > 0 && s[i] == '{')
+                    {
+                        var run = 0;
+
+                        while (i + run < s.Length && s[i + run] == '{')
+                            run++;
+
+                        sb.Append('{', run);
+                        i += run;
+
+                        if (run >= dollars)
+                            CopyCode(s, ref i, sb, untilCloseBrace: true);
+                    }
+                    else
+                    {
+                        sb.Append(s[i]);
+                        i++;
+                    }
+                }
+
+                return;
+            }
+
+            // quotes == 1: regular, verbatim or interpolated
+            while (i < s.Length)
+            {
+                var c = s[i];
+
+                if (verbatim)
+                {
+                    if (c == '"')
+                    {
+                        if (i + 1 < s.Length && s[i + 1] == '"')
+                        {
+                            sb.Append("\"\"");
+                            i += 2;
+                            continue;
+                        }
+
+                        sb.Append('"');
+                        i++;
+                        return;
+                    }
+                }
+                else
+                {
+                    if (c == '\\' && i + 1 < s.Length)
+                    {
+                        sb.Append(c);
+                        sb.Append(s[i + 1]);
+                        i += 2;
+                        continue;
+                    }
+
+                    if (c == '"')
+                    {
+                        sb.Append('"');
+                        i++;
+                        return;
+                    }
+
+                    if (c == '\n')
+                    {
+                        // unterminated regular string; bail out rather than eat the file
+                        return;
+                    }
+                }
+
+                if (dollars > 0 && c == '{')
+                {
+                    if (i + 1 < s.Length && s[i + 1] == '{')
+                    {
+                        sb.Append("{{");
+                        i += 2;
+                        continue;
+                    }
+
+                    sb.Append('{');
+                    i++;
+                    CopyCode(s, ref i, sb, untilCloseBrace: true);
+                    continue;
+                }
+
+                sb.Append(c);
+                i++;
+            }
+        }
+
+        /// <summary>
+        /// The same method body from the comment-stripped text and from the raw text, for a pin that finds a comment
+        /// anchor in <c>Raw</c> and slices <c>Code</c> at that offset. Asserts once that the two have equal length,
+        /// which is what makes the cross-indexing valid.
+        /// </summary>
+        public static (string Code, string Raw) MethodBodyBoth(string repoRelativePath, string signature)
+        {
+            var code = MethodBody(Read(repoRelativePath), signature);
+            var raw = MethodBody(ReadRaw(repoRelativePath), signature);
+
+            Assert.AreEqual(raw.Length, code.Length, $"stripped and raw bodies of {signature} must be the same length");
+            return (code, raw);
         }
 
         public static string MethodBody(string source, string signature)

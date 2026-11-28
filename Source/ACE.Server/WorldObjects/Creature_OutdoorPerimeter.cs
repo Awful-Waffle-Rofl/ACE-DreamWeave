@@ -162,22 +162,8 @@ namespace ACE.Server.WorldObjects
             return harmful && target?.P_OutdoorPerimeter != null && target.RefusesOutdoorPerimeterDamage(caster);
         }
 
-        /// <summary>
-        /// R11(c): a run creature that has walked home regains full health on arrival. Called from Sleep() when the
-        /// creature was in State.Return, which is how every return-home leg ends.
-        /// </summary>
-        internal void OnOutdoorPerimeterHomeArrival()
-        {
-            if (P_OutdoorPerimeter == null || IsDead)
-                return;
-
-            var missing = (int)Health.MaxValue - (int)Health.Current;
-            if (missing <= 0)
-                return;
-
-            var healed = UpdateVitalDelta(Health, missing);
-            if (healed > 0)
-                DamageHistory.OnHeal((uint)healed);
-        }
+        // R11(c), the full heal on arriving home, is RETIRED (2026-11-24, owner ruling after a player report): a run
+        // creature that returns home keeps its damage. A ranged creature that loses its target never leaves its spawn, so
+        // MoveToHome went straight to Sleep() and the heal landed instantly, which made pillar-and-peek fights unwinnable.
     }
 }

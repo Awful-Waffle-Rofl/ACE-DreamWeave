@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 
 using ACE.Entity.Enum.Properties;
+using ACE.Server.Managers;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.WorldObjects;
 
@@ -56,6 +57,37 @@ namespace ACE.Server.Entity
         /// nothing about how many charges are LEFT - see <see cref="HasUsableCharge"/> for that.
         /// </summary>
         public static bool IsSalvageTool(WorldObject source) => GetCapacity(source) > 0;
+
+        /// <summary>
+        /// TRUE for an item the Ultimate Salvaging Tool must refuse to turn into salvage: a salvage tool (a
+        /// multi-charge Hammer) or a foolproof tinkering bag. Both carry a workmanship and a MaterialType like
+        /// loot does, so nothing else in HandleSalvaging stops them, and salvaging either destroys a bought or
+        /// earned item. The foolproof half reads <see cref="RecipeManager.IsFoolproofTinker"/>, which knows
+        /// every retail and fork foolproof wcid.
+        /// </summary>
+        public static bool IsRefusedForSalvage(WorldObject item) =>
+            item != null && (IsSalvageTool(item) || RecipeManager.IsFoolproofTinker(item.WeenieClassId));
+
+        /// <summary>
+        /// The per-item refusal decision of Player.HandleSalvaging, kept pure so it can be tested with real
+        /// data. Returns TRUE when the item must be skipped. <paramref name="message"/> is the chat line to
+        /// send, or null when none is due: the line goes out only for the FIRST refused item of an
+        /// operation, tracked by <paramref name="messageSent"/>, which the caller keeps across the loop.
+        /// </summary>
+        public static bool TryRefuseForSalvage(WorldObject item, ref bool messageSent, out string message)
+        {
+            message = null;
+
+            if (!IsRefusedForSalvage(item))
+                return false;
+
+            if (!messageSent)
+                message = $"The {item.Name} cannot be salvaged.";
+
+            messageSent = true;
+
+            return true;
+        }
 
         /// <summary>
         /// The tool's fixed capacity, 0 when the property is absent. This is the AUTHORED value from the

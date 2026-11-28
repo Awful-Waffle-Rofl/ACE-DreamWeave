@@ -43,8 +43,10 @@ namespace ACE.Server.BalanceTrials
     /// which would read as an item's own spell), so step 2 still removes them before the next rep.
     ///
     /// CONSUMABLES (final review F1). The archetype's LiftUp.Consumables are topped up to their stacks (never trimmed).
-    /// Every other consumable (TrialDigest.IsConsumable) goes back to the MASTER's count: topped up when short, trimmed
-    /// when over (a consumable the master does not hold is trimmed to nothing). Trimming takes from the pack only; an
+    /// Every other consumable (TrialDigest.IsConsumable) goes back to the rep's own BASELINE: its counts as they stood at the
+    /// session's first soft reset (TrialStarter.BaselineConsumables), topped up when short, trimmed when over, so only loot picked up
+    /// in a rep is trimmed (a consumable the baseline does not hold is trimmed to nothing). The master's counts are not used: a
+    /// customized rep keeps its own. Trimming takes from the pack only; an
     /// equipped stack (the wielded ammunition) is never trimmed, and new stacks always land in the pack, so an ammunition
     /// stack shot to nothing (dequipped and destroyed) comes back in the pack, not in the ammunition slot.
     ///
@@ -69,11 +71,11 @@ namespace ACE.Server.BalanceTrials
         public const double ProfileBuffDurationSeconds = 86400;
 
         /// <param name="buffProfile">The profile step 6 casts: TrialBuffs.EffectiveProfile (the scenario's override, else the archetype's).</param>
-        public static TrialSoftResetSummary Soft(Player p, TrialArchetype a, IReadOnlyDictionary<uint, long> masterConsumables, string buffProfile)
+        public static TrialSoftResetSummary Soft(Player p, TrialArchetype a, IReadOnlyDictionary<uint, long> baseline, string buffProfile)
         {
             ArgumentNullException.ThrowIfNull(p);
             ArgumentNullException.ThrowIfNull(a);
-            ArgumentNullException.ThrowIfNull(masterConsumables);
+            ArgumentNullException.ThrowIfNull(baseline);
 
             // 1. Full vitals.
             p.SetMaxVitals();
@@ -111,18 +113,8 @@ namespace ACE.Server.BalanceTrials
 
             p.ClearTrialClassAbilityCooldowns();
 
-            // 4. Consumables: the archetype's to their stacks, every other one to the master's count.
-            var consumableWcids = TrialDigest.ConsumableWcids(a);
-            var held = p.GetAllPossessions().Where(i => TrialDigest.IsConsumable(i.WeenieClassId, i.WeenieType, consumableWcids)).Select(i => i.WeenieClassId);
-
-            var restocked = 0;
-            var trimmed = 0;
-            foreach (var t in ConsumableTargets(a.LiftUp?.Consumables, masterConsumables, held))
-            {
-                var (added, removed) = p.RestoreTrialConsumable(t.Wcid, t.Target, t.Trim);
-                restocked += added;
-                trimmed += removed;
-            }
+            // 4. Consumables: the archetype's to their stacks, every other one to the session baseline.
+            var (restocked, trimmed) = RestoreConsumables(p, a, baseline);
 
             // 5. Every item's mana full: worn, in the pack and in side packs (a swapped-in item starts full too).
             var recharged = Recharge(p.GetAllPossessions());
@@ -150,6 +142,27 @@ namespace ACE.Server.BalanceTrials
             var summary = new TrialSoftResetSummary(enchantmentsRemoved, cooldowns.Count, cloaks, restocked, trimmed, recharged, cast, lengthened, activated);
             log.Debug($"[TRIAL] soft reset {p.Name} (0x{p.Guid.Full:X8}): {summary}");
             return summary;
+        }
+
+        /// <summary>
+        /// The consumables step on its own (the soft reset's step 4, and the session's closing reset): the archetype's LiftUp stacks
+        /// topped up, every other consumable restocked or trimmed to <paramref name="baseline"/>. Room thread only.
+        /// </summary>
+        public static (int Restocked, int Trimmed) RestoreConsumables(Player p, TrialArchetype a, IReadOnlyDictionary<uint, long> baseline)
+        {
+            var consumableWcids = TrialDigest.ConsumableWcids(a);
+            var held = p.GetAllPossessions().Where(i => TrialDigest.IsConsumable(i.WeenieClassId, i.WeenieType, consumableWcids)).Select(i => i.WeenieClassId);
+
+            var restocked = 0;
+            var trimmed = 0;
+            foreach (var t in ConsumableTargets(a.LiftUp?.Consumables, baseline, held))
+            {
+                var (added, removed) = p.RestoreTrialConsumable(t.Wcid, t.Target, t.Trim);
+                restocked += added;
+                trimmed += removed;
+            }
+
+            return (restocked, trimmed);
         }
 
         /// <summary>
@@ -314,8 +327,8 @@ namespace ACE.Server.BalanceTrials
 
         /// <summary>
         /// The consumable restore plan. Pure. The archetype's consumables: top up to their stack, no trim (they win over a
-        /// master count for the same wcid). Every other wcid the master holds: its count, trimmed. Every other consumable the
-        /// rep holds that the master does not: 0, trimmed. Sorted by wcid.
+        /// baseline count for the same wcid). Every other wcid the baseline holds (<paramref name="master"/>, now the session's
+        /// baseline): its count, trimmed. Every other consumable the rep holds that the baseline does not: 0, trimmed. Sorted by wcid.
         /// </summary>
         public static IReadOnlyList<TrialConsumableTarget> ConsumableTargets(IEnumerable<TrialConsumable> liftUp, IReadOnlyDictionary<uint, long> master,
             IEnumerable<uint> heldConsumableWcids)

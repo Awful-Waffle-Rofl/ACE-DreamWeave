@@ -40,13 +40,13 @@ namespace ACE.Server.Tests
         private static readonly uint[] VendorWcids = { 1004130, 1006651, 1006652, 1006653 };
         private const uint BloodWcid = 1006650;
 
-        // PRICE TABLE, in Marks of the Hopeslayer (owner ranges, 2026-10-15), per vendor: weapons and shields 100
-        // (Armsmaster, Quartermaster), armor 160 each with no bundle (Armorer), clothing, robes and cloaks 100
-        // (Tailor). Divided by 5 on 2026-11-03 (owner: nobody had earned enough for one item; was 500/500/800/500). Every clone's price is written by ACE.Content.Tools cosmeticimport (VendorRouting.Price, in
+        // PRICE TABLE, in Marks of the Hopeslayer (owner ranges, 2026-10-15), per vendor: weapons and shields 50
+        // (Armsmaster, Quartermaster), armor 80 each with no bundle (Armorer), clothing, robes and cloaks 50
+        // (Tailor). Divided by 5 on 2026-11-03 (owner: nobody had earned enough for one item; was 500/500/800/500), then halved on 2026-11-26 (owner; Guise 1800 -> 900). Every clone's price is written by ACE.Content.Tools cosmeticimport (VendorRouting.Price, in
         // CosmeticAllowlist.Strip); this is the independent pin on the committed result. It was 5 on every line.
         private static readonly Dictionary<uint, int> ExpectedPricePerVendor = new()
         {
-            { 1004130, 100 }, { 1006651, 100 }, { 1006652, 160 }, { 1006653, 100 },
+            { 1004130, 50 }, { 1006651, 50 }, { 1006652, 80 }, { 1006653, 50 },
         };
 
         // The seven tailoring tools (1004312-1004318) cost 1 Mark each:
@@ -56,21 +56,25 @@ namespace ACE.Server.Tests
 
         // The nine RETAIL Perennial dyes the Tailor stocks as-is (not clones: a dye works through cook_book rows keyed
         // on its own wcid). They have no unit under Content/sql/weenies, so the clone checks skip them; their price
-        // (700, divided by 5 on 2026-11-03, set on the retail weenies by Content/sql/patches/hopeslayer_perennial_dye_price.sql) is pinned by
+        // (250 since 2026-11-25, owner ruling; 700 before, 3500 before that; set on the retail weenies by Content/sql/patches/hopeslayer_perennial_dye_price.sql) is pinned by
         // Hopeslayer_Tailor_StocksTheNinePerennialDyes_PricedByTheirPatch. 30084 Perennial Botched Dye is deliberately
         // absent (owner ruling 2026-10-15: 0 cook_book rows in retail data, so it does nothing).
-        private const int PerennialDyePrice = 700;
+        private const int PerennialDyePrice = 250;
         private static readonly HashSet<uint> RetailDyeWcids = new() { 30082, 30083, 30085, 30086, 30087, 30088, 30089, 30090, 30091 };
         private const uint BotchedDyeWcid = 30084;
+
+        // The sixteen FORK Perennial dyes (Docs/Pvp/DYES.md), 1008650-1008657 primary and 1008658-1008665 shell: hand-authored CraftTools with
+        // fork properties (PerennialDyeKind, DyeShellShade), not cosmeticimport clones, so the clone checks skip them; PerennialDyeContentTests pins them.
+        private static readonly HashSet<uint> ForkDyeWcids = Enumerable.Range(1008650, 16).Select(i => (uint)i).ToHashSet();
 
         // PvP PRESTIGE items: hand-authored, NOT clones, priced on their own and gated by PropertyBool 9076 PvpPrestigeGated
         // (a peak rating or battleground wins, Vendor.BuyItems_ValidateTransaction). Each is stocked by exactly one named
         // vendor, skipped by the clone checks, and pinned instead by Hopeslayer_PrestigeItems_AreGatedPricedAndCarryNoPower,
         // which still forbids every power id and allows only the named extras below on top of the cosmetic allowlist.
-        // 1006654 Guise of the Hopeslayer: the Bael'Zharon body suit (PropertyString 9020 WornModelOverrides), 1800 Marks (divided by 5 on 2026-11-03).
+        // 1006654 Guise of the Hopeslayer: the Bael'Zharon body suit (PropertyString 9020 WornModelOverrides), 900 Marks (divided by 5 on 2026-11-03, halved on 2026-11-26).
         private static readonly Dictionary<uint, (uint Vendor, int Price)> PrestigeItems = new()
         {
-            { 1006654, (1006652, 1800) },
+            { 1006654, (1006652, 900) },
         };
 
         // What a prestige item may carry beyond the cosmetic allowlist: int 33 Bonded, 114 Attuned (it cannot be handed to
@@ -96,10 +100,11 @@ namespace ACE.Server.Tests
         // they move only deliberately (same numbers as ACE.Content.Tools.Tests VendorRoutingTests).
         // 2026-10-15: plus the nine working retail Perennial dyes on the Tailor (173 + 9, 895 + 9).
         // 2026-10-15: plus the prestige suit 1006654 on the Armorer (289 + 1, 904 + 1).
-        private const int ExpectedTotalShopLines = 905;
+        // 2026-11-25: plus the sixteen fork Perennial dyes on the Tailor (182 + 16, 905 + 16).
+        private const int ExpectedTotalShopLines = 921;
         private static readonly Dictionary<uint, int> ExpectedShopLinesPerVendor = new()
         {
-            { 1004130, 225 }, { 1006651, 208 }, { 1006652, 290 }, { 1006653, 182 },
+            { 1004130, 225 }, { 1006651, 208 }, { 1006652, 290 }, { 1006653, 198 },
         };
 
         private static readonly HashSet<string> AllowedTables = new()
@@ -315,6 +320,9 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0, badRows.Count, "create_list rows that are not this vendor's Wield (2) or Shop (4) rows (vendor " + vendorWcid + "):\n" + string.Join("\n", badRows.Take(10)));
             Assert.AreEqual(shopRows, shop.Count, "shop wcid count does not equal the number of destination_Type 4 rows");
 
+            // 2026-11-26: the sixteen fork Perennial dyes are stocked by the Tailor unit itself (the former stocking patch was folded in and deleted), so the vendor's own file is the whole stock.
+            Assert.IsFalse(File.Exists(Path.Combine(WeenieDir().Parent.FullName, "patches", "hopeslayer_tailor_fork_dyes.sql")), "a vendor's stock must live in its own weenie file; the Tailor stocking patch was folded in and deleted");
+
             Assert.IsTrue(shop.Count >= MinimumShopLinesPerVendor, $"parsed only {shop.Count} shop lines from weenie {vendorWcid}; expected at least {MinimumShopLinesPerVendor} per vendor - an empty vendor, or a guard that passes vacuously");
             Assert.AreEqual(shop.Count, shop.Distinct().Count(), $"duplicate shop wcids in weenie {vendorWcid}'s create_list");
             return shop;
@@ -343,7 +351,7 @@ namespace ACE.Server.Tests
             var result = new List<(uint, ParsedWeenie)>();
             foreach (var wcid in ShopWcids())
             {
-                if (RetailDyeWcids.Contains(wcid) || PrestigeItems.ContainsKey(wcid))
+                if (RetailDyeWcids.Contains(wcid) || ForkDyeWcids.Contains(wcid) || PrestigeItems.ContainsKey(wcid))
                     continue;
                 var files = WeenieDir().GetFiles(wcid + " *.sql");
                 if (files.Length != 1)
@@ -364,7 +372,7 @@ namespace ACE.Server.Tests
         public void Bloodwarden_EveryShopFile_IsFullyParsed()
         {
             var violations = new List<string>();
-            var shopCount = ShopWcids().Count(w => !RetailDyeWcids.Contains(w) && !PrestigeItems.ContainsKey(w)); // the retail dyes and the prestige items have their own tests
+            var shopCount = ShopWcids().Count(w => !RetailDyeWcids.Contains(w) && !ForkDyeWcids.Contains(w) && !PrestigeItems.ContainsKey(w)); // the retail dyes and the prestige items have their own tests
             var parsed = ParsedShop(violations);
             Assert.AreEqual(shopCount, parsed.Count, "some shop files were skipped instead of parsed:\n" + string.Join("\n", violations.Take(25)));
             Assert.AreEqual(0, violations.Count, "shop files the guard could not fully account for:\n" + string.Join("\n", violations.Take(25)));
@@ -397,7 +405,7 @@ namespace ACE.Server.Tests
                 var vendorViolations = new List<string>();
                 foreach (var wcid in ShopWcids(vendor))
                 {
-                    if (RetailDyeWcids.Contains(wcid) || PrestigeItems.ContainsKey(wcid))
+                    if (RetailDyeWcids.Contains(wcid) || ForkDyeWcids.Contains(wcid) || PrestigeItems.ContainsKey(wcid))
                         continue;
                     var files = WeenieDir().GetFiles(wcid + " *.sql");
                     if (files.Length != 1)
@@ -437,7 +445,7 @@ namespace ACE.Server.Tests
 
         /// <summary>
         /// The Tailor stocks exactly the nine working retail Perennial dyes as its only non-clone rows, and the patch unit
-        /// that prices them sets Value (19) and StackUnitValue (15) to 700 for exactly those nine. 30084 Perennial Botched
+        /// that prices them sets Value (19) and StackUnitValue (15) to 250 for exactly those nine. 30084 Perennial Botched
         /// Dye is neither stocked by any vendor nor priced. Without the patch a dye
         /// ships at Value 0 and sells for the max(1, ...) floor of one Mark.
         /// </summary>

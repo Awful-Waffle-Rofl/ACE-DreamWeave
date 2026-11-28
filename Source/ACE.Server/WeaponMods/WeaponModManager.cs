@@ -15,8 +15,10 @@ using ACE.Server.WorldObjects;
 namespace ACE.Server.WeaponMods
 {
     /// <summary>
-    /// Two crafting flows onto one shared ten-slot budget, entered from RecipeManager.UseObjectOnTarget before
-    /// the cookbook lookup. Modelled on ACE.Server.EquipmentMods.EquipmentModManager, the armor-side sibling:
+    /// Two crafting flows that each write only the special modifiers a weapon or shield carries (the specials
+    /// live outside the ten retail tinker slots, the tinker log and NumTimesTinkered), entered from
+    /// RecipeManager.UseObjectOnTarget before the cookbook lookup. Modelled on
+    /// ACE.Server.EquipmentMods.EquipmentModManager, the armor-side sibling:
     /// the busy and peace-mode guards, VerifyUseRequirements before the animation, the ClapHands chain, the
     /// SECOND VerifyUseRequirements inside the queued action, TryConsumeFromInventoryWithNetworking, the
     /// ChangesDetected / SaveBiotaToDatabase pair and the GameMessageUpdateObject broadcast all transfer
@@ -33,12 +35,12 @@ namespace ACE.Server.WeaponMods
     /// or a swap actually does - now lives on the two salvage bags' own LongDesc, so a player reads it when
     /// appraising the bag, BEFORE the use (Content/sql/patches/weapon_mods_salvage_bag_description.sql).
     ///
-    ///   REROLL (Tourmaline) - strips the weapon's tinkers and specials and refills all ten slots at random,
-    ///                         with a chance to convert some of the budget into rare special modifiers.
-    ///                         Cheap per attempt, wipes everything, gives a mushy tinker spread.
-    ///   SWAP   (Amethyst)   - trades ONE random filled slot for ONE random modifier at a much higher special
-    ///                         rate. Expensive per special, but the only way to keep a deliberately chosen
-    ///                         tinker base while acquiring them.
+    ///   REROLL (Tourmaline) - special-only: clears every special the item holds and redraws the whole set
+    ///                         (0 to MaxSpecials of them). Tinkers, the tinker log and NumTimesTinkered are
+    ///                         never touched, and no tinker state refuses it (a drift-stone-locked weapon is still refused).
+    ///   SWAP   (Amethyst)   - special-only: removes ONE random held special and draws a replacement from the
+    ///                         full class pool, or ADDS a first special when the item holds none. Tinkers are
+    ///                         never touched. It lets a player reroll one special while keeping the others.
     ///
     /// WHY TARGETABILITY IS LOAD-BEARING. The design prices a +101.1% endgame ceiling on the assumption that a
     /// perfect trio is a lottery, not a grind. Two properties guarantee that and neither is optional: nothing is
@@ -75,10 +77,10 @@ namespace ACE.Server.WeaponMods
         {
             None,
 
-            /// <summary>Tourmaline: strip everything and refill all ten slots at random.</summary>
+            /// <summary>Tourmaline: clear every special and redraw the whole set. Never touches tinkers.</summary>
             Reroll,
 
-            /// <summary>Amethyst: trade one random filled slot for one random modifier.</summary>
+            /// <summary>Amethyst: replace one random special with a fresh draw, or add a first special when none is held.</summary>
             Swap,
         }
 
@@ -93,23 +95,14 @@ namespace ACE.Server.WeaponMods
             /// <summary>The source is not one of the two designated salvage bags.</summary>
             NotAModMaterial,
 
-            /// <summary>The target is not a melee weapon, missile weapon or caster (shields and ammo included).</summary>
+            /// <summary>The target is not a melee weapon, missile weapon, caster or shield (ammo and every other item type).</summary>
             NotAWeapon,
 
             /// <summary>The target has no workmanship, so its specials would all resolve to nothing.</summary>
             NoWorkmanship,
 
-            /// <summary>
-            /// Every slot is spoken for by something this system cannot reverse - imbues, or log entries it does
-            /// not own - so there is nothing to reroll or swap.
-            /// </summary>
-            NoAvailableSlots,
-
             /// <summary>The weapon was finished by a Prismatic Drift Stone, which promised it could never be tinkered again.</summary>
             DriftStoneLocked,
-
-            /// <summary>The retail tinker log does not account for NumTimesTinkered, so the current set cannot be fully reversed.</summary>
-            TinkerLogMismatch,
 
             // REMOVED 2026-08-07 (repo-owner directive), and deliberately NOT re-addable without revisiting the
             // ruling behind them:
@@ -123,6 +116,18 @@ namespace ACE.Server.WeaponMods
             //
             // Both are gone rather than kept-but-unreachable: an enum member no rule can return is a rule a
             // future reader will restore by accident.
+            //
+            // REMOVED 2026-11-25 (repo-owner ruling), same treatment:
+            //
+            //   the all-slots-taken - refused a Tourmaline use when imbues plus unreversible log entries filled
+            //                         all ten tinker slots.
+            //   the log-mismatch    - refused a Tourmaline use when the retail tinker log did not account for
+            //                         NumTimesTinkered.
+            //
+            // Tourmaline determines the number of mods and traditional tinkers have no bearing on it, exactly as
+            // for Amethyst. Since 2026-08-07 ApplyReroll never writes the tinker budget, log or
+            // counter, and reads the composition only to echo it, so both gates guarded state the reroll
+            // cannot change.
         }
 
         // ---------------- classification (pure, no WorldObject needed) ----------------
@@ -172,8 +177,7 @@ namespace ACE.Server.WeaponMods
         /// The whole rule set, expressed over plain values so it can be exercised without a live player, item or
         /// session.
         /// </summary>
-        public static WeaponModRefusal ResolveRefusal(WeaponModAction action, WeaponClass weaponClass, bool hasWorkmanship,
-            bool passesIntegrityGate, int reservedSlots)
+        public static WeaponModRefusal ResolveRefusal(WeaponModAction action, WeaponClass weaponClass, bool hasWorkmanship)
         {
             if (action == WeaponModAction.None)
                 return WeaponModRefusal.NotAModMaterial;
@@ -184,32 +188,16 @@ namespace ACE.Server.WeaponMods
             if (!hasWorkmanship)
                 return WeaponModRefusal.NoWorkmanship;
 
-            // THE TWO TINKER GATES ARE REROLL-ONLY as of 2026-08-07 (repo-owner directive: "traditional tinkers
-            // should have no bearing" on Amethyst).
+            // NO TINKER-STATE REFUSAL REMAINS (repo-owner ruling 2026-11-25). Neither tool writes or refuses on the tinker
+            // budget, the tinker log or NumTimesTinkered; the reroll only reads the log to echo it. So a ten-Oak or log-mismatched weapon is as workable
+            // as any other. The two reroll-only gates that used to sit here (all-slots-taken,
+            // log-mismatch) are removed.
             //
-            // Both describe the state of the TINKER budget - whether there is room in it, and whether the log
-            // accounting for it can be trusted. Tourmaline still cares because ApplyReroll runs against a
-            // weapon whose tinker composition it is preserving and echoing. Amethyst neither reads nor writes
-            // a tinker, a log or the counter, so gating it on any of them gated it on state it cannot touch.
-            //
-            // NOTE THE DELIBERATE ASYMMETRY: a ten-Oak or log-mismatched weapon is now Amethyst-able while
-            // still being refused by Tourmaline. That is the directive as given, not an oversight.
-            if (action == WeaponModAction.Reroll)
-            {
-                // reservedSlots is imbues PLUS every log entry this system cannot reverse, so a weapon whose
-                // whole budget is unreversible (ten Oak) is refused here rather than silently refilled on top
-                if (WeaponModTinkerSet.AvailableSlots(reservedSlots) <= 0)
-                    return WeaponModRefusal.NoAvailableSlots;
-
-                if (!passesIntegrityGate)
-                    return WeaponModRefusal.TinkerLogMismatch;
-            }
-
-            // NO SWAP-SPECIFIC REFUSAL REMAINS. Amethyst applies to any workmanship-bearing weapon that is not
-            // drift-stone locked: it ADDS a special when the weapon holds none, and rerolls one when it holds
-            // any number including the cap. The two conditions that used to sit here - a full tinker budget,
-            // and at least one held special - were both removed on 2026-08-07. See the WeaponModRefusal
-            // remarks for why they are deleted rather than kept unreachable.
+            // NO SWAP-SPECIFIC REFUSAL REMAINS either. Amethyst applies to any workmanship-bearing weapon that
+            // is not drift-stone locked: it ADDS a special when the weapon holds none, and rerolls one when it
+            // holds any number including the cap. The two conditions that used to sit here - a full tinker
+            // budget, and at least one held special - were both removed on 2026-08-07. See the
+            // WeaponModRefusal remarks for why they are deleted rather than kept unreachable.
             return WeaponModRefusal.None;
         }
 
@@ -218,12 +206,12 @@ namespace ACE.Server.WeaponMods
         /// <see cref="ResolveRefusal"/>'s value-only rule table because it has to read the weapon's log and
         /// imbue together.
         ///
-        /// WHY IT EXISTS AT ALL. A drift-stoned weapon is refused today only by accident: the stone writes
-        /// NumTimesTinkered 10 against a log of just MinBoosts+1 .. MaxBoosts+1 = 2..6 entries, so
-        /// WeaponModTinkerSet.PassesIntegrityGate rejects it on the count mismatch. That is a coincidence of the
-        /// stone's current tuning, not a guarantee - raising PrismaticDriftStone.MaxBoosts to 9 makes the log ten
-        /// entries long, the gate passes, and a weapon the game promised "can never be tinkered again" becomes
-        /// fully rerollable. This check keeps the promise regardless of how the stone is tuned.
+        /// WHY IT EXISTS AT ALL. This check, and nothing else, keeps the promise a drift-stoned weapon was
+        /// given ("can never be tinkered again"). Until 2026-11-25 the retail integrity gate refused such a
+        /// weapon by accident (the stone writes NumTimesTinkered 10 against a log of just
+        /// MinBoosts+1 .. MaxBoosts+1 = 2..6 entries, a count mismatch); that gate no longer refuses a
+        /// Tourmaline use, so this explicit check is the only thing standing between a drift-stoned weapon
+        /// and a reroll, whatever the stone's tuning.
         /// </summary>
         public static WeaponModRefusal ResolveDriftStoneRefusal(WorldObject target) =>
             PrismaticDriftStone.MatchesAppliedSignature(target) ? WeaponModRefusal.DriftStoneLocked : WeaponModRefusal.None;
@@ -233,12 +221,10 @@ namespace ACE.Server.WeaponMods
         /// rule table with every argument read off the item. <see cref="VerifyUseRequirements"/> calls this, so
         /// nothing else needs to know which accessor feeds which argument.
         ///
-        /// This overload exists because the wiring itself is the thing that goes wrong. A caller that assembles
-        /// those seven arguments by hand can pass <see cref="WeaponModTinkerSet.ReadReservedImbueSlots"/> where
-        /// the rule table needs <see cref="WeaponModTinkerSet.ReadReservedSlots"/> - imbues only, rather than
-        /// imbues PLUS the log entries this system cannot reverse - and every ten-Oak weapon is then accepted
-        /// instead of refused. The scenario suites' Refusal helper did exactly that, and agreed with itself while
-        /// disagreeing with the server. There is now one wiring, and it is this one.
+        /// This overload exists because the wiring itself is the thing that goes wrong: a caller that assembles
+        /// the rule table's arguments by hand can disagree with the server (the scenario suites' Refusal helper
+        /// once did, and agreed with itself while disagreeing with the server). There is one wiring, and it is
+        /// this one.
         /// </summary>
         public static WeaponModRefusal ResolveRefusal(WeaponModAction action, WorldObject target)
         {
@@ -254,9 +240,7 @@ namespace ACE.Server.WeaponMods
             if (refusal != WeaponModRefusal.None)
                 return refusal;
 
-            return ResolveRefusal(action, WeaponClassifier.Classify(target), target.Workmanship != null,
-                WeaponModTinkerSet.PassesIntegrityGate(target),
-                WeaponModTinkerSet.ReadReservedSlots(target));
+            return ResolveRefusal(action, WeaponClassifier.Classify(target), target.Workmanship != null);
         }
 
         // ---------------- entry point ----------------
@@ -442,19 +426,13 @@ namespace ACE.Server.WeaponMods
                     return null;
 
                 case WeaponModRefusal.NotAWeapon:
-                    return $"The {target.Name} is not a weapon. Only melee weapons, missile weapons and casters can carry weapon mods.";
+                    return $"The {target.Name} is not a weapon or shield. Only melee weapons, missile weapons, casters and shields can carry weapon mods.";
 
                 case WeaponModRefusal.NoWorkmanship:
                     return $"The {target.Name} has no workmanship, so it cannot hold a special modifier.";
 
-                case WeaponModRefusal.NoAvailableSlots:
-                    return $"Every one of the {target.Name}'s slots is taken by work this salvage cannot undo. There is nothing left to work with.";
-
                 case WeaponModRefusal.DriftStoneLocked:
                     return $"The {target.Name} was finished by a Prismatic Drift Stone. Its tinkering is sealed and no salvage will reopen it.";
-
-                case WeaponModRefusal.TinkerLogMismatch:
-                    return $"The {target.Name}'s tinker log does not account for everything applied to it, so its current tinkers cannot be safely removed.";
 
                 default:
                     return $"The {sourceName} cannot be used on the {target.Name}.";

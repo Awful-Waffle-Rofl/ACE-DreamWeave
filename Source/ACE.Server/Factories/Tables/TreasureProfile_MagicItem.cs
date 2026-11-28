@@ -47,11 +47,12 @@ namespace ACE.Server.Factories.Tables
         /// <summary>
         /// A very common MagicItem profile
         /// </summary>
+        // FORK CHANGE (caster drop rate, 2026-11-25): Weapon x1.015, difference taken from Scroll.
         private static ChanceTable<TreasureItemType> magicItemProfile8 = new ChanceTable<TreasureItemType>()
         {
-            ( TreasureItemType.Weapon,              0.15f ),
+            ( TreasureItemType.Weapon,              0.15225f ),
             ( TreasureItemType.Armor,               0.15f ),
-            ( TreasureItemType.Scroll,              0.14f ),
+            ( TreasureItemType.Scroll,              0.13775f ),
             ( TreasureItemType.Clothing,            0.14f ),
             ( TreasureItemType.Jewelry,             0.14f ),
             ( TreasureItemType.Gem,                 0.14f ),
@@ -63,11 +64,12 @@ namespace ACE.Server.Factories.Tables
         /// <summary>
         /// A very common MagicItem profile
         /// </summary>
+        // FORK CHANGE (caster drop rate, 2026-11-25): Weapon x1.015, difference taken from Scroll.
         private static ChanceTable<TreasureItemType> magicItemProfile9 = new ChanceTable<TreasureItemType>()
         {
-            ( TreasureItemType.Weapon,              0.30f ),
+            ( TreasureItemType.Weapon,              0.3045f ),
             ( TreasureItemType.Armor,               0.30f ),
-            ( TreasureItemType.Scroll,              0.10f ),
+            ( TreasureItemType.Scroll,              0.0955f ),
             ( TreasureItemType.Clothing,            0.10f ),
             ( TreasureItemType.Jewelry,             0.10f ),
             ( TreasureItemType.Gem,                 0.05f ),
@@ -76,11 +78,12 @@ namespace ACE.Server.Factories.Tables
             ( TreasureItemType.EncapsulatedSpirit,  0.005f ),
         };
 
+        // FORK CHANGE (caster drop rate, 2026-11-25): Weapon x1.015, difference taken from Scroll.
         private static ChanceTable<TreasureItemType> magicItemProfile10 = new ChanceTable<TreasureItemType>()
         {
-            ( TreasureItemType.Weapon,              0.30f ),
+            ( TreasureItemType.Weapon,              0.3045f ),
             ( TreasureItemType.Armor,               0.30f ),
-            ( TreasureItemType.Scroll,              0.185f ),
+            ( TreasureItemType.Scroll,              0.1805f ),
             ( TreasureItemType.Clothing,            0.10f ),
             ( TreasureItemType.Jewelry,             0.10f ),
             ( TreasureItemType.Cloak,               0.01f  ),

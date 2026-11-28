@@ -3386,7 +3386,7 @@ namespace ACE.Server.ThreadDungeons
                 log.Debug($"[DYNDUNGEON] {logTag} wcid {entry?.Wcid} ({entry?.Role}) damage ceiling cap x{plan.DamageCeilingCap:0.##} top x{plan.DamageCeilingTop:0.##}: " +
                           $"melee {Axis(result.MeleeBefore, result.MeleeTarget, plan.PerHitMedian)}, missile {Axis(result.MissileBefore, result.MissileTarget, plan.PerHitMedian)}; " +
                           $"body x{result.BodyFactor:0.###} ({result.PartsScaled} part(s)), items [{string.Join(", ", result.Items.Select(i => $"{i.Wcid} {i.From}->{i.To}"))}]; " +
-                          $"R {ownRating} G {groupBonus} withheld {result.Withheld} (melee {result.WithheldMelee}, missile {result.WithheldMissile})");
+                          $"R {ownRating} G {groupBonus} damage-clamp withheld {result.Withheld} (melee {result.WithheldMelee}, missile {result.WithheldMissile})");
             }
 
             return result;
@@ -3409,7 +3409,7 @@ namespace ACE.Server.ThreadDungeons
         internal static FamilyAbilityPlan ResolveCreatureAbilities(DungeonSpawnPlan plan, Func<uint, CreaturePerHit> perHitOf,
             Func<uint, DungeonStatProfile> archetypeProfileOf, bool upliftAttributes, long runSeed)
         {
-            if (plan == null || perHitOf == null || !(plan.PerHitMedian > 0) || plan.GroupDamageRatingBonus <= 0)
+            if (plan == null || perHitOf == null || !(plan.PerHitMedian > 0) || plan.AbilityGroupRatingBonus <= 0)
                 return null;
 
             try
@@ -3418,7 +3418,7 @@ namespace ACE.Server.ThreadDungeons
                     CreatureAbilitySettings.Read(), runSeed);
 
                 if (abilities.Budget > 0)
-                    log.Info($"[DYNDUNGEON] creature abilities: family {abilities.FamilyKey} budget {abilities.Budget} (G {plan.GroupDamageRatingBonus}, " +
+                    log.Info($"[DYNDUNGEON] creature abilities: family {abilities.FamilyKey} budget {abilities.Budget} (ability G {plan.AbilityGroupRatingBonus}, " +
                              $"{abilities.Members.Count} member(s), {abilities.GearUnknownCount} gear-unknown) -> {(abilities.Result.Kinds.Count == 0 ? "none" : string.Join(", ", abilities.Result.Kinds))}");
 
                 return abilities;

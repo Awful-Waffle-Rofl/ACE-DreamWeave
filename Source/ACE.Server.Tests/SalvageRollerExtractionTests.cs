@@ -92,16 +92,12 @@ namespace ACE.Server.Tests
 
             Assert.IsNull(WeaponModManager.RefusalMessage(WeaponModManager.WeaponModRefusal.None, "Bag", target));
 
-            Assert.AreEqual("The Test Blade is not a weapon. Only melee weapons, missile weapons and casters can carry weapon mods.",
+            Assert.AreEqual("The Test Blade is not a weapon or shield. Only melee weapons, missile weapons, casters and shields can carry weapon mods.",
                 WeaponModManager.RefusalMessage(WeaponModManager.WeaponModRefusal.NotAWeapon, "Bag", target));
             Assert.AreEqual("The Test Blade has no workmanship, so it cannot hold a special modifier.",
                 WeaponModManager.RefusalMessage(WeaponModManager.WeaponModRefusal.NoWorkmanship, "Bag", target));
-            Assert.AreEqual("Every one of the Test Blade's slots is taken by work this salvage cannot undo. There is nothing left to work with.",
-                WeaponModManager.RefusalMessage(WeaponModManager.WeaponModRefusal.NoAvailableSlots, "Bag", target));
             Assert.AreEqual("The Test Blade was finished by a Prismatic Drift Stone. Its tinkering is sealed and no salvage will reopen it.",
                 WeaponModManager.RefusalMessage(WeaponModManager.WeaponModRefusal.DriftStoneLocked, "Bag", target));
-            Assert.AreEqual("The Test Blade's tinker log does not account for everything applied to it, so its current tinkers cannot be safely removed.",
-                WeaponModManager.RefusalMessage(WeaponModManager.WeaponModRefusal.TinkerLogMismatch, "Bag", target));
 
             // the catch-all names the SOURCE, so the roller must hand in the Hammer's name
             Assert.AreEqual("The Hammer of Tourmaline cannot be used on the Test Blade.",

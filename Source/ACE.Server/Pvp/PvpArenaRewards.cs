@@ -58,7 +58,7 @@ namespace ACE.Server.Pvp
     /// <summary>
     /// What the coordinator hands the gateway with each grant: the match (for logs), the cap dials as they stood
     /// at Resolve, so the player-side cap check reads the same settings the match resolved under, and the
-    /// <see cref="Ledger"/> whose daily cap the grant counts against (defaults to the arena's). <see cref="DoubleMarks"/> marks a battleground
+    /// <see cref="Ledger"/> whose daily cap the grant counts against (defaults to the arena's). <see cref="DoubleMarks"/> marks a battleground or arena match (any mode)
     /// grant that was multiplied by a Double Marks window, so the pickup line says so; it changes no amount or cap.
     /// </summary>
     public sealed record PvpBloodGrant(Guid MatchId, int DailyCap, string ResetTimezone, int ResetHour, PvpBloodLedgerKind Ledger = PvpBloodLedgerKind.Arena, bool DoubleMarks = false);
@@ -104,9 +104,11 @@ namespace ACE.Server.Pvp
         /// <summary>
         /// Blood owed to one participant of a resolved match, before the daily cap. 0 when the payout is off, the match
         /// never went Live, the opponents shared an IP, the participant forfeited, or <paramref name="withheld"/> (an unpaid
-        /// rematch: the repeat-pairing cap, Docs/Pvp/DESIGN.md). A non-positive dial pays 0.
+        /// rematch: the repeat-pairing cap, Docs/Pvp/DESIGN.md). A non-positive dial pays 0. <paramref name="bonusMultiplier"/> is the Double Marks
+        /// multiplier an arena match (any mode) inside a window earns (1.0 elsewhere): the result is round(amount x <see cref="SanitizeBonusMultiplier"/>), halves away
+        /// from zero, saturating at int.MaxValue; a 0 amount stays 0.
         /// </summary>
-        public static int BloodFor(PvpBloodResult result, bool forfeited, bool wentLive, bool sameIp, PvpArenaDials dials, bool withheld = false)
+        public static int BloodFor(PvpBloodResult result, bool forfeited, bool wentLive, bool sameIp, PvpArenaDials dials, bool withheld = false, double bonusMultiplier = 1.0)
         {
             if (dials == null || !dials.BloodEnabled || !wentLive || sameIp || forfeited || withheld)
                 return 0;
@@ -120,7 +122,14 @@ namespace ACE.Server.Pvp
                 default: amount = dials.BloodDraw; break;
             }
 
-            return Math.Max(0, amount);
+            amount = Math.Max(0, amount);
+
+            if (amount == 0)
+                return 0;
+
+            var scaled = Math.Round(amount * SanitizeBonusMultiplier(bonusMultiplier), MidpointRounding.AwayFromZero);
+
+            return scaled >= int.MaxValue ? int.MaxValue : (int)scaled;
         }
 
         /// <summary>

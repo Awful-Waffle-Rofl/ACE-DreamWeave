@@ -127,6 +127,7 @@ namespace ACE.Server.Tests
             {
                 case WeaponClass.Missile: return (ItemType.MissileWeapon, CombatUse.Missile);
                 case WeaponClass.Caster: return (ItemType.Caster, CombatUse.Melee);
+                case WeaponClass.Shield: return (ItemType.Armor, CombatUse.Shield);
                 default: return (ItemType.MeleeWeapon, CombatUse.Melee);
             }
         }
@@ -156,6 +157,10 @@ namespace ACE.Server.Tests
                     floats[PropertyFloat.DamageVariance] = 0.45;
                     floats[PropertyFloat.WeaponDefense] = 1.03;
                     floats[PropertyFloat.MaximumVelocity] = 24.0;
+                    break;
+
+                case WeaponClass.Shield:
+                    ints[PropertyInt.ArmorLevel] = 300;
                     break;
 
                 default:
@@ -491,7 +496,7 @@ namespace ACE.Server.Tests
     [TestClass]
     public class WeaponModSequenceTests
     {
-        private static readonly WeaponClass[] AllClasses = { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster };
+        private static readonly WeaponClass[] AllClasses = { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster, WeaponClass.Shield };
 
         [ClassInitialize]
         public static void TestSetup(TestContext context)

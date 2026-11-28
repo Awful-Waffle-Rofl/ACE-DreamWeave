@@ -388,8 +388,13 @@ namespace ACE.Server.Network.Structure
             // IgnoreShield, MaximumVelocity - so this block is what tells a player which part of those numbers
             // came from this system. The 8130-8135 records themselves carry no [AssessmentProperty] and are
             // never sent; the magnitudes shown here are read straight off them server side.
+            //
+            // These lines are drawn as their own "Weapon Mods:" section after the Property Details block, not
+            // interleaved into it, so a focus's pet/own-damage lines stay short.
+            var weaponModLines = new List<string>();
+
             if (PropertyManager.GetBool("weapon_mods_enabled").Item)
-                propertyDetails.AddRange(WeaponModDisplay.GetAppraisalLines(wo));
+                weaponModLines.AddRange(WeaponModDisplay.GetAppraisalLines(wo));
 
             // Knot loot traits (WaffleACE). Ungated here: each line is gated by its own mechanic switch inside
             // KnotTraitValue.ResolveOn, so a disabled trait contributes no line.
@@ -421,7 +426,12 @@ namespace ACE.Server.Network.Structure
             // helper like SalvageTool's.
             propertyDetails.AddRange(SalvageForge.GetAppraisalLines(wo, examiner));
 
-            WritePropertyDetails(PropertiesString, propertyDetails);
+            // Perennial dyes (WaffleACE) - the nine retail ones and every fork kind. UNGATED: a rendering of what the EXAMINER is wearing against this
+            // dye, computed with the same check as the use guard (PerennialDyes.Accepts), so the line can never promise what the guard would refuse.
+            foreach (var dyeLine in PerennialDyes.GetAppraisalLines(wo, examiner))
+                propertyDetails.Add("- " + dyeLine);
+
+            WritePropertyDetails(PropertiesString, propertyDetails, weaponModLines);
 
             if (!Success)
             {
@@ -461,7 +471,7 @@ namespace ACE.Server.Network.Structure
         }
 
         /// <summary>
-        /// Writes the "Property Details:" block into PropertyString.Use, appending to whatever Use string the
+        /// Writes the "Property Details:" block (and, after one blank line, the "Weapon Mods:" block) into PropertyString.Use, appending to whatever Use string the
         /// item (or an earlier branch) already supplied. Does nothing when there are no lines to show.
         ///
         /// WHY Use, AND NOT LongDesc. VERIFIED 2026-07-30 by a live client probe (@appraiseprobe in
@@ -478,12 +488,24 @@ namespace ACE.Server.Network.Structure
         /// its own use message first and the block appended below it, instead of the block being silently eaten.
         /// Do not move this call back above the ManaStone branch.
         /// </summary>
-        internal static void WritePropertyDetails(Dictionary<PropertyString, string> propertiesString, IReadOnlyList<string> details)
+        internal static void WritePropertyDetails(Dictionary<PropertyString, string> propertiesString, IReadOnlyList<string> details, IReadOnlyList<string> weaponModLines = null)
         {
-            if (propertiesString == null || details == null || details.Count == 0)
+            var hasDetails = details != null && details.Count > 0;
+            var hasMods = weaponModLines != null && weaponModLines.Count > 0;
+
+            if (propertiesString == null || (!hasDetails && !hasMods))
                 return;
 
-            var detailsBlock = "Property Details:\n" + string.Join("\n", details);
+            // Two sections, one blank line between: "Property Details:" then "Weapon Mods:". Either is omitted
+            // when it has no lines, so there is never an empty header; with no weapon-mod lines the text is
+            // exactly the single "Property Details:" block it always was.
+            var detailsBlock = hasDetails ? "Property Details:\n" + string.Join("\n", details) : null;
+            var modsBlock = hasMods ? "Weapon Mods:\n" + string.Join("\n", weaponModLines) : null;
+
+            if (detailsBlock != null && modsBlock != null)
+                detailsBlock = detailsBlock + "\n\n" + modsBlock;
+            else if (detailsBlock == null)
+                detailsBlock = modsBlock;
 
             // NO padding newlines of our own around the block (both removed 2026-08-02 after seeing them
             // rendered live). The client already draws its own gap between the Use slot and the section above

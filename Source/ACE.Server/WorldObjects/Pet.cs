@@ -61,7 +61,10 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// Reports one hit this pet just landed to its own owner, as "&lt;pet&gt; hits &lt;target&gt; for N damage!".
+        /// Reports one hit this pet just landed to its own owner, as "&lt;pet&gt; hits &lt;target&gt; for N damage!",
+        /// prefixed "Critical hit! " when the hit was a critical - the same lead-in the client's own crit lines use.
+        /// Every route forwards its own crit flag; today the Harm and Drain Health routes never set it for a pet,
+        /// because the life-magic crit roll (TryLifeCriticalHit) is player-only.
         /// Opt-in per character via "/summondamage on|off" (Player.SummonDamageMessages), off by default.
         ///
         /// Only ever addressed to P_PetOwner, so a player never sees another player's summons. Zero and
@@ -82,7 +85,7 @@ namespace ACE.Server.WorldObjects
         /// EnchantmentManager applies them through Creature.TakeDamageOverTime, whose signature carries no
         /// source at all, so by the time a tick lands there is nothing left identifying the pet that caused it.
         /// </summary>
-        public void NotifyOwnerOfDamage(WorldObject target, int amount)
+        public void NotifyOwnerOfDamage(WorldObject target, int amount, bool critical)
         {
             if (amount <= 0 || target == null)
                 return;
@@ -95,7 +98,7 @@ namespace ACE.Server.WorldObjects
             if (owner.SquelchManager.Squelches.Contains(target, ChatMessageType.CombatSelf))
                 return;
 
-            owner.Session.Network.EnqueueSend(new GameMessageSystemChat(FormatDamageMessage(Name, target.Name, amount), ChatMessageType.CombatSelf));
+            owner.Session.Network.EnqueueSend(new GameMessageSystemChat(FormatDamageMessage(Name, target.Name, amount, critical), ChatMessageType.CombatSelf));
         }
 
         /// <summary>
@@ -104,9 +107,9 @@ namespace ACE.Server.WorldObjects
         /// Player_Commerce.IsAcceptableToSell. The pet's Name already carries the owner's, because Pet.Init
         /// prefixes it, so the rendered line reads "Bob's Wisp hits Drudge Skulker for 42 damage!".
         /// </summary>
-        internal static string FormatDamageMessage(string petName, string targetName, int amount)
+        internal static string FormatDamageMessage(string petName, string targetName, int amount, bool critical)
         {
-            return $"{petName} hits {targetName} for {amount} damage!";
+            return $"{(critical ? "Critical hit! " : "")}{petName} hits {targetName} for {amount} damage!";
         }
 
         /// <summary>

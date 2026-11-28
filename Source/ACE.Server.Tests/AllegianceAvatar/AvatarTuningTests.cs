@@ -39,6 +39,7 @@ namespace ACE.Server.Tests.Avatars
                 var key = Key(p.Name);
                 object expected = p.PropertyType == typeof(bool) ? DefaultPropertyManager.DefaultBooleanProperties[key].Item
                     : p.PropertyType == typeof(long) ? DefaultPropertyManager.DefaultLongProperties[key].Item
+                    : p.PropertyType == typeof(string) ? DefaultPropertyManager.DefaultStringProperties[key].Item
                     : (object)DefaultPropertyManager.DefaultDoubleProperties[key].Item;
                 Assert.AreEqual(expected, p.GetValue(d), key);
             }
@@ -48,14 +49,15 @@ namespace ACE.Server.Tests.Avatars
         public void EveryAvatarKeyIsInTheRecord()
         {
             var props = typeof(AvatarTuning).GetProperties(BindingFlags.Public | BindingFlags.Instance);
-            Assert.AreEqual(31, props.Length);
+            Assert.AreEqual(41, props.Length);
 
             var bools = AvatarKeys(DefaultPropertyManager.DefaultBooleanProperties);
             var longs = AvatarKeys(DefaultPropertyManager.DefaultLongProperties);
             var doubles = AvatarKeys(DefaultPropertyManager.DefaultDoubleProperties);
-            Assert.AreEqual(31, bools.Count + longs.Count + doubles.Count);
+            var strings = AvatarKeys(DefaultPropertyManager.DefaultStringProperties);
+            Assert.AreEqual(41, bools.Count + longs.Count + doubles.Count + strings.Count);
 
-            var all = bools.Concat(longs).Concat(doubles).ToList();
+            var all = bools.Concat(longs).Concat(doubles).Concat(strings).ToList();
             foreach (var p in props)
                 Assert.AreEqual(1, all.Count(k => k == Key(p.Name)), p.Name);
         }
@@ -68,8 +70,11 @@ namespace ACE.Server.Tests.Avatars
             var bools = AvatarKeys(DefaultPropertyManager.DefaultBooleanProperties);
             var longs = AvatarKeys(DefaultPropertyManager.DefaultLongProperties);
             var doubles = AvatarKeys(DefaultPropertyManager.DefaultDoubleProperties);
+            var strings = AvatarKeys(DefaultPropertyManager.DefaultStringProperties);
             try
             {
+                foreach (var k in strings)
+                    Assert.IsTrue(PropertyManager.ModifyString(k, DefaultPropertyManager.DefaultStringProperties[k].Item));
                 foreach (var k in bools)
                     Assert.IsTrue(PropertyManager.ModifyBool(k, DefaultPropertyManager.DefaultBooleanProperties[k].Item));
                 foreach (var k in longs)
@@ -90,6 +95,12 @@ namespace ACE.Server.Tests.Avatars
                     var v = 0.25 + i * 0.001;
                     PropertyManager.ModifyDouble(doubles[i], v, init: true);
                     expected[doubles[i]] = v;
+                }
+                for (int i = 0; i < strings.Count; i++)
+                {
+                    var v = "Test/Zone_" + i;
+                    PropertyManager.ModifyString(strings[i], v);
+                    expected[strings[i]] = v;
                 }
                 foreach (var k in bools)
                 {
@@ -121,6 +132,8 @@ namespace ACE.Server.Tests.Avatars
                 Assert.IsTrue(PropertyManager.ModifyLong(k, DefaultPropertyManager.DefaultLongProperties[k].Item));
             foreach (var k in AvatarKeys(DefaultPropertyManager.DefaultDoubleProperties))
                 Assert.IsTrue(PropertyManager.ModifyDouble(k, DefaultPropertyManager.DefaultDoubleProperties[k].Item, init: true));
+            foreach (var k in AvatarKeys(DefaultPropertyManager.DefaultStringProperties))
+                Assert.IsTrue(PropertyManager.ModifyString(k, DefaultPropertyManager.DefaultStringProperties[k].Item));
         }
 
         private static void RestoreAll()
@@ -131,6 +144,8 @@ namespace ACE.Server.Tests.Avatars
                 PropertyManager.ModifyLong(k, DefaultPropertyManager.DefaultLongProperties[k].Item);
             foreach (var k in AvatarKeys(DefaultPropertyManager.DefaultDoubleProperties))
                 PropertyManager.ModifyDouble(k, DefaultPropertyManager.DefaultDoubleProperties[k].Item, init: true);
+            foreach (var k in AvatarKeys(DefaultPropertyManager.DefaultStringProperties))
+                PropertyManager.ModifyString(k, DefaultPropertyManager.DefaultStringProperties[k].Item);
         }
 
         [TestMethod]
@@ -192,6 +207,25 @@ namespace ACE.Server.Tests.Avatars
         {
             Assert.AreEqual(0.01, AvatarTuning.Defaults.LevelXpFraction);
             Assert.AreEqual(40L, AvatarTuning.Defaults.EventMinLevel);
+        }
+
+        /// <summary>Owner ruling 2026-11-25: one private World Event per Avatar per day, the day turning over at 12:00 AM US Eastern.</summary>
+        [TestMethod]
+        public void Defaults_PinTheOwnerApprovedDailyLimit()
+        {
+            Assert.AreEqual(1L, AvatarTuning.Defaults.EventDailyLimit);
+            Assert.AreEqual(0L, AvatarTuning.Defaults.DayResetHour);
+            Assert.AreEqual("America/New_York", AvatarTuning.Defaults.DayResetTimezone);
+        }
+
+        /// <summary>Owner ruling 2026-11-25: the Blessing costs 250 + 100 per online member, at most 20000, and adds one hour to each bank.</summary>
+        [TestMethod]
+        public void Defaults_PinTheOwnerApprovedBlessing()
+        {
+            Assert.AreEqual(250L, AvatarTuning.Defaults.BlessingPriceBase);
+            Assert.AreEqual(100L, AvatarTuning.Defaults.BlessingPricePerMember);
+            Assert.AreEqual(20000L, AvatarTuning.Defaults.BlessingPriceCap);
+            Assert.AreEqual(3600L, AvatarTuning.Defaults.BlessingBankSeconds);
         }
     }
 }

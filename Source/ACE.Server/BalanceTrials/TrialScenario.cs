@@ -27,9 +27,12 @@ namespace ACE.Server.BalanceTrials
 
     /// <summary>
     /// One scenario file: the room, the gem, the waves and the block shape. BuffProfile, when not null, overrides the
-    /// archetype's buffProfile at rep setup (TrialBuffs.EffectiveProfile); null leaves the archetype's in force.
+    /// archetype's buffProfile at rep setup (TrialBuffs.EffectiveProfile); null leaves the archetype's in force. Rotation, when not
+    /// null, forces each rep's family (and optionally dungeon) in list order (TrialRotation); the gem's family is then "any".
+    /// StartGraceSecs is the start-of-rep aggro grace: wave 0 of every rep spawns held (no target, no attack) for that many
+    /// seconds, or until the player attacks a held creature (Creature_Trial.cs). 0 turns it off.
     /// </summary>
-    public sealed record TrialScenario(string Id, string Room, TrialGem Gem, int Group, IReadOnlyList<TrialWave> Waves, string Hazards, int Reps, int TimeoutSecs, int HardCopyEvery, string BuffProfile = null);
+    public sealed record TrialScenario(string Id, string Room, TrialGem Gem, int Group, IReadOnlyList<TrialWave> Waves, string Hazards, int Reps, int TimeoutSecs, int HardCopyEvery, string BuffProfile = null, IReadOnlyList<TrialRotationEntry> Rotation = null, int StartGraceSecs = TrialScenarioLoader.DefaultStartGraceSecs);
 
     /// <summary>The scenario schema and loader. Closed key set: an unknown key is an error, so a typo cannot silently drop a rule.</summary>
     public static class TrialScenarioLoader
@@ -39,11 +42,16 @@ namespace ACE.Server.BalanceTrials
         public const int MinTimeoutSecs = 30;
         public const int MaxTimeoutSecs = 7200;
 
+        /// <summary>startGraceSecs when the key is absent: long enough for a bot client to start fighting.</summary>
+        public const int DefaultStartGraceSecs = 6;
+        public const int MinStartGraceSecs = 0;
+        public const int MaxStartGraceSecs = 30;
+
         public static TrialScenario Parse(string json)
         {
             using var doc = TrialJson.ParseDocument(json);
             var root = TrialJson.Obj(doc.RootElement, "scenario",
-                new[] { "id", "room", "gem", "group", "waves", "hazards", "reps", "timeoutSecs" }, "hardCopyEvery", "buffProfile");
+                new[] { "id", "room", "gem", "group", "waves", "hazards", "reps", "timeoutSecs" }, "hardCopyEvery", "buffProfile", "rotation", "startGraceSecs");
 
             var id = TrialJson.Str(root["id"], "id");
             if (!TrialJson.IsId(id))
@@ -73,6 +81,14 @@ namespace ACE.Server.BalanceTrials
             if (timeout < MinTimeoutSecs || timeout > MaxTimeoutSecs)
                 throw new TrialArchetypeException($"timeoutSecs {timeout} must be {MinTimeoutSecs}..{MaxTimeoutSecs}");
 
+            var startGrace = DefaultStartGraceSecs;
+            if (root.TryGetValue("startGraceSecs", out var sg))
+            {
+                startGrace = TrialJson.Int(sg, "startGraceSecs");
+                if (startGrace < MinStartGraceSecs || startGrace > MaxStartGraceSecs)
+                    throw new TrialArchetypeException($"startGraceSecs {startGrace} must be {MinStartGraceSecs}..{MaxStartGraceSecs} (0 turns the start grace off)");
+            }
+
             var hardCopy = 0;
             if (root.TryGetValue("hardCopyEvery", out var hc))
             {
@@ -91,7 +107,50 @@ namespace ACE.Server.BalanceTrials
                     throw new TrialArchetypeException($"buffProfile '{buffProfile}' must be {TrialBuffs.OwnSpellbook} or {TrialBuffs.AdminAllPrefix}1..8");
             }
 
-            return new TrialScenario(id, room, gem, group, waves, hazards, reps, timeout, hardCopy, buffProfile);
+            IReadOnlyList<TrialRotationEntry> rotation = null;
+            if (root.TryGetValue("rotation", out var rot))
+            {
+                rotation = ParseRotation(rot);
+
+                // The rotation owns the family, so the gem must not also pin one.
+                if (!string.Equals(gem.Family, DungeonGemSpec.Any, StringComparison.Ordinal))
+                    throw new TrialArchetypeException($"a scenario with a rotation needs gem family \"any\", got '{gem.Family}'");
+            }
+
+            return new TrialScenario(id, room, gem, group, waves, hazards, reps, timeout, hardCopy, buffProfile, rotation, startGrace);
+        }
+
+        private static IReadOnlyList<TrialRotationEntry> ParseRotation(JsonElement e)
+        {
+            var items = TrialJson.Arr(e, "rotation");
+            if (items.Count == 0)
+                throw new TrialArchetypeException("rotation must not be empty");
+
+            var entries = new List<TrialRotationEntry>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (var item in items)
+            {
+                var o = TrialJson.Obj(item, "rotation entry", new[] { "family" }, "dungeon");
+
+                var family = TrialJson.Str(o["family"], "family");
+                if (family.Length == 0 || string.Equals(family, DungeonGemSpec.Any, StringComparison.OrdinalIgnoreCase))
+                    throw new TrialArchetypeException("a rotation entry must name a concrete family id (not empty, not \"any\")");
+                if (!seen.Add(family))
+                    throw new TrialArchetypeException($"rotation family '{family}' appears twice");
+
+                string dungeon = null;
+                if (o.TryGetValue("dungeon", out var d))
+                {
+                    dungeon = TrialJson.Str(d, "dungeon");
+                    if (dungeon.Length == 0 || string.Equals(dungeon, DungeonGemSpec.Any, StringComparison.OrdinalIgnoreCase))
+                        throw new TrialArchetypeException($"rotation entry '{family}': dungeon must name a concrete Threads dungeon id (not empty, not \"any\")");
+                }
+
+                entries.Add(new TrialRotationEntry(family, dungeon));
+            }
+
+            return entries;
         }
 
         private static TrialGem ParseGem(JsonElement e)

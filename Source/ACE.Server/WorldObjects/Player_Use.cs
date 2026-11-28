@@ -10,6 +10,7 @@ using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Pvp.Rules;
 using ACE.Server.Pvp.Templates;
+using ACE.Server.WeaponMods;
 
 namespace ACE.Server.WorldObjects
 {
@@ -152,7 +153,7 @@ namespace ACE.Server.WorldObjects
             }
 
             // re-verify client checks
-            if (((sourceItem.TargetType ?? ItemType.None) & target.ItemType) == ItemType.None)
+            if (!ShieldSalvageTargets.IsCompatible(sourceItem, target))
             {
                 // ItemHolder::TargetCompatibleWithObject
                 SendTransientError($"Cannot use the {sourceItem.Name} with the {target.Name}");
@@ -161,7 +162,8 @@ namespace ACE.Server.WorldObjects
             }
 
             // ML tinker lock (WaffleACE): a target carrying PropertyBool.TinkerLocked refuses every
-            // use-on-target source except an allow-listed cook_book source or a ManaStone. Placed
+            // use-on-target source except an allow-listed cook_book source or a ManaStone (and, for a
+            // tinker-locked shield, the four shield salvage materials - see TinkerLock). Placed
             // after the TargetType re-verify above and before both HandleActionUseOnTarget
             // dispatches below (the landblock move-to-chain branch and the same-location branch),
             // so this covers every use-on-target regardless of which branch fires.

@@ -648,7 +648,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.IsNotNull(PlaceOnceFault(source.Replace("!ThreadRunGeometry.IsOnRunLandblock(run, creature.Location)", "false")));
 
             var moved = source.Replace("BindToOutdoorPerimeter(creature, outdoor, p);", "")
-                .Replace("// Nothing after EnterWorld.", "BindToOutdoorPerimeter(creature, outdoor, p); // Nothing after EnterWorld.");
+                .Replace("creature.EnterWorld()", "creature.EnterWorld(); BindToOutdoorPerimeter(creature, outdoor, p)");
             Assert.AreNotEqual(source.Replace("BindToOutdoorPerimeter(creature, outdoor, p);", ""), moved, "the mutation anchor must exist");
             Assert.IsNotNull(PlaceOnceFault(moved), "a binding written after EnterWorld");
         }

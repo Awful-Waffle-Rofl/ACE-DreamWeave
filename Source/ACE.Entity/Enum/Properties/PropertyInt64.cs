@@ -105,6 +105,11 @@ namespace ACE.Entity.Enum.Properties
            crash sees it and does not apply the result twice. */
         SalvageBatchApplied = 9029,
 
+        /* Allegiance Blessing (Docs/AllegianceAvatar/README.md): on a player, the unix time (seconds, UTC) of the last
+           Allegiance Blessing grant they received. A character receives at most one Blessing per Avatar day whichever
+           Avatar it is in; the grant (AvatarBlessing.GrantBank) is the authoritative check and writes this stamp. */
+        AllegianceBlessingReceivedAt = 9030,
+
         /* Luminance earned (WaffleACE): running total of Luminance this character has earned since logging in,
            counted only in Player.AddLuminance (kills, quests, fellowship shares, digsite rewards, admin grants). EPHEMERAL: never saved, starts at 0 every
            login, and is pushed to the client on each grant so client-side luminance-per-hour trackers can read

@@ -48,6 +48,25 @@ namespace ACE.Server.Tests.BalanceTrials
         }
 
         [TestMethod]
+        public void Rejects_a_class_with_a_trailing_newline()
+        {
+            // JSON "Archmage\n" is the class name plus a newline: the regex must anchor at the true end (\z, not $).
+            Rejects(With("\"class\": \"Archmage\", \"targetLevel\"", "\"class\": \"Archmage\\n\", \"targetLevel\""), "is not a class");
+        }
+
+        [TestMethod]
+        public void Rejects_a_gear_slot_with_a_trailing_newline()
+        {
+            string Gear(string slot) => With(@"""gear"": []", $@"""gear"": [{{ ""slot"": ""{slot}"", ""source"": ""any"", ""pick"": ""p50 armorLevel"" }}]");
+
+            // Positive control: the plain member parses.
+            Assert.AreEqual(EquipMask.HeadWear, TrialArchetypeLoader.Parse(Gear("HeadWear")).LiftUp.Gear[0].Slot);
+
+            // JSON "HeadWear\n" is the member name plus a newline: the regex must anchor at the true end (\z, not $).
+            Rejects(Gear(@"HeadWear\n"), "is not a single EquipMask member");
+        }
+
+        [TestMethod]
         public void Parses_the_minimal_archetype()
         {
             var a = TrialArchetypeLoader.Parse(Minimal);

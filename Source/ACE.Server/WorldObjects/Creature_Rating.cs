@@ -205,6 +205,47 @@ namespace ACE.Server.WorldObjects
             return GetRatingMod(totalRating);
         }
 
+        /// <summary>
+        /// True on this thread while a blessing-free read is running (<see cref="GetDamageRatingWithoutBlessings"/>,
+        /// <see cref="GetDamageResistRatingWithoutBlessings"/>): both getters then skip the Thread Shrine and Gauntlet aura
+        /// folds, so a caller that must not see them (the Thorns reflect) reads the rating once instead of total-minus-blessing,
+        /// which could straddle an aura publish or a shrine grant between its two reads.
+        /// </summary>
+        [ThreadStatic]
+        private static bool blessingFreeRatings;
+
+        /// <summary>GetDamageRating without the Thread Shrine blessing and the Gauntlet Avatar's aura: the rating the player built.</summary>
+        internal int GetDamageRatingWithoutBlessings()
+        {
+            var was = blessingFreeRatings;
+            blessingFreeRatings = true;
+
+            try
+            {
+                return GetDamageRating();
+            }
+            finally
+            {
+                blessingFreeRatings = was;
+            }
+        }
+
+        /// <summary>GetDamageResistRating without the Thread Shrine blessing and the Gauntlet Avatar's aura.</summary>
+        internal int GetDamageResistRatingWithoutBlessings(CombatType? combatType = null, bool directDamage = true)
+        {
+            var was = blessingFreeRatings;
+            blessingFreeRatings = true;
+
+            try
+            {
+                return GetDamageResistRating(combatType, directDamage);
+            }
+            finally
+            {
+                blessingFreeRatings = was;
+            }
+        }
+
         public int GetDamageRating()
         {
             // get from base properties (monsters)?
@@ -254,8 +295,14 @@ namespace ACE.Server.WorldObjects
             // Thread Shrine damage blessing (Docs/Threads/ENCOUNTERS.md "Shrine"): +25 rating at 1.25, only while the
             // holder stands inside the run that granted it (ThreadBoons.For). Folded into the base term so the final
             // sum below keeps its shape; one volatile read when no run holds a blessing.
-            if (this is Player tsbPlayer)
+            if (!blessingFreeRatings && this is Player tsbPlayer)
                 damageRating += ACE.Server.ThreadDungeons.ThreadBoons.DamageRatingFor(tsbPlayer);
+
+            // Allegiance Gauntlet: the living Avatar fighter's aura (allegiance_gauntlet_fighter_aura_damage_rating) for a
+            // member standing within its radius in the run's copy (GauntletAura). Same base-term fold; one volatile read when
+            // no fighter is up.
+            if (!blessingFreeRatings && this is Player gaPlayer)
+                damageRating += ACE.Server.Avatars.Gauntlet.GauntletAura.DamageRatingFor(gaPlayer);
 
             // heritage / weapon type bonus factored in elsewhere?
             return damageRating + equipment + knotWrist + enchantments - weaknessRating + augBonus + lumAugBonus + classAbilityBonus + healBoostConversion + critDamageConversion;
@@ -305,8 +352,13 @@ namespace ACE.Server.WorldObjects
 
             // Thread Shrine mitigation blessing: +25 damage resist rating at 1.25 (20% less damage taken), only while the
             // holder stands inside the run that granted it. Folded into the base term, as in GetDamageRating.
-            if (this is Player tsbPlayer)
+            if (!blessingFreeRatings && this is Player tsbPlayer)
                 damageResistRating += ACE.Server.ThreadDungeons.ThreadBoons.DamageResistRatingFor(tsbPlayer);
+
+            // Allegiance Gauntlet: the living Avatar fighter's aura (allegiance_gauntlet_fighter_aura_resist_rating), as in
+            // GetDamageRating. Taken back out of the Thorns reflect, as the shrine blessing is.
+            if (!blessingFreeRatings && this is Player gaPlayer)
+                damageResistRating += ACE.Server.Avatars.Gauntlet.GauntletAura.DamageResistRatingFor(gaPlayer);
 
             return damageResistRating + equipment + knotWrist + enchantments - netherDotDamageRating + augBonus + lumAugBonus + specBonus + classAbilityBonus + critResistConversion;
         }

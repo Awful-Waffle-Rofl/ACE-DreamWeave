@@ -177,8 +177,8 @@ namespace ACE.Server.Tests
             Assert.IsTrue(definition.AppliesTo(WeaponClass.Melee));
             Assert.IsTrue(definition.AppliesTo(WeaponClass.Missile));
 
-            // a shield is never a weapon, so it can never be the carrier
-            Assert.AreEqual(WeaponClass.None, WeaponClassifier.Classify(ACE.Entity.Enum.ItemType.MeleeWeapon, ACE.Entity.Enum.CombatUse.Shield));
+            // a shield classifies as WeaponClass.Shield, which Defensive Weapon's Classes excludes, so it can never be the carrier
+            Assert.IsFalse(WeaponModRegistry.Get(WeaponModId.DefensiveWeapon).AppliesTo(WeaponClass.Shield));
             Assert.IsFalse(definition.AppliesTo(WeaponClass.None));
         }
 

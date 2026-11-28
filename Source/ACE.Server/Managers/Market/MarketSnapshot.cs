@@ -94,8 +94,13 @@ namespace ACE.Server.Managers.Market
         /// 8 (2026-11-23) - equipment mod rows carry `requirement` (EquipmentModDisplay.AbilityRequirement), so the
         /// web can show "Works without the ability" / "Requires &lt;Ability&gt; trained". Weapon, cloak and jewelry rows
         /// omit it. A CLOSED listing keeps its old mods forever.
+        ///
+        /// 9 (2026-11-25) - mod rows are alphabetical by name within the weapon group and within the equipment
+        /// group (MarketItemMods.Apply), matching the appraisal panel, so web search over mod names sees one
+        /// order on every item. Bumped so the automatic sweep re-projects every Active listing. A CLOSED listing
+        /// keeps its old order forever.
         /// </summary>
-        public const int CurrentVersion = 8;
+        public const int CurrentVersion = 9;
 
         /// <summary>snake_case per Docs/Market/market-api-v1.yaml; the web app reads snapshot_json verbatim, so this policy is contract.</summary>
         public static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions

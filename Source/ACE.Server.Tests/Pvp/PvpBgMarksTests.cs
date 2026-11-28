@@ -33,21 +33,21 @@ namespace ACE.Server.Tests.Pvp
         public void Defaults_AreTheOwnerRuling()
         {
             var d = BattlegroundTunables.Defaults;
-            Assert.AreEqual(2, d.MarksWin);
-            Assert.AreEqual(1, d.MarksLoss);
-            Assert.AreEqual(1, d.MarksDraw);
+            Assert.AreEqual(5, d.MarksWin);
+            Assert.AreEqual(2, d.MarksLoss);
+            Assert.AreEqual(2, d.MarksDraw);
             Assert.AreEqual(1.0, d.MarksScale);
             Assert.AreEqual(0, d.MarksDailyCap, "owner spec 2026-10-15: no cap on battleground Marks");
         }
 
         [TestMethod]
-        public void Defaults_PayOneMarkPerBattleground_PlusOneForAWin_WithNoDailyCap()
+        public void Defaults_PayTwoMarksPerBattleground_PlusThreeForAWin_WithNoDailyCap()
         {
             var bg = BattlegroundTunables.Defaults;
 
-            Assert.AreEqual(2, PvpArenaRewards.BgMarksFor(PvpBloodResult.Win, false, true, false, true, bg, withheld: false), "1 for completing + 1 for the win");
-            Assert.AreEqual(1, PvpArenaRewards.BgMarksFor(PvpBloodResult.Loss, false, true, false, true, bg, withheld: false));
-            Assert.AreEqual(1, PvpArenaRewards.BgMarksFor(PvpBloodResult.Draw, false, true, false, true, bg, withheld: false));
+            Assert.AreEqual(5, PvpArenaRewards.BgMarksFor(PvpBloodResult.Win, false, true, false, true, bg, withheld: false), "2 for completing + 3 for the win");
+            Assert.AreEqual(2, PvpArenaRewards.BgMarksFor(PvpBloodResult.Loss, false, true, false, true, bg, withheld: false));
+            Assert.AreEqual(2, PvpArenaRewards.BgMarksFor(PvpBloodResult.Draw, false, true, false, true, bg, withheld: false));
 
             var today = 100;
             var decision = PvpArenaRewards.DecideCap(storedCount: 500, storedDay: today, today: today, dailyCap: bg.MarksDailyCap);
@@ -62,9 +62,9 @@ namespace ACE.Server.Tests.Pvp
         [TestMethod]
         public void BonusMultiplier_DoublesWinLossAndDraw_AtTheShippedAmounts()
         {
-            Assert.AreEqual(4, Doubled(PvpBloodResult.Win, 1.0, 2.0));
-            Assert.AreEqual(2, Doubled(PvpBloodResult.Loss, 1.0, 2.0));
-            Assert.AreEqual(2, Doubled(PvpBloodResult.Draw, 1.0, 2.0));
+            Assert.AreEqual(10, Doubled(PvpBloodResult.Win, 1.0, 2.0));
+            Assert.AreEqual(4, Doubled(PvpBloodResult.Loss, 1.0, 2.0));
+            Assert.AreEqual(4, Doubled(PvpBloodResult.Draw, 1.0, 2.0));
         }
 
         [TestMethod]
@@ -76,15 +76,15 @@ namespace ACE.Server.Tests.Pvp
                 PvpArenaRewards.BgMarksFor(PvpBloodResult.Win, false, true, false, true, bg, withheld: false, bonusMultiplier: 1.0));
         }
 
-        /// <summary>Scale 1.5 times bonus 2.0 on a base of 1 is exactly 3; scale 1.25 times bonus 2.0 on a base of 1 is 2.5, which rounds away from zero to 3.</summary>
+        /// <summary>Scale 1.5 times bonus 2.0 on a base of 2 is exactly 6; scale 1.25 times bonus 2.0 on a base of 5 is 12.5, which rounds away from zero to 13.</summary>
         [TestMethod]
         public void BonusMultiplier_MultipliesWithTheScale_ThenRoundsHalvesAwayFromZero()
         {
-            Assert.AreEqual(6, Doubled(PvpBloodResult.Win, 1.5, 2.0), "2 x 1.5 x 2");
-            Assert.AreEqual(3, Doubled(PvpBloodResult.Loss, 1.5, 2.0), "1 x 1.5 x 2");
-            Assert.AreEqual(3, Doubled(PvpBloodResult.Loss, 1.25, 2.0), "1 x 1.25 x 2 = 2.5 rounds up");
-            Assert.AreEqual(2, Doubled(PvpBloodResult.Loss, 0.9, 2.0), "1 x 0.9 x 2 = 1.8");
-            Assert.AreEqual(8, Doubled(PvpBloodResult.Win, 1.0, 4.0), "a larger multiplier is honoured");
+            Assert.AreEqual(15, Doubled(PvpBloodResult.Win, 1.5, 2.0), "5 x 1.5 x 2");
+            Assert.AreEqual(6, Doubled(PvpBloodResult.Loss, 1.5, 2.0), "2 x 1.5 x 2");
+            Assert.AreEqual(13, Doubled(PvpBloodResult.Win, 1.25, 2.0), "5 x 1.25 x 2 = 12.5 rounds up");
+            Assert.AreEqual(4, Doubled(PvpBloodResult.Loss, 0.9, 2.0), "2 x 0.9 x 2 = 3.6");
+            Assert.AreEqual(20, Doubled(PvpBloodResult.Win, 1.0, 4.0), "a larger multiplier is honoured");
         }
 
         [TestMethod]
@@ -97,8 +97,8 @@ namespace ACE.Server.Tests.Pvp
             Assert.AreEqual(1.0, PvpArenaRewards.SanitizeBonusMultiplier(-3.0));
             Assert.AreEqual(1.0, PvpArenaRewards.SanitizeBonusMultiplier(1.0));
             Assert.AreEqual(2.0, PvpArenaRewards.SanitizeBonusMultiplier(2.0));
-            Assert.AreEqual(2, Doubled(PvpBloodResult.Win, 1.0, double.NaN), "a NaN bonus pays the ordinary amount");
-            Assert.AreEqual(2, Doubled(PvpBloodResult.Win, 1.0, 0.1), "a bonus below 1 never reduces pay");
+            Assert.AreEqual(5, Doubled(PvpBloodResult.Win, 1.0, double.NaN), "a NaN bonus pays the ordinary amount");
+            Assert.AreEqual(5, Doubled(PvpBloodResult.Win, 1.0, 0.1), "a bonus below 1 never reduces pay");
         }
 
         [TestMethod]

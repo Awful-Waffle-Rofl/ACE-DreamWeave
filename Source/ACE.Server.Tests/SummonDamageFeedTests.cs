@@ -60,9 +60,55 @@ namespace ACE.Server.Tests
         public void FormatDamageMessage_MatchesTheSpecifiedShape()
         {
             // the pet's Name already carries the owner's, because Pet.Init prefixes it at summon time
-            var message = Pet.FormatDamageMessage("Bob's Anger Wisp", "Drudge Skulker", 42);
+            var message = Pet.FormatDamageMessage("Bob's Anger Wisp", "Drudge Skulker", 42, false);
 
             Assert.AreEqual("Bob's Anger Wisp hits Drudge Skulker for 42 damage!", message);
+        }
+
+        [TestMethod]
+        public void FormatDamageMessage_PrefixesACriticalHit()
+        {
+            Assert.AreEqual("Critical hit! Bob's Anger Wisp hits Drudge Skulker for 84 damage!",
+                Pet.FormatDamageMessage("Bob's Anger Wisp", "Drudge Skulker", 84, true));
+        }
+
+        /// <summary>
+        /// Every route hands the hit's real crit flag to the feed. Melee, missile and multi-shot reach it
+        /// through Creature.TakeDamage's crit argument, which those pet strike sites used to hardcode to false;
+        /// the four NotifyOwnerOfDamage calls then forward their own crit expression. A count of calls
+        /// (EveryPetDamageRoute_CallsNotifyOwnerOfDamage) cannot catch a site quietly reverting to false, so
+        /// this pins the argument text itself, comments stripped so a commented-out line cannot satisfy it.
+        /// </summary>
+        [TestMethod]
+        public void EveryPetDamageRoute_PassesTheRealCritFlag()
+        {
+            var sites = new (string RelativePath, string Call)[]
+            {
+                ("Source/ACE.Server/WorldObjects/Monster_Melee.cs", "target.TakeDamage(this, damageEvent.DamageType, damageEvent.Damage, damageEvent.IsCritical, IncomingDamageOrigin.DirectHit);"),
+                ("Source/ACE.Server/WorldObjects/ProjectileCollisionHelper.cs", "targetCreature.TakeDamage(sourceCreature, damageEvent.DamageType, damageEvent.Damage, damageEvent.IsCritical, IncomingDamageOrigin.DirectHit);"),
+                ("Source/ACE.Server/WorldObjects/Creature_Missile.cs", "target.TakeDamage(this, damageEvent.DamageType, damageEvent.Damage, damageEvent.IsCritical, IncomingDamageOrigin.DirectHit);"),
+                ("Source/ACE.Server/WorldObjects/Monster_Combat.cs", "damagingPet.NotifyOwnerOfDamage(this, damage, crit);"),
+                ("Source/ACE.Server/WorldObjects/SpellProjectile.cs", "castingPet.NotifyOwnerOfDamage(target, (int)amount, critical);"),
+                ("Source/ACE.Server/WorldObjects/WorldObject_Magic.cs", "damagingPet.NotifyOwnerOfDamage(targetCreature, -boost, lifeCritMultiplier > 1.0f);"),
+                ("Source/ACE.Server/WorldObjects/WorldObject_Magic.cs", "drainingPet.NotifyOwnerOfDamage(transferSource, (int)srcVitalChange, drainCritCapMod > 1.0f);"),
+            };
+
+            var repoRoot = FindRepoRoot();
+
+            foreach (var (relativePath, call) in sites)
+            {
+                var source = StripComments(File.ReadAllText(Path.Combine(repoRoot, relativePath.Replace('/', Path.DirectorySeparatorChar))));
+
+                StringAssert.Contains(source, call,
+                    $"{relativePath} no longer carries `{call}`, so /summondamage may stop marking that route's critical hits.");
+            }
+        }
+
+        /// <summary>Removes // line comments and /* */ block comments, so a commented-out call cannot match.</summary>
+        private static string StripComments(string source)
+        {
+            var noBlock = System.Text.RegularExpressions.Regex.Replace(source, @"/\*.*?\*/", "", System.Text.RegularExpressions.RegexOptions.Singleline);
+            return System.Text.RegularExpressions.Regex.Replace(noBlock, @"//[^\n]*", "");
         }
 
         [TestMethod]
@@ -70,7 +116,7 @@ namespace ACE.Server.Tests
         {
             // a raw integer, not "1,250" - the client's combat lines do not group either, and a separator
             // here would read oddly beside them
-            Assert.AreEqual("Pet hits Target for 1250 damage!", Pet.FormatDamageMessage("Pet", "Target", 1250));
+            Assert.AreEqual("Pet hits Target for 1250 damage!", Pet.FormatDamageMessage("Pet", "Target", 1250, false));
         }
 
         /// <summary>

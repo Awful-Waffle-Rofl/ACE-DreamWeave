@@ -65,6 +65,10 @@ namespace ACE.Server.WorldObjects
             if (!(activator is Player player))
                 return;
 
+            // a mule's defense skills are held by Player_Mule; altering skills would refund their credits
+            if (player.MuleBlocked(MuleAction.ChangeSkills))
+                return;
+
             // verify skill
             var skill = player.GetCreatureSkill(SkillToBeAltered);
 

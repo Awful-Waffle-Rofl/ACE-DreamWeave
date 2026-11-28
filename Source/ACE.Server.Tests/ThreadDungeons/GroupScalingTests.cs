@@ -31,8 +31,13 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreEqual(1.0, GroupScaling.DefaultEffortPerMember);
             Assert.AreEqual(0.5, GroupScaling.DefaultCountShare);
             Assert.AreEqual(180, GroupScaling.DefaultGroupMaxMonsters);
-            Assert.AreEqual(15, GroupScaling.DefaultDamageRatingPerMember);
-            Assert.AreEqual(300, GroupScaling.DefaultDamageRatingCap);
+            Assert.AreEqual(5, GroupScaling.DefaultDamageRatingPerMember);
+            Assert.AreEqual(100, GroupScaling.DefaultDamageRatingCap);
+            Assert.AreEqual(15, GroupScaling.DefaultAbilityRatingPerMember, "the ability budget keeps the pre-2026-11-26 damage dials");
+            Assert.AreEqual(300, GroupScaling.DefaultAbilityRatingCap);
+            Assert.AreEqual(95, GroupScaling.DamageRatingBonusFor(20, GroupScaling.DefaultDamageRatingPerMember, GroupScaling.DefaultDamageRatingCap), "19 extra * 5 = 95, just under the cap");
+            Assert.AreEqual(100, GroupScaling.DamageRatingBonusFor(21, GroupScaling.DefaultDamageRatingPerMember, GroupScaling.DefaultDamageRatingCap), "20 extra * 5 = 100 reaches the 2x cap at 21 players");
+            Assert.AreEqual(100, GroupScaling.DamageRatingBonusFor(50, GroupScaling.DefaultDamageRatingPerMember, GroupScaling.DefaultDamageRatingCap), "the cap binds beyond that");
             Assert.AreEqual(0.05, GroupScaling.DefaultRewardBonusPerMember);
             Assert.AreEqual(1.5, GroupScaling.DefaultRewardBonusCap);
             Assert.AreEqual(100, GroupScaling.MaxRosterSize);
@@ -108,8 +113,11 @@ namespace ACE.Server.Tests.ThreadDungeons
         {
             Assert.AreEqual(int.MaxValue, GroupScaling.DamageRatingBonusFor(100, long.MaxValue, 0), "no overflow");
             Assert.AreEqual(int.MaxValue, GroupScaling.DamageRatingBonusFor(3, (long)int.MaxValue + 5, 0), "saturates at int.MaxValue");
-            Assert.AreEqual(75, GroupScaling.DamageRatingBonusFor(6, -1, 300), "negative d reads as default 15");
-            Assert.AreEqual(300, GroupScaling.DamageRatingBonusFor(50, 15, -1), "negative cap reads as default 300");
+            Assert.AreEqual(25, GroupScaling.DamageRatingBonusFor(6, -1, 300), "negative d reads as default 5 (5 * 5 extra members)");
+            Assert.AreEqual(100, GroupScaling.DamageRatingBonusFor(50, 15, -1), "negative cap reads as default 100 (49 * 15 = 735 clamps to it)");
+            Assert.AreEqual(75, GroupScaling.AbilityRatingBonusFor(6, -1, 300), "negative ability d reads as its own default 15");
+            Assert.AreEqual(300, GroupScaling.AbilityRatingBonusFor(50, 15, -1), "negative ability cap reads as its own default 300");
+            Assert.AreEqual(0, GroupScaling.AbilityRatingBonusFor(1, 15, 300));
         }
 
         [TestMethod]
@@ -294,6 +302,8 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.IsTrue(PropertyManager.ModifyDouble("dynamic_dungeons_group_reward_bonus_cap", bCap), "bonus cap key not registered");
             Assert.IsTrue(PropertyManager.ModifyDouble("fellowship_share_group_plateau", plateau), "plateau key not registered");
             Assert.IsTrue(PropertyManager.ModifyLong("dynamic_dungeons_group_loot_hold_minutes", hold), "loot hold key not registered");
+            Assert.IsTrue(PropertyManager.ModifyLong("dynamic_dungeons_creature_ability_group_rating_per_member", GroupScaling.DefaultAbilityRatingPerMember), "ability per member key not registered");
+            Assert.IsTrue(PropertyManager.ModifyLong("dynamic_dungeons_creature_ability_group_rating_cap", GroupScaling.DefaultAbilityRatingCap), "ability cap key not registered");
         }
 
         /// <summary>
@@ -311,6 +321,8 @@ namespace ACE.Server.Tests.ThreadDungeons
             PropertyManager.ModifyDouble("dynamic_dungeons_group_reward_bonus_cap", GroupScaling.DefaultRewardBonusCap);
             PropertyManager.ModifyDouble("fellowship_share_group_plateau", RetailPlateau);
             PropertyManager.ModifyLong("dynamic_dungeons_group_loot_hold_minutes", GroupScaling.DefaultLootHoldMinutes);
+            PropertyManager.ModifyLong("dynamic_dungeons_creature_ability_group_rating_per_member", GroupScaling.DefaultAbilityRatingPerMember);
+            PropertyManager.ModifyLong("dynamic_dungeons_creature_ability_group_rating_cap", GroupScaling.DefaultAbilityRatingCap);
         }
 
         [TestMethod]
@@ -346,6 +358,29 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         [TestMethod]
+        public void ReadGroupScaling_reads_the_ability_rating_dials_apart_from_the_damage_dials()
+        {
+            try
+            {
+                SeedGroupTunables(GroupScaling.DefaultEffortPerMember, GroupScaling.DefaultCountShare, GroupScaling.DefaultGroupMaxMonsters,
+                    7, 40, GroupScaling.DefaultRewardBonusPerMember, GroupScaling.DefaultRewardBonusCap, RetailPlateau);
+                Assert.IsTrue(PropertyManager.ModifyLong("dynamic_dungeons_creature_ability_group_rating_per_member", 20), "ability per member key not registered");
+                Assert.IsTrue(PropertyManager.ModifyLong("dynamic_dungeons_creature_ability_group_rating_cap", 90), "ability cap key not registered");
+
+                var six = ThreadDungeonManager.ReadGroupScaling(6);
+                Assert.AreEqual(35, six.DamageRatingBonus, "damage dials 7 x 5");
+                Assert.AreEqual(90, six.AbilityRatingBonus, "ability dials 20 x 5 = 100 capped at 90");
+
+                Assert.IsTrue(PropertyManager.ModifyLong("dynamic_dungeons_creature_ability_group_rating_cap", 0), "cap key");
+                Assert.AreEqual(100, ThreadDungeonManager.ReadGroupScaling(6).AbilityRatingBonus, "cap 0 reads as uncapped");
+            }
+            finally
+            {
+                RestoreGroupTunables();
+            }
+        }
+
+        [TestMethod]
         public void ReadGroupScaling_at_shipped_defaults_matches_the_worked_check()
         {
             try
@@ -358,7 +393,9 @@ namespace ACE.Server.Tests.ThreadDungeons
                 Assert.AreEqual(6.0, six.Effort, Eps);
                 Assert.AreEqual(3.5, six.CountTarget, Eps);
                 Assert.AreEqual(180, six.GroupMaxMonsters);
-                Assert.AreEqual(75, six.DamageRatingBonus);
+                Assert.AreEqual(25, six.DamageRatingBonus, "5 per extra member * 5 extra members, under the cap of 100");
+                Assert.AreEqual(75, six.AbilityRatingBonus, "the ability budget's own dials: 15 per extra member * 5, under the cap of 300");
+                Assert.AreEqual(0, GroupScaling.Solo.AbilityRatingBonus);
                 Assert.AreEqual(1.25, six.RewardBonus, Eps);
                 Assert.AreEqual(2.7, six.ShareTotal, Eps);
                 Assert.AreEqual(30, six.LootHoldMinutes, "the shipped loot hold");

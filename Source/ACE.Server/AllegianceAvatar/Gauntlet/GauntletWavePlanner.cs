@@ -207,6 +207,8 @@ internal sealed class GauntletWavePlanner
         var plan = build(spec, site.Outdoor, group, CurveAdjust(level, tuning.HealthCurveTopLevel), out var stats)
             ?? throw new InvalidOperationException($"the build returned no plan for {site.Id} L{level}");
 
+        ApplyHeadcountHealth(plan, group, rules, h, boss);
+
         var notes = new List<string>();
         var target = rules.TrashCount(h, boss);
         var rng = DeliveryRng(spec.Seed);
@@ -273,6 +275,34 @@ internal sealed class GauntletWavePlanner
             Notes = notes,
             TotalMs = total.Elapsed.TotalMilliseconds,
         };
+    }
+
+    /// <summary>
+    /// Re-prices the plan's trash and elite health for the Gauntlet's own trash count (owner ruling 2026-11-26). BuildLivePlan folds
+    /// the Thread's H = E / C_thread into <see cref="DungeonSpawnPlan.HealthMultiplier"/>, which prices a Thread's own count
+    /// multiplier; the Gauntlet spawns its own count (<see cref="GauntletRules.TrashCount"/>), so the Thread H is swapped for
+    /// <see cref="GauntletRules.TrashHealthMultiplier"/> and the wave's total trash pool stays E times the solo pool. The boss
+    /// multiplier (x E) and the damage rating are untouched; GroupHealthMult follows so the boss floor, which reads
+    /// E / H, stays what it was. Per-kill XP and luminance follow the new health, as a Thread's reward follows its health (owner ruling
+    /// 2026-11-26): GroupTrashRewardFactor is recomputed as group.TrashRewardFactor(H) = H x B / T with the Gauntlet H, the same formula
+    /// the builder used with the Thread H. GroupBossRewardFactor (E x B / T) does not read H and boss health is unchanged, so it is left
+    /// alone. A solo plan is left alone. The Thread build itself is not touched.
+    /// </summary>
+    internal static void ApplyHeadcountHealth(DungeonSpawnPlan plan, GroupScaling group, GauntletRules rules, int headcount, bool boss)
+    {
+        if (plan == null || group == null || !group.IsGroup)
+            return;
+
+        var threadH = plan.GroupHealthMult;
+
+        if (!double.IsFinite(threadH) || threadH <= 0)
+            return;
+
+        var gauntletH = rules.TrashHealthMultiplier(headcount, boss, group.Effort);
+
+        plan.HealthMultiplier = plan.HealthMultiplier / threadH * gauntletH;
+        plan.GroupHealthMult = gauntletH;
+        plan.GroupTrashRewardFactor = group.TrashRewardFactor(gauntletH);
     }
 
     /// <summary>The index of the portal furthest (horizontally) from <paramref name="anchor"/>; ties to the earlier one. Pure.</summary>

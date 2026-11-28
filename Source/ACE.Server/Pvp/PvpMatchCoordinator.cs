@@ -481,14 +481,14 @@ namespace ACE.Server.Pvp
 
         /// <summary>
         /// The Double Marks window lines (Docs/Pvp/BATTLEGROUNDS.md "Double Marks windows"): the pure <see cref="BgBonusCrier"/> decides, this sends.
-        /// Gated by the arena master switch (pvp_arena_enabled), pvp_bg_bonus_enabled and the battleground room being playable, never by pvp_arena_crier_enabled. A throw is logged and costs only that tick.
+        /// Gated by the arena master switch (pvp_arena_enabled), pvp_bg_bonus_enabled and the battleground room being playable or any arena mode (1v1, 2v2, Tugak Brawl) being enabled, never by pvp_arena_crier_enabled. A throw is logged and costs only that tick.
         /// </summary>
         private void RunBgBonusCrier(DateTime now, PvpArenaDials dials)
         {
             try
             {
                 var bg = BgDials();
-                var enabled = dials.Enabled && bg.BonusEnabled && ModeEnabled(BattlegroundModes.RoomKey, dials);
+                var enabled = dials.Enabled && bg.BonusEnabled && (ModeEnabled(BattlegroundModes.RoomKey, dials) || ModeEnabled(ArenaMapCatalog.OneVOneKey, dials) || ModeEnabled(ArenaMapCatalog.TwoVTwoKey, dials) || ModeEnabled(ArenaMapCatalog.FfaKey, dials));
                 var (spans, zone) = BgBonusConfig.Resolve(bg);
                 var lines = bgBonusCrier.Tick(now, enabled, spans, zone, bg.BonusWarnMinutes);
 
@@ -5677,10 +5677,15 @@ namespace ACE.Server.Pvp
                 return;
             }
 
-            var grant = new PvpBloodGrant(m.Id, dials.BloodDailyCap, dials.BloodResetTimezone, dials.BloodResetHour);
+            // Double Marks reaches every arena mode (owner ruling 2026-11-26: 1v1, 2v2 and Tugak Brawl), on the same pvp_bg_bonus_* dials
+            // and decided by when the match went LIVE. It scales the amount, never the daily cap, which counts one per paid match.
+            var bg = BgDials();
+            var bonus = BgBonusConfig.IsBonusMatch(bg, m.Match.LiveSinceUtc.Value) ? PvpArenaRewards.SanitizeBonusMultiplier(bg.BonusMultiplier) : 1.0;
+
+            var grant = new PvpBloodGrant(m.Id, dials.BloodDailyCap, dials.BloodResetTimezone, dials.BloodResetHour, DoubleMarks: bonus > 1.0);
             var paid = new List<string>();
             var seatPays = ComputeSeatPayouts(m, outcome, twoTeam, "Blood", (s, forfeited, result) =>
-                PvpArenaRewards.BloodFor(result, forfeited, wentLive, sameIpOpponents, dials, withheld: s.UnpaidRematch));
+                PvpArenaRewards.BloodFor(result, forfeited, wentLive, sameIpOpponents, dials, withheld: s.UnpaidRematch, bonusMultiplier: bonus));
             var floor = EvaluateContributionFloor(m, id => seatPays.TryGetValue(id, out var sp) ? sp.Amount : 0);
 
             foreach (var seat in m.Seats.Values)
@@ -5720,7 +5725,7 @@ namespace ACE.Server.Pvp
                 }
             }
 
-            log.Info($"[PVP] match {m.Id}: Blood granted before the daily cap: {string.Join("; ", paid)}");
+            log.Info($"[PVP] match {m.Id}: Blood granted before the daily cap{(bonus > 1.0 ? $" (Double Marks window, x{bonus})" : "")}: {string.Join("; ", paid)}");
         }
 
         private void AdvanceResolving(MatchRuntime m, DateTime now, PvpArenaDials dials)

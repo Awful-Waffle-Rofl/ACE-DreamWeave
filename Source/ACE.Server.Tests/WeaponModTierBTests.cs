@@ -42,7 +42,7 @@ namespace ACE.Server.Tests
     [TestClass]
     public class WeaponModTierBTests
     {
-        private static readonly WeaponClass[] Classes = { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster };
+        private static readonly WeaponClass[] Classes = { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster, WeaponClass.Shield };
 
         /// <summary>
         /// The three SURVIVING v2 rows, with the magnitude and class set each must carry. Pinned as a table

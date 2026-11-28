@@ -596,6 +596,7 @@ namespace ACE.Server.Pvp.Templates
 
                 item.Ints[PaletteTemplateKey] = resolution.Palette;
                 item.Floats[ShadeKey] = resolution.Shade;
+                item.Floats.Remove((int)PropertyFloat.DyeShellShade);   // team colours win over a stale shell dye
 
                 var clothingBase = item.DataIds[ClothingBaseKey];
                 var icon = tableIcon?.Invoke(clothingBase, (uint)resolution.Palette) ?? 0;
@@ -628,6 +629,7 @@ namespace ACE.Server.Pvp.Templates
             Put(item.Floats, (int)PropertyFloat.Shade2, t.Shade2);
             Put(item.Floats, (int)PropertyFloat.Shade3, t.Shade3);
             Put(item.Floats, (int)PropertyFloat.Shade4, t.Shade4);
+            Put(item.Floats, (int)PropertyFloat.DyeShellShade, t.DyeShellShade);
             Put(item.Bools, IgnoreCloIconsKey, t.IgnoreCloIcons);
             if (!plan.KeepIcon) Put(item.DataIds, IconKey, t.Icon);
         }
@@ -715,6 +717,7 @@ namespace ACE.Server.Pvp.Templates
                 Shade2 = F(PropertyFloat.Shade2),
                 Shade3 = F(PropertyFloat.Shade3),
                 Shade4 = F(PropertyFloat.Shade4),
+                DyeShellShade = F(PropertyFloat.DyeShellShade),
                 IgnoreCloIcons = item.Bools.TryGetValue(IgnoreCloIconsKey, out var ignore) ? ignore : (bool?)null,
             };
         }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 
 using ACE.Server.Realms;
@@ -154,6 +155,20 @@ public static class GauntletHooks
     /// method names the fighter type once, at its damage cap). True when the target is the fighter and the heal was queued.
     /// </summary>
     public static bool TryQueueFighterSpellHeal(Player caster, Creature target, double raw) => GauntletAvatarFighter.TryQueueSpellHeal(caster, target, raw);
+
+    // ---- Blood Mage Transfusion (forwarders, so WorldObject_Magic names the fighter type only at its damage cap) ----------------
+
+    /// <summary>The Avatar fighters a Transfusion surplus may feed (<see cref="GauntletAvatarFighter.TransfusionFighters"/>). Null when none.</summary>
+    public static List<Creature> TransfusionFighters(Creature caster) => GauntletAvatarFighter.TransfusionFighters(caster);
+
+    /// <summary>What a fighter asks of a Transfusion surplus, in raw heal points, bounded by its kit bucket (0 for any other creature).</summary>
+    public static uint TransfusionDemand(Creature recipient, double now) => recipient is GauntletAvatarFighter f ? f.TransfusionDemand(now) : 0;
+
+    /// <summary>True for an Avatar fighter (one type test): the payout routes its share through the kit heal.</summary>
+    public static bool IsAvatarFighter(Creature recipient) => recipient is GauntletAvatarFighter;
+
+    /// <summary>Queues a fighter's Transfusion share through the kit heal (<see cref="GauntletAvatarFighter.TryQueueTransfusionShare"/>).</summary>
+    public static bool TryQueueTransfusionShare(Player caster, Creature fighter, double raw) => GauntletAvatarFighter.TryQueueTransfusionShare(caster, fighter, raw);
 
     /// <summary>Pure: true when <paramref name="hold"/> is a Gauntlet arena's realm hold.</summary>
     public static bool IsGauntletHold(IEphemeralHold hold) => hold is GauntletArenaHold;

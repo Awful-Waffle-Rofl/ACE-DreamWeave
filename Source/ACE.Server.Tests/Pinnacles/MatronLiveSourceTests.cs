@@ -45,7 +45,8 @@ namespace ACE.Server.Tests.Pinnacles
         [TestMethod]
         public void DoorActOnUse_HookIsTheFirstStatement_AndCarriesTheForkMarker()
         {
-            var source = DoorSource();
+            // the fork marker is a comment, and so is the only thing allowed before the hook: raw source on purpose
+            var source = PooledLootSourceText.ReadRaw("Source/ACE.Server/WorldObjects/Door.cs");
             var sig = source.IndexOf("public override void ActOnUse(WorldObject worldObject)", StringComparison.Ordinal);
             var open = source.IndexOf('{', sig);
             var hook = source.IndexOf("if (worldObject is Player user && ACE.Server.Pinnacles.PinnacleFightManager.TryHandlePropUse(this, user))", open, StringComparison.Ordinal);

@@ -528,7 +528,7 @@ namespace ACE.Server.WorldObjects
                 // PvE with no extra gate needed.
                 if (source is Pet damagingPet)
                 {
-                    damagingPet.NotifyOwnerOfDamage(this, damage);
+                    damagingPet.NotifyOwnerOfDamage(this, damage, crit);
                     damagingPet.ApplyUmbralSiphonLeech(damage);
                     damagingPet.ApplyEmpoweredSummonsLeech(damage);
 

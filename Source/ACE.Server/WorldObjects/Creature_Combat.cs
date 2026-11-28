@@ -1597,6 +1597,11 @@ namespace ACE.Server.WorldObjects
             if (ACE.Server.WorldEvents.WorldEventHooks.IsHoldKnight(monster))
                 return;
 
+            // Balance Trials start grace: a combat pet's ranged or spell hit lands here (melee goes through PetOnAttackMonster),
+            // and it wakes the struck creature alone, as a player hit does. One field compare for every other creature.
+            if (monster.P_TrialHoldUntil != 0.0 && this is CombatPet)
+                monster.BreakTrialHold();
+
             /*Console.WriteLine($"{Name}.MonsterOnAttackMonster({monster.Name})");
             Console.WriteLine($"Attackable: {monster.Attackable}");
             Console.WriteLine($"Tolerance: {monster.Tolerance}");*/

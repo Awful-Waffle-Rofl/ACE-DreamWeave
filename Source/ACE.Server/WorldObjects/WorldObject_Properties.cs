@@ -2537,6 +2537,13 @@ namespace ACE.Server.WorldObjects
             set { if (!value.HasValue) RemoveProperty(PropertyFloat.Shade4); else SetProperty(PropertyFloat.Shade4, value.Value); }
         }
 
+        /// <summary>The shade of the second colour layer (ClothingTable region index 1); see ACE.Server.Entity.PerennialDyes. Absent = follows Shade.</summary>
+        public double? DyeShellShade
+        {
+            get => GetProperty(PropertyFloat.DyeShellShade);
+            set { if (!value.HasValue) RemoveProperty(PropertyFloat.DyeShellShade); else SetProperty(PropertyFloat.DyeShellShade, value.Value); }
+        }
+
         public int NumTimesTinkered
         {
             get => GetProperty(PropertyInt.NumTimesTinkered) ?? 0;

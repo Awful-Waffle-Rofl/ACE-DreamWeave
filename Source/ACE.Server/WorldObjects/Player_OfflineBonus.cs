@@ -239,6 +239,27 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// Adds granted bonus time to this character's bank, past offline_bonus_max_seconds if it comes to that
+        /// (<see cref="OfflineBonus.AddGranted"/>); later accrual never clamps it back down (<see cref="OfflineBonus.Accrue"/>)
+        /// and only active combat drains it. Settles the online segment up to now first (<see cref="UpdateOfflineBonus"/>),
+        /// so the grant lands on the current balance rather than on a stale one the next reconcile would then rewrite.
+        /// Mutating; call from the player's own thread. Returns the new stored balance. Used by the Allegiance Avatar's
+        /// Blessing (AvatarBlessing), which saves the character promptly afterwards.
+        /// </summary>
+        public double AddOfflineBonusSeconds(double seconds)
+        {
+            if (!(seconds > 0))
+                return OfflineExperienceBonusRemaining;
+
+            UpdateOfflineBonus();
+
+            var updated = OfflineBonus.AddGranted(OfflineExperienceBonusRemaining, seconds);
+            OfflineExperienceBonusRemaining = updated;
+
+            return updated;
+        }
+
+        /// <summary>
         /// Returns the currently-available banked bonus time, in seconds, without mutating stored state. Applies
         /// the same active/idle split as <see cref="UpdateOfflineBonus"/>, so this can return a value HIGHER than
         /// the stored one - it projects idle accrual forward to the current instant rather than waiting for the

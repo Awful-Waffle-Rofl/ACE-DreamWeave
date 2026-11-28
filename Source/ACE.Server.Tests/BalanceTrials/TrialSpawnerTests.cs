@@ -527,7 +527,7 @@ namespace ACE.Server.Tests.BalanceTrials
                 "c.RemoveProperty(PropertyString.KillQuest3);",
                 "c.P_TrialRep = rep;");
 
-            var spawn = PooledLootSourceText.MethodBody(source, "internal static Creature Spawn(DungeonSpawnPlan plan, DungeonSpawnPlanEntry e, uint observedMaxNonBoss, TrialRep rep, Landblock lb, uint instance, string tag)");
+            var spawn = PooledLootSourceText.MethodBody(source, SpawnSignature);
             AssertInOrder(spawn, "Spawn",
                 "WorldObjectFactory.CreateNewWorldObject(e.Wcid)",
                 "if (wo is not Creature creature)",
@@ -535,6 +535,7 @@ namespace ACE.Server.Tests.BalanceTrials
                 "creature.Location = new Position(p.Cell, p.X, p.Y, p.Z, p.QX, p.QY, p.QZ, p.QW, instance);",
                 "creature.Location.LandblockId.Landblock != lb.Id.Landblock",
                 "Prepare(creature, plan, e, observedMaxNonBoss, rep, tag);",
+                "creature.P_TrialHoldUntil = holdUntil;",
                 "creature.EnterWorld()");
 
             // The speed course, for the shared steps: create, type check, killable, location, landblock, shape, kill-task strip, EnterWorld.
@@ -551,7 +552,8 @@ namespace ACE.Server.Tests.BalanceTrials
                 "creature.EnterWorld()");
         }
 
-        private const string SpawnSignature = "internal static Creature Spawn(DungeonSpawnPlan plan, DungeonSpawnPlanEntry e, uint observedMaxNonBoss, TrialRep rep, Landblock lb, uint instance, string tag)";
+        /// <summary>TrialSpawner.Spawn's signature, the one copy every source-scan pin of it uses (TrialPredictionTests, TrialStartGraceTests).</summary>
+        internal const string SpawnSignature = "internal static Creature Spawn(DungeonSpawnPlan plan, DungeonSpawnPlanEntry e, uint observedMaxNonBoss, TrialRep rep, Landblock lb, uint instance, string tag, double holdUntil = 0.0)";
 
         private static int IndexOnce(string body, string text, int from = 0)
         {

@@ -83,7 +83,7 @@ namespace ACE.Server.Command.Handlers
 
             var weaponClass = WeaponClassifier.Classify(weapon);
             var setId = weapon.GetProperty(PropertyInt.EquipmentSetId);
-            var level = weaponClass != WeaponClass.None && ParagonModManager.IsParagonSet(setId) ? ParagonModManager.CurrentLevel(weapon) : null;
+            var level = weaponClass != WeaponClass.None && weaponClass != WeaponClass.Shield && ParagonModManager.IsParagonSet(setId) ? ParagonModManager.CurrentLevel(weapon) : null;
 
             var refusal = ParagonModManager.ResolveGemRefusal(WeaponModRegistry.Enabled(), true, true, weaponClass,
                 setId, weapon.ItemMaxLevel, level,

@@ -61,6 +61,10 @@ namespace ACE.Server.WorldObjects
             if (ACE.Server.WorldEvents.WorldEventHooks.KeepsHoldSeekerLock(monster, this))
                 return;
 
+            // Balance Trials start grace: the attacked creature (only it) wakes now through the retaliation below.
+            if (monster.P_TrialHoldUntil != 0.0)
+                monster.BreakTrialHold();
+
             if (monster.MonsterState != State.Awake && (monster.Tolerance & PlayerCombatPet_RetaliateExclude) == 0)
             {
                 monster.AttackTarget = this;

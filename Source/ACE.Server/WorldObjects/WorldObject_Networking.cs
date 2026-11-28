@@ -20,6 +20,7 @@ using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Network.Sequence;
 using ACE.Server.Network.Structure;
 using ACE.Server.Physics;
+using ACE.Server.WeaponMods;
 
 namespace ACE.Server.WorldObjects
 {
@@ -114,7 +115,7 @@ namespace ACE.Server.WorldObjects
                 writer.Write(UseRadius ?? 0u);
 
             if ((weenieFlags & WeenieHeaderFlag.TargetType) != 0)
-                writer.Write((uint?)TargetType ?? 0u);
+                writer.Write((uint?)ShieldSalvageTargets.EffectiveTargetType(this) ?? 0u);
 
             if ((weenieFlags & WeenieHeaderFlag.UiEffects) != 0)
                 writer.Write((uint?)UiEffects ?? 0u);
@@ -777,7 +778,7 @@ namespace ACE.Server.WorldObjects
             if (UseRadius != null)
                 weenieHeaderFlag |= WeenieHeaderFlag.UseRadius;
 
-            if (TargetType != null)
+            if (ShieldSalvageTargets.EffectiveTargetType(this) != null)
                 weenieHeaderFlag |= WeenieHeaderFlag.TargetType;
 
             if (UiEffects != null)
@@ -1002,7 +1003,8 @@ namespace ACE.Server.WorldObjects
                 //    Console.WriteLine($"Found an item with 1 ClothingSubPalEffects and a PaletteTemplate = {PaletteTemplate} and/or Shade = {Shade} ");
 
                 // If there are no ClothingSubPalEffects, or this item has no Shade and no PaletteTemplate set, we will not apply any Palette changes
-                if (item.ClothingSubPalEffects.Count > 0 && (Shade.HasValue || PaletteTemplate.HasValue))
+                // DyeShellShade counts: a piece with neither Shade nor PaletteTemplate but a shell dye still renders its shell (Docs/Pvp/DYES.md).
+                if (item.ClothingSubPalEffects.Count > 0 && (Shade.HasValue || PaletteTemplate.HasValue || DyeShellShade.HasValue))
                 { 
                     CloSubPalEffect itemSubPal;
                     int palOption = 0;
@@ -1015,17 +1017,22 @@ namespace ACE.Server.WorldObjects
                     else
                         itemSubPal = item.ClothingSubPalEffects[item.ClothingSubPalEffects.Keys.ElementAt(0)];
 
-                    if (itemSubPal.Icon > 0 && !(IgnoreCloIcons ?? false))
+                    // The icon write stays behind the ORIGINAL gate: a piece that has only a shell dye must never get the table's first-key icon persisted.
+                    var iconGate = Shade.HasValue || PaletteTemplate.HasValue;
+                    if (iconGate && itemSubPal.Icon > 0 && !(IgnoreCloIcons ?? false))
                         IconId = itemSubPal.Icon;
 
                     float shade = 0; // Default if no shade is set.
                     if (Shade.HasValue)
                         shade = (float)Shade;
 
+                    // Perennial dyes: region index 1 (the second colour layer) takes DyeShellShade when the piece has one.
+                    var shellShade = DyeShellShade;
+
                     for (int i = 0; i < itemSubPal.CloSubPalettes.Count; i++)
                     {
                         var itemPalSet = DatManager.PortalDat.ReadFromDat<PaletteSet>(itemSubPal.CloSubPalettes[i].PaletteSet);
-                        ushort itemPal = (ushort)itemPalSet.GetPaletteID(shade);
+                        ushort itemPal = (ushort)itemPalSet.GetPaletteID(ACE.Server.Entity.PerennialDyes.ShadeForRegion(i, shade, shellShade));
 
                         for (int j = 0; j < itemSubPal.CloSubPalettes[i].Ranges.Count; j++)
                         {

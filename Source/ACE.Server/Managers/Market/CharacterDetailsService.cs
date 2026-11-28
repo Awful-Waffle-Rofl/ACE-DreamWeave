@@ -3,6 +3,7 @@ using System.Collections.Generic;
 
 using ACE.Entity.Enum;
 using ACE.Server.CombatSimulator;
+using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Physics.Common;
 using ACE.Server.ThreadDungeons;
@@ -99,6 +100,34 @@ namespace ACE.Server.Managers.Market
             DamageType.Electric, DamageType.Nether, DamageType.Health,
         };
 
+        /// <summary>
+        /// The skill the sheet sizes the held caster's Critical Strike / Crippling Blow imbue from in Magic stance. Pure.
+        /// A Summoner focus reads Summoning (owner ruling 2026-11-24, a sheet-display choice: combat sizes a focus imbue on a
+        /// pet hit by the PET's skill, so this never reaches combat); otherwise the wand's own wield skill when it is War, Void
+        /// or Life Magic (the school a real cast of that wand's spells rolls on); otherwise the highest of the three,
+        /// ties War then Void then Life.
+        /// </summary>
+        internal static Skill PickMagicCritSkill(bool isSummonerFocus, int? wieldSkillType, uint war, uint voidMagic, uint life)
+        {
+            if (isSummonerFocus)
+                return Skill.Summoning;
+
+            if (wieldSkillType.HasValue)
+            {
+                var wield = (Skill)wieldSkillType.Value;
+                if (wield == Skill.WarMagic || wield == Skill.VoidMagic || wield == Skill.LifeMagic)
+                    return wield;
+            }
+
+            if (voidMagic > war && voidMagic >= life)
+                return Skill.VoidMagic;
+
+            if (life > war && life > voidMagic)
+                return Skill.LifeMagic;
+
+            return Skill.WarMagic;
+        }
+
         public static CharacterDetailsInputs Read(Player player)
         {
             if (player == null)
@@ -134,8 +163,8 @@ namespace ACE.Server.Managers.Market
             }
 
             // The held weapon's crit chance and crit damage multiplier. Physical: the weapon DamageEvent passes for this stance
-            // (PlayerAttackerSpecs' choice) and the main-hand skill. Magic: the wielded caster, and the higher of War and Void (the
-            // skill only feeds the Critical Strike imbue).
+            // (PlayerAttackerSpecs' choice) and the main-hand skill. Magic: the wielded caster, sized by the skill PickMagicCritSkill
+            // names (the skill feeds both the Critical Strike and the Crippling Blow imbue).
             float heldCritPre;
             float heldCritDamageMod;
             float? offCritPre = null;
@@ -146,9 +175,12 @@ namespace ACE.Server.Managers.Market
             if (stance == CombatMode.Magic)
             {
                 var wand = player.GetEquippedWand();
-                var war = player.GetCreatureSkill(Skill.WarMagic);
-                var voidSkill = player.GetCreatureSkill(Skill.VoidMagic);
-                var magicSkill = voidSkill.Current > war.Current ? voidSkill : war;
+                var magicSkill = player.GetCreatureSkill(PickMagicCritSkill(
+                    SummonerFocus.IsSummonerFocus(wand),
+                    wand?.WieldSkillType,
+                    player.GetCreatureSkill(Skill.WarMagic).Current,
+                    player.GetCreatureSkill(Skill.VoidMagic).Current,
+                    player.GetCreatureSkill(Skill.LifeMagic).Current));
 
                 heldCritPre = WorldObject.GetWeaponMagicCritFrequencyPreResist(wand, player, magicSkill, null);
                 heldCritDamageMod = AttackerTerms.MagicCritDamageMod(wand, player, magicSkill, null);

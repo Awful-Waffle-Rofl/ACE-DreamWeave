@@ -2525,6 +2525,26 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// The skill-reading wield requirement kinds (Skill = current, RawSkill = base, Training = advancement
+        /// class), pure so ACE.Server.Tests can pin them without a Player. <see cref="CheckWieldRequirement"/>
+        /// is the only caller. Current and Base are lazy so each kind evaluates only what it reads. Any other kind returns true (not decided here).
+        /// </summary>
+        internal static bool SkillWieldRequirementMet(WieldRequirement wieldRequirement, Func<uint> current, Func<uint> baseValue, SkillAdvancementClass advancementClass, uint difficulty)
+        {
+            switch (wieldRequirement)
+            {
+                case WieldRequirement.Skill:
+                    return current() >= difficulty;
+                case WieldRequirement.RawSkill:
+                    return baseValue() >= difficulty;
+                case WieldRequirement.Training:
+                    return (int)advancementClass >= difficulty;
+                default:
+                    return true;
+            }
+        }
+
+        /// <summary>
         /// See <see cref="CheckWieldRequirements"/> for what <paramref name="waiveBuffedRequirements"/>
         /// means. It only ever short-circuits the three buff-dependent kinds
         /// (<see cref="IsBuffDependentWieldRequirement"/>) to WeenieError.None; RawSkill, RawAttrib,
@@ -2545,7 +2565,7 @@ namespace ACE.Server.WorldObjects
 
                     // verify skill level - current / buffed
                     var skill = GetCreatureSkill(ConvertToMoASkill((Skill)skillOrAttribute), false);
-                    if (skill.Current < difficulty)
+                    if (!SkillWieldRequirementMet(wieldRequirement, () => skill.Current, () => skill.Base, skill.AdvancementClass, difficulty))
                         return WeenieError.SkillTooLow;
                     break;
 
@@ -2553,7 +2573,7 @@ namespace ACE.Server.WorldObjects
 
                     // verify skill level - base
                     skill = GetCreatureSkill(ConvertToMoASkill((Skill)skillOrAttribute), false);
-                    if (skill.Base < difficulty)
+                    if (!SkillWieldRequirementMet(wieldRequirement, () => skill.Current, () => skill.Base, skill.AdvancementClass, difficulty))
                         return WeenieError.SkillTooLow;
                     break;
 
@@ -2600,7 +2620,7 @@ namespace ACE.Server.WorldObjects
 
                     // verify skill is trained / specialized
                     skill = GetCreatureSkill(ConvertToMoASkill((Skill)skillOrAttribute), false);
-                    if ((int)skill.AdvancementClass < difficulty)
+                    if (!SkillWieldRequirementMet(wieldRequirement, () => skill.Current, () => skill.Base, skill.AdvancementClass, difficulty))
                         return WeenieError.SkillTooLow;
                     break;
 

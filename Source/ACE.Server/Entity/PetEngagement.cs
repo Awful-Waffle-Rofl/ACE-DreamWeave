@@ -124,7 +124,16 @@ namespace ACE.Server.Entity
         /// <paramref name="owner"/> and within <paramref name="radius"/> metres. The Awake test is belt and
         /// braces - an engaged monster is awake - so the pulse can never reach ApplyTaunt's WakeUp branch.
         /// </summary>
-        public static bool IsTauntPulseCandidate(Creature monster, Player owner, double distance, double radius)
+        public static bool IsTauntPulseCandidate(Creature monster, Player owner, double distance, double radius) =>
+            IsTauntPulseShape(monster, distance, radius) && IsEngagedWithOwner(monster, owner);
+
+        /// <summary>
+        /// Every term of <see cref="IsTauntPulseCandidate"/> except the engagement one: a living, awake, non-player, non-pet
+        /// monster (not scenery) within <paramref name="radius"/> metres. Split out so a taunter whose side is not one
+        /// owner (the Allegiance Gauntlet's Avatar fighter, which defends its run's participants) applies the same rule
+        /// with its own engagement test.
+        /// </summary>
+        public static bool IsTauntPulseShape(Creature monster, double distance, double radius)
         {
             if (monster == null || monster is Player || monster is CombatPet || monster.IsDead || monster.Teleporting)
                 return false;
@@ -137,10 +146,7 @@ namespace ACE.Server.Entity
             if (monster.MonsterState != Creature.State.Awake)
                 return false;
 
-            if (distance > radius)
-                return false;
-
-            return IsEngagedWithOwner(monster, owner);
+            return distance <= radius;
         }
     }
 }

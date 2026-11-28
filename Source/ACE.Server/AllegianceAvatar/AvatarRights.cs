@@ -65,6 +65,15 @@ public static class AvatarRights
         return p.Allegiance?.MonarchId ?? p.Guid.Full;
     }
 
+    /// <summary>The guid-keyed form of <see cref="AdmissionMonarchGuid"/> for a character that may be offline: the node map's monarch, else the character's own guid.</summary>
+    internal static uint AdmissionMonarchGuidOf(uint characterGuid)
+    {
+        if (AllegianceManager.Players.TryGetValue(new ACE.Entity.ObjectGuid(characterGuid), out var node) && node != null)
+            return (node.Monarch ?? node).PlayerGuid.Full;
+
+        return characterGuid;
+    }
+
     /// <summary>
     /// <see cref="IsMember"/> for an admission check (the Gauntlet arena): the same rule, but keyed by guid through
     /// <see cref="AdmissionMonarchGuid"/> instead of the online-only allegiance reader, so a member relogging inside the

@@ -12,7 +12,7 @@ namespace ACE.Server.Tests
     /// <summary>
     /// Content pins for the Custom Summons weenies (WaffleACE, 2026-11-02): three blank caster devices and
     /// their pets (1007700-1007705), the Revenant Lich blank caster and its pet (1007751, 1007752), eleven devices and pets (1007706-1007727; the pets are level 300 A'nekshay since round 2), their weapons, the Warden shield (1007753), the Lich wand (1007754), the Ossuary wand (1007755) and
-    /// ammo, the Sacrificial Dagger, the Duo Summon Gem, the Summon Gem Hammer, and Vardo's stock rows.
+    /// ammo, the Sacrificial Dagger, the Duo Summon Essence, the Summon Gem Hammer, and Vardo's stock rows.
     /// Pure file parsing of the committed SQL (no database, no PropertyManager), so it is order independent.
     /// A hand-written C# fixture would not catch a content regression; these read the shipped units.
     /// </summary>

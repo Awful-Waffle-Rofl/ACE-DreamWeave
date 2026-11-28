@@ -68,6 +68,11 @@ namespace ACE.Server.WorldObjects
             // session's first coin figure at 0. See Player_Bank.InitAccountBank.
             InitAccountBank();
 
+            // Mules converted before 'mule_defense_skill_level' existed (or before it was raised) get their
+            // defense skills topped up here, idempotently. Must run before SendSelf() so the client sees them.
+            if (IsMule)
+                ApplyMuleDefenseSkills();
+
             // Warm AccountCapacityUpgradeManager's cache for both capacity upgrade kinds so the FIRST
             // /mule upgrade or /market upgrade this session runs does not pay a cold-cache shard read.
             // GetCount is safe to call speculatively - a failed read is logged and simply retried on the

@@ -30,7 +30,16 @@ namespace ACE.Server.Tests.Avatars
         private static readonly DateTime Today = new DateTime(2027, 1, 15, 0, 0, 0, DateTimeKind.Utc);
         private static readonly DateTime Now = new DateTime(2027, 1, 15, 12, 0, 0, DateTimeKind.Utc);
         // The event gate is opened to level 1: the fixture Avatar is level 4 on the synthetic chart, below the shipped gate of 40.
-        private static readonly AvatarTuning T = AvatarTuning.Defaults with { EventMinLevel = 1 };
+        // The pre-scaling flat prices (2000 quiet, 3000 announced) are seeded here: these tests pin the Favor bookkeeping around a
+        // price, not the price formula, which the scaled-price tests below and AvatarPricingTests pin.
+        private static readonly AvatarTuning T = AvatarTuning.Defaults with
+        {
+            EventMinLevel = 1,
+            EventPriceQuiet = 2000,
+            EventPriceQuietPerAccount = 0,
+            EventPriceAnnounced = 3000,
+            EventPriceAnnouncedPerAccount = 0,
+        };
 
         private const uint AvatarId = 7;
         private const uint Monarch = 1000;
@@ -39,6 +48,9 @@ namespace ACE.Server.Tests.Avatars
         private const uint VassalAcct = 101;
 
         private static uint nextGuid = 0x7ECA0000;
+
+        /// <summary>The tuning the fixture runs under; a scaled-price test swaps it before InitActive.</summary>
+        private AvatarTuning tuning = T;
 
         private Store store;
         private AccountActivityIndex activity;
@@ -70,7 +82,7 @@ namespace ACE.Server.Tests.Avatars
             startResult = (true, null);
 
             AvatarRights.AllegianceFacts = p => (Monarch, false);
-            AvatarVendor.Tuning = () => T;
+            AvatarVendor.Tuning = () => tuning;
             AvatarAnnouncer.Sink = (m, text) => allegiance.Add((m, text));
             AvatarEventPurchase.StartSeam = r => { started.Add(r); return startResult; };
             AvatarEventPurchase.WorldEnqueue = a => worldQueue.Add(() => ((ActionEventDelegate)a).Action());
@@ -104,8 +116,8 @@ namespace ACE.Server.Tests.Avatars
         private static Position Indoor() => new Position((0x0090u << 16) | 0x0111, 50f, 50f, 0f, 0f, 0f, 0f, 1f, 0);
 
         private static AvatarEventRefusal Check(bool permitted = true, bool active = true, int level = 50, Position spot = null,
-            bool thread = false, bool running = false, DateTime? next = null, ulong available = 5000, ulong price = 2000) =>
-            AvatarEventPurchase.Check(permitted, active, level, spot ?? Outdoors(), thread, running, next, Now, available, price, T);
+            bool thread = false, bool running = false, DateTime? next = null, ulong available = 5000, ulong price = 2000, bool daily = false) =>
+            AvatarEventPurchase.Check(permitted, active, level, daily, spot ?? Outdoors(), thread, running, next, Now, available, price, T);
 
         [TestMethod]
         public void Check_AllClear_None() => Assert.AreEqual(AvatarEventRefusal.None, Check());
@@ -141,24 +153,27 @@ namespace ACE.Server.Tests.Avatars
             Assert.AreEqual(AvatarEventRefusal.Inactive, Check(active: false));
         }
 
+        [TestMethod]
+        public void Check_DailyLimit_RefusedAfterTheLevelGate()
+        {
+            Assert.AreEqual(AvatarEventRefusal.DailyLimit, Check(daily: true));
+            Assert.AreEqual(AvatarEventRefusal.LevelTooLow, Check(daily: true, level: 0), "the level gate is heard first");
+            Assert.AreEqual(AvatarEventRefusal.DailyLimit, Check(daily: true, spot: Indoor(), running: true, available: 0),
+                "the day's limit is heard before where, when and how much");
+        }
+
         // ---- TryBuy ---------------------------------------------------------------------------------------------
 
-        private AvatarState InitActive(ulong favor = 5000, ulong lifetime = 10_000)
+        private AvatarState InitActive(ulong favor = 5000, ulong lifetime = 10_000, int r = 2, int s = 2)
         {
             store.Avatars.Add(new AllegianceAvatar
             {
                 AvatarId = AvatarId, MonarchGuid = Monarch, State = (byte)AvatarBindState.Bound,
                 Favor = favor, LifetimeXp = lifetime, LevelXp = lifetime, LastDecayDay = Today,
             });
-            rosters.Add(new AvatarRoster(Monarch, MonarchAcct, false, new List<KeeperCandidate>
-            {
-                new KeeperCandidate(Monarch, MonarchAcct, 1, 0, 0),
-                new KeeperCandidate(VassalGuid, VassalAcct, 1, 0, 1),
-            }));
-            activity.Touch(MonarchAcct, Start);
-            activity.Touch(VassalAcct, Start);
+            rosters.Add(AvatarScaleFixture.Roster(activity, r, s, Monarch, MonarchAcct, VassalGuid, VassalAcct, Start));
 
-            AvatarManager.Initialize(store, () => T, () => Start, () => activity, () => rosters, m => rosters.FirstOrDefault(r => r.MonarchGuid == m));
+            AvatarManager.Initialize(store, () => tuning, () => Start, () => activity, () => rosters, m => rosters.FirstOrDefault(r => r.MonarchGuid == m));
             AvatarManager.Tick();
 
             var state = AvatarManager.Get(AvatarId);
@@ -220,6 +235,56 @@ namespace ACE.Server.Tests.Avatars
             Assert.IsFalse(request.AnnounceServerWide, "the quiet listing keeps the announcements to the allegiance");
             Assert.IsTrue(request.Random);
             Assert.AreEqual($"avatar:{AvatarId}:{monarch.Name}", request.Invoker);
+        }
+
+        // ---- roster-scaled prices (owner ruling 2026-11-26) ----------------------------------------------------
+
+        private static readonly AvatarTuning Scaled = AvatarTuning.Defaults with { EventMinLevel = 1 };
+
+        [DataTestMethod]
+        [DataRow(2, 230, false, 700UL)]
+        [DataRow(2, 230, true, 1000UL)]
+        [DataRow(20, 230, false, 4000UL)]
+        [DataRow(20, 230, true, 6000UL)]
+        [DataRow(73, 230, false, 10240UL)]
+        [DataRow(73, 230, true, 15359UL)]
+        public void TryBuy_ReservesTheScaledPrice_AndTheRunCarriesIt(int r, int s, bool announced, ulong price)
+        {
+            tuning = Scaled;
+            var state = InitActive(favor: 40_000, lifetime: 10_000, r: r, s: s);
+            Assert.AreEqual(r, state.ActiveAccounts, "the fixture reads R");
+            Assert.AreEqual(s, AvatarManager.ServerActiveAccounts(), "the fixture reads S");
+            var npc = MakeVendor();
+
+            Assert.IsTrue(AvatarEventPurchase.TryBuy(monarch, npc, announced, out var line), line);
+            Assert.AreEqual(price, state.ReservedFavor, "the scaled price is what is held");
+
+            Drain(worldQueue);
+
+            Assert.AreEqual(price, started.Single().AvatarFavorPrice, "the run carries exactly the reserved price");
+
+            // The reservation is never recomputed: the roster shrinking before the run settles changes nothing.
+            state.ActiveAccounts = 2;
+            AvatarEventPurchase.Settle(AvatarId, started.Single().AvatarFavorPrice, commit: true);
+            Assert.AreEqual(40_000UL - price, state.Favor, "the commit debits the reserved price");
+            Assert.AreEqual(0UL, state.ReservedFavor);
+        }
+
+        [TestMethod]
+        public void TryBuy_ScaledPrice_RefusesWhenFavorIsUnderIt()
+        {
+            tuning = Scaled;
+            var state = InitActive(favor: 3_999, r: 20, s: 230);
+            var npc = MakeVendor();
+
+            Assert.IsFalse(AvatarEventPurchase.TryBuy(monarch, npc, false, out var line), "the quiet price at R = 20 is 4000");
+            Assert.IsNotNull(line);
+            Assert.AreEqual(0UL, state.ReservedFavor, "a refusal holds nothing");
+            Assert.AreEqual(0, worldQueue.Count);
+
+            state.Favor = 4_000;
+            Assert.IsTrue(AvatarEventPurchase.TryBuy(monarch, npc, false, out _), "exactly the price passes");
+            Assert.AreEqual(4_000UL, state.ReservedFavor);
         }
 
         [TestMethod]
@@ -341,6 +406,10 @@ namespace ACE.Server.Tests.Avatars
         {
             var state = InitActive();
             var npc = MakeVendor();
+            // Two slots a day, so both buys clear the daily limit and the race is between the starts. With one slot the
+            // second buy is refused by the first one's pending claim (TryBuy_SecondBuyWhileTheFirstIsInFlight_Refused).
+            var two = T with { EventDailyLimit = 2 };
+            AvatarVendor.Tuning = () => two;
             var calls = 0;
             AvatarEventPurchase.StartSeam = r =>
             {
@@ -358,6 +427,40 @@ namespace ACE.Server.Tests.Avatars
             Assert.AreEqual(2000UL, state.ReservedFavor, "the loser is refunded; the winner's price stays held for its run");
             AvatarEventPurchase.Settle(AvatarId, 2000, commit: true);
             Assert.AreEqual(3000UL, state.Favor, "start value minus exactly one price");
+            Assert.AreEqual(0UL, state.ReservedFavor);
+            Assert.AreEqual((1, 0), AvatarManager.DailyCount(AvatarId, AvatarDailyKind.Event, AvatarDay.BuildClock(two, Now)),
+                "the loser's claim was given back with its Favor; only the winner used a slot");
+        }
+
+        [TestMethod]
+        public void TryBuy_RequestBuildThrows_RefusedWithNothingClaimedOrReserved()
+        {
+            var state = InitActive();
+            var npc = MakeVendor();
+            AvatarEventPurchase.DescribeAnchor = _ => throw new InvalidOperationException("town index down");
+
+            Assert.IsFalse(AvatarEventPurchase.TryBuy(monarch, npc, false, out var line));
+
+            Assert.AreEqual(AvatarEventPurchase.LineFor(AvatarEventRefusal.StartFailed, T), line);
+            Assert.AreEqual((0, 0), AvatarManager.DailyCount(AvatarId, AvatarDailyKind.Event, AvatarDay.BuildClock(T, Now)), "no slot claimed");
+            Assert.AreEqual(0UL, state.ReservedFavor, "no Favor held");
+            Assert.AreEqual(0, worldQueue.Count);
+
+            AvatarEventPurchase.DescribeAnchor = WorldEventTownIndex.Describe;
+            Assert.IsTrue(AvatarEventPurchase.TryBuy(monarch, npc, false, out line), "control: the same purchase succeeds once Describe works: " + line);
+        }
+
+        [TestMethod]
+        public void TryBuy_EnqueueThrows_ReleasesTheClaimAndTheReservation()
+        {
+            var state = InitActive();
+            var npc = MakeVendor();
+            AvatarEventPurchase.WorldEnqueue = _ => throw new InvalidOperationException("queue gone");
+
+            Assert.IsFalse(AvatarEventPurchase.TryBuy(monarch, npc, false, out var line));
+
+            Assert.AreEqual(AvatarEventPurchase.LineFor(AvatarEventRefusal.StartFailed, T), line);
+            Assert.AreEqual((0, 0), AvatarManager.DailyCount(AvatarId, AvatarDailyKind.Event, AvatarDay.BuildClock(T, Now)));
             Assert.AreEqual(0UL, state.ReservedFavor);
         }
 
@@ -490,6 +593,207 @@ namespace ACE.Server.Tests.Avatars
             Assert.AreEqual(0, resent, "no panel re-send: nothing was reserved");
         }
 
+        // ---- daily limit (owner ruling 2026-11-25: one private World Event per Avatar per Eastern day) ------------
+
+        // Now is 2027-01-15 12:00Z = 7:00 AM EST; the Avatar day turns over at 2027-01-16 05:00Z, 17 hours away.
+        private const string LimitLine = "Your Avatar has already called a private World Event today. It can call another in 17h 0m.";
+
+        /// <summary>Buys, starts and lets the run reach Active (Settle commit), the whole successful path.</summary>
+        private void BuyAndReachActive(AvatarVendor npc, bool announced = false)
+        {
+            Assert.IsTrue(AvatarEventPurchase.TryBuy(monarch, npc, announced, out var line), line);
+            Drain(worldQueue);
+            AvatarEventPurchase.Settle(AvatarId, (ulong)(announced ? T.EventPriceAnnounced : T.EventPriceQuiet), commit: true);
+        }
+
+        [TestMethod]
+        public void TryBuy_SecondBuySameDay_RefusedWithTheResetCountdown_NothingReserved()
+        {
+            var state = InitActive(favor: 10_000);
+            var npc = MakeVendor();
+            BuyAndReachActive(npc);
+            var favorAfterFirst = state.Favor;
+
+            Assert.IsFalse(AvatarEventPurchase.TryBuy(monarch, npc, false, out var line));
+
+            Assert.AreEqual(LimitLine, line);
+            Assert.IsTrue(line.All(c => c < 128), "buyer lines are ASCII");
+            Assert.AreEqual(0UL, state.ReservedFavor, "refused before any Favor moved");
+            Assert.AreEqual(favorAfterFirst, state.Favor);
+            Assert.AreEqual(0, worldQueue.Count, "nothing queued");
+            Assert.AreEqual(1, started.Count, "only the first event started");
+        }
+
+        [TestMethod]
+        public void TryBuy_QuietThenAnnounced_ShareTheLimit()
+        {
+            InitActive(favor: 10_000);
+            var npc = MakeVendor();
+            BuyAndReachActive(npc, announced: false);
+
+            Assert.IsFalse(AvatarEventPurchase.TryBuy(monarch, npc, true, out var line), "the announced listing shares the quiet one's slot");
+            Assert.AreEqual(LimitLine, line);
+        }
+
+        [TestMethod]
+        public void TryBuy_SecondBuyWhileTheFirstIsInFlight_Refused()
+        {
+            var state = InitActive(favor: 10_000);
+            var npc = MakeVendor();
+
+            Assert.IsTrue(AvatarEventPurchase.TryBuy(monarch, npc, false, out _));
+
+            Assert.IsFalse(AvatarEventPurchase.TryBuy(monarch, npc, true, out var line), "the first buy's claim holds the slot until its run settles");
+            Assert.AreEqual(LimitLine, line);
+            Assert.AreEqual(2000UL, state.ReservedFavor, "only the first price is held");
+        }
+
+        [TestMethod]
+        public void FailedStart_DoesNotUseTheDay()
+        {
+            InitActive(favor: 10_000);
+            var npc = MakeVendor();
+            startResult = (false, "no anchor fits");
+
+            Assert.IsTrue(AvatarEventPurchase.TryBuy(monarch, npc, false, out _));
+            Drain(worldQueue);
+
+            startResult = (true, null);
+            Assert.IsTrue(AvatarEventPurchase.TryBuy(monarch, npc, false, out var line), "a start that failed gives the slot back: " + line);
+        }
+
+        [TestMethod]
+        public void StartThrows_RunNotCurrent_DoesNotUseTheDay()
+        {
+            InitActive(favor: 10_000);
+            var npc = MakeVendor();
+            AvatarEventPurchase.StartSeam = r => throw new InvalidOperationException("boom");
+
+            Assert.IsTrue(AvatarEventPurchase.TryBuy(monarch, npc, false, out _));
+            Drain(worldQueue);
+
+            Assert.AreEqual((0, 0), AvatarManager.DailyCount(AvatarId, AvatarDailyKind.Event, AvatarDay.BuildClock(T, Now)), "the claim was released");
+        }
+
+        [TestMethod]
+        public void StartThrows_RunAlreadyCurrent_ClaimLeftToTheRun()
+        {
+            InitActive(favor: 10_000);
+            var npc = MakeVendor();
+            AvatarEventPurchase.StartSeam = r => throw new InvalidOperationException("boom after the run took hold");
+            currentRequest = true;
+
+            Assert.IsTrue(AvatarEventPurchase.TryBuy(monarch, npc, false, out _));
+            Drain(worldQueue);
+
+            Assert.AreEqual((0, 1), AvatarManager.DailyCount(AvatarId, AvatarDailyKind.Event, AvatarDay.BuildClock(T, Now)), "the run settles its own claim");
+        }
+
+        [TestMethod]
+        public void RunEndedBeforeActive_DoesNotUseTheDay()
+        {
+            InitActive(favor: 10_000);
+            var npc = MakeVendor();
+
+            Assert.IsTrue(AvatarEventPurchase.TryBuy(monarch, npc, false, out _));
+            Drain(worldQueue);
+            AvatarEventPurchase.Settle(AvatarId, 2000, commit: false);
+
+            Assert.IsTrue(AvatarEventPurchase.TryBuy(monarch, npc, false, out var line), "a run that never reached Active is free: " + line);
+        }
+
+        [TestMethod]
+        public void ReachingActive_UsesTheDay_AndTheFlushedRowCarriesIt()
+        {
+            InitActive(favor: 10_000);
+            var npc = MakeVendor();
+            BuyAndReachActive(npc);
+
+            Assert.IsFalse(AvatarEventPurchase.TryBuy(monarch, npc, false, out _));
+
+            AvatarManager.OnShutdown();
+            var row = store.Saved.Last(a => a.AvatarId == AvatarId);
+            Assert.AreEqual((byte)1, row.EventsOnDay, "the flushed row shows one event today");
+            Assert.AreEqual(Now, row.LastEventAt, "stamped at the instant the run reached Active");
+        }
+
+        [TestMethod]
+        public void FailedReserve_GivesTheClaimBack()
+        {
+            var state = InitActive(favor: 10_000);
+            var npc = MakeVendor();
+            AvatarEventPurchase.ReserveFavor = (id, price) => false;
+
+            Assert.IsFalse(AvatarEventPurchase.TryBuy(monarch, npc, false, out var line));
+            Assert.AreEqual(AvatarEventPurchase.LineFor(AvatarEventRefusal.InsufficientFavor, T), line);
+            Assert.AreEqual((0, 0), AvatarManager.DailyCount(AvatarId, AvatarDailyKind.Event, AvatarDay.BuildClock(T, Now)), "no claim is left held");
+
+            AvatarEventPurchase.ReserveFavor = AvatarManager.TryReserveFavor;
+            Assert.IsTrue(AvatarEventPurchase.TryBuy(monarch, npc, false, out line), line);
+            Assert.AreEqual(2000UL, state.ReservedFavor);
+        }
+
+        [TestMethod]
+        public void NextEasternDay_IsAllowedAgain_AtTheBoundary()
+        {
+            InitActive(favor: 10_000);
+            var npc = MakeVendor();
+            BuyAndReachActive(npc);
+
+            AvatarEventPurchase.UtcNow = () => new DateTime(2027, 1, 16, 4, 59, 59, DateTimeKind.Utc);
+            Assert.IsFalse(AvatarEventPurchase.TryBuy(monarch, npc, false, out var line), "11:59:59 PM Eastern is still the same day");
+            Assert.AreEqual("Your Avatar has already called a private World Event today. It can call another in 1m.", line);
+
+            AvatarEventPurchase.UtcNow = () => new DateTime(2027, 1, 16, 5, 0, 0, DateTimeKind.Utc);
+            Assert.IsTrue(AvatarEventPurchase.TryBuy(monarch, npc, false, out line), "12:00 AM Eastern starts a new Avatar day: " + line);
+        }
+
+        [TestMethod]
+        public void LimitZero_IsUnlimited()
+        {
+            InitActive(favor: 20_000);
+            var npc = MakeVendor();
+            var unlimited = T with { EventDailyLimit = 0 };
+            AvatarVendor.Tuning = () => unlimited;
+
+            for (var i = 0; i < 3; i++)
+                BuyAndReachActive(npc);
+
+            Assert.AreEqual(3, started.Count);
+        }
+
+        [TestMethod]
+        public void StatusText_ShowsTheDaysEventCount_AndTheCountdownWhenUsed()
+        {
+            var state = InitActive(favor: 10_000);
+            var npc = MakeVendor();
+            AvatarStatusText.UtcNow = () => Now;
+            try
+            {
+                Assert.IsTrue(AvatarStatusText.Lines(state, T, (ulong)T.FavorCap, id => "a").Contains("Private World Events today: 0 of 1 used."));
+
+                // In flight: the claim is held, and the purchase refuses on it, so the line counts it too.
+                Assert.IsTrue(AvatarEventPurchase.TryBuy(monarch, npc, false, out _));
+                Assert.IsTrue(AvatarStatusText.Lines(state, T, (ulong)T.FavorCap, id => "a").Contains("Private World Events today: 1 of 1 used. The next can be called in 17h 0m."),
+                    "a pending claim is shown as used");
+                Drain(worldQueue);
+                AvatarEventPurchase.Settle(AvatarId, 2000, commit: false);
+                Assert.IsTrue(AvatarStatusText.Lines(state, T, (ulong)T.FavorCap, id => "a").Contains("Private World Events today: 0 of 1 used."), "released: back to 0");
+
+                BuyAndReachActive(npc);
+                var lines = AvatarStatusText.Lines(state, T, (ulong)T.FavorCap, id => "a");
+
+                Assert.IsTrue(lines.Contains("Private World Events today: 1 of 1 used. The next can be called in 17h 0m."), string.Join(" | ", lines));
+                StringAssert.StartsWith(lines.Last(), "Next unlock:", "the unlock line stays last");
+                Assert.IsNull(AvatarStatusText.EventDailyLine(state, T with { EventDailyLimit = 0 }, 50), "no line without a limit");
+                Assert.IsNull(AvatarStatusText.EventDailyLine(state, T with { EventMinLevel = 99 }, 50), "no line before events unlock");
+            }
+            finally
+            {
+                AvatarStatusText.UtcNow = () => DateTime.UtcNow;
+            }
+        }
+
         private sealed class Store : IAvatarStore
         {
             public readonly List<AllegianceAvatar> Avatars = new List<AllegianceAvatar>();
@@ -498,7 +802,14 @@ namespace ACE.Server.Tests.Avatars
 
             public List<AllegianceAvatar> LoadAll() => LoadAllReturnsNull ? null : Avatars.ToList();
             public List<AllegianceAvatarContribution> LoadContributionsSince(DateTime dayUtc) => Contributions.Where(c => c.Day >= dayUtc).ToList();
-            public void SaveBatch(IReadOnlyList<AllegianceAvatar> a, IReadOnlyList<AllegianceAvatarContribution> r, Action<bool> done) => done(true);
+            public readonly List<AllegianceAvatar> Saved = new List<AllegianceAvatar>();
+
+            public void SaveBatch(IReadOnlyList<AllegianceAvatar> a, IReadOnlyList<AllegianceAvatarContribution> r, Action<bool> done)
+            {
+                Saved.AddRange(a);
+                done(true);
+            }
+
             public void Insert(AllegianceAvatar row, Action<bool, uint> done) => done(true, 0);
         }
     }

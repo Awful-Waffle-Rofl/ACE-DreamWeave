@@ -70,8 +70,8 @@ namespace ACE.Server.ClassAbilities.Abilities
             DescriptionTemplate = "Your cloak's spell proc always has at least a {v:class_ability_cloakedinpower_floor|pct}% chance " +
                           "to fire on a hit that reaches you, however small the hit. It does not shorten the cloak's cooldown, and " +
                           "an unleveled cloak still never procs. When the cloak procs, your Thorns reflects as a critical hit for a " +
-                          "few seconds, including on the hit that triggered it. A critical reflect deals double damage, and " +
-                          "Critical Damage Rating adds to that.",
+                          "few seconds, including on the hit that triggered it. Those critical reflects use " +
+                          "your shield's full critical damage.",
             RankTailTemplate = "{ranks:class_ability_cloakedinpower_crit_window_r|f1} seconds of critical Thorns",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
@@ -89,8 +89,10 @@ namespace ACE.Server.ClassAbilities.Abilities
         public const string CritWindowPrefix = "class_ability_cloakedinpower_crit_window_r";
 
         /// <summary>
-        /// The base multiplier of a CRITICAL Thorns reflect, before the wearer's Critical Damage Rating mod
-        /// (owner ruling 2026-11-06: "your crit multiplier"): the same 2x a critical hit's base damage uses.
+        /// The base multiplier of a CRITICAL Thorns reflect with no Crippling Blow and no Execution (owner ruling
+        /// 2026-11-06: "your crit multiplier"): the same 2x a critical hit's base damage uses. Production no longer
+        /// reads it: ThornsAbility.CritDamageMultiplier and ThornsAbility.DamageRatingMultiplier are the live formula. It is kept as a parity pin that
+        /// formula is tested against.
         /// </summary>
         public const double CritThornsBaseMultiplier = 2.0;
 
@@ -117,9 +119,11 @@ namespace ACE.Server.ClassAbilities.Abilities
         }
 
         /// <summary>
-        /// The multiplier a critical Thorns reflect takes: 2.0 x the positive rating mod of the wearer's total
-        /// Critical Damage Rating (Creature.GetPositiveRatingMod, (100 + rating) / 100; a negative rating
-        /// takes the negative-rating branch there, so it can shrink the crit but the 2.0 base stays).
+        /// The no-Crippling-Blow, no-Execution, zero-Damage-Rating value of a Thorns crit (ThornsAbility.CritDamageMultiplier
+        /// x ThornsAbility.DamageRatingMultiplier), kept as a parity pin (no production caller; the tests compare the
+        /// live formula against it): 2.0 x the positive rating mod of
+        /// the wearer's total Critical Damage Rating (Creature.GetPositiveRatingMod, (100 + rating) / 100; a
+        /// negative rating takes the negative-rating branch there, so it can shrink the crit but the 2.0 base stays).
         /// </summary>
         public static double CritThornsMultiplier(int critDamageRating)
         {

@@ -529,6 +529,12 @@ namespace ACE.Server.WorldObjects
 
         public MoveToState LastMoveToState { get; set; }
 
+        /// <summary>
+        /// Time.GetUnixTime() when the last client MoveToState was handled; 0 until the first one.
+        /// Stamped only by GameActionMoveToState (client input), never by AutonomousPosition or server motion.
+        /// </summary>
+        public double LastMoveToStateTime { get; set; }
+
         public Position RequestedLocation { get; set; }
 
         /// <summary>

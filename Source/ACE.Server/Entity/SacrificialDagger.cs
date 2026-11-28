@@ -47,7 +47,7 @@ namespace ACE.Server.Entity
     /// </summary>
     public static class SacrificialDagger
     {
-        public const string RefusedDuoGemText = "The dagger cannot be used on a Duo Summon Gem. Break the gem with a Summon Gem Hammer first.";
+        public const string RefusedDuoGemText = "The dagger cannot be used on a Duo Summon Essence. Break the essence with a Summon Gem Hammer first.";
         public const string RefusedNotASummonText = "The Sacrificial Dagger only works on a summoning item.";
         public const string NoTargetText = "The Sacrificial Dagger must be used on a summoning item.";
         public const string RefusedDaggerText = "A Sacrificial Dagger cannot be used on another dagger.";

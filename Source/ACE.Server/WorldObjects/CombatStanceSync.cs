@@ -60,6 +60,82 @@ namespace ACE.Server.WorldObjects
 
             return currentStyle;
         }
+
+        /// <summary>
+        /// "Moving" for the post-teleport stance re-send (Player.ResyncStanceToSelf). That re-send is a non-autonomous
+        /// UpdateMotion carrying ForwardCommand=Ready; on the player's own client it stops a run, and is believed (from the
+        /// client command interpreter reconstruction, not observed) to drop a client-side autorun. Moving means the client
+        /// reported movement commands DURING this teleport window, or a server MoveTo is running. A movement report from
+        /// before the window (the run into the portal) counts as idle, so it cannot hold the re-send back.
+        /// </summary>
+        public static bool IsMovingForArrivalResync(bool clientReportedThisWindow, bool lastReportHasMovement, bool serverMoveToActive)
+        {
+            return (clientReportedThisWindow && lastReportHasMovement) || serverMoveToActive;
+        }
+
+        /// <summary>
+        /// True when the last client MoveToState was handled at or after the current teleport window started.
+        /// lastReportTime is LastMoveToStateTime, where 0 means no report yet; a missing window start cannot be compared.
+        /// </summary>
+        public static bool ClientReportedThisWindow(double lastReportTime, double? windowStart)
+        {
+            return lastReportTime > 0 && windowStart.HasValue && lastReportTime >= windowStart.Value;
+        }
+
+        /// <summary>
+        /// The stop-report fast path: a client report with no movement commands sends a still-pending arrival re-send,
+        /// unless a server MoveTo is running or the player is mid-action (casting, attacking, NextUseTime), where the
+        /// retry covers it instead.
+        /// </summary>
+        public static bool ShouldSendPendingResyncOnReport(bool pendingForCurrentWindow, bool reportHasMovement, bool serverMoveToActive, bool acting)
+        {
+            return pendingForCurrentWindow && !reportHasMovement && !serverMoveToActive && !acting;
+        }
+
+        /// <summary>
+        /// Consecutive still retry ticks: one more than before when the position moved less than stillMeters since the
+        /// previous tick, otherwise 0. An unknown displacement (null) is never still.
+        /// </summary>
+        public static int NextStillTicks(int previousStillTicks, double? movedSincePrevious, double stillMeters)
+        {
+            return movedSincePrevious.HasValue && movedSincePrevious.Value < stillMeters ? previousStillTicks + 1 : 0;
+        }
+
+        /// <summary>What one tick of the arrival resync retry does.</summary>
+        public enum ArrivalResyncStep
+        {
+            /// <summary>Nothing more to do: the window is gone, a re-send already went out, or the give-up time passed.</summary>
+            Stop,
+
+            /// <summary>Send now: the player is no longer moving, or has stood still since the previous tick.</summary>
+            Send,
+
+            /// <summary>Still moving (or mid-action): check again next tick.</summary>
+            Wait,
+        }
+
+        /// <summary>
+        /// One tick of the retry armed when the deferred arrival re-send skipped. Sends when the player is not moving, or
+        /// when its position has stayed still for stillTicksRequired consecutive ticks (<see cref="NextStillTicks"/>; a
+        /// movement flag that stuck after the key was released). One still tick is not enough, because a non-FastTick
+        /// player's Location only moves on client position reports and can read unchanged while running. Waits while it
+        /// is genuinely moving or mid-action. Never sends unconditionally: after giveUpSeconds it stops without a send,
+        /// so a player who keeps running is never interrupted.
+        /// </summary>
+        public static ArrivalResyncStep DecideArrivalResyncRetry(bool windowCurrent, bool alreadyResyncedSinceArrival, bool moving, bool acting,
+            int consecutiveStillTicks, int stillTicksRequired, double secondsSinceArrival, double giveUpSeconds)
+        {
+            if (!windowCurrent || alreadyResyncedSinceArrival || secondsSinceArrival >= giveUpSeconds)
+                return ArrivalResyncStep.Stop;
+
+            if (acting)
+                return ArrivalResyncStep.Wait;
+
+            if (!moving || consecutiveStillTicks >= stillTicksRequired)
+                return ArrivalResyncStep.Send;
+
+            return ArrivalResyncStep.Wait;
+        }
     }
 
     /// <summary>

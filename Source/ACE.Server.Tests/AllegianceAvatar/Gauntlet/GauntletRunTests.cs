@@ -251,6 +251,8 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             public readonly HashSet<uint> Held = new HashSet<uint>();
             public double HoldSecondsLeft(GauntletRun run, Player player) => player != null && Held.Contains(player.Guid.Full) ? 30 : 0;
             public void ReleaseAll(GauntletRun run) => Calls.Add("death.releaseall");
+            public void ReleaseToCaches(GauntletRun run, Position caches) { Calls.Add("death.tocaches"); CacheTargets.Add(caches); }
+            public readonly List<Position> CacheTargets = new List<Position>();
             public int BeginRewarding(GauntletRun run) { Calls.Add("rewards.begin"); return Window; }
             public void DeliverDirect(GauntletRun run) => Calls.Add("rewards.direct");
             public void EndRewarding(GauntletRun run) => Calls.Add("rewards.end");
@@ -554,9 +556,11 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
 
             h.Advance(200);
             Assert.AreEqual(GauntletState.Active, run.State, "not yet");
+            Assert.IsFalse(run.FightOver, "a live wave is a live fight");
 
             h.Advance(40);
             Assert.AreEqual(GauntletState.Rewarding, run.State, "the timer ended it; Ending passes straight to Rewarding");
+            Assert.IsTrue(run.FightOver, "Rewarding: the fighting is over, so a later death goes to the caches, not the pen");
             Assert.AreEqual(GauntletEndReason.TimeLimit, run.EndReason);
 
             // (1000 dead + 500 + 1000 clamped + 0) / 4000 = 0.625 -> partial 62
@@ -565,6 +569,12 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             Assert.AreEqual(62L, h.FakeRecords.Announces.Single().Score);
             Assert.IsTrue(c.Skip(1).All(x => x.Destroyed), "the remaining monsters are cleared");
             CollectionAssert.Contains(h.Hooks.Calls, "rewards.begin");
+
+            // the fight is over: the death pen is emptied to the cache area (the centre) right after the caches are placed
+            Assert.AreEqual(1, h.Hooks.Calls.Count(x => x == "death.tocaches"), "held members are released to the caches once");
+            Assert.IsTrue(h.Hooks.Calls.IndexOf("death.tocaches") > h.Hooks.Calls.IndexOf("rewards.begin"), "after the caches exist");
+            Assert.AreEqual(run.CentrePosition.PositionX, h.Hooks.CacheTargets.Single().PositionX, "to the arena centre, where the caches are");
+            Assert.AreEqual(run.Instance, h.Hooks.CacheTargets.Single().Instance, "in the arena copy");
 
             h.Advance(0.5);
             var wave = h.Store.Waves.Single();
@@ -783,6 +793,7 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             Assert.AreEqual(100L, h.FakeRecords.Banks.Last().Score);
             Assert.AreEqual(1, h.Hooks.Calls.Count(x => x == "rewards.direct"), "eligible online members are paid to their packs");
             Assert.IsFalse(h.Hooks.Calls.Contains("rewards.begin"), "no caches: there is no arena");
+            Assert.IsFalse(h.Hooks.Calls.Contains("death.tocaches"), "no arena to bring anyone to");
             Assert.AreEqual((byte)GauntletEndReason.InstanceLost, h.Store.LastRunRow.EndReason);
             Assert.AreEqual(100u, h.Store.LastRunRow.ScoreCenti);
             Assert.AreEqual(0, h.Manager.RunCount);

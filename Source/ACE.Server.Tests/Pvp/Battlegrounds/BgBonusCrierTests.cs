@@ -37,11 +37,11 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
         [TestMethod]
         public void Lines_AreTheExactOwnerText()
         {
-            Assert.AreEqual("Battleground Double Marks begins in 15 minutes! Every battleground match that starts during the window pays double Marks of the Hopeslayer.", BgBonusCrier.WarnLine(15));
-            Assert.AreEqual("Battleground Double Marks is now live for the next 1h 0m! Queue for battlegrounds now. Use /arena join bg.", BgBonusCrier.OpenLine("1h 0m"));
-            Assert.AreEqual("Battleground Double Marks has ended. The next window opens in 11h 0m.", BgBonusCrier.EndLine("11h 0m"));
-            Assert.AreEqual("Battleground Double Marks has ended.", BgBonusCrier.EndLine(null));
-            Assert.AreEqual("Battleground Double Marks begins in 1 minute! Every battleground match that starts during the window pays double Marks of the Hopeslayer.", BgBonusCrier.WarnLine(1));
+            Assert.AreEqual("Double Marks begins in 15 minutes! Every Battleground and Arena match (1v1, 2v2 and Tugak Brawl) that starts during the window pays double Marks of the Hopeslayer.", BgBonusCrier.WarnLine(15));
+            Assert.AreEqual("Double Marks is now live for the next 1h 0m for Battlegrounds and Arena (all modes)! Use /arena join bg, /arena join 1v1, /arena join 2v2 or /arena join tugak.", BgBonusCrier.OpenLine("1h 0m"));
+            Assert.AreEqual("Double Marks has ended. The next window opens in 11h 0m.", BgBonusCrier.EndLine("11h 0m"));
+            Assert.AreEqual("Double Marks has ended.", BgBonusCrier.EndLine(null));
+            Assert.AreEqual("Double Marks begins in 1 minute! Every Battleground and Arena match (1v1, 2v2 and Tugak Brawl) that starts during the window pays double Marks of the Hopeslayer.", BgBonusCrier.WarnLine(1));
         }
 
         [TestMethod]
@@ -265,7 +265,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
 
             var end = crier.Tick(Local(7, 0), true, swapped, utcMinus8, 15);
             Assert.AreEqual(1, end.Count, "the next real transition (the swapped window closing) fires once");
-            StringAssert.StartsWith(end[0], "Battleground Double Marks has ended.");
+            StringAssert.StartsWith(end[0], "Double Marks has ended.");
             Assert.AreEqual(0, crier.Tick(Local(7, 1), true, swapped, utcMinus8, 15).Count);
         }
 

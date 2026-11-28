@@ -465,7 +465,7 @@ namespace ACE.Server.Tests
         {
             var body = Body(ProjectileFile, "public void SpawnClassAbilityAoeChild(");
 
-            AssertLine(body, "InheritEchoWispMark(sp, this);       // a child of a wisp cast keeps the wisp rules", "AOE children inherit the wisp mark");
+            AssertLine(body, "InheritEchoWispMark(sp, this);", "AOE children inherit the wisp mark");
         }
 
         [TestMethod]

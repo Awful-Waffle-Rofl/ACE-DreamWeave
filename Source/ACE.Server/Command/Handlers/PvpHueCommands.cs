@@ -70,13 +70,12 @@ namespace ACE.Server.Command.Handlers
                 return;
             }
 
-            var target = ResolveTarget(admin);
+            var target = ResolveTarget(admin, out var fellBack);
 
-            if (target == null)
-            {
-                Reply(session, "[PvpHue] Selected object is not a player; clear the selection to target yourself.");
-                return;
-            }
+            if (fellBack)
+                Reply(session, $"[PvpHue] Last assessed object is not a player in range; targeting yourself ({admin.Name}).");
+            else if (target != admin)
+                Reply(session, $"[PvpHue] Targeting {target.Name} (last assessed player). Press Escape or assess yourself to target yourself.");
 
             if (isLook)
             {
@@ -101,14 +100,26 @@ namespace ACE.Server.Command.Handlers
             }
         }
 
-        /// <summary>The selected player, the admin when nothing is selected, or null when the selection is not a player.</summary>
-        private static Player ResolveTarget(Player admin)
+        /// <summary>
+        /// The last successfully assessed player, else the admin. CurrentAppraisalTarget is the last SUCCESSFUL assess,
+        /// not the client's selection, and selecting yourself does not reliably refresh it, so a stale item or NPC guid
+        /// used to refuse the command no matter how often you reselected yourself. Any non-player now falls back to the
+        /// admin, and <paramref name="fellBack"/> tells the caller to say so.
+        /// </summary>
+        private static Player ResolveTarget(Player admin, out bool fellBack)
         {
+            fellBack = false;
+
             if (!admin.CurrentAppraisalTarget.HasValue)
                 return admin;
 
-            var selected = admin.CurrentLandblock?.GetObject(new ObjectGuid(admin.CurrentAppraisalTarget.Value));
-            return selected as Player;
+            var selected = admin.CurrentLandblock?.GetObject(new ObjectGuid(admin.CurrentAppraisalTarget.Value)) as Player;
+
+            if (selected != null)
+                return selected;
+
+            fellBack = true;
+            return admin;
         }
 
         private static bool HasOwnPaletteRows(WorldObject item) =>
@@ -228,7 +239,8 @@ namespace ACE.Server.Command.Handlers
             item.GetProperty(PropertyFloat.Shade2),
             item.GetProperty(PropertyFloat.Shade3),
             item.GetProperty(PropertyFloat.Shade4),
-            item.GetProperty(PropertyBool.IgnoreCloIcons));
+            item.GetProperty(PropertyBool.IgnoreCloIcons),
+            item.GetProperty(PropertyFloat.DyeShellShade));
 
         private static void HandleLook(Session session, Player admin, Player target, string[] parameters)
         {
@@ -314,6 +326,7 @@ namespace ACE.Server.Command.Handlers
             Restore(item, PropertyFloat.Shade2, plan.Target.Shade2);
             Restore(item, PropertyFloat.Shade3, plan.Target.Shade3);
             Restore(item, PropertyFloat.Shade4, plan.Target.Shade4);
+            Restore(item, PropertyFloat.DyeShellShade, plan.Target.DyeShellShade);
             Restore(item, PropertyBool.IgnoreCloIcons, plan.Target.IgnoreCloIcons);
             if (!plan.KeepIcon) Restore(item, PropertyDataId.Icon, plan.Target.Icon);
 
@@ -450,6 +463,7 @@ namespace ACE.Server.Command.Handlers
                 Restore(item, PropertyFloat.Shade2, o.Shade2);
                 Restore(item, PropertyFloat.Shade3, o.Shade3);
                 Restore(item, PropertyFloat.Shade4, o.Shade4);
+                Restore(item, PropertyFloat.DyeShellShade, o.DyeShellShade);
                 Restore(item, PropertyBool.IgnoreCloIcons, o.IgnoreCloIcons);
 
                 Memory.Forget(item.Guid.Full);

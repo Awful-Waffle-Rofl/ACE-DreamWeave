@@ -381,10 +381,10 @@ namespace ACE.Server.Tests.MlTreasure
         {
             var src = StripComments(File.ReadAllText(SourcePath("Source", "ACE.Server", "MlTreasure", "MlRelariaTrophy.cs")));
 
-            var killerResolved = src.IndexOf("killer.TryGetPetOwnerOrAttacker() is Player killerPlayer", StringComparison.Ordinal);
-            var relicBranch = src.IndexOf("var alreadyClaimed = killerPlayer.QuestManager.HasQuest(ClaimQuestName);", StringComparison.Ordinal);
+            var killerResolved = src.IndexOf("killer?.TryGetPetOwnerOrAttacker() as Player", StringComparison.Ordinal);
+            var relicBranch = src.IndexOf("var alreadyClaimed = digger.QuestManager.HasQuest(ClaimQuestName);", StringComparison.Ordinal);
 
-            Assert.AreNotEqual(-1, killerResolved, "the killer Player must be resolved via TryGetPetOwnerOrAttacker");
+            Assert.AreNotEqual(-1, killerResolved, "the digger Player must be resolved via TryGetPetOwnerOrAttacker (corpse route)");
             Assert.AreNotEqual(-1, relicBranch, "the relic's own alreadyClaimed read must still exist, unmodified");
             Assert.IsFalse(src.Contains("MlRelariaChargeTrophy.TryDropOnCorpse("),
                 "MlRelariaTrophy.TryDropTrophy must no longer call MlRelariaChargeTrophy.TryDropOnCorpse");

@@ -179,7 +179,7 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
-            // Summon Gem Hammer: same shape as the dagger - it only works ON a Duo Summon Gem, and a target-less use
+            // Summon Gem Hammer: same shape as the dagger - it only works ON a Duo Summon Essence, and a target-less use
             // must refuse BEFORE the fall-through consumption below, or the hammer is destroyed.
             if (SummonGemHammer.IsHammer(this))
             {
@@ -187,7 +187,7 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
-            // Duo Summon Gem: the gem is a PetDevice weenie, never a Gem. A Gem-typed weenie carrying the flag is a
+            // Duo Summon Essence: the gem is a PetDevice weenie, never a Gem. A Gem-typed weenie carrying the flag is a
             // content error; refuse it here so a double-click cannot consume what may be holding two summons.
             if (DuoSummonGem.IsDuoGem(this))
             {
@@ -777,7 +777,7 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
-            // Custom Summons: the Summon Gem Hammer breaks a bound Duo Summon Gem back into its two summon items. Keyed
+            // Custom Summons: the Summon Gem Hammer breaks a bound Duo Summon Essence back into its two summon items. Keyed
             // on its PropertyBool. UseOnTarget sends the use-done event on every exit (after its animation).
             if (SummonGemHammer.IsHammer(this))
             {

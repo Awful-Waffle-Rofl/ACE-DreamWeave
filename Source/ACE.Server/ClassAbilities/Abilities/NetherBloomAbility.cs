@@ -259,6 +259,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             // this stamps that pre-existing row too - deliberately conservative, since the alternative is a
             // bloom that can be laundered back into a bloomable DoT by re-casting on the secondary target.
             entry.StatModValue = source.StatModValue;
+            NetherDotWielderCuts.Copy(source, entry); // the copied value carries the source's Summoner wielder cut, so its record follows it
             entry.StartTime = 0;
             entry.Duration = duration;
             entry.DegradeLimit = BloomMarker;

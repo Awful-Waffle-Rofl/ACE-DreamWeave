@@ -260,7 +260,7 @@ namespace ACE.Server.BalanceTrials
             {
                 var go = Obj(g, $"liftUp.gear[{i}]", "slot", "source", "pick");
                 var slotName = Str(go, "slot");
-                if (slotName.Length == 0 || !Regex.IsMatch(slotName, "^[A-Za-z]+$") || !Enum.TryParse<EquipMask>(slotName, false, out var slot) || !Enum.IsDefined(typeof(EquipMask), slot)
+                if (slotName.Length == 0 || !Regex.IsMatch(slotName, @"^[A-Za-z]+\z") || !Enum.TryParse<EquipMask>(slotName, false, out var slot) || !Enum.IsDefined(typeof(EquipMask), slot)
                     || slot == EquipMask.None || System.Numerics.BitOperations.PopCount((uint)slot) != 1)
                     throw new TrialArchetypeException($"liftUp.gear[{i}].slot '{slotName}' is not a single EquipMask member");
                 if (!seenSlots.Add(slot))
@@ -317,7 +317,7 @@ namespace ACE.Server.BalanceTrials
 
         private static ClassAbilityClass Class(string name, string field)
         {
-            if (name.Length == 0 || !Regex.IsMatch(name, "^[A-Za-z]+$") || !Enum.TryParse<ClassAbilityClass>(name, false, out var c) || !Enum.IsDefined(typeof(ClassAbilityClass), c) || c == ClassAbilityClass.None)
+            if (name.Length == 0 || !Regex.IsMatch(name, @"^[A-Za-z]+\z") || !Enum.TryParse<ClassAbilityClass>(name, false, out var c) || !Enum.IsDefined(typeof(ClassAbilityClass), c) || c == ClassAbilityClass.None)
                 throw new TrialArchetypeException($"{field} '{name}' is not a class");
             return c;
         }

@@ -57,8 +57,8 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             var longs = GauntletKeys(DefaultPropertyManager.DefaultLongProperties);
             var doubles = GauntletKeys(DefaultPropertyManager.DefaultDoubleProperties);
             var strings = GauntletKeys(DefaultPropertyManager.DefaultStringProperties);
-            Assert.AreEqual(42, props.Length);
-            Assert.AreEqual(42, bools.Count + longs.Count + doubles.Count + strings.Count);
+            Assert.AreEqual(50, props.Length);
+            Assert.AreEqual(50, bools.Count + longs.Count + doubles.Count + strings.Count);
 
             var all = bools.Concat(longs).Concat(doubles).Concat(strings).ToList();
             foreach (var p in props)
@@ -69,7 +69,8 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
         public void Defaults_OwnerValues()
         {
             var d = GauntletTuning.Defaults;
-            Assert.AreEqual(3000L, d.Price);
+            Assert.AreEqual(1000L, d.Price);
+            Assert.AreEqual(300L, d.PricePerAccount);
             Assert.AreEqual(200L, d.StartLevel);
             Assert.AreEqual(25L, d.LevelStep);
             Assert.AreEqual(5L, d.BossEvery);
@@ -242,7 +243,8 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
                 FighterHealthBase = double.NaN, FighterHealthPerLevel = double.NaN,
                 FighterOffenseBase = double.NaN, FighterOffensePerLevel = double.NaN,
                 FighterDamageBase = double.NaN, FighterDamagePerLevel = double.NaN,
-                FighterMinDeathSeconds = double.NaN, FighterBurstSeconds = double.NaN,
+                FighterMinDeathSeconds = double.NaN, FighterBurstSeconds = double.NaN, FighterTauntSeconds = double.NaN,
+                FighterHealSharePerTenSeconds = double.NaN, FighterAuraRadius = double.PositiveInfinity,
             });
 
             Assert.AreEqual(d.WaveCountPerPlayer, t.WaveCountPerPlayer);
@@ -261,6 +263,27 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             Assert.AreEqual(d.FighterDamagePerLevel, t.FighterDamagePerLevel);
             Assert.AreEqual(d.FighterMinDeathSeconds, t.FighterMinDeathSeconds);
             Assert.AreEqual(d.FighterBurstSeconds, t.FighterBurstSeconds);
+            Assert.AreEqual(d.FighterTauntSeconds, t.FighterTauntSeconds);
+            Assert.AreEqual(d.FighterHealSharePerTenSeconds, t.FighterHealSharePerTenSeconds);
+            Assert.AreEqual(d.FighterAuraRadius, t.FighterAuraRadius);
+        }
+
+        [TestMethod]
+        public void Sanitized_FighterBoonAndRespawnKeys_AreClamped()
+        {
+            var t = GauntletTuning.Sanitized(GauntletTuning.Defaults with
+            {
+                FighterHealSharePerTenSeconds = -0.5, FighterAuraRadius = -3.0,
+                FighterAuraDamageRating = -4, FighterAuraResistRating = 1_000_000,
+                FighterRespawnStepSeconds = -20, FighterRespawnSeconds = 90, FighterRespawnMaxSeconds = 30,
+            });
+
+            Assert.AreEqual(0.0, t.FighterHealSharePerTenSeconds, "a negative share is every heal refused");
+            Assert.AreEqual(0.0, t.FighterAuraRadius, "a negative radius is the aura off");
+            Assert.AreEqual(0L, t.FighterAuraDamageRating);
+            Assert.AreEqual(GauntletTuning.AuraRatingCeiling, t.FighterAuraResistRating, "a garbled rating cannot overflow the rating sum");
+            Assert.AreEqual(0L, t.FighterRespawnStepSeconds);
+            Assert.AreEqual(90L, t.FighterRespawnMaxSeconds, "the respawn ceiling is never below the base respawn");
         }
 
         [TestMethod]
@@ -270,7 +293,7 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             {
                 WaveCountPerPlayer = -1.0, BossWaveTrashFraction = 7.0, KillXpScale = -2.0, PenMinDistance = -1.0,
                 FighterHealthBase = -1.0, FighterOffenseBase = -1.0, FighterDamageBase = -1.0,
-                FighterMinDeathSeconds = 0.0, FighterBurstSeconds = -1.0,
+                FighterMinDeathSeconds = 0.0, FighterBurstSeconds = -1.0, FighterTauntSeconds = -3.0,
             });
 
             Assert.AreEqual(0.0, t.WaveCountPerPlayer);
@@ -282,6 +305,7 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             Assert.AreEqual(0.0, t.FighterDamageBase);
             Assert.AreEqual(1.0, t.FighterMinDeathSeconds, "a zero death time would make the intake cap divide by zero");
             Assert.AreEqual(0.0, t.FighterBurstSeconds);
+            Assert.AreEqual(0.0, t.FighterTauntSeconds, "a negative interval is the pulse off");
             Assert.AreEqual(0.0, GauntletTuning.Sanitized(GauntletTuning.Defaults with { BossWaveTrashFraction = -1.0 }).BossWaveTrashFraction);
         }
 

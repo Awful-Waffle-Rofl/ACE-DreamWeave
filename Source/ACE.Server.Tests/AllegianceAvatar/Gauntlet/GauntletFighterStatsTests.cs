@@ -23,23 +23,33 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
         [TestMethod]
         public void Defaults_AreTheSpecPlaceholders()
         {
-            Assert.AreEqual(10.0, T.FighterHealthBase);
-            Assert.AreEqual(0.04, T.FighterHealthPerLevel);
+            Assert.AreEqual(6.0, T.FighterHealthBase, "owner ruling 2026-11-25: lowered from 10 with the band armor");
+            Assert.AreEqual(0.02, T.FighterHealthPerLevel, "owner ruling 2026-11-25: lowered from 0.04");
             Assert.AreEqual(1.0, T.FighterOffenseBase);
             Assert.AreEqual(0.0004, T.FighterOffensePerLevel);
             Assert.AreEqual(1.0, T.FighterDamageBase);
             Assert.AreEqual(0.004, T.FighterDamagePerLevel);
             Assert.AreEqual(20.0, T.FighterMinDeathSeconds);
             Assert.AreEqual(5.0, T.FighterBurstSeconds);
+            Assert.AreEqual(5.0, T.FighterTauntSeconds, "the Revenant Warden's pulse interval (1007717-1007719 float 9021)");
+            Assert.AreEqual(0.25, T.FighterHealSharePerTenSeconds, "the old flat bucket, now a tunable");
+            Assert.AreEqual(30.0, T.FighterAuraRadius);
+            Assert.AreEqual(10L, T.FighterAuraDamageRating);
+            Assert.AreEqual(10L, T.FighterAuraResistRating);
+            Assert.AreEqual(60L, T.FighterRespawnSeconds);
+            Assert.AreEqual(20L, T.FighterRespawnStepSeconds);
+            Assert.AreEqual(120L, T.FighterRespawnMaxSeconds);
+            Assert.AreEqual(1.0, GauntletFighterStats.ArmorRatio, "owner ruling 2026-11-25: the band's own armor");
         }
 
         [TestMethod]
         public void Health_ScalesWithAvatarLevel()
         {
-            // plan.HealthCurveTarget x (10 + 0.04 x A)
-            Assert.AreEqual(10_000u, GauntletFighterStats.MaxHealth(1000, 0, T), "A = 0: x10");
-            Assert.AreEqual(10_400u, GauntletFighterStats.MaxHealth(1000, 10, T), "A = 10: x10.4");
-            Assert.AreEqual(13_000u, GauntletFighterStats.MaxHealth(1000, 75, T), "A = 75: x13");
+            // plan.HealthCurveTarget x (6 + 0.02 x A)
+            Assert.AreEqual(6_000u, GauntletFighterStats.MaxHealth(1000, 0, T), "A = 0: x6");
+            Assert.AreEqual(6_200u, GauntletFighterStats.MaxHealth(1000, 10, T), "A = 10: x6.2");
+            Assert.AreEqual(7_500u, GauntletFighterStats.MaxHealth(1000, 75, T), "A = 75: x7.5");
+            Assert.AreEqual(8_000u, GauntletFighterStats.MaxHealth(1000, 100, T), "A = 100: x8");
             Assert.AreEqual(GauntletFighterStats.MaxHealth(1000, 0, T), GauntletFighterStats.MaxHealth(1000, -5, T), "a negative level reads as 0");
 
             Assert.AreEqual(0u, GauntletFighterStats.MaxHealth(0, 50, T), "no curve target: leave the weenie's health");
@@ -49,7 +59,7 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             Assert.AreEqual(5_000u, GauntletFighterStats.MaxHealth(1e12, 50, T with { MaxCreatureHealth = 5000 }));
 
             var stamp = GauntletFighterStats.Compute(300, 1000, null, 0, 10, T);
-            Assert.AreEqual(10_400u, stamp.MaxHealth, "the stamp carries it");
+            Assert.AreEqual(6_200u, stamp.MaxHealth, "the stamp carries it");
             Assert.AreEqual(300, stamp.Level, "the level shown is the wave's L(n)");
             Assert.AreEqual(10, stamp.AvatarLevel);
         }
@@ -85,9 +95,15 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             Assert.AreEqual(180u, GauntletFighterStats.Compute(400, 1000, standard, 0, a, T).DamageTarget, "no per-hit median: the band's MaxBodyDamage 90 x 2");
             Assert.AreEqual(0u, GauntletFighterStats.Compute(400, 1000, null, 0, a, T).DamageTarget, "neither: left authored");
 
+            // the band armor (owner ruling 2026-11-25): the standard's MaxBaseArmor at ratio 1.0, whatever A is
+            Assert.AreEqual(200u, stamp.ArmorTarget, "MaxBaseArmor 200 x 1.0");
+            Assert.AreEqual(200u, GauntletFighterStats.Compute(400, 1000, standard, 60, 0, T).ArmorTarget, "A does not move the armor");
+            Assert.AreEqual(0u, GauntletFighterStats.Compute(400, 1000, null, 60, a, T).ArmorTarget, "no standard: left authored");
+
             var empty = GauntletFighterStats.Compute(400, 1000, DungeonBandStandard.Empty, 60, a, T);
             Assert.AreEqual(0, empty.Skills.Count, "an empty standard sets no skill");
             Assert.AreEqual(0, empty.Attributes.Count);
+            Assert.AreEqual(0u, empty.ArmorTarget, "an empty standard leaves the armor authored");
 
             Assert.AreEqual(T.FighterMinDeathSeconds, stamp.MinDeathSeconds);
             Assert.AreEqual(T.FighterBurstSeconds, stamp.BurstSeconds);
@@ -100,7 +116,8 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             var stamp = GauntletFighterStats.Compute(plan, 0, T);
 
             Assert.AreEqual(plan.Level, stamp.Level);
-            Assert.AreEqual(20_000u, stamp.MaxHealth, "HealthCurveTarget 2000 x 10");
+            Assert.AreEqual(12_000u, stamp.MaxHealth, "HealthCurveTarget 2000 x 6");
+            Assert.AreEqual(200u, stamp.ArmorTarget, "the plan's BandStandard armor at ratio 1");
             Assert.AreEqual(50u, stamp.DamageTarget, "PerHitMedian 50 x 1");
             Assert.AreEqual(400u, stamp.Skills[Skill.LightWeapons], "the plan's BandStandard at ratio 1");
 

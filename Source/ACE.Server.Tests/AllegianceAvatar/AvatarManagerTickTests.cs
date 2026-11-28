@@ -6,7 +6,9 @@ using System.Threading;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 using ACE.Database.Models.Shard;
+using ACE.Entity;
 using ACE.Server.Avatars;
+using ACE.Server.Entity;
 
 namespace ACE.Server.Tests.Avatars
 {
@@ -18,8 +20,8 @@ namespace ACE.Server.Tests.Avatars
         private const double Day = 86400.0;
         private static readonly DateTime Today = new DateTime(2027, 1, 15, 0, 0, 0, DateTimeKind.Utc);
 
-        // Defaults: base rate 1e-6 (1,000,000 raw XP = 1 point), soft cap 500, flush 60 s, min 2 active accounts.
-        private static readonly AvatarTuning T = AvatarTuning.Defaults;
+        // Defaults except the base rate, seeded here at 1e-6 (1,000,000 raw XP = 1 point) so the XP-denominated numbers below do not move when the shipped rate does; soft cap 500, flush 60 s, min 2 active accounts.
+        private static readonly AvatarTuning T = AvatarTuning.Defaults with { BaseRate = 0.000001 };
         private const long OnePoint = 1_000_000;
 
         private const uint AvatarId = 7;
@@ -560,6 +562,40 @@ namespace ACE.Server.Tests.Avatars
         }
 
         [TestMethod]
+        public void Tick_StaleAllegianceRoster_DoesNotFoundAnAvatar()
+        {
+            // 3000 is a former monarch now sworn into 2000's allegiance: AllegianceManager.Allegiances still holds the
+            // old allegiance, so the raw walk yields a roster for 3000 as well. Fed through the filter it must not found.
+            var players = new Dictionary<uint, IPlayer>();
+            var real = new object();
+            var stale = new object();
+            AllegianceNode Node(uint g, AllegianceNode monarch = null) => new AllegianceNode(new ObjectGuid(g), null, monarch, monarch);
+            var realMonarch = Node(2000);
+            var realVassal = Node(2001, realMonarch);
+            var staleMonarch = Node(3000);
+            var staleVassal = Node(3001, staleMonarch);
+            foreach (var g in new uint[] { 2000, 2001, 3000, 3001 })
+                players[g] = AvatarRostersTests.FakePlayer.Make(g, g);
+            Seen(2000); Seen(2001); Seen(3000); Seen(3001);
+
+            var entries = new List<(object Allegiance, AllegianceNode Monarch, IEnumerable<AllegianceNode> Members)>
+            {
+                (stale, staleMonarch, new[] { staleMonarch, staleVassal }),
+                (real, realMonarch, new[] { realMonarch, realVassal }),
+            };
+            object CurrentOf(uint g) => g == 3000 || g == 2000 ? real : null;
+
+            store.DeferInserts = true;
+            AvatarManager.Initialize(store, () => T, () => Now, () => activity,
+                () => AvatarRosters.FromAllegiances(entries, CurrentOf, p => false, n => players[n.PlayerGuid.Full]));
+
+            AvatarManager.Tick();
+
+            Assert.AreEqual(1, store.Inserts.Count, "only the real allegiance founds");
+            Assert.AreEqual(2000U, store.Inserts[0].Row.MonarchGuid);
+        }
+
+        [TestMethod]
         public void Tick_DoesNotFoundTwice_WhileInsertPending()
         {
             store.DeferInserts = true;
@@ -848,12 +884,114 @@ namespace ACE.Server.Tests.Avatars
             Assert.AreEqual(cap, AvatarManager.Get(AvatarId).Favor);
         }
 
+        // ---- the per-Avatar Favor cap scales with the Avatar's largest price (owner ruling 2026-11-26) ----------------
+
+        /// <summary>Avatar 7 on a roster of <paramref name="r"/> active accounts in a server of <paramref name="s"/>.</summary>
+        private void SeedScaledAllegiance(int r, int s, ulong favor)
+        {
+            SeedAvatar(favor: favor);
+            rosters.Add(AvatarScaleFixture.Roster(activity, r, s, Monarch, MonarchAcct, Vassal, VassalAcct, Start));
+        }
+
+        [TestMethod]
+        public void FavorCapFor_ReadsTheAvatarsRosterAndTheServerCount()
+        {
+            SeedScaledAllegiance(73, 230, 0);
+            Init();
+            AvatarManager.Tick();
+            var state = AvatarManager.Get(AvatarId);
+
+            Assert.AreEqual(230, AvatarManager.ServerActiveAccounts());
+            Assert.AreEqual(30_718UL, AvatarManager.FavorCapFor(state, T), "2 x the 15,359 announced and Gauntlet price");
+
+            state.ActiveAccounts = 2;
+            Assert.AreEqual(20_000UL, AvatarManager.FavorCapFor(state, T), "a small roster: the flat cap");
+        }
+
+        [TestMethod]
+        public void Tick_CreditStopsAtThePerAvatarCap_NotTheFlatCap()
+        {
+            SeedScaledAllegiance(73, 230, favor: 30_500);
+            Init();
+            AvatarManager.Tick();
+
+            // 1000 points x the roster scale 51.196/73 = 701 points; the account-day curve gives 500 + 201 x 0.25 = 550 Favor.
+            Feed(Monarch, MonarchAcct, Monarch, 1000 * OnePoint);
+            Advance(61);
+            AvatarManager.Tick();
+
+            var state = AvatarManager.Get(AvatarId);
+            Assert.AreEqual(30_718UL, state.Favor, "30,500 + 550 is clamped to the per-Avatar cap; the flat 20,000 would have clamped it lower");
+        }
+
+        [TestMethod]
+        public void Tick_SmallRoster_StillStopsAtTheFlatCap()
+        {
+            SeedActiveAllegiance(favor: 19_900);
+            Init();
+            AvatarManager.Tick();
+
+            Feed(Monarch, MonarchAcct, Monarch, 1000 * OnePoint);
+            Advance(61);
+            AvatarManager.Tick();
+
+            Assert.AreEqual(20_000UL, AvatarManager.Get(AvatarId).Favor, "R = 2: the cap is the flat 20,000");
+        }
+
+        [TestMethod]
+        public void Tick_CreditNeverLowersFavor_WhenTheRosterShrinksAndTheCapFalls()
+        {
+            SeedScaledAllegiance(73, 230, favor: 30_718);
+            Init();
+            AvatarManager.Tick();
+            var state = AvatarManager.Get(AvatarId);
+            Assert.AreEqual(30_718UL, AvatarManager.FavorCapFor(state, T));
+
+            // The roster shrinks to 20 accounts (the other 53 stay active on the server, so S is still 230).
+            rosters.Clear();
+            rosters.Add(AvatarScaleFixture.Roster(activity, 20, 20, Monarch, MonarchAcct, Vassal, VassalAcct, Start));
+            Advance(3700); // past the recompute interval
+            Seen(MonarchAcct);
+            AvatarManager.Tick();
+            Assert.AreEqual(20, state.ActiveAccounts, "the recompute read the smaller roster");
+            Assert.AreEqual(20_000UL, AvatarManager.FavorCapFor(state, T), "2 x 6,000 is under the flat floor");
+
+            Feed(Monarch, MonarchAcct, Monarch, 1000 * OnePoint);
+            Advance(61);
+            AvatarManager.Tick();
+
+            Assert.AreEqual(30_718UL, AvatarManager.Get(AvatarId).Favor, "crediting stops growth at the cap but never takes Favor away");
+        }
+
+        [TestMethod]
+        public void PriceInputs_ReadsRAndSTogether()
+        {
+            SeedScaledAllegiance(73, 230, 0);
+            Init();
+            AvatarManager.Tick();
+
+            Assert.AreEqual((73, 230), AvatarManager.PriceInputs(AvatarManager.Get(AvatarId)));
+            Assert.AreEqual((0, 230), AvatarManager.PriceInputs(null));
+        }
+
+        [TestMethod]
+        public void RefundFavor_UsesThePerAvatarCap()
+        {
+            SeedScaledAllegiance(73, 230, favor: 30_000);
+            Init();
+            AvatarManager.Tick();
+
+            Assert.IsTrue(AvatarManager.RefundFavor(AvatarId, 3_000));
+
+            Assert.AreEqual(30_718UL, AvatarManager.Get(AvatarId).Favor, "min(30,718, 33,000)");
+        }
+
         [TestMethod]
         public void RefundFavor_NeverLowersFavorAboveTheCap_AndUnknownAvatarIsFalse()
         {
             // a cap cut at runtime below the Avatar's Favor: the refund adds nothing but also takes nothing away
-            var lowCap = T with { FavorCap = 100 };
-            SeedActiveAllegiance(favor: 500);
+            var lowCap = T with { FavorCap = 100 }; // the cap falls to the 1000 floor price (R = 2), under the Avatar's Favor
+            SeedActiveAllegiance(favor: 5000);
             AvatarManager.Initialize(store, () => lowCap, () => Now, () => activity, () => rosters);
             AvatarManager.Tick();
 

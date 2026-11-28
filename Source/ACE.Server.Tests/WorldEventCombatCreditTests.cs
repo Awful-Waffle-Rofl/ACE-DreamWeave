@@ -926,9 +926,9 @@ namespace ACE.Server.Tests
                 ("Source/ACE.Server/WorldObjects/Player_Combat.cs", "targetPlayer.TakeDamage(this, damageEvent);"),
                 ("Source/ACE.Server/WorldObjects/Player_Combat.cs", "target.TakeDamage(this, damageEvent.DamageType, damageEvent.Damage, damageEvent.IsCritical, IncomingDamageOrigin.DirectHit);"),
                 ("Source/ACE.Server/WorldObjects/Monster_Melee.cs", "targetPlayer.TakeDamage(this, damageEvent);"),
-                ("Source/ACE.Server/WorldObjects/Monster_Melee.cs", "target.TakeDamage(this, damageEvent.DamageType, damageEvent.Damage, false, IncomingDamageOrigin.DirectHit);"),
+                ("Source/ACE.Server/WorldObjects/Monster_Melee.cs", "target.TakeDamage(this, damageEvent.DamageType, damageEvent.Damage, damageEvent.IsCritical, IncomingDamageOrigin.DirectHit);"),
                 ("Source/ACE.Server/WorldObjects/ProjectileCollisionHelper.cs", "targetPlayer.TakeDamage(sourceCreature, damageEvent);"),
-                ("Source/ACE.Server/WorldObjects/ProjectileCollisionHelper.cs", "targetCreature.TakeDamage(sourceCreature, damageEvent.DamageType, damageEvent.Damage, false, IncomingDamageOrigin.DirectHit);"),
+                ("Source/ACE.Server/WorldObjects/ProjectileCollisionHelper.cs", "targetCreature.TakeDamage(sourceCreature, damageEvent.DamageType, damageEvent.Damage, damageEvent.IsCritical, IncomingDamageOrigin.DirectHit);"),
             };
 
             foreach (var (path, call) in sites)
@@ -942,7 +942,7 @@ namespace ACE.Server.Tests
 
             // The matcher discriminates: the real file with the pet-sink gate turned into `if (true)` must fail.
             var helper = StripComments(ReadSource("Source/ACE.Server/WorldObjects/ProjectileCollisionHelper.cs"));
-            var petSink = "targetCreature.TakeDamage(sourceCreature, damageEvent.DamageType, damageEvent.Damage, false, IncomingDamageOrigin.DirectHit);";
+            var petSink = "targetCreature.TakeDamage(sourceCreature, damageEvent.DamageType, damageEvent.Damage, damageEvent.IsCritical, IncomingDamageOrigin.DirectHit);";
             var petAt = helper.IndexOf(petSink, StringComparison.Ordinal);
             var gateAt = helper.LastIndexOf("if (damageEvent.HasDamage)", petAt, StringComparison.Ordinal);
             Assert.IsTrue(gateAt >= 0, "sanity: the pet-sink gate was found");

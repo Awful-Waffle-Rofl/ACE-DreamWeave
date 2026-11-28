@@ -48,6 +48,8 @@ public interface IGauntletFighterOwner
 /// through CombatPet's own idle follow and summon assist (FollowLeader). With no leader it fights only what is in range, else
 /// stands still. An optional leash (<see cref="Anchor"/>, <see cref="LeashRadius"/>) bounds a private event's fighter.</item>
 /// <item>Placement does CombatPet.Init's world half by hand (combat mode, Awake, IsAwake); see LiveGauntletFighterHooks.</item>
+/// <item>The Revenant Warden's (Tank) taunt pulse defends the run's side instead of an owner's (<see cref="TauntPulseSide"/>),
+/// armed at placement in the Gauntlet only (<see cref="ArmTauntPulse"/>).</item>
 /// </list>
 ///
 /// Damage intake is capped through WorldEventHoldRules.CapProtectedHit (via WorldEventHooks) (<see cref="CapIncomingHit"/>), called on all three
@@ -77,7 +79,49 @@ public class GauntletAvatarFighter : CombatPet, IAvatarFigure
     public float LeashRadius { get; set; } = DefaultLeashRadius;
 
     /// <summary>The run's side. Null outside a run: the fighter then refuses every beneficial spell and reports nothing.</summary>
-    public IGauntletFighterOwner Owner { get; set; }
+    public IGauntletFighterOwner Owner
+    {
+        get => System.Threading.Volatile.Read(ref owner);
+        set
+        {
+            var was = System.Threading.Interlocked.Exchange(ref owner, value);
+
+            // This fighter counts once while it has a side: counted flips 0 to 1 with the increment and back with the release,
+            // so a fighter that dies (ReportDeathOnce) and is then cleared is released once, never twice.
+            if (was == null && value != null)
+            {
+                if (System.Threading.Interlocked.Exchange(ref counted, 1) == 0)
+                    System.Threading.Interlocked.Increment(ref ownedCount);
+            }
+            else if (was != null && value == null)
+                ReleaseOwnedCount();
+        }
+    }
+
+    private IGauntletFighterOwner owner;
+    private static int ownedCount;
+    private int counted;
+
+    /// <summary>Takes this fighter out of the owned count, once (a death or an owner cleared, whichever comes first).</summary>
+    private void ReleaseOwnedCount()
+    {
+        if (System.Threading.Interlocked.Exchange(ref counted, 0) == 1)
+            System.Threading.Interlocked.Decrement(ref ownedCount);
+    }
+
+    /// <summary>The number of fighters that currently have a side and have not died (any thread).</summary>
+    internal static int OwnedCount => System.Threading.Volatile.Read(ref ownedCount);
+
+    /// <summary>Test seam: zeroes the owned count between tests.</summary>
+    internal static void ResetOwnedCountForTests() => System.Threading.Volatile.Write(ref ownedCount, 0);
+
+    /// <summary>
+    /// True while at least one fighter belongs to a run or an event (any thread). The cheap gate for Blood Mage Transfusion, so
+    /// an ordinary Drain never pays for the visible-creature scan (<see cref="TransfusionFighters"/>). A death releases its fighter;
+    /// it may still err high for a fighter destroyed with its owner set (WorldObject.Destroy is not virtual, so there is no hook;
+    /// the run and event slots clear Owner before they destroy), never low.
+    /// </summary>
+    internal static bool AnyOwned => System.Threading.Volatile.Read(ref ownedCount) > 0;
 
     /// <summary>The last stamp applied (null before the first).</summary>
     public GauntletFighterStamp Stamp { get; private set; }
@@ -333,6 +377,7 @@ public class GauntletAvatarFighter : CombatPet, IAvatarFigure
     public override void HandleFindTarget()
     {
         RefreshLeader(Timers.RunningTime);
+        TickAura(Timers.RunningTime);
         TickVoice(Timers.RunningTime);
 
         base.HandleFindTarget();
@@ -350,6 +395,202 @@ public class GauntletAvatarFighter : CombatPet, IAvatarFigure
             ResetAttack();
             AttackTarget = null;
         }
+    }
+
+    // ---- the Warden taunt (owner ruling 2026-11-25) -----------------------------------------------------------------------
+
+    /// <summary>
+    /// The run whose creatures this fighter's taunt pulse may pull, or null: no pulse at all. Set together with the pulse
+    /// interval by <see cref="ArmTauntPulse"/> each time the Gauntlet places the fighter (a respawn included), from the run's tuning snapshot; a private event's fighter is never armed.
+    /// </summary>
+    public IGauntletCreatureOwner TauntScope { get; private set; }
+
+    /// <summary>
+    /// Gives the fighter the Revenant Warden's (Tank) taunt pulse (CombatPet.TickTauntPulse): every
+    /// <paramref name="intervalSeconds"/> (allegiance_gauntlet_fighter_taunt_seconds), the same 15 m reach, line of sight,
+    /// the player Taunt's base hold and the cap of three held at once, over <see cref="TauntPulseSide"/>. A null scope, or
+    /// an interval that is not a positive number, leaves the pulse off.
+    /// </summary>
+    internal void ArmTauntPulse(IGauntletCreatureOwner scope, double intervalSeconds)
+    {
+        TauntScope = scope;
+        SummonTauntInterval = scope != null && double.IsFinite(intervalSeconds) && intervalSeconds > 0.0 ? intervalSeconds : 0.0;
+    }
+
+    /// <summary>
+    /// The fighter has no owner, so "the owner's side" a Tank pet defends becomes its run's side: a creature of THIS run
+    /// (Creature.P_Gauntlet is <see cref="TauntScope"/>) whose current target is this fighter, a participant
+    /// (<see cref="Participants"/>, read once per pulse), or a participant's pet. Null - no pulse - when unarmed or once the
+    /// run is no longer live.
+    /// </summary>
+    protected override Func<Creature, bool> TauntPulseSide()
+    {
+        var scope = TauntScope;
+
+        if (scope == null || !scope.IsLive)
+            return null;
+
+        var participants = ParticipantGuids();
+
+        return monster => IsRunTauntCandidate(monster, scope, this, participants);
+    }
+
+    /// <summary>The engagement rule of the fighter's pulse, pure over its inputs: a creature of <paramref name="scope"/> engaged with the run's side.</summary>
+    internal static bool IsRunTauntCandidate(Creature monster, IGauntletCreatureOwner scope, GauntletAvatarFighter fighter, ISet<uint> participants)
+    {
+        if (monster == null || scope == null || !ReferenceEquals(monster.P_Gauntlet, scope))
+            return false;
+
+        // read once: a second read could observe a different target (PetEngagement's rule)
+        return IsOnRunSide(monster.AttackTarget, fighter, participants);
+    }
+
+    /// <summary>
+    /// True when <paramref name="target"/> is on the run's side: <paramref name="fighter"/> itself, a participant, or a
+    /// participant's pet. Another fighter, any other player or pet, and anything else are not.
+    /// </summary>
+    internal static bool IsOnRunSide(WorldObject target, GauntletAvatarFighter fighter, ISet<uint> participants)
+    {
+        switch (target)
+        {
+            case GauntletAvatarFighter other:
+                return fighter != null && ReferenceEquals(other, fighter);
+            case Player player:
+                return participants != null && participants.Contains(player.Guid.Full);
+            case Pet pet:
+                var owner = pet.P_PetOwner;
+                return owner != null && participants != null && participants.Contains(owner.Guid.Full);
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>The participants' guids, from one snapshot read. A read that throws is logged and gives none (the fighter's own engagement still counts).</summary>
+    private HashSet<uint> ParticipantGuids()
+    {
+        var guids = new HashSet<uint>();
+
+        try
+        {
+            var snapshot = Participants?.Invoke();
+
+            if (snapshot != null)
+            {
+                foreach (var p in snapshot)
+                {
+                    if (p != null)
+                        guids.Add(p.Guid.Full);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            log.Error($"[AVATAR] fighter 0x{Guid}: the participant read threw; this taunt pulse counts the fighter only", ex);
+        }
+
+        return guids;
+    }
+
+    // ---- the aura (owner direction 2026-11-25: a boon to the team while it stands) -------------------------------------------
+
+    /// <summary>The run whose members this fighter's aura covers (0: no aura). Set by <see cref="ArmAura"/> at each Gauntlet placement.</summary>
+    public uint AuraRunKey { get; private set; }
+
+    /// <summary>Metres from the fighter inside which a member is covered (allegiance_gauntlet_fighter_aura_radius).</summary>
+    public double AuraRadius { get; private set; }
+
+    public int AuraDamageRating { get; private set; }
+    public int AuraResistRating { get; private set; }
+
+    /// <summary>True when an aura is armed with something to give.</summary>
+    public bool AuraArmed => AuraRunKey != 0 && AuraRadius > 0 && (AuraDamageRating > 0 || AuraResistRating > 0);
+
+    private double nextAuraPublishAt;
+
+    /// <summary>
+    /// Gives the fighter its run's aura (GauntletAura), from the run's tuning snapshot, each time the Gauntlet places it (a
+    /// respawn included). A private event's fighter is never armed. A radius that is not a positive number, or both ratings
+    /// 0, leaves it off.
+    /// </summary>
+    internal void ArmAura(uint runKey, double radius, long damageRating, long resistRating)
+    {
+        AuraRunKey = runKey;
+        AuraRadius = double.IsFinite(radius) && radius > 0 ? radius : 0.0;
+        AuraDamageRating = (int)Math.Clamp(damageRating, 0L, GauntletTuning.AuraRatingCeiling);
+        AuraResistRating = (int)Math.Clamp(resistRating, 0L, GauntletTuning.AuraRatingCeiling);
+        nextAuraPublishAt = 0;
+    }
+
+    /// <summary>
+    /// Test seam: the members as the aura sees them. Null: the live read over <see cref="Participants"/> (down through
+    /// <see cref="IsDown"/>, where they stand from their Location, skipping one mid-teleport or not in the world).
+    /// </summary>
+    internal Func<IEnumerable<GauntletAura.AuraCandidate>> AuraCandidatesSeam { get; set; }
+
+    /// <summary>
+    /// Every <see cref="GauntletAura.PublishSeconds"/> (beside the leader refresh): decides who stands in the aura and
+    /// publishes it. A dead fighter, one whose run's copy is no longer live, or one with no position clears its aura instead.
+    /// Returns true when it published.
+    /// </summary>
+    internal bool TickAura(double now)
+    {
+        if (!AuraArmed)
+            return false;
+
+        if (nextAuraPublishAt > 0 && now < nextAuraPublishAt)
+            return false;
+
+        nextAuraPublishAt = now + GauntletAura.PublishSeconds;
+
+        // a reported death counts at once, even before the health write lands
+        if (IsDead || System.Threading.Volatile.Read(ref deathReported) != 0 || Owner?.IsLiveCopy != true || Location == null || Location.Instance == 0)
+        {
+            GauntletAura.ClearFrom(this);
+            return false;
+        }
+
+        HashSet<uint> members;
+
+        try
+        {
+            members = GauntletAura.Members((AuraCandidatesSeam ?? LiveAuraCandidates)(), Location, !IsDead, AuraRadius);
+        }
+        catch (Exception ex)
+        {
+            log.Error($"[GAUNTLET] fighter 0x{Guid}: the aura member read threw; no aura this second", ex);
+            GauntletAura.ClearFrom(this);
+            return false;
+        }
+
+        GauntletAura.Publish(new GauntletAura.Snapshot(AuraRunKey, Location.Instance, this, GauntletAura.Now(), AuraDamageRating, AuraResistRating, members));
+
+        // a death that landed while the set was being built (its clear ran before this publish) must not leave the set up
+        if (IsDead || System.Threading.Volatile.Read(ref deathReported) != 0)
+        {
+            GauntletAura.ClearFrom(this);
+            return false;
+        }
+
+        return true;
+    }
+
+    private IEnumerable<GauntletAura.AuraCandidate> LiveAuraCandidates()
+    {
+        var list = new List<GauntletAura.AuraCandidate>();
+        var snapshot = Participants?.Invoke();
+
+        if (snapshot == null)
+            return list;
+
+        foreach (var p in snapshot)
+        {
+            if (p == null || p.PhysicsObj == null || p.Teleporting || p.Location == null)
+                continue;
+
+            list.Add(new GauntletAura.AuraCandidate(p.Guid.Full, (IsDown ?? DefaultIsDown)(p), p.Location));
+        }
+
+        return list;
     }
 
     // ---- the periodic voice -----------------------------------------------------------------------------------------------
@@ -404,8 +645,14 @@ public class GauntletAvatarFighter : CombatPet, IAvatarFigure
     /// <summary>The once-only half of <see cref="OnDeath"/>. True when this call reported.</summary>
     internal bool ReportDeathOnce()
     {
+        // the aura goes the moment the fighter falls, not three seconds later
+        GauntletAura.ClearFrom(this);
+
         if (System.Threading.Interlocked.Exchange(ref deathReported, 1) != 0)
             return false;
+
+        // a dead fighter is no Transfusion recipient; Owner itself stays (other paths read it)
+        ReleaseOwnedCount();
 
         var owner = Owner;
 
@@ -454,10 +701,17 @@ public class GauntletAvatarFighter : CombatPet, IAvatarFigure
             return amount;
 
         var max = Health.MaxValue;
+        float capped;
 
         lock (capLock)
-            return WorldEventHooks.CapProtectedHit(amount, max, stamp.MinDeathSeconds, stamp.BurstSeconds, ref capTokens, ref capLastAt, now);
+            capped = WorldEventHooks.CapProtectedHit(amount, max, stamp.MinDeathSeconds, stamp.BurstSeconds, ref capTokens, ref capLastAt, now);
+
+        Ledger?.AddHit(amount, capped);
+        return capped;
     }
+
+    /// <summary>The run's telemetry tallies (intake before and after the cap, heals), or null outside a Gauntlet run.</summary>
+    internal GauntletFighterLedger Ledger { get; set; }
 
     /// <summary>A full bucket: the next hit gets the whole burst (a restamp or a respawn).</summary>
     private void ResetCap()
@@ -492,16 +746,30 @@ public class GauntletAvatarFighter : CombatPet, IAvatarFigure
     /// <summary>Pure core of <see cref="IsInvalidFighterSpellTarget"/>: valid only when beneficial and the copy is live.</summary>
     public static bool IsInvalidFighterSpell(bool acceptsBeneficial, bool isBeneficial) => !(acceptsBeneficial && isBeneficial);
 
+    /// <summary>
+    /// Player.CheckPKStatusVsTarget, ahead of the creature PK-type rule: true when <paramref name="target"/> is a fighter and
+    /// <paramref name="spell"/> is a non-harmful spell. The fighter is RubberGlue (its NPC presentation), so without this a
+    /// heal or buff from any caster of a different PK status was refused as NotSamePKType. Harmful spells and a null spell
+    /// (the melee and missile probes) stay with the rules as before, as does every other target, after one type test.
+    /// Whether the fighter is a valid spell target at all (a live run's copy) is Player.IsInvalidTarget's call, not this one.
+    /// </summary>
+    public static bool SkipsPkTypeRule(WorldObject target, ACE.Server.Entity.Spell spell) =>
+        target is GauntletAvatarFighter && spell != null && !spell.IsHarmful;
+
     /// <summary>True while this fighter belongs to a live run (Staging, Active or Intermission) and is alive.</summary>
     public bool AcceptsBeneficialSpells => !IsDead && Owner?.IsLiveCopy == true;
 
     // ---- members' healing kits -------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// The most health, as a share of the fighter's maximum, that kits may restore in any ten seconds (a token bucket, the
-    /// Hold knight's player-heal shape). A flat starting value for the Task 16 tuning pass; not a tunable.
+    /// The default most health, as a share of the fighter's maximum, that kits and heal spells may restore in any ten seconds
+    /// (a token bucket, the Hold knight's player-heal shape): a private event's fighter keeps it. A Gauntlet fighter is given
+    /// its run's allegiance_gauntlet_fighter_heal_share_per_ten_seconds at placement (<see cref="KitHealSharePerTenSeconds"/>).
     /// </summary>
     public const double KitHealMaxSharePerTenSeconds = 0.25;
+
+    /// <summary>This fighter's heal bucket size per ten seconds, as a share of its maximum health (set at placement).</summary>
+    public double KitHealSharePerTenSeconds { get; internal set; } = KitHealMaxSharePerTenSeconds;
 
     private double kitTokens;
     private double kitLastAt;
@@ -542,7 +810,7 @@ public class GauntletAvatarFighter : CombatPet, IAvatarFigure
         int converted;
 
         lock (capLock)
-            converted = WorldEventHooks.ConvertPlayerHeal(raw, max, KitHealMaxSharePerTenSeconds, ref kitTokens, ref kitLastAt, now);
+            converted = WorldEventHooks.ConvertPlayerHeal(raw, max, KitHealSharePerTenSeconds, ref kitTokens, ref kitLastAt, now);
 
         var healed = Math.Min(converted, missing);
 
@@ -553,6 +821,7 @@ public class GauntletAvatarFighter : CombatPet, IAvatarFigure
         }
 
         UpdateVitalDelta(Health, healed);
+        Ledger?.AddHeal(healed);
         outcome = ACE.Server.WorldEvents.Hold.HoldHealOutcome.Healed;
         return healed;
     }
@@ -607,6 +876,114 @@ public class GauntletAvatarFighter : CombatPet, IAvatarFigure
         return true;
     }
 
+    // ---- Blood Mage Transfusion ----------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// READ-ONLY and pure: how much health the kit bucket would accept right now (the smaller of the fighter's missing health
+    /// and the bucket's tokens after the refill since <paramref name="lastAt"/>). Mirrors WorldEventHoldRules.TakeFromBucket
+    /// without changing anything. 0 for anything unusable.
+    /// </summary>
+    internal static int KitRoom(uint max, uint current, double share, double tokens, double lastAt, double now)
+    {
+        if (max == 0 || !(share > 0) || !double.IsFinite(share) || !double.IsFinite(now))
+            return 0;
+
+        var missing = (int)(max - Math.Min(max, current));
+
+        if (missing <= 0)
+            return 0;
+
+        var capacity = max * share;
+        var held = !(lastAt > 0) || !double.IsFinite(lastAt) || !double.IsFinite(tokens)
+            ? capacity
+            : Math.Min(capacity, tokens + capacity / 10.0 * Math.Max(0, now - lastAt));
+
+        return Math.Min(missing, (int)Math.Floor(held));
+    }
+
+    /// <summary>
+    /// What this fighter asks of a Transfusion surplus, in raw heal points: the points whose conversion fits the room the kit
+    /// bucket has now (so the surplus is not spent on a heal the bucket then refuses). 0 when it cannot take a heal. Runs on the
+    /// caster's thread, which is safe because the caster and the fighter share a landblock (the scan checked that first).
+    /// The 250-raw-point ceiling is the Hold knights' (WorldEventHoldRules.RawPointsForHealth), shared on purpose.
+    /// </summary>
+    internal uint TransfusionDemand(double now)
+    {
+        if (!AcceptsBeneficialSpells)
+            return 0;
+
+        int room;
+
+        lock (capLock)
+            room = KitRoom(Health.MaxValue, Health.Current, KitHealSharePerTenSeconds, kitTokens, kitLastAt, now);
+
+        return WorldEventHooks.RawPointsForHealth(room, Health.MaxValue);
+    }
+
+    /// <summary>Pure: a fighter is a Transfusion recipient when it accepts beneficial spells (live copy, alive) and is on the caster's landblock within reach.</summary>
+    internal static bool TransfusionFighterQualifies(bool acceptsBeneficial, double? distanceOnSameLandblock, double reach)
+        => acceptsBeneficial && distanceOnSameLandblock.HasValue && distanceOnSameLandblock.Value <= reach;
+
+    /// <summary>
+    /// Blood Mage Transfusion: the Avatar fighters a Drain Health surplus may feed, within the Transfusion reach of the caster, on
+    /// the caster's own landblock. Null (no allocation) when none, and without a scan when no fighter belongs to a run or event.
+    /// Caster's thread.
+    /// </summary>
+    public static List<Creature> TransfusionFighters(Creature caster)
+    {
+        if (!AnyOwned)
+            return null;
+
+        var landblock = caster?.CurrentLandblock;
+        var location = caster?.Location;
+        var objMaint = caster?.PhysicsObj?.ObjMaint;
+
+        if (landblock == null || location == null || objMaint == null)
+            return null;
+
+        return SelectTransfusionFighters(objMaint.GetVisibleObjectsValuesOfTypeNonPlayerCreature(), c =>
+        {
+            // landblock first, so no other landblock's Location is ever read on this thread
+            if (c.CurrentLandblock != landblock || c.Location == null)
+                return null;
+
+            return location.DistanceTo(c.Location);
+        });
+    }
+
+    /// <summary>Core of <see cref="TransfusionFighters"/>: the candidates that are fighters and qualify. Null when none.</summary>
+    internal static List<Creature> SelectTransfusionFighters(IEnumerable<Creature> candidates, Func<Creature, double?> distanceOnSameLandblock)
+    {
+        List<Creature> found = null;
+
+        foreach (var c in candidates)
+        {
+            if (c is not GauntletAvatarFighter fighter)
+                continue;
+
+            // landblock and reach FIRST: a fighter elsewhere is never asked about its state, which belongs to its own thread
+            var distance = distanceOnSameLandblock(c);
+
+            // null = another landblock: no state read. The reach check lives in the pure rule (its argument is read only after this).
+            if (!distance.HasValue)
+                continue;
+
+            if (!TransfusionFighterQualifies(fighter.AcceptsBeneficialSpells, distance, WorldObject.DrainSurplusRange))
+                continue;
+
+            if (found == null || !found.Contains(c))
+                (found ??= new List<Creature>()).Add(c);
+        }
+
+        return found;
+    }
+
+    /// <summary>
+    /// Blood Mage Transfusion payout: a fighter's share (raw heal points) goes through the kit heal, so it shares the kit and
+    /// heal-spell bucket, lands on the fighter's landblock, credits the run ledger and sends the caster the result line.
+    /// </summary>
+    public static bool TryQueueTransfusionShare(Player caster, Creature fighter, double raw) => TryQueueSpellHeal(caster, fighter, raw);
+
     // ---- restamp ------------------------------------------------------------------------------------------------------------
 
     private IDictionary<CombatBodyPart, PropertiesBodyPart> authoredBodyParts;
@@ -648,7 +1025,7 @@ public class GauntletAvatarFighter : CombatPet, IAvatarFigure
                 }
             }
 
-            ApplyDamageTarget(stamp.DamageTarget);
+            ApplyBodyAndWeapons(stamp.DamageTarget, stamp.ArmorTarget);
 
             Stamp = stamp;
         }
@@ -670,14 +1047,22 @@ public class GauntletAvatarFighter : CombatPet, IAvatarFigure
         ResetCap();
     }
 
-    /// <summary>Body parts from the AUTHORED set each time (no drift over many restamps); weapons from their authored damage.</summary>
-    private void ApplyDamageTarget(uint target)
+    /// <summary>
+    /// Body parts from the AUTHORED set each time (no drift over many restamps): the hit onto <paramref name="target"/> and
+    /// the base armor onto <paramref name="armor"/> (the band armor, owner ruling 2026-11-25), either left authored when 0;
+    /// then weapons from their authored damage. Both targets arrive final (their ratios already applied), so the normalizer
+    /// is called at ratio 1.0 on each axis.
+    /// </summary>
+    private void ApplyBodyAndWeapons(uint target, uint armor)
     {
-        if (target == 0)
+        if (target == 0 && armor == 0)
             return;
 
         Biota.PropertiesBodyPart = authoredBodyParts;
-        DungeonCombatNormalizer.SetBossBodyParts(Biota, target, 0, 1.0, 0);
+        DungeonCombatNormalizer.SetBossBodyParts(Biota, target, armor, 1.0, 1.0);
+
+        if (target == 0)
+            return;
 
         var items = EquippedObjects.Values.Concat(Inventory.Values).Where(i => i != null).Distinct().ToList();
         var launcher = items.FirstOrDefault(i => i is MissileLauncher);
@@ -791,7 +1176,9 @@ public class GauntletAvatarFighter : CombatPet, IAvatarFigure
 
         clone.PropertiesDID.Remove(PropertyDataId.DeathTreasureType);
 
-        // SummonTauntInterval is weenie data a Tank pet reads; the taunt pulse needs an owner (ApplyTauntPulse returns 0)
+        // SummonTauntInterval is weenie data a Tank pet reads at construction. The fighter's pulse is armed from its run's
+        // tuning at placement instead (ArmTauntPulse, allegiance_gauntlet_fighter_taunt_seconds), so a content value never
+        // reaches it, and a fighter that is never armed (a private event's) never pulses.
         clone.PropertiesFloat.Remove(PropertyFloat.SummonTauntInterval);
 
         // NPC presentation (owner ruling 2026-11-23): a yellow NPC blip and the shopkeepers' PK status, as the Hold knights

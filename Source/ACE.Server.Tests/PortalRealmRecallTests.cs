@@ -23,7 +23,7 @@ namespace ACE.Server.Tests
     /// realm_portal_recall_allowlist that is routed ONLY by a persistent PortalRealm is not locked.
     ///
     /// No PropertyManager key is read: RealmPortalRecallTunables.AllowlistSource is pinned to the shipped
-    /// Defaults (23032, 1001007) for every test and restored afterwards.
+    /// Defaults for every test and restored afterwards.
     /// </summary>
     [TestClass]
     public class PortalRealmRecallTests
@@ -133,6 +133,22 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
+        /// The two lugian dungeon entry portals (1008466 Hills Citadel, 1008467 Lugian Excavations; owner 2026-11-26)
+        /// route into realm 1 by PortalRealm alone and are allowlisted, so they are tie-able, recallable and summonable.
+        /// </summary>
+        [TestMethod]
+        public void LugianDungeonEntryPortals_AreRecallable()
+        {
+            foreach (var wcid in new uint[] { 1008466, 1008467 })
+            {
+                var portal = CreatePortal(PortalBitmask.Unrestricted, wcid);
+                portal.SetProperty(PropertyInt.PortalRealm, 1);
+
+                AssertRecallable(portal, $"{wcid} + PortalRealm = 1");
+            }
+        }
+
+        /// <summary>
         /// The Held Door shape (1001109: PortalRealm = 1, Unrestricted) is NOT allowlisted and stays locked.
         /// Fails against the blanket persistent-realm exemption this replaced.
         /// </summary>
@@ -204,7 +220,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(RealmPortalRecallTunables.DefaultAllowlist,
                 ACE.Server.Managers.DefaultPropertyManager.DefaultStringProperties[RealmPortalRecallTunables.AllowlistConfigKey].Item);
 
-            CollectionAssert.AreEquivalent(new uint[] { 23032, 1001007 }, new List<uint>(RealmPortalRecallTunables.Defaults));
+            CollectionAssert.AreEquivalent(new uint[] { 23032, 1001007, 1008466, 1008467 }, new List<uint>(RealmPortalRecallTunables.Defaults));
 
             var rejected = new List<string>();
             var parsed = RealmPortalRecallTunables.Parse(" 23032, ,0x59F8,abc,0,-5,", rejected);

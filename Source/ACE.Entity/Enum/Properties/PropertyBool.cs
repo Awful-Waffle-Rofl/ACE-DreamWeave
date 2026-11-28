@@ -586,7 +586,7 @@ namespace ACE.Entity.Enum.Properties
         // Marks a Sacrificial Dagger that currently holds an imprint of a destroyed summon's ratings (spent on use).
         SummonImprinted                       = 9083,
 
-        // Marks a Duo Summon Gem, which absorbs two summon items and becomes one usable item with a combined charge pool.
+        // Marks a Duo Summon Essence, which absorbs two summon items and becomes one usable item with a combined charge pool.
         DuoSummonGem                          = 9084,
 
         // Marks a Summon Gem Hammer, which breaks a bound Duo Gem and restores the two absorbed summon items.

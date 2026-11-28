@@ -716,9 +716,12 @@ namespace ACE.Server.ThreadDungeons
             private readonly double rewardBonusCap;
             private readonly double sharePlateau;
             private readonly long lootHoldMinutes;
+            private readonly long abilityRatingPerMember;
+            private readonly long abilityRatingCap;
 
             private GroupTunables(double effortPerMember, double countShare, long groupMaxMonsters, long damageRatingPerMember,
-                long damageRatingCap, double rewardBonusPerMember, double rewardBonusCap, double sharePlateau, long lootHoldMinutes)
+                long damageRatingCap, double rewardBonusPerMember, double rewardBonusCap, double sharePlateau, long lootHoldMinutes,
+                long abilityRatingPerMember, long abilityRatingCap)
             {
                 this.effortPerMember = effortPerMember;
                 this.countShare = countShare;
@@ -729,6 +732,8 @@ namespace ACE.Server.ThreadDungeons
                 this.rewardBonusCap = rewardBonusCap;
                 this.sharePlateau = sharePlateau;
                 this.lootHoldMinutes = lootHoldMinutes;
+                this.abilityRatingPerMember = abilityRatingPerMember;
+                this.abilityRatingCap = abilityRatingCap;
             }
 
             public static GroupTunables Read() => new GroupTunables(
@@ -740,10 +745,12 @@ namespace ACE.Server.ThreadDungeons
                 PropertyManager.GetDouble("dynamic_dungeons_group_reward_bonus_per_member", GroupScaling.DefaultRewardBonusPerMember).Item,
                 PropertyManager.GetDouble("dynamic_dungeons_group_reward_bonus_cap", GroupScaling.DefaultRewardBonusCap).Item,
                 PropertyManager.GetDouble("fellowship_share_group_plateau").Item,
-                PropertyManager.GetLong("dynamic_dungeons_group_loot_hold_minutes", GroupScaling.DefaultLootHoldMinutes).Item);
+                PropertyManager.GetLong("dynamic_dungeons_group_loot_hold_minutes", GroupScaling.DefaultLootHoldMinutes).Item,
+                PropertyManager.GetLong("dynamic_dungeons_creature_ability_group_rating_per_member", GroupScaling.DefaultAbilityRatingPerMember).Item,
+                PropertyManager.GetLong("dynamic_dungeons_creature_ability_group_rating_cap", GroupScaling.DefaultAbilityRatingCap).Item);
 
             public GroupScaling Compute(int rosterSize) => GroupScaling.Compute(rosterSize, effortPerMember, countShare, groupMaxMonsters,
-                damageRatingPerMember, damageRatingCap, rewardBonusPerMember, rewardBonusCap, sharePlateau, lootHoldMinutes);
+                damageRatingPerMember, damageRatingCap, rewardBonusPerMember, rewardBonusCap, sharePlateau, lootHoldMinutes, abilityRatingPerMember, abilityRatingCap);
         }
 
         /// <summary>

@@ -264,7 +264,8 @@ namespace ACE.Server.Tests.Avatars
         public void ProductionInitialize_WiresTheLiveMonarchStatus_ForTheRecomputeRepair()
         {
             var init = Body("Source/ACE.Server/AllegianceAvatar/AvatarManager.cs", "public static void Initialize()");
-            At(init, "AvatarLifecycle.LiveMonarchStatus);");
+            At(init, "AvatarLifecycle.LiveMonarchStatus,");
+            At(init, "() => Gauntlet.GauntletPurchase.Tuning());");
 
             // A member's Monarch property holds the monarch's own guid too: only one naming someone else is a vassal.
             var status = Body("Source/ACE.Server/AllegianceAvatar/AvatarLifecycle.cs", "internal static AvatarMonarchStatus LiveMonarchStatus(uint guid)");

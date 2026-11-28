@@ -403,6 +403,15 @@ namespace ACE.Server.Pvp
         /// <summary>Marks earned but not delivered (pack full or too heavy): kept and delivered at the next login.</summary>
         public const string BloodOwed = "[Arena] Your pack could not hold {amount} {marks}. It will be delivered the next time you log in.";
 
+        /// <summary><see cref="BloodReceived"/> for an arena match (any mode) paid inside a Double Marks window (Docs/Pvp/BATTLEGROUNDS.md "Double Marks windows"); the suffix sits before the full stop.</summary>
+        public const string BloodReceivedDouble = "[Arena] You receive {amount} {marks} (Double Marks).";
+
+        /// <summary>The pickup template for a delivered payout: battleground or arena ledger, ordinary or Double Marks.</summary>
+        public static string ReceivedLine(bool battleground, bool doubled) =>
+            battleground
+                ? (doubled ? BgMarksReceivedDouble : BgMarksReceived)
+                : (doubled ? BloodReceivedDouble : BloodReceived);
+
         /// <summary>Battleground counterpart of <see cref="BloodReceived"/>: the arena line with "battleground" in place of "arena".</summary>
         public const string BgMarksReceived = "[Battleground] You receive {amount} {marks}.";
 

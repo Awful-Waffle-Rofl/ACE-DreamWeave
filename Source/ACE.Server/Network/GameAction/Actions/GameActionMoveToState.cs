@@ -1,5 +1,6 @@
 using System;
 
+using ACE.Common;
 using ACE.Server.Network.Structure;
 
 namespace ACE.Server.Network.GameAction.Actions
@@ -33,6 +34,7 @@ namespace ACE.Server.Network.GameAction.Actions
             // MoveToState - UpdatePosition broadcasts were capped to 1 per second in retail
             session.Player.OnMoveToState(moveToState);
             session.Player.LastMoveToState = moveToState;
+            session.Player.LastMoveToStateTime = Time.GetUnixTime();
 
             // the client's own view of whether it is on the ground, kept current from both position sources
             // (AutonomousPosition already does this), so Player_Tick.UpdateObjectPhysics can tell a grounded
@@ -83,6 +85,9 @@ namespace ACE.Server.Network.GameAction.Actions
                     }
                 }
             }
+
+            // a post-teleport stance resync deferred because the player was moving goes out once they stop (Player_Location)
+            session.Player.CheckPendingArrivalStanceResync(moveToState);
         }
     }
 }

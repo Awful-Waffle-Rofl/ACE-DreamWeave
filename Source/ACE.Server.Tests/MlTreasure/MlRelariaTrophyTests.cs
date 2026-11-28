@@ -20,13 +20,12 @@ namespace ACE.Server.Tests.MlTreasure
 
         // ---- the drop side ---------------------------------------------------------------------------
 
-        /// <summary>The baseline positive: a dug-up Relaria, killed by a player who has neither claimed
+        /// <summary>The baseline positive: a dug-up Relaria, killed by anyone, with a digger who has neither claimed
         /// nor is already carrying a trophy.</summary>
         [TestMethod]
         public void ShouldDropTrophy_FirstKill_Drops()
         {
-            Assert.IsTrue(MlRelariaTrophy.ShouldDropTrophy(BossMarker, killedByPlayer: true,
-                alreadyClaimed: false, killerHoldsTrophy: false));
+            Assert.IsTrue(MlRelariaTrophy.ShouldDropTrophy(BossMarker, alreadyClaimed: false, killerHoldsTrophy: false));
         }
 
         /// <summary>An ordinary Marae Lassel creature carries no 9066 marker (absent reads as 0) and can
@@ -35,20 +34,9 @@ namespace ACE.Server.Tests.MlTreasure
         [TestMethod]
         public void ShouldDropTrophy_NoBossMarker_DoesNotDrop()
         {
-            Assert.IsFalse(MlRelariaTrophy.ShouldDropTrophy(0, killedByPlayer: true,
-                alreadyClaimed: false, killerHoldsTrophy: false));
+            Assert.IsFalse(MlRelariaTrophy.ShouldDropTrophy(0, alreadyClaimed: false, killerHoldsTrophy: false));
 
-            Assert.IsFalse(MlRelariaTrophy.ShouldDropTrophy(-1, killedByPlayer: true,
-                alreadyClaimed: false, killerHoldsTrophy: false));
-        }
-
-        /// <summary>A Relaria that died to something other than a player (fall damage, another monster,
-        /// an Olthoi player) leaves no trophy.</summary>
-        [TestMethod]
-        public void ShouldDropTrophy_NotKilledByPlayer_DoesNotDrop()
-        {
-            Assert.IsFalse(MlRelariaTrophy.ShouldDropTrophy(BossMarker, killedByPlayer: false,
-                alreadyClaimed: false, killerHoldsTrophy: false));
+            Assert.IsFalse(MlRelariaTrophy.ShouldDropTrophy(-1, alreadyClaimed: false, killerHoldsTrophy: false));
         }
 
         /// <summary>OWNER DECISION 14: a repeat kill by a character that has already claimed drops no
@@ -58,8 +46,7 @@ namespace ACE.Server.Tests.MlTreasure
         [TestMethod]
         public void ShouldDropTrophy_AlreadyClaimed_DoesNotDrop()
         {
-            Assert.IsFalse(MlRelariaTrophy.ShouldDropTrophy(BossMarker, killedByPlayer: true,
-                alreadyClaimed: true, killerHoldsTrophy: false));
+            Assert.IsFalse(MlRelariaTrophy.ShouldDropTrophy(BossMarker, alreadyClaimed: true, killerHoldsTrophy: false));
         }
 
         /// <summary>Same decision for a character who banked the first trophy instead of using it.
@@ -68,8 +55,7 @@ namespace ACE.Server.Tests.MlTreasure
         [TestMethod]
         public void ShouldDropTrophy_KillerAlreadyHoldsOne_DoesNotDrop()
         {
-            Assert.IsFalse(MlRelariaTrophy.ShouldDropTrophy(BossMarker, killedByPlayer: true,
-                alreadyClaimed: false, killerHoldsTrophy: true));
+            Assert.IsFalse(MlRelariaTrophy.ShouldDropTrophy(BossMarker, alreadyClaimed: false, killerHoldsTrophy: true));
         }
 
         /// <summary>The drop side and the consume side must read and write the SAME quest registry row,

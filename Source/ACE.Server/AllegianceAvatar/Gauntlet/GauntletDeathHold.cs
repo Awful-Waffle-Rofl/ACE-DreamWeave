@@ -5,6 +5,7 @@ using System.Threading;
 
 using log4net;
 
+using ACE.Server.Entity;
 using ACE.Server.ThreadDungeons;
 using ACE.Server.WorldObjects;
 
@@ -25,6 +26,12 @@ internal interface IGauntletHoldRun
 
     /// <summary>True once the run is Closed or Aborted.</summary>
     bool IsTerminal { get; }
+
+    /// <summary>True once the run stopped fighting (Ending, Rewarding or terminal): a death now goes to the caches, never the pen.</summary>
+    bool FightOver { get; }
+
+    /// <summary>The cache area's centre, in the arena's instance (null with no copy).</summary>
+    Position CachesPosition { get; }
 
     /// <summary>The site's death pen, in the arena's instance.</summary>
     Position PenPosition { get; }
@@ -221,6 +228,12 @@ internal interface IGauntletHoldEffects
 {
     void SnapBack(Player player, Position pen, int secondsLeft);
     void Release(Player player, Position entry);
+
+    /// <summary>The run stopped fighting: the held player goes to the cache area now (hold already ended).</summary>
+    void ReleaseToCaches(Player player, Position caches);
+
+    /// <summary>A player dying after the fight ended: record <paramref name="caches"/> as where the death chain sends them (synchronously, on their own thread, from the death latch).</summary>
+    void DeferToCaches(Player player, Position caches);
 }
 
 /// <summary>
@@ -228,7 +241,8 @@ internal interface IGauntletHoldEffects
 /// inside a live arena copy is latched (Player.Die, through <see cref="LatchDeath"/>), sent to the site's pen with no vitae,
 /// no item loss, no corpse and every buff kept, held for allegiance_gauntlet_death_hold_seconds, snapped back to the pen if
 /// they walk into the circle, and then released: lifestone protection cleared, full vitals, and a teleport to the run's next
-/// entry point (the Battlegrounds respawn steps, Docs/Pvp/BATTLEGROUNDS.md "Respawn" 6).
+/// entry point (the Battlegrounds respawn steps, Docs/Pvp/BATTLEGROUNDS.md "Respawn" 6). When the run stops fighting
+/// (Rewarding begins) every hold ends at once and held players in the arena go to the cache area (<see cref="ReleaseToCaches(GauntletRun, Position)"/>).
 /// </summary>
 internal sealed class LiveGauntletDeathHooks : IGauntletDeathHooks
 {
@@ -280,7 +294,20 @@ internal sealed class LiveGauntletDeathHooks : IGauntletDeathHooks
         if (run == null || run.IsTerminal)
             return null;
 
+        // The fight is over (Rewarding, after ReleaseToCaches has emptied the pen): no hold and no death count; the death
+        // chain sends the player to the caches landing instead of the pen (Player.ThreadSafeTeleportOnDeath).
+        if (run.FightOver)
+            return DeferDeathToCaches(run, player, guid);
+
         Holds.Begin(run, guid);
+
+        // The fight may have ended between the read above and the hold: ReleaseToCaches could already have run and missed this
+        // entry. Re-read; when it is over now, take the hold back and send the death to the caches instead.
+        if (run.FightOver)
+        {
+            Holds.End(guid, run);
+            return DeferDeathToCaches(run, player, guid);
+        }
 
         try
         {
@@ -289,6 +316,23 @@ internal sealed class LiveGauntletDeathHooks : IGauntletDeathHooks
         catch (Exception ex)
         {
             log.Error($"[GAUNTLET] run {run.RunKey} death count threw for 0x{guid:X8}", ex);
+        }
+
+        return run;
+    }
+
+    private IGauntletHoldRun DeferDeathToCaches(IGauntletHoldRun run, Player player, uint guid)
+    {
+        try
+        {
+            var caches = run.CachesPosition;
+
+            if (caches != null)
+                Effects.DeferToCaches(player, LandingFor(caches, guid, Snap));
+        }
+        catch (Exception ex)
+        {
+            log.Error($"[GAUNTLET] run {run.RunKey}: sending the dying 0x{guid:X8} to the caches threw", ex);
         }
 
         return run;
@@ -350,6 +394,112 @@ internal sealed class LiveGauntletDeathHooks : IGauntletDeathHooks
             log.Info($"[GAUNTLET] run {run?.RunKey}: {released.Count} death hold(s) ended with the run");
     }
 
+    /// <summary>Metres from the cache area's centre a released player lands (past the 3 m cache ring, a few metres off a lone cache).</summary>
+    public const float LandingRadius = 5.0f;
+
+    /// <summary>
+    /// A deterministic offset from the arena centre for <paramref name="guid"/>: <see cref="LandingRadius"/> metres out at an angle
+    /// spread by the golden angle, so players released together do not stack on one point or on a lone cache at the centre. Pure.
+    /// </summary>
+    public static System.Numerics.Vector3 LandingOffset(uint guid)
+    {
+        var angle = (guid * 2.399963229728653) % (2.0 * Math.PI);
+        return new System.Numerics.Vector3((float)(LandingRadius * Math.Cos(angle)), (float)(LandingRadius * Math.Sin(angle)), 0f);
+    }
+
+    /// <summary>
+    /// The landing point for <paramref name="guid"/>: the centre moved by <see cref="LandingOffset"/>, kept on the centre's landblock
+    /// and snapped to terrain outdoors, as the caches are placed (GauntletRewards.PlaceCaches). The centre itself when the offset
+    /// leaves the landblock.
+    /// </summary>
+    internal static Position LandingFor(Position centre, uint guid, Action<Position> snap = null)
+    {
+        var at = new Position(centre);
+
+        try
+        {
+            at.SetPosition(centre.Pos + LandingOffset(guid));
+        }
+        catch (Exception ex)
+        {
+            log.Debug("[GAUNTLET] a landing point could not be computed; using the centre", ex);
+            return new Position(centre);
+        }
+
+        if (at.InstancedLandblock != centre.InstancedLandblock)
+            return new Position(centre);
+
+        if (!at.Indoors)
+        {
+            try { (snap ?? (p => p.AdjustMapCoords()))(at); }
+            catch (Exception ex) { log.Debug("[GAUNTLET] a landing point could not be snapped to terrain; keeping the centre's height", ex); }
+        }
+
+        return at;
+    }
+
+    /// <summary>Test seam: snaps a landing point to terrain (AdjustMapCoords by default).</summary>
+    internal Action<Position> Snap { get; set; }
+
+    /// <summary>Test seam: the LIVE player for a guid (PlayerManager.GetOnlinePlayer), null when offline.</summary>
+    internal Func<uint, Player> ResolvePlayer { get; set; } = guid => ACE.Server.Managers.PlayerManager.GetOnlinePlayer(guid);
+
+    /// <summary>
+    /// The run stopped fighting (Rewarding began): every hold in it ends at once. Each released guid is resolved to its LIVE
+    /// player (not the run's tick snapshot, which a relog leaves stale); one who is online and standing in the arena copy goes to
+    /// a landing point beside <paramref name="caches"/> (<see cref="LandingFor"/>) through
+    /// <see cref="IGauntletHoldEffects.ReleaseToCaches"/>; one who is offline or outside the copy is just dropped, as at a close.
+    /// The entries are removed first, under the registry's lock, so the 1 Hz check finds nothing to act on afterwards.
+    /// Returns the guids teleported.
+    /// </summary>
+    internal IReadOnlyList<uint> ReleaseToCaches(IGauntletHoldRun run, Position caches)
+    {
+        var released = Holds.ReleaseAll(run);
+        var moved = new List<uint>();
+
+        foreach (var guid in released)
+        {
+            if (caches == null || run.Instance == 0)
+                continue;
+
+            Player player;
+
+            try
+            {
+                player = ResolvePlayer(guid);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[GAUNTLET] run {run.RunKey}: resolving 0x{guid:X8} threw", ex);
+                continue;
+            }
+
+            if (player?.Location == null || player.Location.Instance != run.Instance)
+                continue;
+
+            try
+            {
+                Effects.ReleaseToCaches(player, LandingFor(caches, guid, Snap));
+                moved.Add(guid);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[GAUNTLET] run {run.RunKey}: releasing 0x{guid:X8} to the caches threw", ex);
+            }
+        }
+
+        if (released.Count > 0)
+            log.Info($"[GAUNTLET] run {run.RunKey}: {released.Count} death hold(s) ended at the end of the fight, {moved.Count} moved to the caches");
+
+        return moved;
+    }
+
+    public void ReleaseToCaches(GauntletRun run, Position caches)
+    {
+        if (run != null)
+            ReleaseToCaches((IGauntletHoldRun)run, caches);
+    }
+
     private sealed class LivePlayerEffects : IGauntletHoldEffects
     {
         public static readonly LivePlayerEffects Instance = new LivePlayerEffects();
@@ -357,5 +507,11 @@ internal sealed class LiveGauntletDeathHooks : IGauntletDeathHooks
         public void SnapBack(Player player, Position pen, int secondsLeft) => player.GauntletSnapBackToPen(pen, secondsLeft);
 
         public void Release(Player player, Position entry) => player.ReleaseFromGauntletHold(entry);
+
+        public void DeferToCaches(Player player, Position caches) => player.SetGauntletCachesPending(caches);
+
+        // Off the world thread: the release touches vitals and teleports, so it runs on the player's own queue, as the 1 Hz check does.
+        public void ReleaseToCaches(Player player, Position caches)
+            => player.EnqueueAction(new ACE.Server.Entity.Actions.ActionEventDelegate(() => player.ReleaseFromGauntletHoldAtCaches(caches)));
     }
 }

@@ -1265,6 +1265,14 @@ namespace ACE.Server.ThreadDungeons
         public int GroupDamageRatingBonus { get; set; }
 
         /// <summary>
+        /// The group rating G the family ability budget is bought from (GroupScaling.AbilityRatingBonus, its own dials
+        /// dynamic_dungeons_creature_ability_group_rating_*): what FamilyAbilityPlanner.Resolve reads in place of
+        /// <see cref="GroupDamageRatingBonus"/>, so the damage rating can be tuned without moving the abilities. The damage path
+        /// (stamping, the clamp) never reads this. 0 on a solo plan.
+        /// </summary>
+        public int AbilityGroupRatingBonus { get; set; }
+
+        /// <summary>
         /// The family's group creature abilities (DAMAGE-CEILING-PLAN.md step 6; <see cref="FamilyAbilityPlanner.Resolve"/>).
         /// NOT set by Build: the spawner resolves it once per run right after Build, from the live tunables and the run seed,
         /// so it takes no draw from the plan rng, adds no note and is no fingerprint field. Null (speed courses, the offline
@@ -2580,6 +2588,7 @@ namespace ACE.Server.ThreadDungeons
                     plan.BossHealthMultiplier *= group.Effort;
 
                 plan.GroupDamageRatingBonus = group.DamageRatingBonus;
+                plan.AbilityGroupRatingBonus = group.AbilityRatingBonus;
                 plan.GroupTrashRewardFactor = group.TrashRewardFactor(plan.GroupHealthMult);
                 plan.GroupBossRewardFactor = group.BossRewardFactor();
             }

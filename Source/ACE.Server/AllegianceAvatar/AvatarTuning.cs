@@ -8,8 +8,8 @@ namespace ACE.Server.Avatars;
 /// Every Allegiance Avatar tunable as one immutable value. The pure math and rules take this
 /// value instead of reading PropertyManager, so they stay testable without seeding statics.
 /// Property names are the PascalCase of the allegiance_avatar_ key minus the prefix. Units:
-/// contribution points = raw received XP x base_rate x source multiplier x roster scale; one
-/// point = 1,000,000 raw XP at the Base source.
+/// contribution points = received XP (offline-boosted, before the alt bonus) x base_rate x source multiplier x roster scale; one
+/// point = 100,000,000 such XP at the Base source.
 /// </summary>
 public sealed record AvatarTuning
 {
@@ -27,8 +27,39 @@ public sealed record AvatarTuning
     public long FlushSeconds { get; init; }
     public long EventPriceQuiet { get; init; }
     public long EventPriceAnnounced { get; init; }
+
+    /// <summary>Favor per effective account in a quiet event's price: price = max(EventPriceQuiet, ceil(this x effective accounts)). See AvatarPricing.</summary>
+    public long EventPriceQuietPerAccount { get; init; }
+
+    /// <summary>Favor per effective account in an announced event's price: price = max(EventPriceAnnounced, ceil(this x effective accounts)).</summary>
+    public long EventPriceAnnouncedPerAccount { get; init; }
+
+    /// <summary>The per-Avatar Favor cap is max(FavorCap, ceil(this x the largest scaled price)). See AvatarPricing.FavorCap.</summary>
+    public double FavorCapPriceMultiple { get; init; }
     public long EventMinLevel { get; init; }
     public long EventScheduleBufferMinutes { get; init; }
+
+    /// <summary>Private World Events per Avatar per Avatar day (quiet and announced share it). 0 = no limit.</summary>
+    public long EventDailyLimit { get; init; }
+
+    /// <summary>The hour (0-23) in <see cref="DayResetTimezone"/> at which the Avatar day turns over. AvatarDay clamps it.</summary>
+    public long DayResetHour { get; init; }
+
+    /// <summary>The time zone id whose wall clock defines the Avatar day (DST-aware). AvatarDay resolves it.</summary>
+    public string DayResetTimezone { get; init; }
+
+    /// <summary>The Allegiance Blessing's Favor price before the per-member part (AvatarBlessing.Price).</summary>
+    public long BlessingPriceBase { get; init; }
+
+    /// <summary>Favor added to the Blessing's price per distinct online non-mule account.</summary>
+    public long BlessingPricePerMember { get; init; }
+
+    /// <summary>The most the Blessing can cost.</summary>
+    public long BlessingPriceCap { get; init; }
+
+    /// <summary>Seconds the Blessing adds to each recipient's offline bonus bank (uncapped by offline_bonus_max_seconds).</summary>
+    public long BlessingBankSeconds { get; init; }
+
     public double BaseRate { get; init; }
     public double ThreadMultiplier { get; init; }
     public double WorldEventMultiplier { get; init; }
@@ -58,19 +89,28 @@ public sealed record AvatarTuning
         MinActiveAccounts = 2,
         ActiveWindowDays = 7,
         KeeperIdleDays = 30,
-        ReseatCooldownDays = 7,
+        ReseatCooldownDays = 0,
         SummonSeconds = 600,
-        DressCooldownSeconds = 3600,
+        DressCooldownSeconds = 0,
         FavorCap = 20000,
         FavorDecayGraceDays = 3,
         AccountDailySoftCap = 500,
         TopContributorsDays = 30,
         FlushSeconds = 60,
-        EventPriceQuiet = 2000,
-        EventPriceAnnounced = 3000,
+        EventPriceQuiet = 700,
+        EventPriceQuietPerAccount = 200,
+        EventPriceAnnounced = 1000,
+        EventPriceAnnouncedPerAccount = 300,
         EventMinLevel = 40,
         EventScheduleBufferMinutes = 15,
-        BaseRate = 0.000001,
+        EventDailyLimit = 1,
+        DayResetHour = 0,
+        DayResetTimezone = "America/New_York",
+        BlessingPriceBase = 250,
+        BlessingPricePerMember = 100,
+        BlessingPriceCap = 20000,
+        BlessingBankSeconds = 3600,
+        BaseRate = 0.00000001,
         ThreadMultiplier = 4.0,
         WorldEventMultiplier = 6.0,
         FellowshipMultiplier = 8.0,
@@ -80,6 +120,7 @@ public sealed record AvatarTuning
         RosterExcessExponent = 0.5,
         LevelXpFraction = 0.01,
         FavorRate = 1.0,
+        FavorCapPriceMultiple = 2.0,
         FavorDecayDailyFraction = 0.10,
         AbsorbFraction = 0.25,
         Scale = 2.0,
@@ -107,8 +148,17 @@ public sealed record AvatarTuning
         FlushSeconds = PropertyManager.GetLong("allegiance_avatar_flush_seconds").Item,
         EventPriceQuiet = PropertyManager.GetLong("allegiance_avatar_event_price_quiet").Item,
         EventPriceAnnounced = PropertyManager.GetLong("allegiance_avatar_event_price_announced").Item,
+        EventPriceQuietPerAccount = PropertyManager.GetLong("allegiance_avatar_event_price_quiet_per_account").Item,
+        EventPriceAnnouncedPerAccount = PropertyManager.GetLong("allegiance_avatar_event_price_announced_per_account").Item,
         EventMinLevel = PropertyManager.GetLong("allegiance_avatar_event_min_level").Item,
         EventScheduleBufferMinutes = PropertyManager.GetLong("allegiance_avatar_event_schedule_buffer_minutes").Item,
+        EventDailyLimit = PropertyManager.GetLong("allegiance_avatar_event_daily_limit").Item,
+        DayResetHour = PropertyManager.GetLong("allegiance_avatar_day_reset_hour").Item,
+        DayResetTimezone = PropertyManager.GetString("allegiance_avatar_day_reset_timezone").Item,
+        BlessingPriceBase = PropertyManager.GetLong("allegiance_avatar_blessing_price_base").Item,
+        BlessingPricePerMember = PropertyManager.GetLong("allegiance_avatar_blessing_price_per_member").Item,
+        BlessingPriceCap = PropertyManager.GetLong("allegiance_avatar_blessing_price_cap").Item,
+        BlessingBankSeconds = PropertyManager.GetLong("allegiance_avatar_blessing_bank_seconds").Item,
         BaseRate = PropertyManager.GetDouble("allegiance_avatar_base_rate").Item,
         ThreadMultiplier = PropertyManager.GetDouble("allegiance_avatar_thread_multiplier").Item,
         WorldEventMultiplier = PropertyManager.GetDouble("allegiance_avatar_world_event_multiplier").Item,
@@ -119,6 +169,7 @@ public sealed record AvatarTuning
         RosterExcessExponent = PropertyManager.GetDouble("allegiance_avatar_roster_excess_exponent").Item,
         LevelXpFraction = PropertyManager.GetDouble("allegiance_avatar_level_xp_fraction").Item,
         FavorRate = PropertyManager.GetDouble("allegiance_avatar_favor_rate").Item,
+        FavorCapPriceMultiple = PropertyManager.GetDouble("allegiance_avatar_favor_cap_price_multiple").Item,
         FavorDecayDailyFraction = PropertyManager.GetDouble("allegiance_avatar_favor_decay_daily_fraction").Item,
         AbsorbFraction = PropertyManager.GetDouble("allegiance_avatar_absorb_fraction").Item,
         Scale = PropertyManager.GetDouble("allegiance_avatar_scale").Item,

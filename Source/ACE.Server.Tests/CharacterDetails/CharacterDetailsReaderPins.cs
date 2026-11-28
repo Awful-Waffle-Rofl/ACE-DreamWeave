@@ -53,6 +53,12 @@ namespace ACE.Server.Tests.CharacterDetails
         {
             AssertLineOnce(ServiceFile, ReadSignature, "if (skill.AdvancementClass >= SkillAdvancementClass.Trained)");
             AssertLineOnce(ServiceFile, ReadSignature, "var wand = player.GetEquippedWand();");
+            // the held caster's crit skill goes through PickMagicCritSkill (Summoner focus, wield skill, then the highest of War/Void/Life), never the old War/Void pick
+            AssertLineOnce(ServiceFile, ReadSignature, "var magicSkill = player.GetCreatureSkill(PickMagicCritSkill(");
+            AssertLineOnce(ServiceFile, ReadSignature, "SummonerFocus.IsSummonerFocus(wand),");
+            AssertLineOnce(ServiceFile, ReadSignature, "wand?.WieldSkillType,");
+            AssertLineOnce(ServiceFile, ReadSignature, "player.GetCreatureSkill(Skill.LifeMagic).Current));");
+            AssertNoLineContains(ServiceFile, ReadSignature, "voidSkill");
             AssertLineOnce(ServiceFile, ReadSignature, "? player.GetEquippedMissileLauncher() ?? player.GetMissileAmmo()");
             AssertLineOnce(ServiceFile, ReadSignature, ": player.GetEquippedMeleeWeapon(forceMainHand: true);");
             AssertLineOnce(ServiceFile, ReadSignature, "var offWeapon = stance == CombatMode.Melee ? player.GetDualWieldWeapon() : null;");

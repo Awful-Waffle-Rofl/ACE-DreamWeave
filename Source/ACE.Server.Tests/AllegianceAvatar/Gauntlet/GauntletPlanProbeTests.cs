@@ -199,7 +199,9 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             PropertyManager.GetDouble("dynamic_dungeons_group_reward_bonus_per_member", GroupScaling.DefaultRewardBonusPerMember).Item,
             PropertyManager.GetDouble("dynamic_dungeons_group_reward_bonus_cap", GroupScaling.DefaultRewardBonusCap).Item,
             PropertyManager.GetDouble("fellowship_share_group_plateau").Item,
-            PropertyManager.GetLong("dynamic_dungeons_group_loot_hold_minutes", GroupScaling.DefaultLootHoldMinutes).Item);
+            PropertyManager.GetLong("dynamic_dungeons_group_loot_hold_minutes", GroupScaling.DefaultLootHoldMinutes).Item,
+            PropertyManager.GetLong("dynamic_dungeons_creature_ability_group_rating_per_member", GroupScaling.DefaultAbilityRatingPerMember).Item,
+            PropertyManager.GetLong("dynamic_dungeons_creature_ability_group_rating_cap", GroupScaling.DefaultAbilityRatingCap).Item);
 
         private static ProbeRow RunCase(DungeonEntryDef site, ThreadDungeonStore store, int level, int headcount, bool extended)
         {

@@ -515,8 +515,7 @@ namespace ACE.Server.EquipmentMods
                 Standalone = false,
                 MaxMagnitude = 0.05,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##} life vulnerability on marked targets",
-                DisplayScale = 1.0,
+                DisplayFormat = "+{0:0.##}pp life vulnerability on marked targets",
             },
             new EquipmentModDefinition
             {

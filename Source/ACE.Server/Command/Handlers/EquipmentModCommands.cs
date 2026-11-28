@@ -125,7 +125,7 @@ namespace ACE.Server.Command.Handlers
             var player = session.Player;
 
             var equipped = player.EquippedObjects.Values
-                .Select(item => (item, mods: EquipmentModDisplay.GetMods(item).Where(m => EquipmentModRoller.Clamp01(m.Potency) > 0.0).ToList()))
+                .Select(item => (item, mods: EquipmentModDisplay.GetModsByName(item).Where(m => EquipmentModRoller.Clamp01(m.Potency) > 0.0).ToList()))
                 .Where(entry => entry.mods.Count > 0)
                 .ToList();
 

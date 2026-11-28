@@ -48,22 +48,29 @@ namespace ACE.Server.Factories.Tables
         // it appears they might have gotten rid of the tier chances
         private static ChanceTable<TreasureWeaponType> RetailChances = new ChanceTable<TreasureWeaponType>()
         {
-            // melee: 63%
-            // missile: 20%
-            // two-handed: 10%
-            // caster: 7%
-            ( TreasureWeaponType.Sword,           0.09f ),
-            ( TreasureWeaponType.Mace,            0.09f ),
-            ( TreasureWeaponType.Axe,             0.09f ),
-            ( TreasureWeaponType.Spear,           0.09f ),
-            ( TreasureWeaponType.Unarmed,         0.09f ),
-            ( TreasureWeaponType.Staff,           0.09f ),
-            ( TreasureWeaponType.Dagger,          0.09f ),
-            ( TreasureWeaponType.Bow,             0.07f ),
-            ( TreasureWeaponType.Crossbow,        0.07f ),
-            ( TreasureWeaponType.Atlatl,          0.06f ),
-            ( TreasureWeaponType.Caster,          0.07f ),
-            ( TreasureWeaponType.TwoHandedWeapon, 0.10f ),      // see TreasureWeaponType for an explanation of why this is here,
+            // FORK CHANGE (caster drop rate, 2026-11-25): Sanguine (T3+) and Summoner (T7-8) diluted each
+            // retail element in CasterWcids. Caster share raised 7% -> 8.35% of weapons, and the weapons' share
+            // of the item-type roll raised x1.015 in the scroll-bearing profiles (taken from Scroll), so absolute
+            // caster drops are ~x1.21 and non-caster weapons are unchanged (0.0887*1.015/0.09 = 1.0003).
+            // Tables with a Weapon entry but no x1.015 compensation (weapon-only profiles 1, legendary chest 22,
+            // mana forge 24, the TreasureItemTypeChances testlootgen tables) get casters ~x1.19 and non-caster
+            // weapons ~x0.985 absolute.
+            // melee: 62.09%
+            // missile: 19.71%
+            // two-handed: 9.85%
+            // caster: 8.35%
+            ( TreasureWeaponType.Sword,           0.0887f ),
+            ( TreasureWeaponType.Mace,            0.0887f ),
+            ( TreasureWeaponType.Axe,             0.0887f ),
+            ( TreasureWeaponType.Spear,           0.0887f ),
+            ( TreasureWeaponType.Unarmed,         0.0887f ),
+            ( TreasureWeaponType.Staff,           0.0887f ),
+            ( TreasureWeaponType.Dagger,          0.0887f ),
+            ( TreasureWeaponType.Bow,             0.069f ),
+            ( TreasureWeaponType.Crossbow,        0.069f ),
+            ( TreasureWeaponType.Atlatl,          0.0591f ),
+            ( TreasureWeaponType.Caster,          0.0835f ),
+            ( TreasureWeaponType.TwoHandedWeapon, 0.0985f ),      // see TreasureWeaponType for an explanation of why this is here,
                                                                 // and not deeper in WeaponWcids.cs
         };
 

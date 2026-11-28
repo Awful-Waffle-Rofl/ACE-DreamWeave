@@ -496,6 +496,12 @@ namespace ACE.Server.WorldObjects
                 // pulled from when it still takes them, else the stamp, else home.
                 newPosition = ResolvePvpReturn("match death") ?? Instantiation ?? Location;
             }
+            else if (GauntletDeathInProgress && PeekGauntletCachesPending() is Position gauntletCaches)
+            {
+                // Allegiance Gauntlet: the fight ended while this player was dying; they go to the cache area, not the pen and
+                // not out. The exit stamp is left alone. The chain's last step finishes the release.
+                newPosition = gauntletCaches;
+            }
             else if (GauntletDeathInProgress && GauntletDeathPen() is Position gauntletPen)
             {
                 // Allegiance Gauntlet: to the site's death pen inside the arena copy. The EphemeralRealmExitTo stamp is kept:
@@ -599,6 +605,7 @@ namespace ACE.Server.WorldObjects
                     pvpMatchDeathWaiver = null;
                     ClearPvpDeathPenLatch();
                     gauntletDeathInProgress = false;
+                    CompleteGauntletCachesPending();
 
                     // Battlegrounds completion backstop (Docs/Pvp/BATTLEGROUNDS.md "Respawn" 4): the player went to
                     // the pen, but the match is no longer Live for them (it ended, or they were exited while dying).

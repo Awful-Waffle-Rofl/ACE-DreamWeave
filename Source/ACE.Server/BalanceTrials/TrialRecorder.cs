@@ -86,6 +86,9 @@ namespace ACE.Server.BalanceTrials
 
         public string RunKey => runKey;
 
+        /// <summary>Kills so far: trash, elites and the boss. Room thread (the campaign's zero-kill breaker reads it at RepEnded).</summary>
+        public int Kills => killsTrash + killsElite + (bossKilled ? 1 : 0);
+
         public DateTime StartedUtc => startedUtc;
 
         private AnalyticsDatabase.TrialEventRow Row(string kind, string dir, double now) => new()

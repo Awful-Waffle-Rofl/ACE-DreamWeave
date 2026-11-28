@@ -73,7 +73,7 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
-            // Custom Summons: a Duo Summon Gem summons nothing until it has absorbed its second summon. A blank gem
+            // Custom Summons: a Duo Summon Essence summons nothing until it has absorbed its second summon. A blank gem
             // carries no PetClass, charges or cooldown either; this is the explicit gate. Refused before anything is spent.
             if (DuoSummonGem.IsDuoGem(this) && !DuoSummonGem.IsBound(this))
             {
@@ -159,7 +159,7 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public override void HandleActionUseOnTarget(Player player, WorldObject target)
         {
-            // Custom Summons: a Duo Summon Gem used ON a summon item absorbs it (DuoSummonGem.Absorb). Checked first so a
+            // Custom Summons: a Duo Summon Essence used ON a summon item absorbs it (DuoSummonGem.Absorb). Checked first so a
             // gem never falls through to the recipe manager. A bound gem refuses as full.
             if (DuoSummonGem.IsDuoGem(this))
             {
@@ -380,7 +380,7 @@ namespace ACE.Server.WorldObjects
             if (!baseRequirements.Success)
                 return baseRequirements;
 
-            // Custom Summons: a Duo Summon Gem that cannot describe two pets (unbound, or a slot that will not read) is refused.
+            // Custom Summons: a Duo Summon Essence that cannot describe two pets (unbound, or a slot that will not read) is refused.
             // An unbound gem has no PetClass, and the retail-stow branch below casts PetClass. Refusing here also keeps the
             // activation from starting any cooldown (OnActivate starts it after this gate).
             if (DuoSummonGem.IsDuoGem(this) && DuoSummonGem.GetSources(this).Count < 2)
@@ -461,7 +461,7 @@ namespace ACE.Server.WorldObjects
         /// summon, index 1 the Summon 2x second one. A normal device describes the same pet twice - its own
         /// PetClass and ratings, which is what Summon 2x has always done - and ActOnUse only reads index 1
         /// when CanSummonAdditionalCombatPet allows it. A device carrying two different pets returns two
-        /// different sources here: a bound Duo Summon Gem returns slot A's pet then slot B's, read from its
+        /// different sources here: a bound Duo Summon Essence returns slot A's pet then slot B's, read from its
         /// snapshots, and an unbound or unreadable one returns none.
         /// </summary>
         public virtual IReadOnlyList<PetSummonSource> GetSummonSources()

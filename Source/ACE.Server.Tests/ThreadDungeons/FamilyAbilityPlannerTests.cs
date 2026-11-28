@@ -45,8 +45,12 @@ namespace ACE.Server.Tests.ThreadDungeons
 
         // ---- fixture ---------------------------------------------------------------------------------------
 
-        /// <summary>G for a 6-player roster at the compiled group dials (15 per extra member, cap 300): 75.</summary>
-        private static int SixPlayerBonus => GroupScaling.DamageRatingBonusFor(6, GroupScaling.DefaultDamageRatingPerMember, GroupScaling.DefaultDamageRatingCap);
+        /// <summary>
+        /// G for a 6-player roster at the dials these scenarios were built around (15 per extra member, cap 300): 75. Pinned
+        /// rather than read from the shipped defaults so a tuning of the group damage tunables (2026-11-26: 5 per member,
+        /// cap 100) does not change the planner scenarios, which exercise the budget logic at a fixed G.
+        /// </summary>
+        private static int SixPlayerBonus => GroupScaling.DamageRatingBonusFor(6, 15, 300);
 
         /// <summary>A body-only melee read with the given base damage at Strength 200 (one attribute mod for every member).</summary>
         private static CreaturePerHit Melee(double baseDamage, int damageRating = 0)
@@ -64,6 +68,7 @@ namespace ACE.Server.Tests.ThreadDungeons
                 DamageCeilingCap = 2.0,
                 DamageCeilingTop = 3.0,
                 GroupDamageRatingBonus = groupBonus,
+                AbilityGroupRatingBonus = groupBonus,
                 BossNormalize = false,
             };
 
@@ -93,9 +98,169 @@ namespace ACE.Server.Tests.ThreadDungeons
 
         private static int ExpectedWithheld(DungeonSpawnPlan plan, double perHit, int ownRating)
             => DamageCeiling.WithheldRating(DamageCeiling.TargetPerHit(perHit, plan.PerHitMedian, plan.DamageCeilingCap, plan.DamageCeilingTop),
-                plan.PerHitMedian, plan.DamageCeilingCap, ownRating, plan.GroupDamageRatingBonus);
+                plan.PerHitMedian, plan.DamageCeilingCap, ownRating, plan.AbilityGroupRatingBonus);
+
+        /// <summary>A family with a 1.6x trash hitter and a 3.5x boss.</summary>
+        private static (DungeonSpawnPlan Plan, Dictionary<uint, CreaturePerHit> Reads) Mixed(int groupBonus)
+        {
+            var trash = nextWcid++;
+            var boss = nextWcid++;
+            var plan = Plan("fam_mixed", groupBonus, (trash, DungeonRole.Trash), (trash, DungeonRole.Trash), (boss, DungeonRole.Boss));
+            var reads = new Dictionary<uint, CreaturePerHit> { [trash] = Melee(1600), [boss] = Melee(3500) };
+            return (plan, reads);
+        }
 
         // ---- 1. a clamped family: one spec on every member; an unclamped family: none -------------------------
+
+        /// <summary>
+        /// A plan carrying the group ratings GroupScaling computes at the SHIPPED dials, the two fields exactly as
+        /// DungeonPopulationBuilder.Build copies them (damage on GroupDamageRatingBonus, the budget's own on AbilityGroupRatingBonus).
+        /// </summary>
+        private static void CarryShippedGroup(DungeonSpawnPlan plan, int roster)
+        {
+            var group = GroupScaling.Compute(roster, GroupScaling.DefaultEffortPerMember, GroupScaling.DefaultCountShare, GroupScaling.DefaultGroupMaxMonsters,
+                GroupScaling.DefaultDamageRatingPerMember, GroupScaling.DefaultDamageRatingCap, GroupScaling.DefaultRewardBonusPerMember,
+                GroupScaling.DefaultRewardBonusCap, 2.7);
+
+            plan.GroupDamageRatingBonus = group.DamageRatingBonus;
+            plan.AbilityGroupRatingBonus = group.AbilityRatingBonus;
+        }
+
+        /// <summary>
+        /// GOLDENS from the pre-2026-11-26 planner (origin/master before #2374, damage dials 15 per member, cap 300): the same fixtures
+        /// run with GroupDamageRatingBonus = min(15 x (N - 1), 300) through the unchanged planner at seed 42. Owner ruling 2026-11-26:
+        /// no impact to family abilities, so the shipped dials (damage 5/100, ability 15/300) must reproduce every row. Kinds are the
+        /// chosen abilities in draw order.
+        /// </summary>
+        private static readonly (int Roster, int OldG, int BudgetClamped, string KindsClamped, int BudgetMixed, string KindsMixed)[] OldGoldens =
+        {
+            (2, 15, 3, "", 15, "Riposte"),
+            (3, 30, 18, "Execute", 30, "Riposte"),
+            (6, 75, 63, "Execute,Riposte", 75, "Riposte,Leech"),
+            (10, 135, 123, "Execute,Riposte,Speed", 135, "Riposte,Leech,Execute"),
+            (20, 285, 273, "Execute,Riposte,Speed,Scattering", 285, "Riposte,Leech,Execute,Scattering"),
+        };
+
+        [TestMethod]
+        public void At_the_shipped_dials_the_family_budget_and_abilities_equal_what_they_were_before_the_damage_rating_cut()
+        {
+            foreach (var row in OldGoldens)
+            {
+                var (clamped, clampedReads) = Clamped(0);
+                CarryShippedGroup(clamped, row.Roster);
+                var (mixed, mixedReads) = Mixed(0);
+                CarryShippedGroup(mixed, row.Roster);
+
+                Assert.AreEqual(row.OldG, clamped.AbilityGroupRatingBonus, $"guard: N={row.Roster} ability G is the old damage G");
+                Assert.IsTrue(clamped.GroupDamageRatingBonus < clamped.AbilityGroupRatingBonus, $"guard: N={row.Roster} the damage G is the lower one");
+
+                var a = Resolve(clamped, clampedReads);
+                var b = Resolve(mixed, mixedReads);
+
+                Assert.AreEqual(row.BudgetClamped, a.Budget, $"N={row.Roster} clamped family budget");
+                Assert.AreEqual(row.KindsClamped, string.Join(",", a.Result.Kinds), $"N={row.Roster} clamped family abilities");
+                Assert.AreEqual(row.BudgetMixed, b.Budget, $"N={row.Roster} mixed family budget");
+                Assert.AreEqual(row.KindsMixed, string.Join(",", b.Result.Kinds), $"N={row.Roster} mixed family abilities");
+            }
+        }
+
+        [TestMethod]
+        public void The_spawner_resolves_abilities_on_the_ability_rating_not_the_damage_rating()
+        {
+            // A damage G alone buys nothing (the guard returns before the world cache is touched).
+            var (plan, reads) = Clamped(0);
+            plan.GroupDamageRatingBonus = 25;
+            Assert.IsNull(ThreadDungeonSpawner.ResolveCreatureAbilities(plan, w => reads[w], null, true, 42), "a damage G alone buys nothing");
+
+            // Resolving a family reads each member's traits off the world cache, so the guard and the log line are pinned in source.
+            var body = PooledLootSourceText.MethodBody(PooledLootSourceText.Read(Spawner),
+                "internal static FamilyAbilityPlan ResolveCreatureAbilities(DungeonSpawnPlan plan, Func<uint, CreaturePerHit> perHitOf,");
+            StringAssert.Contains(body, "plan.AbilityGroupRatingBonus <= 0");
+            Assert.IsFalse(body.Contains("GroupDamageRatingBonus"), "the ability path never reads the damage rating");
+        }
+
+        /// <summary>An archetype uplift whose spell-parity top-up is positive (run spell output 320 over the source's 200).</summary>
+        private static ArchetypeUpliftInfo ToppedUpInfo(uint wcid)
+        {
+            DungeonBandStandard Std(uint scale) => DungeonBandStandard.ForTest(null, 20 * scale, 100 * scale,
+                attributeMedians: new Dictionary<PropertyAttribute, uint> { [PropertyAttribute.Strength] = 100 * scale, [PropertyAttribute.Coordination] = 100 * scale });
+
+            return new ArchetypeUpliftInfo
+            {
+                Wcid = wcid,
+                RunLevel = 400,
+                OwnLevel = 200,
+                Run = new ArchetypeAxes(Std(2), 40, 320, 0, 0, 0, 0, 0, 8, 1.0),
+                Own = new ArchetypeAxes(Std(1), 20, 200, 0, 0, 0, 0, 0, 8, 1.0),
+                OffenseRatio = 1.0,
+                DefenseRatio = 1.0,
+                CapRatio = 0,
+            };
+        }
+
+        private static (DungeonSpawnPlan Plan, CreaturePerHit Raw, DungeonSpawnPlanEntry Entry) ToppedUpFamily(double median, int damageG, int abilityG)
+        {
+            var info = ToppedUpInfo(77);
+            var plan = new DungeonSpawnPlan
+            {
+                FamilyId = "fam_topped",
+                PerHitMedian = median,
+                DamageCeilingCap = 2.0,
+                DamageCeilingTop = 3.0,
+                GroupDamageRatingBonus = damageG,
+                AbilityGroupRatingBonus = abilityG,
+                BossNormalize = false,
+                ArchetypeUplift = ArchetypeUpliftContext.ForTest(400, info),
+            };
+            var entry = new DungeonSpawnPlanEntry(77, DungeonRole.Trash, null, 400);
+            plan.Entries.Add(entry);
+
+            var raw = new CreaturePerHit(200, new PerHitSource(30, PropertyAttribute.Strength, 100, false, isBody: true), default,
+                new ArchetypeUpliftInputs(30, 0, new[] { 200.0 }));
+
+            return (plan, raw, entry);
+        }
+
+        [TestMethod]
+        public void The_archetype_prediction_and_budget_read_the_ability_rating_not_the_damage_rating()
+        {
+            // GOLDENS: the pre-change planner (origin/master, which fed the damage G into the archetype uplift's rating offset)
+            // at the old dials, where damage G == ability G == 75.
+            foreach (var (median, golden) in new[] { (50.0, 47), (60.0, 24) })
+            {
+                var (lowDamage, raw, entry) = ToppedUpFamily(median, 25, 75);
+                var (sameDamage, _, entry2) = ToppedUpFamily(median, 75, 75);
+
+                Assert.IsTrue(ThreadDungeonSpawner.ArchetypeInfoFor(entry, lowDamage) != null, "guard: the entry is archetype-uplifted");
+                var probe = lowDamage.ArchetypeUplift.For(77);
+                Assert.IsTrue(ArchetypeUplift.DamageRatingFloor(probe, 0, raw.UpliftInputs.SpellMeanAt(probe.Run.Core.SpellTier)).Added > 0, "guard: a spell-parity top-up is in play");
+
+                var low = FamilyAbilityPlanner.PredictEntry(lowDamage, entry, raw, true);
+                var same = FamilyAbilityPlanner.PredictEntry(sameDamage, entry2, raw, true);
+
+                Assert.AreEqual(same.MeleePerHit, low.MeleePerHit, 0.0, $"median {median}: the predicted per-hit does not depend on the damage G");
+                Assert.AreEqual(golden, Resolve(sameDamage, new Dictionary<uint, CreaturePerHit> { [77] = raw }).Budget, $"median {median}: golden budget");
+                Assert.AreEqual(golden, Resolve(lowDamage, new Dictionary<uint, CreaturePerHit> { [77] = raw }).Budget, $"median {median}: budget at damage G 25");
+            }
+        }
+
+        [TestMethod]
+        public void The_budget_reads_the_ability_rating_and_ignores_the_damage_rating()
+        {
+            var (plan, reads) = Clamped(75);
+            var baseline = Resolve(plan, reads);
+
+            plan.GroupDamageRatingBonus = 25;
+            Assert.AreEqual(baseline.Budget, Resolve(plan, reads).Budget, "lowering the damage G does not move the budget");
+            Assert.AreEqual(63, baseline.Budget, "guard: the golden six-player budget");
+
+            plan.GroupDamageRatingBonus = 75;
+            plan.AbilityGroupRatingBonus = 25;
+            Assert.IsTrue(Resolve(plan, reads).Budget <= 25, "the budget is bounded by the ability G, not the damage G");
+
+            plan.AbilityGroupRatingBonus = 0;
+            Assert.AreEqual(0, Resolve(plan, reads).Budget, "a plan with no ability G buys nothing even with a damage G");
+        }
 
         [TestMethod]
         public void A_six_player_plan_at_410_gives_every_member_of_a_clamped_family_the_same_spec()
@@ -105,7 +270,7 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             var abilities = Resolve(plan, reads);
 
-            Assert.AreEqual(75, plan.GroupDamageRatingBonus, "guard: the compiled 6-player group bonus");
+            Assert.AreEqual(75, plan.GroupDamageRatingBonus, "guard: the pinned 6-player group bonus");
             Assert.AreEqual(3, abilities.Members.Count, "one member per distinct drawn (wcid, role), the boss included");
             Assert.AreEqual(ExpectedWithheld(plan, reads[hard].MeleePerHit, 0), abilities.Budget, "the budget is the hardest hitter's withheld rating");
             Assert.IsTrue(abilities.Budget >= 45, $"guard: a 2.5x hitter at G 75 withholds at least two tiers (budget {abilities.Budget})");

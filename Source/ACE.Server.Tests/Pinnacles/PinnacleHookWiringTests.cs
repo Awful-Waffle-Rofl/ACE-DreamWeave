@@ -89,7 +89,10 @@ namespace ACE.Server.Tests.Pinnacles
 
             var guide = body.IndexOf("ThreadGuideStation.TryHandleUse(this, guided)", StringComparison.Ordinal);
             var head = body.IndexOf("if (worldObject is Player challenger && ACE.Server.Pinnacles.PinnacleFightManager.TryHandleHeadUse(this, challenger))", StringComparison.Ordinal);
-            var generic = body.IndexOf("// handled in base.OnActivate -> EmoteManager.OnUse()", StringComparison.Ordinal);
+            // the generic-use anchor is a comment; stripping keeps offsets, so the raw body's index compares with the stripped body's
+            var rawBody = PooledLootSourceText.MethodBodyBoth("Source/ACE.Server/WorldObjects/Creature.cs",
+                "public override void ActOnUse(WorldObject worldObject)").Raw;
+            var generic = rawBody.IndexOf("// handled in base.OnActivate -> EmoteManager.OnUse()", StringComparison.Ordinal);
 
             Assert.IsTrue(guide > 0 && head > guide && generic > head, $"guide={guide} head={head} generic={generic}");
             StringAssert.Contains(body.Substring(head), "return;", "a routed head use consumes the use");

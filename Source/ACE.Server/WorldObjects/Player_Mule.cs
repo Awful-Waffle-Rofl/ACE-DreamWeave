@@ -5,6 +5,7 @@ using ACE.Database.Models.Shard;
 using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Entity.Models;
 using ACE.Server.Command.Handlers;
 using ACE.Server.Entity;
 using ACE.Server.Managers;
@@ -102,6 +103,7 @@ namespace ACE.Server.WorldObjects
                 case MuleAction.BuyHouse:          return "A mule cannot buy a dwelling.";
                 case MuleAction.StartChallenge:    return "A mule cannot enter a challenge.";
                 case MuleAction.ChangeFacet:       return "A mule cannot change facets.";
+                case MuleAction.ChangeSkills:      return "A mule cannot train or reset skills.";
                 default:                           return "A mule cannot do that.";
             }
         }
@@ -183,6 +185,77 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// The skills whose wield requirements a mule must be able to meet: Melee, Missile and Magic Defense.
+        /// </summary>
+        internal static bool IsMuleDefenseSkill(Skill skill)
+            => skill == Skill.MeleeDefense || skill == Skill.MissileDefense || skill == Skill.MagicDefense;
+
+        /// <summary>
+        /// Pure form of the defense top-up, on the persisted skill record so it can be tested without a Player:
+        /// trains the skill if it is below Trained and raises InitLevel to <paramref name="targetLevel"/>.
+        /// Base is attribute formula + InitLevel + Ranks (+ bonuses), so InitLevel alone puts Base - and so
+        /// Current, absent a debuff - at or above the target. Never lowers anything, so it is idempotent
+        /// and safe to run on every login. Returns true if anything changed.
+        /// </summary>
+        internal static bool TopUpMuleDefenseRecord(PropertiesSkill record, uint targetLevel)
+        {
+            var changed = false;
+
+            if (record.SAC < SkillAdvancementClass.Trained)
+            {
+                record.SAC = SkillAdvancementClass.Trained;
+                changed = true;
+            }
+
+            if (record.InitLevel < targetLevel)
+            {
+                record.InitLevel = targetLevel;
+                changed = true;
+            }
+
+            return changed;
+        }
+
+        /// <summary>
+        /// Trains Melee, Missile and Magic Defense on a mule and raises them to 'mule_defense_skill_level'
+        /// (default above the highest defense wield requirement in the world data), so the mule can wield
+        /// gear with defense requirements. Idempotent. Called at conversion and from PlayerEnterWorld for
+        /// every mule, which is what tops up mules converted before this existed. Returns the update message
+        /// for each skill that changed: the conversion sends them, the login path discards them because
+        /// SendSelf() runs after it and carries the full skill set.
+        /// </summary>
+        public List<GameMessage> ApplyMuleDefenseSkills()
+        {
+            var updates = new List<GameMessage>();
+
+            if (!IsMule)
+                return updates;
+
+            var target = (uint)Math.Clamp(PropertyManager.GetLong("mule_defense_skill_level").Item, 0, 9999);
+
+            // a mule holds no skill credits (conversion zeroes them); re-asserting it here means a credit
+            // refund that ever slipped through cannot survive a login
+            if ((AvailableSkillCredits ?? 0) != 0)
+                AvailableSkillCredits = 0;
+
+            foreach (var skill in new[] { Skill.MeleeDefense, Skill.MissileDefense, Skill.MagicDefense })
+            {
+                var creatureSkill = GetCreatureSkill(skill);
+
+                if (creatureSkill == null)
+                    continue;
+
+                if (!TopUpMuleDefenseRecord(creatureSkill.PropertiesSkill, target))
+                    continue;
+
+                ChangesDetected = true;
+                updates.Add(new GameMessagePrivateUpdateSkill(this, creatureSkill));
+            }
+
+            return updates;
+        }
+
+        /// <summary>
         /// Applies the whole mule stat package. Callers MUST have just re-run
         /// <see cref="IsEligibleForMuleConversion(Player, out string)"/> - this method does not re-check.
         /// </summary>
@@ -212,8 +285,9 @@ namespace ACE.Server.WorldObjects
 
             Session?.Network.EnqueueSend(new GameMessagePrivateUpdateAttribute(this, Attributes[PropertyAttribute.Strength]));
 
-            // 4. Untrain everything the engine permits, and zero skill credits. The six AlwaysTrained skills
-            //    (ArcaneLore, Jump, Loyalty, MagicDefense, Run, Salvaging) cannot be untrained - the engine's
+            // 4. Untrain everything the engine permits EXCEPT the three defense skills (step 4b trains and raises
+            //    those), and zero skill credits. The other AlwaysTrained skills
+            //    (ArcaneLore, Jump, Loyalty, Run, Salvaging) cannot be untrained - the engine's
             //    own IsSkillUntrainable refuses - so they are skipped rather than fought. Harmless now that
             //    attributes stay normal: an AlwaysTrained skill on a mule is just a normal character's skill.
             //    This whole step is defence in depth. The live guards (MuleBlocked call sites) are the control.
@@ -221,6 +295,11 @@ namespace ACE.Server.WorldObjects
 
             foreach (var skill in PlayerSkills)
             {
+                // the three defense skills are raised in step 4b, not untrained: armor and weapons carry
+                // Melee/Missile/Magic Defense wield requirements, and an untrained mule could wear none of them
+                if (IsMuleDefenseSkill(skill))
+                    continue;
+
                 if (!IsSkillUntrainable(skill))
                     continue;
 
@@ -236,6 +315,10 @@ namespace ACE.Server.WorldObjects
 
                 skillUpdates.Add(new GameMessagePrivateUpdateSkill(this, creatureSkill));
             }
+
+            // 4b. Melee/Missile/Magic Defense are trained and raised to 'mule_defense_skill_level' so the mule
+            //     meets the defense wield requirements armor can carry (see ApplyMuleDefenseSkills).
+            skillUpdates.AddRange(ApplyMuleDefenseSkills());
 
             AvailableSkillCredits = 0;
             TotalSkillCredits = 0;

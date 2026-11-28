@@ -20,7 +20,7 @@ namespace ACE.Server.Tests.Avatars
 {
     /// <summary>
     /// /avatar dress and dress reset: the parse, the refusals, and the popup's Yes handler through the Confirmation_Choice
-    /// Dispatch seam. Tuning is passed in as AvatarTuning.Defaults, so no PropertyManager key is read. Every collaborator is an
+    /// Dispatch seam. Tuning is passed in as AvatarTuning.Defaults with a 3600 s dress cooldown (the shipped default is 0), so the in-cooldown checks stay meaningful and no PropertyManager key is read. Every collaborator is an
     /// AvatarNpcs, AvatarRights, AvatarDress or AvatarAnnouncer seam restored in cleanup.
     /// </summary>
     [TestClass]
@@ -29,7 +29,8 @@ namespace ACE.Server.Tests.Avatars
         private const double Start = 1_800_000_000.0;
         private static readonly DateTime Today = new DateTime(2027, 1, 15, 0, 0, 0, DateTimeKind.Utc);
         private static readonly DateTime Now = new DateTime(2027, 1, 15, 12, 0, 0, DateTimeKind.Utc);
-        private static readonly AvatarTuning T = AvatarTuning.Defaults;
+        // The shipped default is no dress cooldown; the cooldown tests need a real one, so it is set explicitly.
+        private static readonly AvatarTuning T = AvatarTuning.Defaults with { DressCooldownSeconds = 3600 };
 
         private const uint AvatarId = 7;
         private const uint Monarch = 1000;
@@ -225,6 +226,18 @@ namespace ACE.Server.Tests.Avatars
 
             SetLook(ResetLook(Now.AddMinutes(-61)));
             Assert.IsTrue(Begin(monarch, a, false, out _));
+        }
+
+        [TestMethod]
+        public void Dress_allowed_immediately_at_zero_cooldown()
+        {
+            Assert.AreEqual(0L, AvatarTuning.Defaults.DressCooldownSeconds, "fixture: the shipped default is no cooldown");
+            var a = Init();
+            AvatarManager.Initialize(store, () => T with { DressCooldownSeconds = 0 }, () => Start, () => activity, () => rosters.Values.ToList(),
+                m => rosters.TryGetValue(m, out var r) ? r : null);
+
+            SetLook(ResetLook(Now));
+            Assert.IsTrue(Begin(monarch, a, false, out var refusal), refusal);
         }
 
         [TestMethod]

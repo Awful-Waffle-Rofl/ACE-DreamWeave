@@ -88,7 +88,7 @@ namespace ACE.Server.Tests
             // order: room checked, both added in memory, gem consumed, THEN the items are committed (sent + saved)
             var canAdd = pack.IndexOf("canadd:2");
             var addB = pack.IndexOf("add:Beta");
-            var gemGone = pack.IndexOf("consume:Duo Summon Gem");
+            var gemGone = pack.IndexOf("consume:Duo Summon Essence");
             var commitA = pack.IndexOf("commit:Alpha");
             var hammerGone = pack.IndexOf("consume:Summon Gem Hammer");
 
@@ -279,7 +279,7 @@ namespace ACE.Server.Tests
             Assert.IsTrue(threw);
             Assert.IsFalse(pack.HasInPack(gem));
             Assert.IsTrue(pack.Discarded.Contains(gem), "a gem that left the pack but was not destroyed is destroyed before the items are committed");
-            Assert.IsTrue(pack.IndexOf("discard:Duo Summon Gem") < pack.IndexOf("commit:Alpha"));
+            Assert.IsTrue(pack.IndexOf("discard:Duo Summon Essence") < pack.IndexOf("commit:Alpha"));
             Assert.AreEqual(2, pack.Committed.Count, "the two restored items are the only copies now, so they are kept");
             Assert.AreEqual(0, pack.Count("undo:"));
         }

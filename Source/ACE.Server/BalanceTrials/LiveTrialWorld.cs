@@ -96,9 +96,13 @@ namespace ACE.Server.BalanceTrials
             // Whatever has arrived by now; a spawn never waits for it.
             rep.PlayerSide = PlayerSides?.Side;
 
+            // The start-of-rep aggro grace: wave 0 enters the world held until holdUntil (Creature_Trial.cs); later waves never.
+            var graceSecs = rep.StartGraceSecsFor(rep.WaveIndex);
+            var holdUntil = graceSecs > 0 ? TrialManager.Now() + graceSecs : 0.0;
+
             foreach (var entry in wave)
             {
-                var creature = TrialSpawner.Spawn(rep.Plan, entry, rep.ObservedMaxNonBoss, rep, landblock, instance, Tag);
+                var creature = TrialSpawner.Spawn(rep.Plan, entry, rep.ObservedMaxNonBoss, rep, landblock, instance, Tag, holdUntil);
 
                 if (creature == null)
                     continue;
@@ -110,6 +114,13 @@ namespace ACE.Server.BalanceTrials
 
             if (guids.Count < wave.Count)
                 log.Warn($"[TRIAL] {Tag} rep {rep.Number} wave {rep.WaveIndex}: {guids.Count} of {wave.Count} creatures entered the world");
+
+            if (holdUntil > 0 && guids.Count > 0)
+            {
+                rep.GraceHeld = guids.Count;
+                rep.GraceUntil = holdUntil;
+                log.Info($"[TRIAL] {Tag} rep {rep.Number} ({rep.RunKey}) start grace applied: {guids.Count} wave-{rep.WaveIndex} creatures held for {graceSecs}s");
+            }
 
             return guids;
         }

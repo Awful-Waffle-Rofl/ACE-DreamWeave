@@ -2569,7 +2569,7 @@ namespace ACE.Server.WorldObjects
             }
 
             // Mule (WaffleACE): a mule is a storage character, not a progression one - ConvertToMule zeroes
-            // TotalSkillCredits and forces every untrainable skill to Untrained, so a switch would capture
+            // TotalSkillCredits and forces every untrainable skill except the three defense skills to Untrained, so a switch would capture
             // that zeroed state into a slot row as though it were a build the player had chosen. Silent
             // refusal (notify: false) because this method's own contract is to hand the reason back through
             // `refusal`, exactly as Player_ClassAbilities' TrainClassAbility guard does; notifying here

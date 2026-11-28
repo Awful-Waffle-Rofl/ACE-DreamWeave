@@ -133,7 +133,7 @@ namespace ACE.Server.WorldObjects
                         // monster damage pet
                         if (damageEvent.HasDamage)
                         {
-                            targetCreature.TakeDamage(sourceCreature, damageEvent.DamageType, damageEvent.Damage, false, IncomingDamageOrigin.DirectHit);
+                            targetCreature.TakeDamage(sourceCreature, damageEvent.DamageType, damageEvent.Damage, damageEvent.IsCritical, IncomingDamageOrigin.DirectHit);
 
                             // blood splatter?
 

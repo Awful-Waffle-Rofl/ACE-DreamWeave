@@ -1107,6 +1107,9 @@ namespace ACE.Server.WorldObjects
                 case Skill.Sword:
                 case Skill.UnarmedCombat:
 
+                // shields: Thorns is the only caller that passes the Shield skill here; it scales Critical Strike / Crippling Blow on the Melee curve
+                case Skill.Shield:
+
                     return ImbuedSkillType.Melee;
 
                 case Skill.MissileWeapons:
@@ -1124,6 +1127,7 @@ namespace ACE.Server.WorldObjects
                 case Skill.VoidMagic:
                 case Skill.LifeMagic:   // Martyr's Hecatomb
                 case Skill.ItemEnchantment:   // Spellsword class-ability procs (SpellProjectile.CasterSkillOverride)
+                case Skill.Summoning:   // Character Sheet sizing for a Summoner focus (owner ruling 2026-11-24); no combat path passes Summoning
 
                     return ImbuedSkillType.Magic;
 

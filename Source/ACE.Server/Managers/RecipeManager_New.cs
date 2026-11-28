@@ -80,6 +80,17 @@ namespace ACE.Server.Managers
                 return DatabaseManager.World.GetCachedRecipe(SourceToRecipe[WeenieClassName.W_LUCKYRABBITSFOOT_CLASS]);
             }
 
+            // WaffleACE - fork Perennial dyes (Docs/Pvp/DYES.md), routed by PropertyInt PerennialDyeKind ahead of the switch: they are fork wcids
+            // (>= 1000000) and cannot be WeenieClassName labels. Same target gate as the retail eternal dyes (Clothing + Dyable).
+            var perennialKind = PerennialDyes.KindOf(source);
+            if (perennialKind != null)
+            {
+                if (target.WeenieType != WeenieType.Clothing || !(target.GetProperty(PropertyBool.Dyable) ?? false))
+                    return null;
+
+                return DatabaseManager.World.GetCachedRecipe(PerennialDyes.RecipeIdFor(perennialKind.Value));
+            }
+
             switch ((WeenieClassName)source.WeenieClassId)
             {
                 case WeenieClassName.W_POTDYEDARKGREEN_CLASS:

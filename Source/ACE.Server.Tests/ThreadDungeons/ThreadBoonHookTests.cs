@@ -74,11 +74,12 @@ namespace ACE.Server.Tests.ThreadDungeons
             var source = PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/Creature_Rating.cs");
 
             var damage = PooledLootSourceText.MethodBody(source, "public int GetDamageRating()");
-            StringAssert.Contains(damage, "if (this is Player tsbPlayer)\n                damageRating += ACE.Server.ThreadDungeons.ThreadBoons.DamageRatingFor(tsbPlayer);");
+            // (the blessing-free read the Thorns reflect uses skips it: GauntletAuraTests pins that read)
+            StringAssert.Contains(damage, "if (!blessingFreeRatings && this is Player tsbPlayer)\n                damageRating += ACE.Server.ThreadDungeons.ThreadBoons.DamageRatingFor(tsbPlayer);");
             Assert.IsTrue(damage.IndexOf("ThreadBoons.DamageRatingFor", StringComparison.Ordinal) < damage.IndexOf("return damageRating", StringComparison.Ordinal));
 
             var resist = PooledLootSourceText.MethodBody(source, "public int GetDamageResistRating(CombatType? combatType = null, bool directDamage = true)");
-            StringAssert.Contains(resist, "if (this is Player tsbPlayer)\n                damageResistRating += ACE.Server.ThreadDungeons.ThreadBoons.DamageResistRatingFor(tsbPlayer);");
+            StringAssert.Contains(resist, "if (!blessingFreeRatings && this is Player tsbPlayer)\n                damageResistRating += ACE.Server.ThreadDungeons.ThreadBoons.DamageResistRatingFor(tsbPlayer);");
             Assert.IsTrue(resist.IndexOf("ThreadBoons.DamageResistRatingFor", StringComparison.Ordinal) < resist.IndexOf("return damageResistRating", StringComparison.Ordinal));
 
             var boons = PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadBoons.cs");
@@ -195,7 +196,9 @@ namespace ACE.Server.Tests.ThreadDungeons
             var src = PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/Player_ClassAbilityCombat.cs");
             var reflect = PooledLootSourceText.MethodBody(src, "public void ApplyThornsReflect(Creature attacker, DamageType damageType, double strengthMultiplier)");
 
-            StringAssert.Contains(reflect, "RatingAbility.DamageResistRatingThornsMultiplier(drrGrant, GetDamageResistRating() - ACE.Server.ThreadDungeons.ThreadBoons.DamageResistRatingFor(this))");
+            // One blessing-free read (no shrine blessing, no Gauntlet aura), never total-minus-blessing, which could straddle a
+            // grant between its two reads. GauntletAuraTests proves the read leaves both folds out on a real player.
+            StringAssert.Contains(reflect, "RatingAbility.DamageResistRatingThornsMultiplier(drrGrant, GetDamageResistRatingWithoutBlessings())");
             Assert.IsFalse(reflect.Contains("(drrGrant, GetDamageResistRating())", StringComparison.Ordinal), "no uncorrected total read left");
         }
 

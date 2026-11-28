@@ -13,18 +13,43 @@ namespace ACE.Server.Entity
     {
         /// <summary>
         /// Adds <paramref name="offlineSeconds"/> of banked time to <paramref name="currentBank"/>, capped at
-        /// <paramref name="maxSeconds"/>. A non-positive offline duration leaves the bank unchanged (but still
-        /// clamped to the cap, in case the cap was lowered or the value was set out of band).
+        /// <paramref name="maxSeconds"/>. The cap limits what ACCRUAL can add; it never lowers a bank. A bank already at
+        /// or above the cap - granted past it by the Allegiance Avatar's Blessing (<see cref="AddGranted"/>), or left
+        /// there by a lowered cap - is returned unchanged: accrual adds nothing while at or over the cap, and only
+        /// <see cref="Drain"/> (active combat) brings it down (owner ruling 2026-11-25). A non-positive offline duration
+        /// leaves the bank unchanged. A negative bank reads as 0.
         /// </summary>
         public static double Accrue(double currentBank, double offlineSeconds, long maxSeconds)
         {
             if (currentBank < 0)
                 currentBank = 0;
 
+            if (currentBank >= maxSeconds)
+                return currentBank;
+
             if (offlineSeconds > 0)
                 currentBank += offlineSeconds;
 
             return Math.Min(currentBank, maxSeconds);
+        }
+
+        /// <summary>
+        /// Adds <paramref name="seconds"/> of granted bonus time on top of <paramref name="currentBank"/> with NO cap: a
+        /// grant (the Allegiance Avatar's Blessing) may take the bank past offline_bonus_max_seconds, and
+        /// <see cref="Accrue"/> keeps it there. A non-positive or non-finite grant leaves the bank unchanged; a negative
+        /// bank reads as 0; a sum that is not finite keeps the bank as it was.
+        /// </summary>
+        public static double AddGranted(double currentBank, double seconds)
+        {
+            if (currentBank < 0 || double.IsNaN(currentBank))
+                currentBank = 0;
+
+            if (!(seconds > 0) || !double.IsFinite(seconds))
+                return currentBank;
+
+            var sum = currentBank + seconds;
+
+            return double.IsFinite(sum) ? sum : currentBank;
         }
 
         /// <summary>

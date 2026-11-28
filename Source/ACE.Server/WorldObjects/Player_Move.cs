@@ -225,7 +225,10 @@ namespace ACE.Server.WorldObjects
                 default:
 
                     SendWeenieError(status);
-                    HandleActionCancelAttack();
+
+                    // a failure from a move started for an older attack must not cancel the current one
+                    if (ChargeAttackSequence == AttackSequence)
+                        HandleActionCancelAttack();
                     break;
             }
         }

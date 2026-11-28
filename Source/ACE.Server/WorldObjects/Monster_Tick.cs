@@ -44,6 +44,13 @@ namespace ACE.Server.WorldObjects
             if (ClassAbilityMoveSlowUntil != 0.0)
                 TickClassAbilityMoveSlow();
 
+            // Balance Trials start grace (Creature_Trial.cs): when a wave-0 hold runs out, a creature still asleep runs the spawn
+            // scan again (CheckTargets_Inner, without its 0.75 s spawn delay), so it acquires exactly as it would have at spawn.
+            // While held it falls through to the !IsAwake return below, since WakeUp refused every wake. One double compare
+            // for every creature that is not held.
+            if (P_TrialHoldUntil != 0.0 && TrialHoldExpired(ACE.Server.BalanceTrials.TrialManager.Now()) && !IsAwake && !IsDead && MonsterState == State.Idle && !SpawnScanExcluded)
+                CheckTargets_Inner();
+
             // Hunter's Echo (Archer T3, CombatPet_HuntersEcho): its whole think is its own, and it is taken BEFORE the
             // !IsAwake return so the Echo's end-of-life and owner checks run whatever its awake state. It never reaches
             // HandleFindTarget, the pet follow/assist branches or the movement below: it stands where it was placed,

@@ -1764,6 +1764,16 @@ namespace ACE.Server.WorldObjects
 
             var targetPlayer = target as Player;
 
+            // WaffleACE fork, Allegiance Gauntlet: the Avatar fighter is RubberGlue, so the creature PK-type rule below would refuse
+            // every heal and buff from a caster of a different status. A non-harmful spell on the fighter skips it.
+            if (ACE.Server.Avatars.Gauntlet.GauntletAvatarFighter.SkipsPkTypeRule(targetCreature, spell))
+                return null;
+
+            // WaffleACE fork, World Events Hold: a knight is RubberGlue, so the creature PK-type rule below would refuse every
+            // heal and buff from a caster of a different status. A non-harmful spell on a knight skips it.
+            if (ACE.Server.WorldEvents.WorldEventHooks.SkipsPkTypeRule(targetCreature, spell))
+                return null;
+
             if (targetPlayer != null)
             {
                 if (spell == null || spell.IsHarmful)

@@ -67,7 +67,8 @@ namespace ACE.Server.Managers.Market
 
         /// <summary>
         /// Fills Mods, ModCapacity and WeaponQualityTier on a snapshot projected from a live item: weapon rows
-        /// first, then equipment rows, each group in registry order and each only while its switch is on.
+        /// first, then equipment rows, each group ALPHABETICAL by mod name (the appraisal panel's order) and each
+        /// only while its switch is on.
         ///
         /// PRESENCE IS CHECKED BEFORE ANY SWITCH OR SCALE READ. ReadSpecials reads weapon_mod_magnitude_scale
         /// unconditionally, so a mod-less item would otherwise touch PropertyManager for nothing.
@@ -125,7 +126,9 @@ namespace ACE.Server.Managers.Market
                             weaponRows.Add(WeaponRow(definition, magnitude, item));
                     }
 
-                    mods.AddRange(weaponRows);
+                    // Alphabetical, the appraisal panel's order (WeaponModParagonDisplay.ByName), so the web rows and
+                    // the search text built from them list the same mods in the same order on every item.
+                    mods.AddRange(weaponRows.OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase));
 
                     // Summed from the rows just built, NOT WeaponQualityTiers.Evaluate(item). Evaluate
                     // re-walks ReadSpecials and re-reads weapon_mod_magnitude_scale independently, so a
@@ -144,7 +147,7 @@ namespace ACE.Server.Managers.Market
 
                 if ((capacity > 0 || HasAnyEquipmentMod(item)) && IsOn(EquipmentModsEnabledSource, true))
                 {
-                    foreach (var (definition, potency) in EquipmentModDisplay.GetMods(item))
+                    foreach (var (definition, potency) in EquipmentModDisplay.GetModsByName(item))
                         mods.Add(ArmorRow(definition, potency));
 
                     if (capacity > 0)
@@ -170,8 +173,8 @@ namespace ACE.Server.Managers.Market
 
         /// <summary>
         /// The mod names on a live item, for free-text search (ItemTextSearch): exactly the Name of each row
-        /// <see cref="Apply"/> projects for the web market (weapon rows first, then equipment rows, each in
-        /// registry order, each only while its switch is on), which is the definition's DisplayName. It runs
+        /// <see cref="Apply"/> projects for the web market (weapon rows first, then equipment rows, each
+        /// alphabetical, each only while its switch is on), which is the definition's DisplayName. It runs
         /// Apply itself rather than a second walk, so /mule search and the web search can never disagree
         /// about which mods an item has. Empty, never null.
         /// </summary>

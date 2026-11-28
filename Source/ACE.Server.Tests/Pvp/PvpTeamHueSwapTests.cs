@@ -292,6 +292,35 @@ namespace ACE.Server.Tests.Pvp
         }
 
         [TestMethod]
+        public void Apply_ASwap_CarriesDyeShellShade_IncludingZero_OnTheClone()
+        {
+            var result = PvpTeamHue.Apply(Definition(BlueAegis()), KitHue.Red, DialsWith("10000156:red=@1007256"), Valid, TableIcon, Sources(RedAegis(s => s.Look.DyeShellShade = 0.0)));
+
+            Assert.AreEqual(1, result.AppliedCount);
+            Assert.AreEqual(0.0, result.Definition.Kit[0].Floats[(int)PropertyFloat.DyeShellShade], "a shell shade of 0.0 is a value and is carried");
+        }
+
+        [TestMethod]
+        public void Apply_ASwap_FromASourceWithoutDyeShellShade_RemovesItFromAKitItemThatCarriedIt()
+        {
+            var item = BlueAegis();
+            item.Floats[(int)PropertyFloat.DyeShellShade] = 0.4;
+
+            var result = PvpTeamHue.Apply(Definition(item), KitHue.Red, DialsWith("10000156:red=@1007256"), Valid, TableIcon, Sources(RedAegis()));
+
+            Assert.AreEqual(1, result.AppliedCount);
+            Assert.IsFalse(result.Definition.Kit[0].Floats.ContainsKey((int)PropertyFloat.DyeShellShade));
+        }
+
+        [TestMethod]
+        public void LookOf_AfterASwap_RoundTripsTheSourcesDyeShellShade()
+        {
+            var result = PvpTeamHue.Apply(Definition(BlueAegis()), KitHue.Red, DialsWith("10000156:red=@1007256"), Valid, TableIcon, Sources(RedAegis(s => s.Look.DyeShellShade = 0.3)));
+
+            Assert.AreEqual(0.3, PvpTeamHue.LookOf(result.Definition.Kit[0]).DyeShellShade);
+        }
+
+        [TestMethod]
         public void Apply_ASwap_CarriesTheSourceShade()
         {
             var result = PvpTeamHue.Apply(Definition(BlueAegis()), KitHue.Red, DialsWith("10000156:red=@1007256"), Valid, TableIcon, Sources(RedAegis(s => s.Look.Shade = 0.75)));

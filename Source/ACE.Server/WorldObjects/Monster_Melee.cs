@@ -131,7 +131,7 @@ namespace ACE.Server.WorldObjects
                         {
                             // combat pet inflicting or receiving damage
                             //Console.WriteLine($"{target.Name} taking {Math.Round(damage)} {damageType} damage from {Name}");
-                            target.TakeDamage(this, damageEvent.DamageType, damageEvent.Damage, false, IncomingDamageOrigin.DirectHit);
+                            target.TakeDamage(this, damageEvent.DamageType, damageEvent.Damage, damageEvent.IsCritical, IncomingDamageOrigin.DirectHit);
 
                             EmitSplatter(target, damageEvent.Damage);
 

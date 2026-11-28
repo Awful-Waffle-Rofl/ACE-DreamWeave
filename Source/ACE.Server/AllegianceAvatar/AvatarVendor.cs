@@ -27,6 +27,9 @@ public enum AvatarListingKind
 
     /// <summary>An Allegiance Gauntlet run.</summary>
     Gauntlet,
+
+    /// <summary>The Allegiance Blessing: bonus time added to every online member's offline bonus bank.</summary>
+    Blessing,
 }
 
 /// <summary>
@@ -34,8 +37,8 @@ public enum AvatarListingKind
 /// PropertyBool.AllegianceAvatarVendor (9098), ahead of the WeenieType switch. The weenie stays type 10 (Creature), so an
 /// image without the factory arm builds a plain Creature that sells nothing, never a retail Vendor.
 ///
-/// It sells one thing: a Private World Event, paid for in the Avatar's Favor, to a member of the bound allegiance who may
-/// spend (<see cref="AvatarRights.CanSpend(Player, AvatarState)"/>) while the Avatar is Bound and Active. The shape follows
+/// It sells Private World Events (quiet and announced), the Allegiance Gauntlet and the Allegiance Blessing, paid for in the
+/// Avatar's Favor, to a member of the bound allegiance who may spend (<see cref="AvatarRights.CanSpend(Player, AvatarState)"/>) while the Avatar is Bound and Active. The shape follows
 /// ThreadPeddlerVendor: per-viewer listings, a virtual balance, an inert stock/sell path, and a buy that never calls base,
 /// so FinalizeBuyTransaction never runs and nothing reaches a pack.
 /// </summary>
@@ -52,6 +55,11 @@ public class AvatarVendor : Vendor, IAvatarFigure
 
     /// <summary>The display-only shell for the Allegiance Gauntlet row.</summary>
     public const uint GauntletListingWcid = 1008503;
+
+    /// <summary>The display-only shell for the Allegiance Blessing row.</summary>
+    public const uint BlessingListingWcid = 1008508;
+
+    public const string BlessingName = "Allegiance Blessing";
 
     public const string GauntletName = "Allegiance Gauntlet";
     public const string QuietName = "Private World Event (quiet)";
@@ -74,6 +82,12 @@ public class AvatarVendor : Vendor, IAvatarFigure
 
     internal static GauntletBuyHandlerFn GauntletBuyHandler = Gauntlet.GauntletPurchase.TryBuy;
 
+    /// <summary>The Blessing buy hand-off. Defaults to <see cref="AvatarBlessing.TryBuy"/>; tests capture what the vendor passes.</summary>
+    internal static GauntletBuyHandlerFn BlessingBuyHandler = AvatarBlessing.TryBuy;
+
+    /// <summary>Test seam: builds the Blessing listing shell. Defaults to a new object from <see cref="BlessingListingWcid"/>.</summary>
+    internal static Func<WorldObject> BlessingListingBuilder = DefaultBlessingListingBuilder;
+
     /// <summary>Test seam: builds the Gauntlet listing shell. Defaults to a new object from <see cref="GauntletListingWcid"/>.</summary>
     internal static Func<WorldObject> GauntletListingBuilder = DefaultGauntletListingBuilder;
 
@@ -94,6 +108,8 @@ public class AvatarVendor : Vendor, IAvatarFigure
         BuyHandler = AvatarEventPurchase.TryBuy;
         GauntletBuyHandler = Gauntlet.GauntletPurchase.TryBuy;
         GauntletListingBuilder = DefaultGauntletListingBuilder;
+        BlessingBuyHandler = AvatarBlessing.TryBuy;
+        BlessingListingBuilder = DefaultBlessingListingBuilder;
         ListingBuilder = DefaultListingBuilder;
         Tuning = AvatarTuning.FromPropertyManager;
         AccountNames = DefaultAccountNames;
@@ -103,6 +119,8 @@ public class AvatarVendor : Vendor, IAvatarFigure
 
     private static WorldObject DefaultGauntletListingBuilder() => WorldObjectFactory.CreateNewWorldObject(GauntletListingWcid);
 
+    private static WorldObject DefaultBlessingListingBuilder() => WorldObjectFactory.CreateNewWorldObject(BlessingListingWcid);
+
     private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
     private readonly object listingGate = new object();
@@ -110,6 +128,7 @@ public class AvatarVendor : Vendor, IAvatarFigure
     private readonly List<WorldObject> listings = new List<WorldObject>();
     private bool listingsBuilt;
     private WorldObject gauntletListing;
+    private WorldObject blessingListing;
     private readonly Dictionary<uint, List<WorldObject>> panelRows = new Dictionary<uint, List<WorldObject>>();
 
     /// <summary>The hair texture pair (old, new) the dressed look carries, or null. Read by WorldObject.AddBaseModelData, the way a Player reads its Character's.</summary>
@@ -119,6 +138,15 @@ public class AvatarVendor : Vendor, IAvatarFigure
 
     /// <summary>The Avatar this NPC speaks for. 0 until seated or bound by the lifecycle.</summary>
     public uint AvatarId { get; internal set; }
+
+    /// <summary>
+    /// True for the SEATED NPC (set by AvatarNpcs before it enters the world). The seated Avatar is a figure, not a shop:
+    /// using it sends the status lines only, because opening the panel rotates the NPC and breaks its held pose. Only the
+    /// summoned NPC trades.
+    /// </summary>
+    public bool IsSeated { get; internal set; }
+
+    public const string SeatedNoTradeMessage = "The seated Avatar holds its pose and does not trade. Use /avatar summon to spend Favor.";
 
     /// <summary>Called by the factory when a weenie is created.</summary>
     public AvatarVendor(Weenie weenie, ObjectGuid guid) : base(weenie, guid)
@@ -285,12 +313,51 @@ public class AvatarVendor : Vendor, IAvatarFigure
     }
 
     /// <summary>
+    /// Builds the Blessing row once, apart from the other rows so a failed shell never blanks them. False when it cannot be
+    /// built (the row is then absent; the build is retried on the next panel).
+    /// </summary>
+    private bool EnsureBlessingListing()
+    {
+        lock (listingGate)
+        {
+            if (blessingListing != null)
+            {
+                // The event-row build failure path clears the whole kind map; re-register so the row stays buyable.
+                kindByWireGuid[GetWireGuid(blessingListing)] = AvatarListingKind.Blessing;
+                return true;
+            }
+
+            try
+            {
+                var display = BlessingListingBuilder();
+                if (display == null)
+                    throw new InvalidOperationException($"the Blessing listing shell (wcid {BlessingListingWcid}) could not be built");
+
+                display.Name = BlessingName;
+                display.ContainerId = Guid.Full;
+                display.VendorShopCreateListStackSize = -1;
+                blessingListing = display;
+                kindByWireGuid[GetWireGuid(display)] = AvatarListingKind.Blessing;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[AVATAR] {Name}: could not build the Blessing listing; the row stays hidden.", ex);
+                return false;
+            }
+        }
+    }
+
+    /// <summary>
     /// Whether the Gauntlet row is offered at all: the run manager has installed its starter (a purchase with no starter can
     /// only refuse) and the Gauntlet switch is on.
     /// </summary>
     private static bool GauntletOffered() => Gauntlet.GauntletRunStarter.Current != null && Gauntlet.GauntletPurchase.Tuning().Enabled;
 
-    /// <summary>The rows the viewer sees: the event listings and, while the Gauntlet is offered, the Gauntlet row, priced now, for a viewer who may spend while the Avatar is Bound and Active; else none.</summary>
+    /// <summary>
+    /// The rows the viewer sees: the event listings, the Gauntlet row while it is offered, then the Blessing row priced for
+    /// the members online now, for a viewer who may spend while the Avatar is Bound and Active; else none.
+    /// </summary>
     private List<WorldObject> RowsFor(Player viewer)
     {
         var rows = new List<WorldObject>();
@@ -300,11 +367,12 @@ public class AvatarVendor : Vendor, IAvatarFigure
             return rows;
 
         var t = Tuning();
+        var (rosterAccounts, serverAccounts) = AvatarManager.PriceInputs(avatar);
 
         lock (listingGate)
         {
-            listings[0].Value = (int)Math.Clamp(t.EventPriceQuiet, 0, int.MaxValue);
-            listings[1].Value = (int)Math.Clamp(t.EventPriceAnnounced, 0, int.MaxValue);
+            listings[0].Value = (int)Math.Min(AvatarPricing.Quiet(t, rosterAccounts, serverAccounts), int.MaxValue);
+            listings[1].Value = (int)Math.Min(AvatarPricing.Announced(t, rosterAccounts, serverAccounts), int.MaxValue);
             rows.AddRange(listings);
         }
 
@@ -313,8 +381,19 @@ public class AvatarVendor : Vendor, IAvatarFigure
         {
             lock (listingGate)
             {
-                gauntletListing.Value = (int)Math.Clamp(Gauntlet.GauntletPurchase.Tuning().Price, 0, int.MaxValue);
+                gauntletListing.Value = (int)Math.Min(AvatarPricing.Gauntlet(t, Gauntlet.GauntletPurchase.Tuning(), rosterAccounts, serverAccounts), int.MaxValue);
                 rows.Add(gauntletListing);
+            }
+        }
+
+        // Priced outside the listing lock: the price reads the online roster.
+        var blessingPrice = AvatarBlessing.CurrentPrice(avatar, t);
+        if (EnsureBlessingListing())
+        {
+            lock (listingGate)
+            {
+                blessingListing.Value = (int)Math.Min(blessingPrice, int.MaxValue);
+                rows.Add(blessingListing);
             }
         }
 
@@ -363,8 +442,15 @@ public class AvatarVendor : Vendor, IAvatarFigure
     }
 
     /// <summary>Every panel message (Use, the buy refresh, the refused-buy re-send) reads one row snapshot.</summary>
+    /// The seated figure never rotates or sends a panel, including the re-send Player.HandleActionBuyItem makes after a
+    /// refused buy.
     public override void ApproachVendor(Player player, VendorType action = VendorType.Undef, uint altCurrencySpent = 0)
-        => WithPanelSnapshot(player, () => base.ApproachVendor(player, action, altCurrencySpent));
+    {
+        if (IsSeated)
+            return;
+
+        WithPanelSnapshot(player, () => base.ApproachVendor(player, action, altCurrencySpent));
+    }
 
     public override void ForEachItemFor(Player viewer, Action<WorldObject> action)
     {
@@ -435,8 +521,17 @@ public class AvatarVendor : Vendor, IAvatarFigure
             return;
         }
 
-        foreach (var line in AvatarStatusText.Lines(avatar, Tuning(), AccountDisplayName))
+        var statusTuning = Tuning();
+
+        foreach (var line in AvatarStatusText.Lines(avatar, statusTuning, AvatarManager.FavorCapFor(avatar, statusTuning), AccountDisplayName))
             Tell(player, line);
+
+        // The seated figure never rotates or opens the panel (base.ActOnUse does both), so its pose holds.
+        if (IsSeated)
+        {
+            Tell(player, SeatedNoTradeMessage);
+            return;
+        }
 
         if (PanelOpener != null)
             PanelOpener(player);
@@ -478,6 +573,13 @@ public class AvatarVendor : Vendor, IAvatarFigure
         if (player == null)
             return false;
 
+        // The seated figure never shows a panel, so a buy naming it is stale or forged.
+        if (IsSeated)
+        {
+            Tell(player, SeatedNoTradeMessage);
+            return false;
+        }
+
         var avatar = Avatar;
         if (avatar == null || !AvatarRights.IsMember(player, avatar))
         {
@@ -516,9 +618,12 @@ public class AvatarVendor : Vendor, IAvatarFigure
         }
 
         string line;
-        var bought = kind == AvatarListingKind.Gauntlet
-            ? GauntletBuyHandler(player, this, out line)
-            : BuyHandler(player, this, kind == AvatarListingKind.AnnouncedEvent, out line);
+        var bought = kind switch
+        {
+            AvatarListingKind.Gauntlet => GauntletBuyHandler(player, this, out line),
+            AvatarListingKind.Blessing => BlessingBuyHandler(player, this, out line),
+            _ => BuyHandler(player, this, kind == AvatarListingKind.AnnouncedEvent, out line),
+        };
 
         if (!bought)
         {

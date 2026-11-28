@@ -332,14 +332,15 @@ namespace ACE.Server.Tests
 
             var retry = onComplete.IndexOf("actionChain.AddAction(this, OnTeleportComplete);", StringComparison.Ordinal);
             var teleportingFalse = onComplete.IndexOf("Teleporting = false;", StringComparison.Ordinal);
-            var resync = onComplete.IndexOf("ResyncStanceToSelf(\"teleport-complete\");", StringComparison.Ordinal);
+            var resync = onComplete.IndexOf("ScheduleArrivalStanceResync();", StringComparison.Ordinal);
             var delayed = onComplete.IndexOf("ScheduleDelayedStanceResync();", StringComparison.Ordinal);
 
             Assert.IsTrue(retry >= 0, "pink-bubble retry not found");
             Assert.IsTrue(teleportingFalse >= 0, "Teleporting = false not found");
-            Assert.IsTrue(resync >= 0, "immediate stance resync missing from OnTeleportComplete");
+            Assert.IsTrue(resync >= 0, "deferred arrival stance resync missing from OnTeleportComplete");
             Assert.IsTrue(delayed >= 0, "delayed stance resync missing from OnTeleportComplete");
-            Assert.AreEqual(1, Regex.Matches(onComplete, @"ResyncStanceToSelf\(").Count, "exactly one immediate resync call");
+            Assert.AreEqual(0, Regex.Matches(onComplete, @"ResyncStanceToSelf\(").Count, "no immediate resync: it would overtake an autorun MoveToState");
+            Assert.AreEqual(1, Regex.Matches(onComplete, @"ScheduleArrivalStanceResync\(\);").Count, "exactly one deferred arrival resync");
             Assert.IsTrue(resync > teleportingFalse, "the resync must come AFTER Teleporting = false");
             Assert.IsTrue(delayed > teleportingFalse, "the delayed resync must be scheduled AFTER Teleporting = false");
             Assert.IsTrue(resync > retry, "the resync must not sit in (or before) the pink-bubble retry branch");
@@ -347,6 +348,180 @@ namespace ACE.Server.Tests
             // the retry branch ends at its own return; nothing resync-related may appear before it
             var retryReturn = onComplete.IndexOf("return;", retry, StringComparison.Ordinal);
             Assert.IsTrue(retryReturn >= 0 && resync > retryReturn, "the resync must come after the retry branch's return");
+        }
+
+        private const double Still = 0.1, GiveUp = 60.0;
+
+        [TestMethod]
+        public void ArrivalResync_Moving_IsInWindowMovementOrServerMoveTo()
+        {
+            Assert.IsTrue(CombatStanceSync.IsMovingForArrivalResync(true, true, false), "autorun reported this window");
+            Assert.IsTrue(CombatStanceSync.IsMovingForArrivalResync(false, false, true), "server MoveTo");
+
+            Assert.IsFalse(CombatStanceSync.IsMovingForArrivalResync(true, false, false), "a stop report this window is idle");
+            Assert.IsFalse(CombatStanceSync.IsMovingForArrivalResync(false, false, false), "no report");
+        }
+
+        [TestMethod]
+        public void ArrivalResync_PreWindowMovementReport_IsIdleAtTheDeferredSend()
+        {
+            const double windowStart = 1000.0;
+
+            // the run into the portal: a movement report stamped before the teleport started
+            var reported = CombatStanceSync.ClientReportedThisWindow(windowStart - 0.5, windowStart);
+            Assert.IsFalse(reported);
+            Assert.IsFalse(CombatStanceSync.IsMovingForArrivalResync(reported, true, false), "a stale movement report must not hold the 0.5 s send back");
+
+            // the same report made after the teleport began does hold it back
+            reported = CombatStanceSync.ClientReportedThisWindow(windowStart + 0.2, windowStart);
+            Assert.IsTrue(CombatStanceSync.IsMovingForArrivalResync(reported, true, false));
+
+            Assert.IsTrue(CombatStanceSync.ClientReportedThisWindow(windowStart, windowStart), "same instant counts");
+            Assert.IsFalse(CombatStanceSync.ClientReportedThisWindow(0, windowStart), "0 = no MoveToState handled yet");
+            Assert.IsFalse(CombatStanceSync.ClientReportedThisWindow(0, 0), "0 stays unset even against a zero window");
+            Assert.IsFalse(CombatStanceSync.ClientReportedThisWindow(windowStart + 0.5, null), "no window");
+        }
+
+        private const int StillTicks = 2;
+
+        /// <summary>Drives the retry the way Player.ScheduleArrivalStanceResyncRetry does; returns the tick that sent, or null.</summary>
+        private static int? RunRetry(bool moving, double?[] movedPerTick, bool acting = false)
+        {
+            var still = 0;
+
+            for (var tick = 0; tick < movedPerTick.Length; tick++)
+            {
+                still = CombatStanceSync.NextStillTicks(still, movedPerTick[tick], Still);
+                var step = CombatStanceSync.DecideArrivalResyncRetry(true, false, moving, acting, still, StillTicks, 1.5 + tick, GiveUp);
+
+                if (step == CombatStanceSync.ArrivalResyncStep.Send)
+                    return tick;
+
+                if (step == CombatStanceSync.ArrivalResyncStep.Stop)
+                    return null;
+            }
+
+            return null;
+        }
+
+        [TestMethod]
+        public void ArrivalResync_Retry_ContinuouslyMovingPlayer_NeverGetsASend()
+        {
+            // autorun for well past the give-up time: about 5 m covered per 1 s tick
+            var running = new double?[70];
+            for (var i = 0; i < running.Length; i++)
+                running[i] = 5.0;
+            Assert.IsNull(RunRetry(true, running), "a running player must never be interrupted");
+
+            // a running player whose Location reads unchanged on ONE tick (no position report landed) is still running
+            Assert.IsNull(RunRetry(true, new double?[] { 5.0, 0.0, 5.0, 0.0, 5.0, 0.0, 5.0 }), "one identical-position tick must not send");
+
+            // slow but real movement just over the threshold, and unknown positions, are never still
+            Assert.IsNull(RunRetry(true, new double?[] { Still, Still, Still, Still }));
+            Assert.IsNull(RunRetry(true, new double?[] { null, null, null, null }));
+
+            // past the give-up time it stops without a send
+            Assert.AreEqual(CombatStanceSync.ArrivalResyncStep.Stop, CombatStanceSync.DecideArrivalResyncRetry(true, false, true, false, 0, StillTicks, GiveUp, GiveUp));
+        }
+
+        [TestMethod]
+        public void ArrivalResync_Retry_StuckFlagButStationary_SendsAtTheSecondConsecutiveStillTick()
+        {
+            // moving flag stuck true throughout; runs for 3 ticks, then stands still
+            Assert.AreEqual(4, RunRetry(true, new double?[] { 5.0, 5.0, 5.0, 0.02, 0.0, 0.0 }), "two consecutive still ticks send");
+
+            // the NextStillTicks counter resets on any real movement
+            Assert.AreEqual(0, CombatStanceSync.NextStillTicks(1, 5.0, Still));
+            Assert.AreEqual(2, CombatStanceSync.NextStillTicks(1, 0.0, Still));
+            Assert.AreEqual(0, CombatStanceSync.NextStillTicks(1, null, Still));
+
+            // not moving at all sends at once; mid-action waits; stop conditions win over everything
+            Assert.AreEqual(0, RunRetry(false, new double?[] { 5.0 }));
+            Assert.IsNull(RunRetry(false, new double?[] { 0.0, 0.0, 0.0 }, acting: true), "casting/attacking waits");
+            Assert.AreEqual(CombatStanceSync.ArrivalResyncStep.Stop, CombatStanceSync.DecideArrivalResyncRetry(false, false, false, false, 5, StillTicks, 2, GiveUp), "window gone");
+            Assert.AreEqual(CombatStanceSync.ArrivalResyncStep.Stop, CombatStanceSync.DecideArrivalResyncRetry(true, true, false, false, 5, StillTicks, 2, GiveUp), "already resynced");
+        }
+
+        [TestMethod]
+        public void ArrivalResync_StopReport_TriggersTheFastPathOnce()
+        {
+            // pending after the deferred skip; reports: still running, running, stop, stop, start again, stop
+            var reportsHaveMovement = new[] { true, true, false, false, true, false };
+            var pending = true;
+            var sends = 0;
+            var sentOnReport = -1;
+
+            for (var i = 0; i < reportsHaveMovement.Length; i++)
+            {
+                if (CombatStanceSync.ShouldSendPendingResyncOnReport(pending, reportsHaveMovement[i], false, false))
+                {
+                    sends++;
+                    sentOnReport = i;
+                    pending = false; // the send claims (clears) the pending state
+                }
+            }
+
+            Assert.AreEqual(1, sends, "exactly one fast-path send per window");
+            Assert.AreEqual(2, sentOnReport, "sent on the first stop report");
+            Assert.IsFalse(CombatStanceSync.ShouldSendPendingResyncOnReport(true, false, true, false), "a server MoveTo holds it");
+            Assert.IsFalse(CombatStanceSync.ShouldSendPendingResyncOnReport(true, false, false, true), "mid-action holds it; the retry covers it");
+        }
+
+        [TestMethod]
+        public void Wiring_ArrivalResync_DeferredGuardRetryAndFastPath()
+        {
+            var source = PlayerLocationSource();
+
+            StringAssert.Contains(source, "private const double ArrivalStanceResyncDelaySeconds = 0.5;");
+            StringAssert.Contains(source, "private const double ArrivalStanceResyncRetrySeconds = 1.0;");
+            StringAssert.Contains(source, "private const double ArrivalStanceResyncGiveUpSeconds = 60.0;");
+            StringAssert.Contains(source, "private const double ArrivalStanceResyncStillMeters = 0.1;");
+
+            var moving = ExtractMember(source, "private bool IsMovingForArrivalStanceResync(double? stamp)");
+            StringAssert.Contains(moving, "CombatStanceSync.ClientReportedThisWindow(LastMoveToStateTime, stamp)");
+            StringAssert.Contains(moving, "CombatStanceSync.IsMovingForArrivalResync(");
+
+            var deferred = ExtractMember(source, "private void ScheduleArrivalStanceResync()");
+            StringAssert.Contains(deferred, "chain.AddDelaySeconds(ArrivalStanceResyncDelaySeconds);");
+            var action = deferred.IndexOf("chain.AddAction(this, () =>", StringComparison.Ordinal);
+            var gate = Regex.Match(deferred, @"if \(!IsMovingForArrivalStanceResync\(stamp\)\)\s*\{\s*ResyncStanceToSelf\(""teleport-complete""\);\s*return;\s*\}");
+            Assert.IsTrue(action >= 0 && gate.Success && gate.Index > action, "the deferred send must be gated at fire time");
+            var tail = deferred.Substring(gate.Index + gate.Length);
+            StringAssert.Contains(tail, "Interlocked.Exchange(ref pendingArrivalStanceResyncStamp, stamp ?? 0);");
+            StringAssert.Contains(tail, "ScheduleArrivalStanceResyncRetry(stamp, arrivedAt, Location == null ? null : new Position(Location), 0);");
+            StringAssert.Contains(source, "private const int ArrivalStanceResyncStillTicksRequired = 2;");
+            StringAssert.Contains(source, "private double pendingArrivalStanceResyncStamp;");
+
+            var retryBody = ExtractMember(source, "private void ScheduleArrivalStanceResyncRetry(double? stamp, double arrivedAt, Position previous, int stillTicks)");
+            StringAssert.Contains(retryBody, "chain.AddDelaySeconds(ArrivalStanceResyncRetrySeconds);");
+            StringAssert.Contains(retryBody, "current.DistanceTo(previous)");
+            StringAssert.Contains(retryBody, "IsMovingForArrivalStanceResync(stamp)");
+            StringAssert.Contains(retryBody, "ArrivalStanceResyncGiveUpSeconds);");
+            StringAssert.Contains(retryBody, "CombatStanceSync.NextStillTicks(stillTicks, moved, ArrivalStanceResyncStillMeters)");
+            StringAssert.Contains(retryBody, "ArrivalStanceResyncStillTicksRequired,");
+            Assert.IsTrue(Regex.IsMatch(retryBody, @"case CombatStanceSync\.ArrivalResyncStep\.Send:\s*if \(TryClaimPendingArrivalStanceResync\(stamp\)\)\s*ResyncStanceToSelf\("), "Send must claim, then resync");
+            Assert.IsTrue(Regex.IsMatch(retryBody, @"case CombatStanceSync\.ArrivalResyncStep\.Wait:\s*ScheduleArrivalStanceResyncRetry\(stamp, arrivedAt, current, consecutiveStill\);"), "Wait must re-arm with this tick's position and still count");
+
+            var claim = ExtractMember(source, "private bool TryClaimPendingArrivalStanceResync(double? stamp)");
+            StringAssert.Contains(claim, "Interlocked.CompareExchange(ref pendingArrivalStanceResyncStamp, 0, stamp.Value) == stamp.Value");
+
+            var resync = ExtractMember(source, "public void ResyncStanceToSelf(string reason)");
+            StringAssert.Contains(resync, "lastStanceResyncTime = Time.GetUnixTime();");
+            StringAssert.Contains(resync, "Interlocked.Exchange(ref pendingArrivalStanceResyncStamp, 0);");
+            StringAssert.Contains(retryBody, "lastStanceResyncTime >= arrivedAt");
+
+            var fast = ExtractMember(source, "public void CheckPendingArrivalStanceResync(ACE.Server.Network.Structure.MoveToState moveToState)");
+            StringAssert.Contains(fast, "CombatStanceSync.ShouldSendPendingResyncOnReport(");
+            StringAssert.Contains(fast, "MoveToParams != null || IsPlayerMovingTo, IsActingForStanceResync()))");
+            Assert.IsTrue(Regex.IsMatch(fast, @"if \(TryClaimPendingArrivalStanceResync\(stamp\)\)\s*ResyncStanceToSelf\(""teleport-complete-stopped""\);"), "the fast path must claim before sending");
+            StringAssert.Contains(fast, "ResyncStanceToSelf(\"teleport-complete-stopped\");");
+
+            var handler = File.ReadAllText(FindInSourceTree(Path.Combine("Source", "ACE.Server", "Network", "GameAction", "Actions", "GameActionMoveToState.cs")));
+            Assert.IsTrue(Regex.IsMatch(handler, @"session\.Player\.LastMoveToState = moveToState;\s*session\.Player\.LastMoveToStateTime = Time\.GetUnixTime\(\);"),
+                "GameActionMoveToState must stamp LastMoveToStateTime together with LastMoveToState");
+            var stamped = handler.IndexOf("session.Player.LastMoveToStateTime = Time.GetUnixTime();", StringComparison.Ordinal);
+            var fastCall = handler.IndexOf("session.Player.CheckPendingArrivalStanceResync(moveToState);", StringComparison.Ordinal);
+            Assert.IsTrue(fastCall > stamped, "the fast path runs on every report, after LastMoveToState is stored");
         }
 
         [TestMethod]

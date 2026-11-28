@@ -8,7 +8,7 @@ namespace ACE.Server.Tests
 {
     /// <summary>
     /// Boundary math for the offline bonus system (<see cref="OfflineBonus"/>): banked time must accrue 1:1
-    /// with offline time but never exceed the cap, drain 1:1 with online time but never go negative, and the
+    /// with offline time but never accrue past the cap (a granted bank above it is kept, never clamped down), drain 1:1 with online time but never go negative, and the
     /// combat multiplier must only fire while time remains (and never overflow a long on a bad multiplier).
     /// </summary>
     [TestClass]
@@ -33,12 +33,47 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void Accrue_NonPositiveOfflineTime_LeavesBankUnchangedButClampedToCap()
+        public void Accrue_NonPositiveOfflineTime_LeavesBankUnchanged()
         {
             Assert.AreEqual(1800, OfflineBonus.Accrue(1800, 0, Cap));
             Assert.AreEqual(1800, OfflineBonus.Accrue(1800, -100, Cap));
-            // a value already over the cap (e.g. cap lowered / set out of band) clamps down
-            Assert.AreEqual(Cap, OfflineBonus.Accrue(Cap + 500, 0, Cap));
+            Assert.AreEqual(0, OfflineBonus.Accrue(-50, 0, Cap), "a negative bank reads as 0");
+        }
+
+        /// <summary>
+        /// Owner ruling 2026-11-25 (Allegiance Blessing): a bank above the cap - granted past it by the Blessing, or left there
+        /// by a lowered cap - is NEVER clamped back down by accrual. Accrual simply adds nothing while at or over the cap; only
+        /// Drain (active combat) lowers it. This replaced the old rule that an over-cap value clamped down to the cap.
+        /// </summary>
+        [TestMethod]
+        public void Accrue_AboveCapBank_IsKept_AndGainsNothing()
+        {
+            Assert.AreEqual(Cap + 3600, OfflineBonus.Accrue(Cap + 3600, 0, Cap), "no accrual: kept as is");
+            Assert.AreEqual(Cap + 3600, OfflineBonus.Accrue(Cap + 3600, 7200, Cap), "accrual over the cap adds nothing and lowers nothing");
+            Assert.AreEqual(Cap, OfflineBonus.Accrue(Cap, 7200, Cap), "exactly at the cap gains nothing");
+            Assert.AreEqual(5000, OfflineBonus.Accrue(5000, 100, 3000), "a lowered cap does not take banked time away");
+            Assert.AreEqual(Cap, OfflineBonus.Accrue(Cap - 10, 7200, Cap), "control: below the cap, accrual still stops at the cap");
+        }
+
+        [TestMethod]
+        public void AddGranted_IsUncapped_AndIgnoresBadInput()
+        {
+            Assert.AreEqual(Cap + 3600, OfflineBonus.AddGranted(Cap, 3600), "a grant may pass the cap");
+            Assert.AreEqual(3600, OfflineBonus.AddGranted(0, 3600));
+            Assert.AreEqual(3600, OfflineBonus.AddGranted(-5, 3600), "a negative bank reads as 0");
+            Assert.AreEqual(1800, OfflineBonus.AddGranted(1800, 0));
+            Assert.AreEqual(1800, OfflineBonus.AddGranted(1800, -60));
+            Assert.AreEqual(1800, OfflineBonus.AddGranted(1800, double.NaN));
+            Assert.AreEqual(1800, OfflineBonus.AddGranted(1800, double.PositiveInfinity));
+            Assert.AreEqual(double.MaxValue, OfflineBonus.AddGranted(double.MaxValue, double.MaxValue), "an overflowing sum keeps the bank");
+        }
+
+        /// <summary>The Blessing's bonus time drains like any other: active combat takes it down, through the cap and below.</summary>
+        [TestMethod]
+        public void Drain_TakesAnAboveCapBankDown()
+        {
+            Assert.AreEqual(Cap + 600, OfflineBonus.Drain(Cap + 3600, 3000));
+            Assert.AreEqual(Cap - 400, OfflineBonus.Drain(Cap + 3600, 4000));
         }
 
         [TestMethod]

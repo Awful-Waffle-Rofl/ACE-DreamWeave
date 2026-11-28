@@ -42,6 +42,9 @@ namespace ACE.Server.Tests.Avatars
         [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "<Account>k__BackingField")]
         private static extern ref Account AccountField(Player player);
 
+        [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "altCharacterBonusThreshold")]
+        private static extern ref long AltThreshold(Player player);
+
         private Action<AvatarFeedEvent> savedSink;
         private Action<uint, long> savedLevelSink;
         private List<(uint Monarch, long Amount)> levelCaptured;
@@ -129,11 +132,11 @@ namespace ACE.Server.Tests.Avatars
         }
 
         /// <summary>Runs the real GrantXP. A seeded Player ends it in EnqueueAction (no action queue); anything else is a failure.</summary>
-        private static void Grant(Player player, long amount, XpType type)
+        private static void Grant(Player player, long amount, XpType type, bool combatShare = false)
         {
             try
             {
-                player.GrantXP(amount, type, ShareType.None, false);
+                player.GrantXP(amount, type, ShareType.None, combatShare);
                 Assert.Fail("GrantXP was expected to end in EnqueueAction on a seeded Player");
             }
             catch (NullReferenceException ex) when (ex.StackTrace != null && ex.StackTrace.Contains("EnqueueAction"))
@@ -224,6 +227,100 @@ namespace ACE.Server.Tests.Avatars
             Assert.AreEqual(OtherMonarch, captured[0].MonarchGuid);
             Assert.AreEqual(AccountId, captured[0].AccountId);
         }
+
+        // ---- offline bank bonus XP counts toward Favor (owner ruling 2026-11-25) ----
+
+        /// <summary>Seeds the offline and alt bonus keys GrantXP reads, runs <paramref name="body"/>, and restores them.</summary>
+        private static void WithBonusKeys(bool offlineOn, double offlineMultiplier, bool altOn, Action body)
+        {
+            var keys = (Enabled: PropertyManager.GetBool("offline_bonus_enabled").Item, Mult: PropertyManager.GetDouble("offline_bonus_multiplier").Item,
+                AltOn: PropertyManager.GetBool("alt_character_bonus_enabled").Item, AltMult: PropertyManager.GetDouble("alt_character_bonus_multiplier").Item,
+                Gap: PropertyManager.GetLong("alt_character_bonus_gap").Item);
+            try
+            {
+                Assert.IsTrue(PropertyManager.ModifyBool("offline_bonus_enabled", offlineOn));
+                Assert.IsTrue(PropertyManager.ModifyDouble("offline_bonus_multiplier", offlineMultiplier, init: true));
+                Assert.IsTrue(PropertyManager.ModifyBool("alt_character_bonus_enabled", altOn));
+                Assert.IsTrue(PropertyManager.ModifyDouble("alt_character_bonus_multiplier", 1.0, init: true));
+                Assert.IsTrue(PropertyManager.ModifyLong("alt_character_bonus_gap", 0));
+                body();
+            }
+            finally
+            {
+                PropertyManager.ModifyBool("offline_bonus_enabled", keys.Enabled);
+                PropertyManager.ModifyDouble("offline_bonus_multiplier", keys.Mult, init: true);
+                PropertyManager.ModifyBool("alt_character_bonus_enabled", keys.AltOn);
+                PropertyManager.ModifyDouble("alt_character_bonus_multiplier", keys.AltMult, init: true);
+                PropertyManager.ModifyLong("alt_character_bonus_gap", keys.Gap);
+            }
+        }
+
+        [TestMethod]
+        public void RealGrant_WithABankedOfflineBonus_FeedsTheBoostedAmount() => WithBonusKeys(true, 1.0, false, () =>
+        {
+            var player = Earner();
+            player.OfflineExperienceBonusRemaining = 3600;
+
+            Grant(player, 1000, XpType.Kill);
+
+            Assert.AreEqual(1, captured.Count);
+            Assert.AreEqual(2000L, captured[0].Amount, "multiplier 1.0 (+100%): the Favor feed sees the doubled amount");
+        });
+
+        [TestMethod]
+        public void RealGrant_WithAnEmptyBank_FeedsTheRawAmount() => WithBonusKeys(true, 1.0, false, () =>
+        {
+            Grant(Earner(), 1000, XpType.Kill);
+
+            Assert.AreEqual(1000L, captured.Single().Amount, "control: no bank, no boost");
+        });
+
+        [TestMethod]
+        public void RealGrant_AltBonus_IsNotFed_ButTheOfflineBonusIs() => WithBonusKeys(true, 1.0, true, () =>
+        {
+            var player = Earner();
+            player.OfflineExperienceBonusRemaining = 3600;
+            AltThreshold(player) = 1_000_000; // far behind the account's best character: the alt bonus is active
+            Assert.IsTrue(player.IsAltCharacterBonusActive, "control: the alt bonus applies to this grant");
+            Assert.AreEqual(4000L, player.ApplyAltCharacterBonus(2000), "control: after the feed the alt bonus doubles again");
+
+            Grant(player, 1000, XpType.Kill);
+
+            Assert.AreEqual(2000L, captured.Single().Amount, "offline-boosted, and taken before the alt bonus (not 4000)");
+        });
+
+        [TestMethod]
+        public void RealGrant_FellowshipShareOfACombatKill_FeedsTheBoostedAmount() => WithBonusKeys(true, 1.0, false, () =>
+        {
+            var player = Earner();
+            player.OfflineExperienceBonusRemaining = 3600;
+
+            Grant(player, 1000, XpType.Fellowship, combatShare: true);
+
+            Assert.AreEqual(2000L, captured.Single().Amount, "a fellow's combat share takes the receiver's offline bonus, and Favor sees it");
+        });
+
+        [TestMethod]
+        public void RealGrant_FellowshipShareNotFromCombat_FeedsTheRawAmount() => WithBonusKeys(true, 1.0, false, () =>
+        {
+            var player = Earner();
+            player.OfflineExperienceBonusRemaining = 3600;
+
+            Grant(player, 1000, XpType.Fellowship, combatShare: false);
+
+            Assert.AreEqual(1000L, captured.Single().Amount, "control: a non-combat Fellowship share takes no offline bonus");
+        });
+
+        [TestMethod]
+        public void RealGrant_QuestXp_TakesNoOfflineBonus_SoFeedsTheRawAmount() => WithBonusKeys(true, 1.0, false, () =>
+        {
+            var player = Earner();
+            player.OfflineExperienceBonusRemaining = 3600;
+
+            Grant(player, 1000, XpType.Quest);
+
+            Assert.AreEqual(1000L, captured.Single().Amount, "quest XP never reaches the offline bonus, so Favor sees it unboosted");
+        });
 
         [TestMethod]
         public void Capture_MonarchOwnKill_Feeds()

@@ -471,10 +471,10 @@ namespace ACE.Server.Tests
                 "target.TakeDamage(this, damageEvent.DamageType, damageEvent.Damage, damageEvent.IsCritical, IncomingDamageOrigin.DirectHit);");
 
             AssertSource("S3 origin, monster/pet missile", "Source/ACE.Server/WorldObjects/ProjectileCollisionHelper.cs",
-                "targetCreature.TakeDamage(sourceCreature, damageEvent.DamageType, damageEvent.Damage, false, IncomingDamageOrigin.DirectHit);");
+                "targetCreature.TakeDamage(sourceCreature, damageEvent.DamageType, damageEvent.Damage, damageEvent.IsCritical, IncomingDamageOrigin.DirectHit);");
 
             AssertSource("S3 origin, monster/pet melee", "Source/ACE.Server/WorldObjects/Monster_Melee.cs",
-                "target.TakeDamage(this, damageEvent.DamageType, damageEvent.Damage, false, IncomingDamageOrigin.DirectHit);");
+                "target.TakeDamage(this, damageEvent.DamageType, damageEvent.Damage, damageEvent.IsCritical, IncomingDamageOrigin.DirectHit);");
 
             AssertSource("S3 origin, monster riposte counter", "Source/ACE.Server/MonsterEffects/Effects/RiposteEffect.cs",
                 "counterTarget.TakeDamage(counterAttacker, damageEvent.DamageType, damageEvent.Damage, damageEvent.IsCritical, IncomingDamageOrigin.DirectHit);");

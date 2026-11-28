@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -225,9 +226,10 @@ namespace ACE.Server.Tests
             WeaponModTinkerSet.ApplySpecialAtFraction(weapon, Row(WeaponModId.Ambush), 0.5);
             WeaponModTinkerSet.ApplySpecial(weapon, Row(WeaponModId.Devastation), 4);
 
-            // the pre-Paragon construction, verbatim
+            // the pre-Paragon construction, then alphabetical by name (owner ruling 2026-11-25)
             var legacy = WeaponModTinkerSet.ReadSpecials(weapon)
                 .Select(s => MarketItemMods.WeaponRow(s.Definition, s.Magnitude, weapon))
+                .OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
             var snapshot = MarketSnapshot.FromItem(weapon);

@@ -1058,6 +1058,17 @@ namespace ACE.Server.WorldObjects
             }
         }
 
+        /// <summary>True when a player's buff is welcome on this creature: a living knight of an active run with player_heal on (the same gate as heals, so a Thread Defense pillar, which runs with it off, takes none).</summary>
+        internal bool AcceptsHoldBuff
+        {
+            get
+            {
+                var tag = WorldEventHold;
+
+                return tag?.Kind == HoldUnitKind.Knight && !IsDead && tag.Run?.IsActive == true && tag.Run.Tuning.PlayerHealEnabled;
+            }
+        }
+
         // ---- H4b: what players see -------------------------------------------------------------------------------------
 
         /// <summary>

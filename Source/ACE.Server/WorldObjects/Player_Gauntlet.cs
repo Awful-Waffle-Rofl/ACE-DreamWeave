@@ -55,6 +55,10 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         private bool LatchGauntletDeath()
         {
+            // A destination left from an earlier death must not steer this one.
+            gauntletCachesPending = null;
+            gauntletCachesPendingArrived = false;
+
             try
             {
                 var run = LiveGauntletDeathHooks.Instance.LatchDeath(this, Guid.Full, Location?.Instance ?? 0);
@@ -62,12 +66,15 @@ namespace ACE.Server.WorldObjects
                 if (run == null)
                     return false;
 
+                // After the fight ended the death goes to the caches (no hold), so the line says that, not "return to the fight".
+                var line = run.FightOver
+                    ? "You have fallen in the Allegiance Gauntlet, but the fight is over. You keep your items and your enchantments, and you are brought to the caches shortly."
+                    : $"You have fallen in the Allegiance Gauntlet. You keep your items and your enchantments, and you return to the fight in {Math.Max(0L, run.DeathHoldSeconds)} seconds.";
+
                 // A death inside the shield's seconds: the death arrival's own protection must not be cut by the old expiry.
                 ClearGauntletArrivalShieldStamp();
 
-                Session?.Network.EnqueueSend(new GameMessageSystemChat(
-                    $"You have fallen in the Allegiance Gauntlet. You keep your items and your enchantments, and you return to the fight in {Math.Max(0L, run.DeathHoldSeconds)} seconds.",
-                    ChatMessageType.Broadcast));
+                Session?.Network.EnqueueSend(new GameMessageSystemChat(line, ChatMessageType.Broadcast));
 
                 return true;
             }
@@ -166,6 +173,113 @@ namespace ACE.Server.WorldObjects
                 SetGauntletArrivalShield(ACE.Common.Time.GetUnixTime());
             }
         }
+
+        /// <summary>
+        /// Where a player who was still in the death animation or the pen-arrival chain when the fight ended goes once that chain
+        /// is done (null: none). Read by ThreadSafeTeleportOnDeath, which sends them there instead of the pen, and by the arrival
+        /// chain's last step, which then restores their vitals (the chain's own 75% write would otherwise stand).
+        /// </summary>
+        private Position gauntletCachesPending;
+
+        /// <summary>True once ThreadSafeTeleportOnDeath has already sent the player to <see cref="gauntletCachesPending"/>.</summary>
+        private bool gauntletCachesPendingArrived;
+
+        /// <summary>The death latch, after the fight ended: records where the death chain sends this player (the caches landing).</summary>
+        internal void SetGauntletCachesPending(Position caches) => gauntletCachesPending = caches;
+
+        /// <summary>Test seam: the destination waiting for the death chain, or null.</summary>
+        internal Position GauntletCachesPending => gauntletCachesPending;
+
+        /// <summary>ThreadSafeTeleportOnDeath: the pending cache destination (kept, so the chain's last step still releases), or null.</summary>
+        internal Position PeekGauntletCachesPending()
+        {
+            var at = gauntletCachesPending;
+
+            if (at == null)
+                return null;
+
+            // The run may have closed since the destination was recorded: its copy is going, so the ordinary exit branch runs.
+            if (!GauntletCachesPendingStillValid(at))
+            {
+                gauntletCachesPending = null;
+                gauntletCachesPendingArrived = false;
+                return null;
+            }
+
+            gauntletCachesPendingArrived = true;
+            return new Position(at);
+        }
+
+        /// <summary>True while the run whose copy <paramref name="at"/> is in still exists and has not closed.</summary>
+        private static bool GauntletCachesPendingStillValid(Position at)
+        {
+            try
+            {
+                var run = LiveGauntletDeathHooks.RunForInstance(at.Instance);
+                return run != null && !run.IsTerminal;
+            }
+            catch (Exception ex)
+            {
+                log.Error("[GAUNTLET] the pending cache destination's run lookup threw", ex);
+                return false;
+            }
+        }
+
+        /// <summary>The death chain's last step: a still-pending cache release is carried out now (vitals, shield; no second teleport when already there).</summary>
+        private void CompleteGauntletCachesPending()
+        {
+            var at = gauntletCachesPending;
+
+            if (at == null)
+                return;
+
+            var arrived = gauntletCachesPendingArrived;
+            gauntletCachesPending = null;
+            gauntletCachesPendingArrived = false;
+
+            if (!GauntletCachesPendingStillValid(at))
+                return;   // the run closed mid-chain: no false "brought to the caches" line
+
+            ReleaseFromGauntletHoldAtCaches(at, teleport: !arrived);
+        }
+
+        /// <summary>
+        /// The run stopped fighting (Rewarding began) and this player was still held: the same release as
+        /// <see cref="ReleaseFromGauntletHold"/> (full vitals, damage history reset, the arrival shield once there), but with the
+        /// end-of-fight line and the teleport to <paramref name="caches"/>, the cache area. The player's own queue. A player still
+        /// dying (the death animation, or the 3 s pen-arrival chain) only has the destination recorded: restoring health now would
+        /// read as alive in the middle of the death chain, which would then send them out of the arena, and its arrival write
+        /// would overwrite the vitals. The chain finishes the release (<see cref="CompleteGauntletCachesPending"/>).
+        /// </summary>
+        internal void ReleaseFromGauntletHoldAtCaches(Position caches, bool teleport = true)
+        {
+            if (IsInDeathProcess || IsDead)
+            {
+                gauntletCachesPending = caches;
+                return;
+            }
+
+            PvpPlayerRules.RestoreRespawnVitals(v => Vitals[v].MaxValue, (v, max) => UpdateVital(Vitals[v], max));
+
+            DamageHistory.Reset();
+
+            Session?.Network.EnqueueSend(new GameMessageSystemChat(GauntletCachesReleaseLine, ChatMessageType.Broadcast));
+
+            if (caches != null && teleport)
+            {
+                WorldManager.ThreadSafeTeleport(this, caches, new ActionEventDelegate(() =>
+                {
+                    SetGauntletArrivalShield(ACE.Common.Time.GetUnixTime());
+                    SendWeenieError(WeenieError.ITeleported);
+                }));
+            }
+            else
+            {
+                SetGauntletArrivalShield(ACE.Common.Time.GetUnixTime());
+            }
+        }
+
+        internal const string GauntletCachesReleaseLine = "The fight is over. You are brought to the caches.";
 
         /// <summary>Seconds of lifestone protection a released player arrives with.</summary>
         public const double GauntletArrivalShieldSeconds = 5.0;

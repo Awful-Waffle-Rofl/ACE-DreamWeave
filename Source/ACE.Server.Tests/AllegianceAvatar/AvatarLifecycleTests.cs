@@ -19,7 +19,7 @@ namespace ACE.Server.Tests.Avatars
         private const double Start = 1_800_000_000.0; // 2027-01-15 08:00:00 UTC
         private const double Day = 86400.0;
         private static readonly DateTime Today = new DateTime(2027, 1, 15, 0, 0, 0, DateTimeKind.Utc);
-        private static readonly AvatarTuning T = AvatarTuning.Defaults;
+        private static readonly AvatarTuning T = AvatarTuning.Defaults with { BaseRate = 0.000001 };
 
         private const uint AvatarA = 7;
         private const uint AvatarB = 8;

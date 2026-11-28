@@ -108,6 +108,64 @@ namespace ACE.Server.Tests
         private static string AsAppraisalLine(ItemMod mod)
             => $"- {mod.Name}{(mod.IntensityPct.HasValue ? $" [{mod.IntensityPct}%]" : string.Empty)}: {mod.Effect}";
 
+        // ---- alphabetical order (owner ruling 2026-11-25) ----
+
+        /// <summary>
+        /// Weapon mods read alphabetically by name on the appraisal panel, in the market rows and in the search
+        /// text. The fixture's registry order (Weak Point, Bloodthirst, Ambush) is NOT alphabetical, so a
+        /// registry-order walk fails every assertion here.
+        /// </summary>
+        [TestMethod]
+        public void WeaponMods_ReadAlphabetically_OnPanelRowsAndSearch()
+        {
+            var sword = Sword();
+            ApplyPerfect(sword, WeaponModId.WeakPoint, WeaponModId.Bloodthirst, WeaponModId.Ambush);
+
+            var registryOrder = WeaponModTinkerSet.ReadSpecials(sword).Select(s => s.Definition.DisplayName).ToArray();
+            CollectionAssert.AreEqual(new[] { "Weak Point", "Bloodthirst", "Ambush" }, registryOrder, "fixture: registry order is not alphabetical");
+
+            var expected = new[] { "Ambush", "Bloodthirst", "Weak Point" };
+
+            var panelNames = WeaponModDisplay.GetAppraisalLines(sword).Select(l => l.Substring(2, l.IndexOf(" [", StringComparison.Ordinal) - 2)).ToArray();
+            CollectionAssert.AreEqual(expected, panelNames);
+
+            CollectionAssert.AreEqual(expected, MarketSnapshot.FromItem(sword).Mods.Select(m => m.Name).ToArray());
+            CollectionAssert.AreEqual(expected, MarketItemMods.SearchNames(sword).ToArray());
+
+            var text = ItemTextSearch.SearchText(sword);
+            Assert.IsTrue(text.IndexOf("Ambush", StringComparison.Ordinal) < text.IndexOf("Bloodthirst", StringComparison.Ordinal)
+                && text.IndexOf("Bloodthirst", StringComparison.Ordinal) < text.IndexOf("Weak Point", StringComparison.Ordinal), text);
+        }
+
+        /// <summary>
+        /// Armor mods read alphabetically by name on the appraisal panel (Mod Capacity stays last), in the market
+        /// rows and in the search text. Registry order here is Long Draw, Splitshot, Double Volley.
+        /// </summary>
+        [TestMethod]
+        public void ArmorMods_ReadAlphabetically_OnPanelRowsAndSearch()
+        {
+            var plate = Breastplate();
+            plate.SetProperty(EquipmentModRegistry.Get(EquipmentModId.LongDraw).Property, 0.5);
+            plate.SetProperty(EquipmentModRegistry.Get(EquipmentModId.Splitshot).Property, 0.5);
+            plate.SetProperty(EquipmentModRegistry.Get(EquipmentModId.DoubleVolley).Property, 0.5);
+            plate.SetProperty(PropertyInt.GearModCapacity, 3);
+
+            CollectionAssert.AreEqual(new[] { "Long Draw", "Splitshot", "Double Volley" },
+                EquipmentModDisplay.GetMods(plate).Select(m => m.Definition.DisplayName).ToArray(), "fixture: registry order is not alphabetical");
+
+            var expected = new[] { "Double Volley", "Long Draw", "Splitshot" };
+
+            var panel = EquipmentModDisplay.GetAppraisalLines(plate);
+            CollectionAssert.AreEqual(expected, panel.Take(3).Select(l => l.Substring(2, l.IndexOf(" [", StringComparison.Ordinal) - 2)).ToArray());
+            Assert.AreEqual("- Mod Capacity: 3", panel.Last(), "capacity stays last");
+
+            CollectionAssert.AreEqual(expected, MarketSnapshot.FromItem(plate).Mods.Select(m => m.Name).ToArray());
+
+            var text = ItemTextSearch.SearchText(plate);
+            Assert.IsTrue(text.IndexOf("Double Volley", StringComparison.Ordinal) < text.IndexOf("Long Draw", StringComparison.Ordinal)
+                && text.IndexOf("Long Draw", StringComparison.Ordinal) < text.IndexOf("Splitshot", StringComparison.Ordinal), text);
+        }
+
         // ---- the token rule ----
 
         [TestMethod]

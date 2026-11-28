@@ -43,6 +43,9 @@ public sealed class ShardAvatarStore : IAvatarStore
             LastContributionAt = s.LastContributionUtc,
             LastDecayDay = s.LastDecayDay,
             LookJson = s.LookJson,
+            BlessingBoughtAt = s.BlessingBoughtUtc,
+            LastEventAt = s.LastEventUtc,
+            EventsOnDay = s.EventsOnDay,
         };
 
         var seat = s.Seat;
@@ -86,6 +89,9 @@ public sealed class ShardAvatarStore : IAvatarStore
             KeeperGuid = e.MonarchGuid ?? 0,
             LookJson = e.LookJson,
             Look = AvatarLookJson.Parse(e.LookJson),
+            BlessingBoughtUtc = AsUtc(e.BlessingBoughtAt),
+            LastEventUtc = AsUtc(e.LastEventAt),
+            EventsOnDay = e.EventsOnDay,
         };
 
         if (e.SeatHouseGuid.HasValue && e.SeatCell.HasValue && e.SeatInstance.HasValue

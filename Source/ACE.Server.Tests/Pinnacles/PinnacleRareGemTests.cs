@@ -25,7 +25,9 @@ namespace ACE.Server.Tests.Pinnacles
             var act = PooledLootSourceText.MethodBody(gem, "public void ActOnUse(WorldObject activator, bool confirmed)");
             var refuse = act.IndexOf("if (RefuseRareInKnot(player))", StringComparison.Ordinal);
             Assert.IsTrue(refuse > 0, "ActOnUse refuses");
-            Assert.IsTrue(refuse < act.IndexOf("// handle rare gems", StringComparison.Ordinal), "before the confirmation prompt");
+            // the anchor is a section comment; stripping keeps offsets, so the raw body's index compares with the stripped body's
+            var rawAct = PooledLootSourceText.MethodBodyBoth("Source/ACE.Server/WorldObjects/Gem.cs", "public void ActOnUse(WorldObject activator, bool confirmed)").Raw;
+            Assert.IsTrue(refuse < rawAct.IndexOf("// handle rare gems", StringComparison.Ordinal), "before the confirmation prompt");
             Assert.IsTrue(refuse < act.IndexOf("if (RareUsesTimer)", StringComparison.Ordinal), "before the rare timer");
 
             var use = PooledLootSourceText.MethodBody(gem, "public void UseGem(Player player)");

@@ -64,10 +64,100 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
                 Assert.AreEqual(GauntletRewards.CacheWcid, reward.CacheWcid, id);
                 Assert.IsTrue(reward.Pool != null && reward.Pool.Count > 0, $"{id} has a pool, or its crate would refuse to open");
                 Assert.AreEqual(store.Rewards["standard"].ClaimWindowSeconds, reward.ClaimWindowSeconds, $"{id} copies the standard claim window");
-                Assert.AreEqual(store.Rewards["standard"].Pool.Count, reward.Pool.Count, $"{id} copies the standard pool");
                 Assert.IsTrue(reward.GateByCharacter && reward.GateByAccount && reward.GateByIp, $"{id} copies the standard gates");
                 Assert.AreEqual(0, reward.CacheWcids.Count, $"{id} uses its one cache look");
             }
+        }
+
+        [TestMethod]
+        public void GauntletProfiles_DrawsPerTier_AreExactly_1_2_3_4_4_5_6()
+        {
+            var store = ShippedStore();
+            var expected = new int?[] { 1, 2, 3, 4, 4, 5, 6 };
+
+            for (var tier = 0; tier < expected.Length; tier++)
+                Assert.AreEqual(expected[tier], store.Rewards[GauntletCrateTier.ProfilePrefix + tier].Draws, $"tier {tier}");
+        }
+
+        [TestMethod]
+        public void GauntletProfiles_PoolWeightsSumTo100_PerDraw()
+        {
+            var store = ShippedStore();
+
+            for (var tier = 0; tier <= 6; tier++)
+            {
+                var id = GauntletCrateTier.ProfilePrefix + tier;
+
+                Assert.AreEqual(100.0, store.Rewards[id].Pool.Sum(e => e.Weight), 1e-9, id);
+            }
+        }
+
+        [TestMethod]
+        public void GauntletProfiles_LevelFiveAetheria_OnlyInTiers4To6()
+        {
+            var store = ShippedStore();
+
+            for (var tier = 0; tier <= 6; tier++)
+            {
+                var id = GauntletCrateTier.ProfilePrefix + tier;
+                var hasL5 = store.Rewards[id].Pool.Any(e => e.ItemMaxLevel == 5);
+
+                Assert.AreEqual(tier >= 4, hasL5, id);
+            }
+        }
+
+        [TestMethod]
+        public void GauntletProfiles_PatternsAndFibers_OnlyInTiers2To6_NeverInStandard()
+        {
+            var store = ShippedStore();
+
+            for (var tier = 0; tier <= 6; tier++)
+            {
+                var pool = store.Rewards[GauntletCrateTier.ProfilePrefix + tier].Pool;
+                var hasPattern = pool.Any(e => e.KnotItem == "pattern");
+                var hasFiber = pool.Any(e => e.KnotItem == "fiber");
+
+                Assert.AreEqual(tier >= 2, hasPattern, $"tier {tier} pattern");
+                Assert.AreEqual(tier >= 2, hasFiber, $"tier {tier} fiber");
+            }
+
+            Assert.IsTrue(store.Rewards["standard"].Pool.All(e => e.KnotItem == null));
+        }
+
+        /// <summary>
+        /// Golden values computed by origin/master's ORIGINAL WorldEventRewardRoller.Roll (run from a throwaway harness built from
+        /// `git show origin/master:...WorldEventRewardRoller.cs`) against the live standard pool, never derived from this branch's roller.
+        /// A moved or extra rng draw anywhere on the standard path changes them.
+        /// </summary>
+        [TestMethod]
+        public void StandardProfile_RollsMatchOriginMasterGoldenValues()
+        {
+            var golden = new (double M, int Seed, string Rows)[]
+            {
+                (1.0, 1, "1008001:1"), (1.0, 7, "6331:1"), (1.0, 42, "43901:25"), (1.0, 2026, "1001912:1"),
+                (1.5, 1, "1008001:1,1001756:5"), (1.5, 7, "6331:1,20630:12"), (1.5, 42, "43901:25,1001752:5"), (1.5, 2026, "1001912:1,20630:12"),
+                (0.37, 1, "1008002:4"), (0.37, 7, "43901:10"), (0.37, 42, "43901:10"), (0.37, 2026, "1001752:4"),
+                (2.0, 1, "1008001:1,1001911:1"), (2.0, 7, "6331:1,20630:25"), (2.0, 42, "43901:25,1001912:1"), (2.0, 2026, "1001912:1,6331:1"),
+            };
+
+            var pool = ShippedStore().Rewards["standard"].Pool;
+
+            foreach (var (m, seed, rows) in golden)
+            {
+                var rolled = WorldEventRewardRoller.Roll(pool, m, new Random(seed));
+
+                Assert.AreEqual(rows, string.Join(",", rolled.Select(r => $"{r.Wcid}:{r.Qty}")), $"m={m} seed={seed}");
+            }
+        }
+
+        [TestMethod]
+        public void StandardProfile_UsesNoGauntletOnlyFields()
+        {
+            var standard = ShippedStore().Rewards["standard"];
+
+            Assert.IsNull(standard.Draws);
+            Assert.IsTrue(standard.Pool.Count > 0);
+            Assert.IsTrue(standard.Pool.All(e => (e.Wcids == null || e.Wcids.Count == 0) && e.ItemMaxLevel == null && e.Wcid != 0));
         }
 
         [TestMethod]

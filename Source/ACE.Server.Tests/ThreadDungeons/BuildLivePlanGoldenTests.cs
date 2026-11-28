@@ -460,11 +460,19 @@ namespace ACE.Server.Tests.ThreadDungeons
 
         // ---- inputs ---------------------------------------------------------------------------------------------
 
+        /// <summary>
+        /// The damage-rating dials the golden rows were captured with (15 per extra member, cap 300). They are pinned here,
+        /// not read from the shipped defaults, so a later tuning of the group damage tunables (2026-11-26: 5 per member,
+        /// cap 100) does not move the captured plans; G for a roster of 3 stays 30 as the rows record.
+        /// </summary>
+        private const int CapturedDamageRatingPerMember = 15;
+        private const int CapturedDamageRatingCap = 300;
+
         internal static GroupScaling GroupFor(GoldenCase c)
             => c.GroupSize <= 1 ? GroupScaling.Solo
                 : GroupScaling.Compute(c.GroupSize, GroupScaling.DefaultEffortPerMember, GroupScaling.DefaultCountShare, GroupScaling.DefaultGroupMaxMonsters,
-                    GroupScaling.DefaultDamageRatingPerMember, GroupScaling.DefaultDamageRatingCap, GroupScaling.DefaultRewardBonusPerMember,
-                    GroupScaling.DefaultRewardBonusCap, 2.7);
+                    CapturedDamageRatingPerMember, CapturedDamageRatingCap, GroupScaling.DefaultRewardBonusPerMember,
+                    GroupScaling.DefaultRewardBonusCap, 2.7, abilityRatingPerMember: 15, abilityRatingCap: 300);
 
         internal static DungeonEntryDef DungeonFor(GoldenCase c, ThreadDungeonStore store)
         {

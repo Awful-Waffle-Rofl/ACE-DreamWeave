@@ -563,7 +563,7 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
 
             // the wave 1 stats it received (the consumer pin: what the fighter received)
             var t = h.Tuning;
-            Assert.AreEqual(new GauntletRules(t).LevelOf(1), fighter.Level, "the level shown is L(1)");
+            Assert.AreEqual(h.AvatarLevel, fighter.Level, "the level shown is the Avatar's own level A, never the wave level");
             Assert.AreEqual((uint)(2000 * (t.FighterHealthBase + t.FighterHealthPerLevel * h.AvatarLevel)), fighter.Health.MaxValue, "HealthCurveTarget x (10 + 0.4 A) at the live A");
             Assert.AreEqual(fighter.Health.MaxValue, fighter.Health.Current, "full health kept full");
 
@@ -583,7 +583,7 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             Assert.IsFalse(HasEnchantment(fighter, 2002));
             Assert.IsTrue(HasEnchantment(fighter, 2003), "a monster's debuff stays");
             Assert.IsTrue(HasEnchantment(fighter, 2004), "an item spell (duration -1) stays");
-            Assert.AreEqual(new GauntletRules(t).LevelOf(2), fighter.Level, "stamped from wave 2's plan at the break's start");
+            Assert.AreEqual(h.AvatarLevel, fighter.Level, "still the Avatar's level A at the break (the wave level is never shown)");
 
             // A buff cast during the break carries into wave 2.
             Enchant(fighter, 2005, beneficial: true);
@@ -617,13 +617,13 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             Assert.IsTrue(wave2Calls >= 3, "fixture: the mid-wave re-plan succeeded");
 
             Assert.IsTrue(HasEnchantment(fighter, 2101), "a mid-wave re-plan never clears buffs again");
-            Assert.AreEqual(new GauntletRules(h.Tuning).LevelOf(2), fighter.Level, "it still carries wave 2's stats");
+            Assert.AreEqual(h.AvatarLevel, fighter.Level, "it shows the Avatar's level A; its stats are still wave 1's snapshot");
         }
 
         private static uint DungeonSkill(uint median, double ratio) => (uint)Math.Round(median * ratio, MidpointRounding.AwayFromZero);
 
         [TestMethod]
-        public void Restamp_ReadsTheLiveAvatarLevel_AndKeepsTheHealthFraction()
+        public void Restamp_AvatarLevelUp_MovesTheShownLevelOnly_StatsStayAtTheStartSnapshot()
         {
             var h = new FighterRunHarness { AvatarLevel = 0 };
             var run = h.StartActive();
@@ -631,8 +631,10 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             var t = h.Tuning;
 
             Assert.AreEqual((uint)(2000 * t.FighterHealthBase), fighter.Health.MaxValue, "A = 0 at wave 1");
+            var startMax = fighter.Health.MaxValue;
+            var startSkill = fighter.GetCreatureSkill(Skill.LightWeapons, false).InitLevel;
 
-            // half health, then the Avatar levels up mid-run: it takes effect at the next restamp, at the same fraction
+            // half health, then the Avatar levels up mid-run: the shown level follows at the next restamp, the stats do not
             fighter.Health.Current = fighter.Health.MaxValue / 2;
             h.AvatarLevel = 50;
 
@@ -640,9 +642,95 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             h.Advance(t.IntermissionSeconds + 0.5);
             Assert.AreEqual(2, run.CurrentWave, "fixture: wave 2 started");
 
-            Assert.AreEqual((uint)(2000 * (t.FighterHealthBase + t.FighterHealthPerLevel * 50)), fighter.Health.MaxValue, "the level-up applied at the restamp");
-            Assert.AreEqual(fighter.Health.MaxValue / 2, fighter.Health.Current, "the health fraction is kept");
-            Assert.AreEqual(new GauntletRules(t).LevelOf(2), fighter.Level);
+            Assert.AreEqual(startMax, fighter.Health.MaxValue, "max health is the run-start snapshot, not recomputed at the new A");
+            Assert.AreEqual(startMax / 2, fighter.Health.Current, "the health fraction is kept");
+            Assert.AreEqual(startSkill, fighter.GetCreatureSkill(Skill.LightWeapons, false).InitLevel, "skills are the start snapshot");
+            Assert.AreEqual(50, fighter.Level, "the shown level follows the Avatar's level A");
+        }
+
+        [TestMethod]
+        public void StartSnapshot_HoldsAtWaves1_5_And12_AndTheShownLevelIsA_NotTheWaveLevel()
+        {
+            var h = new FighterRunHarness { AvatarLevel = 30 };
+            // plans that differ every wave: the old per-wave restamp would move every number below
+            h.Plans = w => FighterRunHarness.Plan(w, GauntletFighterFixtures.Standard(), 2000.0 * w, 50.0 * w);
+            var run = h.StartActive();
+            var fighter = h.Placed.Single();
+            var t = h.Tuning;
+            var rules = new GauntletRules(t);
+
+            var wave1 = fighter.Stamp;
+            Assert.IsNotNull(wave1);
+            Assert.AreEqual((uint)Math.Round(2000 * (t.FighterHealthBase + t.FighterHealthPerLevel * 30), MidpointRounding.AwayFromZero), wave1.MaxHealth, "fixture: wave 1's stamp is from wave 1's plan at A = 30");
+
+            void AssertSnapshot(int wave)
+            {
+                Assert.AreEqual(wave, run.CurrentWave, "fixture: the wave under test is running");
+                var s = fighter.Stamp;
+                Assert.AreEqual(wave1.MaxHealth, s.MaxHealth, $"wave {wave}: max health");
+                Assert.AreEqual(wave1.MaxHealth, fighter.Health.MaxValue, $"wave {wave}: applied max health");
+                Assert.AreEqual(wave1.DamageTarget, s.DamageTarget, $"wave {wave}: damage target");
+                Assert.AreEqual(wave1.OffenseRatio, s.OffenseRatio, 1e-9, $"wave {wave}: offense ratio");
+                CollectionAssert.AreEquivalent(wave1.Skills.ToList(), s.Skills.ToList(), $"wave {wave}: skills");
+                CollectionAssert.AreEquivalent(wave1.Attributes.ToList(), s.Attributes.ToList(), $"wave {wave}: attributes");
+                Assert.AreEqual(wave1.Skills[Skill.LightWeapons], fighter.GetCreatureSkill(Skill.LightWeapons, false).InitLevel, $"wave {wave}: applied skill");
+                Assert.AreEqual(wave1.DamageTarget, (uint)fighter.Biota.PropertiesBodyPart.Values.Max(p => p.DVal), $"wave {wave}: applied body-part hit");
+                Assert.AreEqual(30, fighter.Level, $"wave {wave}: the shown level is A, not L({wave}) = {rules.LevelOf(wave)}");
+            }
+
+            AssertSnapshot(1);
+
+            for (var w = 2; w <= 12; w++)
+            {
+                KillWave(h, run);
+                h.Advance(t.IntermissionSeconds + 0.5);
+
+                if (w == 5 || w == 12)
+                    AssertSnapshot(w);
+            }
+        }
+
+        [TestMethod]
+        public void Restamp_WhenTheAvatarLevelCannotBeRead_KeepsThePreviousShownLevel()
+        {
+            var h = new FighterRunHarness { AvatarLevel = 30 };
+            var run = h.StartActive();
+            var fighter = h.Placed.Single();
+            Assert.AreEqual(30, fighter.Level, "fixture");
+
+            h.AvatarLevel = 0;   // the Avatar is gone (the read's fallback)
+            KillWave(h, run);
+            h.Advance(h.Tuning.IntermissionSeconds + 0.5);
+
+            Assert.AreEqual(30, fighter.Level, "the previous shown level stays, not 1");
+        }
+
+        [TestMethod]
+        public void Respawn_AfterWave5_UsesTheWave1Stamp()
+        {
+            var h = new FighterRunHarness { AvatarLevel = 30 };
+            h.Plans = w => FighterRunHarness.Plan(w, GauntletFighterFixtures.Standard(), 2000.0 * w, 50.0 * w);
+            var run = h.StartActive();
+            var first = h.Placed.Single();
+            var wave1 = first.Stamp;
+
+            for (var w = 2; w <= 5; w++)
+            {
+                KillWave(h, run);
+                h.Advance(h.Tuning.IntermissionSeconds + 0.5);
+            }
+
+            Assert.AreEqual(5, run.CurrentWave, "fixture: wave 5");
+
+            first.OnDeath(null, DamageType.Slash);
+            h.Advance(h.Tuning.FighterRespawnSeconds + 1.5);
+            Assert.AreEqual(2, h.Placed.Count, "fixture: respawned");
+
+            var second = h.Placed[1];
+            Assert.AreEqual(wave1.MaxHealth, second.Health.MaxValue, "the respawn has the wave 1 max health");
+            Assert.AreEqual(wave1.DamageTarget, second.Stamp.DamageTarget);
+            CollectionAssert.AreEquivalent(wave1.Skills.ToList(), second.Stamp.Skills.ToList());
+            Assert.AreEqual(30, second.Level, "and shows A");
         }
 
         private static void KillWave(FighterRunHarness h, GauntletRun run)

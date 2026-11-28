@@ -76,6 +76,38 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             Assert.AreEqual(5000UL, state.Favor, "nothing is committed until wave 1");
         }
 
+        // ---- roster-scaled price (owner ruling 2026-11-26) -------------------------------------------------------
+
+        [DataTestMethod]
+        [DataRow(2, 230, 1000UL)]
+        [DataRow(20, 230, 6000UL)]
+        [DataRow(73, 230, 15359UL)]
+        public void TryBuy_ReservesTheScaledPrice_TheRunCarriesIt_AndThePanelShowsIt(int r, int s, ulong price)
+        {
+            var state = h.InitActive(favor: 40_000, r: r, s: s);
+            var vendor = h.MakeVendor();
+
+            var row = GauntletVendorHarness.Panel(vendor, h.Seneschal).Single(w => w.Name == AvatarVendor.GauntletName);
+            Assert.AreEqual((int)price, row.Value, "the listing shows this Avatar's price");
+
+            Assert.IsTrue(GauntletPurchase.TryBuy(h.Seneschal, vendor, out var line), line);
+
+            Assert.AreEqual(price, state.ReservedFavor, "the scaled price is what is held");
+            Assert.AreEqual(price, h.Starter.Started.Single().Price, "the run is handed the reserved price, to commit or release");
+        }
+
+        [TestMethod]
+        public void TryBuy_ScaledPrice_RefusesUnderIt_HoldingNothing()
+        {
+            var state = h.InitActive(favor: 15_358, r: 73, s: 230);
+
+            Assert.IsFalse(GauntletPurchase.TryBuy(h.Seneschal, h.MakeVendor(), out var line));
+
+            Assert.AreEqual(GauntletPurchase.LineFor(GauntletRefusal.InsufficientFavor, T), line);
+            Assert.AreEqual(0UL, state.ReservedFavor);
+            Assert.AreEqual(0, h.Starter.StartCalls);
+        }
+
         [TestMethod]
         public void TryBuy_StartReceivesNpcSpotAndAvatarId()
         {
@@ -206,17 +238,17 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
         // ---- vendor ----------------------------------------------------------------------------------------------
 
         [TestMethod]
-        public void Panel_SpenderSeesThreeRows_MemberSeesNone()
+        public void Panel_SpenderSeesFourRows_MemberSeesNone()
         {
             h.InitActive(favor: 5000);
             var vendor = h.MakeVendor();
 
             var rows = GauntletVendorHarness.Panel(vendor, h.Seneschal);
 
-            CollectionAssert.AreEqual(new[] { AvatarVendor.QuietName, AvatarVendor.AnnouncedName, AvatarVendor.GauntletName }, rows.Select(r => r.Name).ToArray());
+            CollectionAssert.AreEqual(new[] { AvatarVendor.QuietName, AvatarVendor.AnnouncedName, AvatarVendor.GauntletName, AvatarVendor.BlessingName }, rows.Select(r => r.Name).ToArray());
             Assert.AreEqual((int)T.Price, rows[2].Value);
             Assert.AreEqual(rows.Count, vendor.GetItemsForSaleCount(h.Seneschal));
-            Assert.AreEqual(3, GauntletVendorHarness.Panel(vendor, h.Monarchp).Count, "the monarch spends too");
+            Assert.AreEqual(4, GauntletVendorHarness.Panel(vendor, h.Monarchp).Count, "the monarch spends too");
 
             Assert.AreEqual(0, GauntletVendorHarness.Panel(vendor, h.Plain).Count, "a member without rights sees none");
             Assert.AreEqual(0, GauntletVendorHarness.Panel(vendor, h.Outsider).Count);
@@ -228,15 +260,17 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             h.InitActive(favor: 5000);
             var vendor = h.MakeVendor();
 
+            // The two event rows and the Blessing row stay; only the Gauntlet row comes and goes.
             GauntletRunStarter.Current = null;
-            Assert.AreEqual(2, GauntletVendorHarness.Panel(vendor, h.Seneschal).Count, "no manager, no Gauntlet row");
+            Assert.AreEqual(3, GauntletVendorHarness.Panel(vendor, h.Seneschal).Count, "no manager, no Gauntlet row");
+            Assert.IsFalse(GauntletVendorHarness.Panel(vendor, h.Seneschal).Any(r => r.Name == AvatarVendor.GauntletName));
 
             GauntletRunStarter.Current = h.Starter;
             h.GT = T with { Enabled = false };
-            Assert.AreEqual(2, GauntletVendorHarness.Panel(vendor, h.Seneschal).Count);
+            Assert.AreEqual(3, GauntletVendorHarness.Panel(vendor, h.Seneschal).Count);
 
             h.GT = T;
-            Assert.AreEqual(3, GauntletVendorHarness.Panel(vendor, h.Seneschal).Count);
+            Assert.AreEqual(4, GauntletVendorHarness.Panel(vendor, h.Seneschal).Count);
         }
 
         [TestMethod]

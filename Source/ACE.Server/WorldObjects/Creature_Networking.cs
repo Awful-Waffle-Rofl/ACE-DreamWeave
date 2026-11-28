@@ -316,10 +316,12 @@ namespace ACE.Server.WorldObjects
                             float shade = 0;
                             if (w.Shade.HasValue)
                                 shade = (float)w.Shade;
+                            // Perennial dyes: region index 1 (the second colour layer) takes DyeShellShade when the piece has one.
+                            var shellShade = w.DyeShellShade;
                             for (int i = 0; i < itemSubPal.CloSubPalettes.Count; i++)
                             {
                                 var itemPalSet = DatManager.PortalDat.ReadFromDat<PaletteSet>(itemSubPal.CloSubPalettes[i].PaletteSet);
-                                ushort itemPal = (ushort)itemPalSet.GetPaletteID(shade);
+                                ushort itemPal = (ushort)itemPalSet.GetPaletteID(ACE.Server.Entity.PerennialDyes.ShadeForRegion(i, shade, shellShade));
 
                                 for (int j = 0; j < itemSubPal.CloSubPalettes[i].Ranges.Count; j++)
                                 {

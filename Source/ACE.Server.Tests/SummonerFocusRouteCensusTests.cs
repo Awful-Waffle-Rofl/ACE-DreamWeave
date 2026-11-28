@@ -228,8 +228,12 @@ namespace ACE.Server.Tests
                 "SummonerFocus.IsSummonerFocus Factories/LootGenerationFactory_Spells.cs:1",
                 "SummonerFocus.IsSummonerFocus Factories/Tables/CasterSlotSpells.cs:1",
                 "SummonerFocus.IsSummonerFocus WorldObjects/WorldObject_Weapon.cs:1",
+                // the Character Sheet caster crit row: a Summoner focus is sized from Summoning (CharacterDetailsReader.PickMagicCritSkill), display only
+                "SummonerFocus.IsSummonerFocus Managers/Market/CharacterDetailsService.cs:1",
                 // the Elemental Proficiency Acid burn sizing: the bolt's cut divided back out, because each tick is cut again at Creature.TakeDamage
                 "SummonerFocusMath.BeforeWielderCut WorldObjects/Player_ElementalProficiency.cs:1",
+                // the void curse debuff (GetNetherDotDamageRating): the curse's baked-in cut divided back out, so the debuff is the uncut curse's
+                "SummonerFocusMath.BeforeWielderCut WorldObjects/Managers/EnchantmentManager.cs:1",
                 // the summon-duel harness (SummonDuelBuilder): the pet multipliers from the same math and live scales combat uses, and the mod filter for --summoner-mods
                 "SummonerFocus.ReachesPets CombatSimulator/SummonDuelBuilder.cs:1",
                 "SummonerFocusMath.DealtMultiplier CombatSimulator/SummonDuelBuilder.cs:1",
@@ -239,6 +243,7 @@ namespace ACE.Server.Tests
                 "SummonerFocus.PetDefenseFloor CombatSimulator/SummonDuelBuilder.cs:1",
                 "SummonerFocusDisplay.GetAppraisalLines Network/Structure/AppraiseInfo.cs:1",
                 "SummonerFocusDisplay.SuppressClientDamageBonusLine Network/Structure/AppraiseInfo.cs:1",
+                "SummonerFocusDisplay.RouteTag WeaponMods/WeaponModDisplay.cs:1",
             }, rest, $"remaining-surface sites under Source/ACE.Server; actual: {string.Join(", ", rest)}");
         }
     }

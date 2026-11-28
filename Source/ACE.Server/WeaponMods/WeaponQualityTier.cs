@@ -113,7 +113,10 @@ namespace ACE.Server.WeaponMods
         /// The tier a weapon currently qualifies for. Thresholds are INCLUSIVE (repo-owner directive,
         /// 2026-08-08), so a weapon sitting exactly on 300 IS Exceptional.
         /// </summary>
-        public static WeaponQualityTier Evaluate(WorldObject weapon) => FromTotal(TotalIntensity(weapon));
+        public static WeaponQualityTier Evaluate(WorldObject weapon) =>
+            weapon != null && WeaponClassifier.Classify(weapon) == WeaponClass.Shield
+                ? WeaponQualityTier.None
+                : FromTotal(TotalIntensity(weapon));
 
         public static WeaponQualityTier FromTotal(int total) =>
             Ladder.FirstOrDefault(t => total >= t.Threshold)?.Tier ?? WeaponQualityTier.None;

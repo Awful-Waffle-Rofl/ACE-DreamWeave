@@ -63,10 +63,20 @@ namespace ACE.Server.BalanceTrials
             public string Reason;
             public string ArchetypeSha;
             public string CalibrationSha;
+
+            /// <summary>The clock reading when this mark was made.</summary>
+            public double MarkedAt;
+
+            /// <summary>True for the mark a purge-then-copy makes before its purge: a copy is (or was) on its way and has not reported.</summary>
+            public bool CopyInFlight;
+
+            /// <summary>Unique per mark (every MarkBroken bumps it), so a late copy can clear only the mark it was made under.</summary>
+            public long Generation;
         }
 
         private readonly Dictionary<uint, BrokenRecord> broken = new Dictionary<uint, BrokenRecord>();
         private long lastToken;
+        private long lastGeneration;
 
         /// <param name="clock">Seconds on a monotonic clock (TrialManager.Now live; a fake in tests).</param>
         public TrialCopyGate(Func<double> clock)
@@ -156,10 +166,13 @@ namespace ACE.Server.BalanceTrials
         }
 
         /// <summary>
-        /// Marks <paramref name="master"/> broken. When both shas are given they become its lineage; when they are not, a
-        /// lineage recorded earlier is kept (a later mark only updates the reason).
+        /// Marks <paramref name="master"/> broken, at the current clock reading. When both shas are given they become its lineage;
+        /// when they are not, a lineage recorded earlier is kept (a later mark only updates the reason, the time and the flag).
+        /// <paramref name="copyInFlight"/> is true only for the mark made just before a purge-then-copy's purge (see
+        /// <see cref="TryGetCopyInFlight"/>); every other mark, including a copy's own failure, clears it.
         /// </summary>
-        public void MarkBroken(uint master, string reason, string archetypeSha = null, string calibrationSha = null)
+        /// <returns>The mark's generation, for <see cref="ClearBrokenIfGeneration"/>.</returns>
+        public long MarkBroken(uint master, string reason, string archetypeSha = null, string calibrationSha = null, bool copyInFlight = false)
         {
             lock (sync)
             {
@@ -172,7 +185,29 @@ namespace ACE.Server.BalanceTrials
                     Reason = reason ?? "unknown",
                     ArchetypeSha = hasLineage ? archetypeSha : previous?.ArchetypeSha,
                     CalibrationSha = hasLineage ? calibrationSha : previous?.CalibrationSha,
+                    MarkedAt = clock(),
+                    CopyInFlight = copyInFlight,
+                    Generation = ++lastGeneration,
                 };
+
+                return lastGeneration;
+            }
+        }
+
+        /// <summary>
+        /// A copy that landed AFTER its hold lapsed: clears <paramref name="master"/>'s broken record only while it is still the mark
+        /// of <paramref name="generation"/> (the one made before that copy's purge). Any later mark, by a newer promote, adopt or
+        /// unpromote, has a newer generation and is left alone. True when it cleared.
+        /// </summary>
+        public bool ClearBrokenIfGeneration(uint master, long generation)
+        {
+            lock (sync)
+            {
+                if (!broken.TryGetValue(master, out var record) || record.Generation != generation)
+                    return false;
+
+                broken.Remove(master);
+                return true;
             }
         }
 
@@ -193,6 +228,26 @@ namespace ACE.Server.BalanceTrials
                 }
 
                 reason = null;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// True when <paramref name="master"/>'s broken mark is a purge-then-copy's "copy has not landed" mark, with
+        /// <paramref name="ageSeconds"/> the time since it was made. Such a copy may still land after its hold lapses (a copy that
+        /// never reports cannot be told from a slow one), so the next purge of that master waits for it (TrialPromote.TryPurgeThenCopy).
+        /// </summary>
+        public bool TryGetCopyInFlight(uint master, out double ageSeconds)
+        {
+            lock (sync)
+            {
+                if (broken.TryGetValue(master, out var record) && record.CopyInFlight)
+                {
+                    ageSeconds = clock() - record.MarkedAt;
+                    return true;
+                }
+
+                ageSeconds = 0;
                 return false;
             }
         }

@@ -218,8 +218,11 @@ namespace ACE.Server.WorldEvents
                     return;
                 }
 
-                foreach (var position in positions)
-                    SpawnOne(evt, runId, cacheWcid, position, anchor, reward.CacheDecor, cacheEffectScriptDid, cacheEffectRepeatSeconds);
+                for (var cacheIndex = 0; cacheIndex < positions.Count; cacheIndex++)
+                {
+                    if (!SpawnOne(evt, runId, cacheWcid, positions[cacheIndex], anchor, cacheIndex, reward.CacheDecor, cacheEffectScriptDid, cacheEffectRepeatSeconds))
+                        break;   // permanent: the weenie does not build, so the remaining caches would fail identically
+                }
             }));
         }
 
@@ -378,38 +381,336 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>
-        /// The 2.4 spawn recipe for one cache. Runs on the anchor landblock's action queue.
+        /// The 2.4 spawn recipe for one cache. Runs on the anchor landblock's action queue. Returns false only
+        /// on a PERMANENT failure (the cache weenie does not build), which the caller treats as "stop placing";
+        /// a cache that every candidate refused, or one placed after cleanup, returns true.
         /// </summary>
-        private static void SpawnOne(WorldEvent evt, uint runId, uint cacheWcid, Position position, Position anchor,
+        private static bool SpawnOne(WorldEvent evt, uint runId, uint cacheWcid, Position position, Position anchor, int cacheIndex,
             IReadOnlyList<DecorDef> cacheDecor, uint cacheEffectScriptDid, long cacheEffectRepeatSeconds)
         {
-            if (TryPlace(evt, runId, cacheWcid, position, out var placed))
+            // 2026-11-23 prod run 4: a single-cache run asks for the anchor itself, and the old "one retry at
+            // the anchor" was then the SAME point a second time, so one crowded centre (14 players plus the
+            // wave creatures whose destroys are queued BEHIND this action) refused the cache twice and the run
+            // paid nobody. The plan below tries the requested point, the anchor, solid points on growing rings
+            // around the anchor, and finally an ethereal cache, which only static geometry can refuse. It is
+            // lazy: a cache accepted at its requested point snaps no ring point at all.
+            var plan = EnumeratePlacementPlan(position, anchor, cacheIndex, SnapToTerrain);
+
+            WorldObject placed = null;
+
+            var outcome = PlaceFirstAccepted(plan,
+                attempt => TryPlace(evt, runId, cacheWcid, attempt.Position, attempt.Ethereal, out placed),
+                // A closed held list is not a placement failure: retrying would only build and destroy
+                // more objects and log an error for a run that is already cleaning up.
+                () => evt.HeldClosed);
+
+            if (outcome.Permanent)
+                return false;
+
+            if (outcome.Index < 0 || placed == null)
             {
-                ScheduleCacheEffect(evt, runId, placed, cacheEffectScriptDid, cacheEffectRepeatSeconds);
-                SpawnCacheDecor(evt, runId, cacheDecor, position);
-                return;
-            }
+                if (evt.HeldClosed)
+                    return true;
 
-            // A closed held list is not a placement failure: retrying would only build and destroy a
-            // second object and log an error for a run that is already cleaning up.
-            if (evt.HeldClosed)
-                return;
-
-            // One retry at the anchor itself. A ring point can fail EnterWorld for reasons the anchor
-            // will not (a wall, a slope, another object), and a run that placed no cache at all pays
-            // nobody.
-            var fallback = new Position(anchor);
-
-            if (!TryPlace(evt, runId, cacheWcid, fallback, out var fallbackPlaced))
-            {
+                log.Warn($"[WORLDEVENT] run={runId} cache wcid={cacheWcid} refused at every one of {outcome.Tried} placement candidates around the anchor {anchor.ToLOCString()}");
                 log.Error($"[WORLDEVENT] run={runId} cache wcid={cacheWcid} failed to enter the world at {position.ToLOCString()} and at the anchor; skipped");
-                return;
+                return true;
             }
 
-            ScheduleCacheEffect(evt, runId, fallbackPlaced, cacheEffectScriptDid, cacheEffectRepeatSeconds);
+            if (outcome.Index > 0)
+            {
+                var used = outcome.Used;
 
-            // Dressed around where the cache ACTUALLY landed, not where it was first asked to go.
-            SpawnCacheDecor(evt, runId, cacheDecor, fallback);
+                log.Warn($"[WORLDEVENT] run={runId} cache wcid={cacheWcid} placed by fallback candidate={outcome.Index + 1} kind={used.Kind} ethereal={used.Ethereal} requested={position.ToLOCString()} loc={placed.Location?.ToLOCString()}");
+            }
+
+            ScheduleCacheEffect(evt, runId, placed, cacheEffectScriptDid, cacheEffectRepeatSeconds);
+
+            // Dressed around where the cache ACTUALLY landed (AddPhysicsObj synced Location from physics, so a
+            // slide or a fallback candidate is already reflected), not where it was first asked to go.
+            SpawnCacheDecor(evt, runId, cacheDecor, new Position(placed.Location ?? position));
+
+            return true;
+        }
+
+        /// <summary>Radii in metres of the solid fallback rings around the anchor, tried in this order.</summary>
+        public static readonly IReadOnlyList<float> FallbackRingRadii = new[] { 5f, 8f, 12f };
+
+        /// <summary>Points on each fallback ring. Each ring is turned half a step from the previous one.</summary>
+        public const int FallbackPointsPerRing = 8;
+
+        /// <summary>
+        /// Spacing in metres of the per-cache ethereal offsets: cache k (k &gt; 0) puts its ethereal tail on
+        /// circle ceil(k / <see cref="EtherealSpreadPerCircle"/>), of radius that many times this, so two caches
+        /// that both fall through to the last resort never stack on one point. Cache 0 keeps the exact points.
+        /// </summary>
+        public const float EtherealSpreadSpacing = 1.0f;
+
+        /// <summary>Offsets per ethereal spread circle.</summary>
+        public const int EtherealSpreadPerCircle = 8;
+
+        /// <summary>Two plan entries closer than this, in the same cell, are the same point.</summary>
+        private const float SamePointTolerance = 0.01f;
+
+        /// <summary>What one placement attempt came to.</summary>
+        public enum CachePlaceResult
+        {
+            /// <summary>In the world and held: stop, this is the cache.</summary>
+            Placed,
+
+            /// <summary>This candidate was refused; the next one may not be.</summary>
+            Refused,
+
+            /// <summary>No candidate can ever succeed (the cache weenie does not build): stop the whole plan.</summary>
+            Permanent,
+        }
+
+        /// <summary>The result of <see cref="PlaceFirstAccepted"/>.</summary>
+        public readonly struct CachePlacementOutcome
+        {
+            public CachePlacementOutcome(int index, int tried, bool permanent, CachePlacementAttempt used)
+            {
+                Index = index;
+                Tried = tried;
+                Permanent = permanent;
+                Used = used;
+            }
+
+            /// <summary>Index of the accepted attempt, or -1.</summary>
+            public int Index { get; }
+
+            /// <summary>How many attempts were actually made.</summary>
+            public int Tried { get; }
+
+            /// <summary>True when an attempt reported <see cref="CachePlaceResult.Permanent"/>.</summary>
+            public bool Permanent { get; }
+
+            /// <summary>The accepted attempt (default when none was).</summary>
+            public CachePlacementAttempt Used { get; }
+        }
+
+        /// <summary>One placement attempt for a cache: where, and whether the cache is built ethereal.</summary>
+        public readonly struct CachePlacementAttempt
+        {
+            public CachePlacementAttempt(Position position, bool ethereal, string kind)
+            {
+                Position = position;
+                Ethereal = ethereal;
+                Kind = kind;
+            }
+
+            public Position Position { get; }
+
+            /// <summary>
+            /// An ethereal cache is walk-through: its placement ignores every non-static object (players,
+            /// creatures, corpses), so only baked geometry can refuse it (PhysicsObj.FindObjCollisions_Inner;
+            /// measured in WorldEventCachePlacementDatTests). Nothing found on the server side refuses a Use on
+            /// an ethereal object, but whether the CLIENT lets a player select and use an ethereal chest is NOT
+            /// verified - it is owed an in-game check. That is why ethereal is the last resort, not the default.
+            /// </summary>
+            public bool Ethereal { get; }
+
+            /// <summary>"requested", "anchor", "ring" or "anchor-ground": what the log line reports.</summary>
+            public string Kind { get; }
+        }
+
+        /// <summary>
+        /// As <see cref="EnumeratePlacementPlan"/>, materialised (tests and diagnostics; production stays lazy).
+        /// </summary>
+        public static List<CachePlacementAttempt> BuildPlacementPlan(Position requested, Position anchor, Action<Position> snapOutdoor, int cacheIndex = 0)
+        {
+            return EnumeratePlacementPlan(requested, anchor, cacheIndex, snapOutdoor).ToList();
+        }
+
+        /// <summary>
+        /// Every place one cache may go, in order, produced lazily so a cache accepted early never pays for the
+        /// later candidates' terrain snaps (pure apart from <paramref name="snapOutdoor"/>, which the caller
+        /// supplies so a test can run without a landscape):
+        /// 1. the requested point, solid (a ring point, or the anchor for a single-cache run);
+        /// 2. the anchor exactly as composed, solid, unless that is the requested point;
+        /// 3. outdoors only: <see cref="FallbackPointsPerRing"/> solid points on each of
+        ///    <see cref="FallbackRingRadii"/> around the anchor, terrain-snapped, dropping any that leave the
+        ///    anchor's landblock (this code holds only that landblock's action queue). Indoors a 5-12 m offset
+        ///    is a wall or another room, so the rings are skipped;
+        /// 4. ethereal, the last resort: the requested point, the anchor, and (outdoors) the anchor snapped to
+        ///    the terrain under it, duplicates dropped. For <paramref name="cacheIndex"/> above 0 all three are
+        ///    moved by that cache's spread offset (see <see cref="EtherealSpreadSpacing"/>) and snapped outdoors,
+        ///    so the caches of one run never stack on the same point.
+        /// A crowd moves on; static geometry does not, which is why the ethereal tail is the last word rather
+        /// than a deferred retry: by the time an ethereal cache is refused, waiting would not change the answer.
+        /// </summary>
+        public static IEnumerable<CachePlacementAttempt> EnumeratePlacementPlan(Position requested, Position anchor, int cacheIndex, Action<Position> snapOutdoor)
+        {
+            if (requested == null && anchor == null)
+                yield break;
+
+            requested ??= anchor;
+            anchor ??= requested;
+
+            var seen = new List<Position>();
+
+            var first = new Position(requested);
+            seen.Add(first);
+            yield return new CachePlacementAttempt(first, false, "requested");
+
+            var composed = new Position(anchor);
+
+            if (AddDistinct(seen, composed))
+                yield return new CachePlacementAttempt(composed, false, "anchor");
+
+            if (!anchor.Indoors)
+            {
+                for (var ring = 0; ring < FallbackRingRadii.Count; ring++)
+                {
+                    var radius = FallbackRingRadii[ring];
+
+                    for (var i = 0; i < FallbackPointsPerRing; i++)
+                    {
+                        var angle = 2.0 * Math.PI * (i + 0.5 * ring) / FallbackPointsPerRing;
+
+                        var candidate = Offset(anchor, radius, angle);
+
+                        if (candidate == null)
+                            continue;
+
+                        Snap(candidate, snapOutdoor);
+
+                        if (AddDistinct(seen, candidate))
+                            yield return new CachePlacementAttempt(candidate, false, "ring");
+                    }
+                }
+            }
+
+            var spreadRadius = 0f;
+            var spreadAngle = 0.0;
+
+            if (cacheIndex > 0)
+            {
+                var circle = (cacheIndex - 1) / EtherealSpreadPerCircle + 1;
+                spreadRadius = circle * EtherealSpreadSpacing;
+                spreadAngle = 2.0 * Math.PI * ((cacheIndex - 1) % EtherealSpreadPerCircle) / EtherealSpreadPerCircle;
+            }
+
+            var ethereal = new List<Position>();
+
+            foreach (var (basePoint, kind, ground) in new[] { (requested, "requested", false), (anchor, "anchor", false), (anchor, "anchor-ground", true) })
+            {
+                if (ground && anchor.Indoors)
+                    continue;
+
+                Position point;
+
+                if (spreadRadius > 0f)
+                {
+                    point = Offset(basePoint, spreadRadius, spreadAngle);
+
+                    if (point == null)
+                        continue;
+
+                    Snap(point, snapOutdoor);
+                }
+                else
+                {
+                    point = new Position(basePoint);
+
+                    if (ground)
+                    {
+                        Snap(point, snapOutdoor);
+
+                        if (point.InstancedLandblock != anchor.InstancedLandblock)
+                            continue;
+                    }
+                }
+
+                if (AddDistinct(ethereal, point))
+                    yield return new CachePlacementAttempt(point, true, kind);
+            }
+        }
+
+        /// <summary>
+        /// <paramref name="from"/> moved <paramref name="radius"/> metres at <paramref name="angle"/>, or null when
+        /// that leaves the landblock (or, from outdoors, lands on an indoor cell id).
+        /// </summary>
+        private static Position Offset(Position from, float radius, double angle)
+        {
+            var point = new Position(from);
+
+            point.SetPosition(from.Pos + new Vector3((float)(radius * Math.Cos(angle)), (float)(radius * Math.Sin(angle)), 0f));
+
+            if (point.InstancedLandblock != from.InstancedLandblock || (!from.Indoors && point.Indoors))
+                return null;
+
+            return point;
+        }
+
+        /// <summary>
+        /// Tries <paramref name="plan"/> in order and stops at the first <see cref="CachePlaceResult.Placed"/>, at
+        /// the first <see cref="CachePlaceResult.Permanent"/>, or when <paramref name="stop"/> (consulted after every
+        /// refusal) says the run is cleaning up. The plan is enumerated only as far as it is tried.
+        /// </summary>
+        public static CachePlacementOutcome PlaceFirstAccepted(IEnumerable<CachePlacementAttempt> plan, Func<CachePlacementAttempt, CachePlaceResult> tryPlace, Func<bool> stop)
+        {
+            if (plan == null || tryPlace == null)
+                return new CachePlacementOutcome(-1, 0, false, default);
+
+            var i = 0;
+
+            foreach (var attempt in plan)
+            {
+                var result = tryPlace(attempt);
+
+                if (result == CachePlaceResult.Placed)
+                    return new CachePlacementOutcome(i, i + 1, false, attempt);
+
+                if (result == CachePlaceResult.Permanent)
+                    return new CachePlacementOutcome(-1, i + 1, true, default);
+
+                i++;
+
+                if (stop != null && stop())
+                    return new CachePlacementOutcome(-1, i, false, default);
+            }
+
+            return new CachePlacementOutcome(-1, i, false, default);
+        }
+
+        private static void Snap(Position position, Action<Position> snapOutdoor)
+        {
+            if (snapOutdoor == null || position.Indoors)
+                return;
+
+            try
+            {
+                snapOutdoor(position);
+            }
+            catch (Exception ex)
+            {
+                log.Debug($"[WORLDEVENT] cache placement candidate {position.ToLOCString()} could not be snapped to terrain; using the raw Z", ex);
+            }
+        }
+
+        private static void SnapToTerrain(Position position) => position.AdjustMapCoords();
+
+        /// <summary>Adds <paramref name="candidate"/> unless an equal point is already listed; true when added.</summary>
+        private static bool AddDistinct(List<Position> list, Position candidate)
+        {
+            foreach (var p in list)
+            {
+                if (SamePoint(p, candidate))
+                    return false;
+            }
+
+            list.Add(candidate);
+
+            return true;
+        }
+
+        private static bool SamePoint(Position a, Position b)
+        {
+            if (a == null || b == null)
+                return false;
+
+            return a.Cell == b.Cell && a.Instance == b.Instance && Vector3.Distance(a.Pos, b.Pos) < SamePointTolerance;
         }
 
         /// <summary>
@@ -538,7 +839,7 @@ namespace ACE.Server.WorldEvents
                 log.Info($"[WORLDEVENT] run={runId} cache decor placed={placed} of {cacheDecor.Count}");
         }
 
-        private static bool TryPlace(WorldEvent evt, uint runId, uint cacheWcid, Position position, out WorldObject placed)
+        private static CachePlaceResult TryPlace(WorldEvent evt, uint runId, uint cacheWcid, Position position, bool ethereal, out WorldObject placed)
         {
             placed = null;
 
@@ -546,26 +847,18 @@ namespace ACE.Server.WorldEvents
 
             if (wo == null)
             {
+                // Permanent: the weenie does not build, so every later candidate would fail the same way.
                 log.Error($"[WORLDEVENT] run={runId} failed to create cache wcid={cacheWcid}");
-                return false;
+                return CachePlaceResult.Permanent;
             }
 
-            wo.Location = position;
-
-            if (!wo.EnterWorld())
+            if (!TryEnterCache(wo, position, ethereal, w => w.EnterWorld()))
             {
                 wo.Destroy();
-                return false;
+                return CachePlaceResult.Refused;
             }
 
-            // Mandatory. A hand-spawned object has a dynamic guid and no Generator back-reference, so
-            // IsDecayable() is true for it and the landblock heartbeat would Destroy it at DefaultTimeToRot -
-            // in the middle of the claim window, with no message to anyone.
-            wo.TimeToRot = -1;
-
-            // The run stamp: it is what makes the claim handler refuse a stale cache, what excludes the
-            // object from the shard save, and what the orphan sweep looks for.
-            wo.SetProperty(PropertyInt.WorldEventId, (int)runId);
+            StampPlacedCache(wo, runId);
 
             // AddHeld is the single held-list entry point (it takes the HeldObjects monitor itself) and
             // refuses once the run has closed the list. A refusal means this cache was placed after the
@@ -575,14 +868,65 @@ namespace ACE.Server.WorldEvents
             {
                 log.Info($"[WORLDEVENT] run={runId} cache wcid={cacheWcid} placed after cleanup closed the held list; destroyed");
                 wo.Destroy();
-                return false;
+                return CachePlaceResult.Refused;
             }
 
             log.Info($"[WORLDEVENT] run={runId} spawn wcid={cacheWcid} guid=0x{wo.Guid.Full:X8} loc={wo.Location.ToLOCString()}");
 
             placed = wo;
 
-            return true;
+            return CachePlaceResult.Placed;
+        }
+
+        /// <summary>
+        /// Everything a cache needs BEFORE it enters the world. The ethereal flag must be set here and not
+        /// after: InitPhysicsObj builds the physics state from the property (CalculatedPhysicsState), so a flag
+        /// set once the physics object exists is too late for the placement it was meant to change. The
+        /// location is a copy, because a physics placement mutates Location and the plan's position is shared
+        /// with the log lines.
+        /// </summary>
+        internal static void PrepareCache(WorldObject wo, Position at, bool ethereal)
+        {
+            if (wo == null)
+                return;
+
+            if (ethereal)
+                wo.Ethereal = true;
+
+            wo.Location = at != null ? new Position(at) : null;
+        }
+
+        /// <summary>
+        /// PrepareCache, then <paramref name="enter"/> (EnterWorld in production; the dat test passes the
+        /// landblock-free InitPhysicsObj + AddPhysicsObj pair). One sequence for both, so the test exercises the
+        /// ordering production uses rather than a copy of it.
+        /// </summary>
+        internal static bool TryEnterCache(WorldObject wo, Position at, bool ethereal, Func<WorldObject, bool> enter)
+        {
+            if (wo == null || enter == null)
+                return false;
+
+            PrepareCache(wo, at, ethereal);
+
+            return enter(wo);
+        }
+
+        /// <summary>
+        /// The stamps a cache gets once it is in the world (testable without a landblock).
+        /// </summary>
+        internal static void StampPlacedCache(WorldObject wo, uint runId)
+        {
+            if (wo == null)
+                return;
+
+            // Mandatory. A hand-spawned object has a dynamic guid and no Generator back-reference, so
+            // IsDecayable() is true for it and the landblock heartbeat would Destroy it at DefaultTimeToRot -
+            // in the middle of the claim window, with no message to anyone.
+            wo.TimeToRot = -1;
+
+            // The run stamp: it is what makes the claim handler refuse a stale cache, what excludes the
+            // object from the shard save, and what the orphan sweep looks for.
+            wo.SetProperty(PropertyInt.WorldEventId, (int)runId);
         }
 
         /// <summary>

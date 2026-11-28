@@ -628,8 +628,8 @@ namespace ACE.Server.Tests.Avatars
         [TestMethod]
         public void Tuning_reads_dress_cooldown()
         {
-            Assert.AreEqual(3600L, AvatarTuning.Defaults.DressCooldownSeconds);
-            Assert.AreEqual(3600L, DefaultPropertyManager.DefaultLongProperties[DressCooldownKey].Item);
+            Assert.AreEqual(0L, AvatarTuning.Defaults.DressCooldownSeconds);
+            Assert.AreEqual(0L, DefaultPropertyManager.DefaultLongProperties[DressCooldownKey].Item);
 
             try
             {
@@ -640,6 +640,8 @@ namespace ACE.Server.Tests.Avatars
                     Assert.IsTrue(PropertyManager.ModifyLong(kv.Key, kv.Value.Item));
                 foreach (var kv in DefaultPropertyManager.DefaultDoubleProperties.Where(kv => kv.Key.StartsWith("allegiance_avatar_")))
                     Assert.IsTrue(PropertyManager.ModifyDouble(kv.Key, kv.Value.Item, init: true));
+                foreach (var kv in DefaultPropertyManager.DefaultStringProperties.Where(kv => kv.Key.StartsWith("allegiance_avatar_")))
+                    Assert.IsTrue(PropertyManager.ModifyString(kv.Key, kv.Value.Item));
 
                 Assert.IsTrue(PropertyManager.ModifyLong(DressCooldownKey, 1234));
                 Assert.AreEqual(1234L, AvatarTuning.FromPropertyManager().DressCooldownSeconds);
@@ -652,6 +654,8 @@ namespace ACE.Server.Tests.Avatars
                     PropertyManager.ModifyLong(kv.Key, kv.Value.Item);
                 foreach (var kv in DefaultPropertyManager.DefaultDoubleProperties.Where(kv => kv.Key.StartsWith("allegiance_avatar_")))
                     PropertyManager.ModifyDouble(kv.Key, kv.Value.Item, init: true);
+                foreach (var kv in DefaultPropertyManager.DefaultStringProperties.Where(kv => kv.Key.StartsWith("allegiance_avatar_")))
+                    PropertyManager.ModifyString(kv.Key, kv.Value.Item);
             }
         }
 

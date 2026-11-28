@@ -44,7 +44,9 @@ namespace ACE.Server.WeaponMods
     ///
     /// THAT ASYMMETRY IS WHY THE INTEGRITY GATE STAYS SUPPRESSED ON A MANAGED WEAPON. See
     /// <see cref="PassesIntegrityGate"/>: tightening it would refuse every weapon rolled before this change,
-    /// which is exactly the migration hazard. No data migration is needed and none should be written.
+    /// which was the migration hazard. HISTORICAL: since 2026-11-25 ApplyReroll and ApplySwap touch no tinker
+    /// state (WriteComposition has no production caller) and no production path reads that query. No data
+    /// migration is needed and none should be written.
     ///
     /// Slayer is NOT a slot: SlayerCreatureType 166 and SlayerDamageBonus 138 are untouched and cost nothing.
     /// </summary>
@@ -79,8 +81,9 @@ namespace ACE.Server.WeaponMods
         /// per successful tinker, imbues included, and PrismaticDriftStone.AppendTinkerLog follows the same
         /// one-entry-per-material shape, so the counts are directly comparable.
         ///
-        /// Resulting behaviour: ten Oak reserves 10, so <see cref="AvailableSlots"/> is 0 and the use is refused
-        /// outright - correct, because nothing on that weapon can be reversed. Five Oak plus five Iron reserves
+        /// Resulting behaviour: ten Oak reserves 10, so <see cref="AvailableSlots"/> is 0 - nothing on that
+        /// weapon can be reversed. (Until 2026-11-25 that refused a Tourmaline use outright; no use is refused
+        /// on tinker state any more, and this arithmetic is now informational.) Five Oak plus five Iron reserves
         /// 5, refills five, and the total effect stays at ten. One imbue material plus nine Iron reserves 1,
         /// exactly as it did before this rule existed.
         /// </summary>
@@ -100,7 +103,7 @@ namespace ACE.Server.WeaponMods
         /// compiling and quietly changing meaning, and the call sites are exactly what needed reviewing.
         /// Identical to <see cref="AvailableSlots"/> by construction now - both names are kept because they
         /// answer different questions ("how many tinkers do I roll" against "is there anything here to work
-        /// with at all") and the second is what <see cref="WeaponModManager.ResolveRefusal"/> gates on.
+        /// with at all"). Nothing gates on either since 2026-11-25: ResolveRefusal no longer reads tinker state.
         /// </summary>
         public static int ComputeTinkerCount(int reservedSlots) => AvailableSlots(reservedSlots);
 
@@ -206,7 +209,7 @@ namespace ACE.Server.WeaponMods
         }
 
         /// <summary>
-        /// The layer 1 composition currently on the weapon, filtered to materials this table owns. Entries it
+        /// HISTORICAL (since 2026-11-25 no production path writes the composition or refuses on it; the description below is of the retired reroll and integrity-gate behaviour). The layer 1 composition currently on the weapon, filtered to materials this table owns. Entries it
         /// does not own - imbue salvage, Oak, a bag with no MaterialType - are left strictly alone rather than
         /// guessed at, so their effects simply persist across a reroll. Their SLOTS are charged for by
         /// <see cref="ComputeReservedSlots"/>, and the entries themselves are carried forward verbatim by
@@ -223,7 +226,8 @@ namespace ACE.Server.WeaponMods
 
         /// <summary>
         /// The weapon's full reserved-slot count: its imbues plus every log entry this table cannot reverse.
-        /// This is what both flows budget against - see <see cref="ComputeReservedSlots"/>.
+        /// Since 2026-11-25 no production path reads it (neither flow budgets against tinker slots any more); it
+        /// is kept as a pure query. See <see cref="ComputeReservedSlots"/>.
         /// </summary>
         public static int ReadReservedSlots(WorldObject weapon)
         {
@@ -428,7 +432,7 @@ namespace ACE.Server.WeaponMods
         // ---------------- bookkeeping ----------------
 
         /// <summary>
-        /// Writes the post-application state: the tinker counter, the tinker cap counter, and BOTH logs.
+        /// HISTORICAL (since 2026-11-25 no production path writes the composition or refuses on it; the description below is of the retired reroll and integrity-gate behaviour). Writes the post-application state: the tinker counter, the tinker cap counter, and BOTH logs.
         ///
         /// THE LOGS ARE REPLACED, NEVER APPENDED (HARD). RecipeManager.HandleTinkerLog does "TinkerLog += ..."
         /// which is right for retail, where a log grows to ten once and the item locks, and exactly wrong here:
@@ -473,30 +477,18 @@ namespace ACE.Server.WeaponMods
         }
 
         /// <summary>
-        /// The retail integrity gate: the parsed TinkerLog entry count must equal NumTimesTinkered. Older shard
+        /// The retail integrity check: the parsed TinkerLog entry count must equal NumTimesTinkered. NO LONGER
+        /// A REFUSAL GATE (2026-11-25 owner ruling: traditional tinkers have no bearing on Tourmaline or
+        /// Amethyst) - it is retained as a pure query and no production path refuses on it. Older shard
         /// data and retail-era items can carry a tinker count with a null or short log, and silently reversing a
         /// set you cannot fully see corrupts the item. SUPPRESSED on a weapon already managed by this system,
         /// which reads its own log instead.
         ///
-        /// THIS GATE IS ABOUT COMPLETENESS, NOT OWNERSHIP. Passing it means the log accounts for every slot the
-        /// counter claims; it says NOTHING about whether this table can reverse those entries. Ten Oak passes it
-        /// cleanly. The budget half of that problem is <see cref="ComputeReservedSlots"/>, which must be applied
-        /// alongside the gate, never instead of it.
-        ///
-        /// THE SUPPRESSION ON A MANAGED WEAPON IS DELIBERATELY UNCHANGED BY THE 2026-08-06 DECOUPLING, AND
-        /// TIGHTENING IT WOULD BE A MIGRATION BUG. It is tempting to un-suppress it now, because a weapon
-        /// written by the NEW code does satisfy it: the log is written at full tinker length, so log entries
-        /// plus imbue bits account for all ten slots. But a weapon rolled by the OLD code carries a log short by
-        /// exactly its special count, and un-suppressing would refuse it with TinkerLogMismatch - permanently,
-        /// because the only way to rewrite that log is a reroll, which is what the refusal blocks. Weapons in
-        /// that state exist on the dev shard today. So the gate stays suppressed and the accounting stays where
-        /// it always was, in <see cref="ComputeReservedSlots"/>.
-        ///
-        /// NOR DOES AN OLD WEAPON GAIN FREE CAPACITY FROM THE SUPPRESSION. Capacity comes from
-        /// <see cref="ReadReservedSlots"/>, which counts UNKNOWN log entries against KNOWN ones. Specials appear
-        /// in neither, so a short log changes nothing about the reserved figure, and the one path that grants
-        /// tinkers - <see cref="WeaponModManager.ApplyReroll"/> - reverses everything the weapon currently holds
-        /// before it refills. The old set is undone, then a new full-length set is applied.
+        /// HISTORICAL NOTE (2026-11-25): ApplyReroll and ApplySwap touch no tinker state, and no production path reads
+        /// this query or the reserved-slot figures (ReadReservedSlots, ComputeReservedSlots). The reasoning that used
+        /// to sit here - the gate is about completeness not ownership, its suppression on a managed weapon protected
+        /// weapons rolled before the 2026-08-06 decoupling (whose log is short by their special count), and a reroll
+        /// used to rebuild the tinker set - is migration history, kept only as a pure query for tests and tools.
         /// </summary>
         public static bool PassesIntegrityGate(WorldObject weapon)
         {

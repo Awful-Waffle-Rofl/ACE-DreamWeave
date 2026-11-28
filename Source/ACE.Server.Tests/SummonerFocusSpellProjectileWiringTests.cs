@@ -16,6 +16,10 @@ namespace ACE.Server.Tests
     {
         private const string Signature = "public void DamageTarget(Creature target, float damage, bool critical, bool critDefended, bool overpower)";
 
+        // The site marker is itself a comment, so its count is read from the raw (comment-bearing) body.
+        private static string BodyRaw() =>
+            PooledLootSourceText.MethodBodyBoth("Source/ACE.Server/WorldObjects/SpellProjectile.cs", Signature).Raw;
+
         private static string Body() =>
             PooledLootSourceText.MethodBody(PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/SpellProjectile.cs"), Signature);
 
@@ -46,7 +50,7 @@ namespace ACE.Server.Tests
 
             Assert.AreEqual(1, CountOf(body, "SummonerFocus.HitMod("), "exactly one read per projectile");
             Assert.AreEqual(1, CountOf(body, "damage *= SummonerFocus.HitMod(ProjectileSource, target, ProjectileLauncher);"));
-            Assert.AreEqual(1, CountOf(body, "// Summoner casters (Docs/SummonerCasters/DESIGN.md): the live focus multiplier, read at the hit"));
+            Assert.AreEqual(1, CountOf(BodyRaw(), "// Summoner casters (Docs/SummonerCasters/DESIGN.md): the live focus multiplier, read at the hit"));
         }
 
         /// <summary>

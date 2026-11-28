@@ -420,6 +420,16 @@ namespace ACE.Server.BalanceTrials
                     log.Error($"[TRIAL] trial {session?.TrialUuid} manager tick threw", ex);
                 }
             }
+
+            // Campaigns: member re-starts, the deadline close, the status and report lines. World thread, after the sessions.
+            try
+            {
+                TrialCampaigns.WorldTick(now);
+            }
+            catch (Exception ex)
+            {
+                log.Error("[TRIAL] the campaign tick threw", ex);
+            }
         }
 
         /// <summary>Test seam: runs the room-thread half of a tick for the session registered on <paramref name="instance"/>, inline.</summary>
@@ -438,6 +448,9 @@ namespace ACE.Server.BalanceTrials
             session.Tick(now);
 
             SampleVitals(entry, now);
+
+            // A campaign member's auto-next (nothing for a plain session): it checks online, alive and in the room itself.
+            TrialCampaigns.RoomTick(session, world, now);
 
             if (world == null)
                 return;

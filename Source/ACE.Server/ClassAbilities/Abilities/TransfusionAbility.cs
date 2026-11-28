@@ -35,7 +35,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             Name = "transfusion",
             DisplayName = "Transfusion",
             // Live text. Share per rank: TransfusionAbility.cs ~72-74 (ShareFraction) and ~105-107 (GetReadout).
-            DescriptionTemplate = "The surplus from your Drain Health goes to fellowship members, your own summons and the envoys of a World Event within 10 " +
+            DescriptionTemplate = "The surplus from your Drain Health goes to fellowship members, your own summons, the envoys of a World Event and the Allegiance Avatar within 10 " +
                           "metres who need it, instead of being lost. You do not need a fellowship. Drain damage is the same at " +
                           "every rank.",
             RankTailTemplate = "{ranks:class_ability_transfusion_share_r|pct}% of the surplus shared",

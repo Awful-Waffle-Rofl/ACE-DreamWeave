@@ -259,11 +259,11 @@ namespace ACE.Server.Entity
         /// because this stone promises the player the weapon "can never be tinkered again" and that promise has
         /// to be honored by anything that could break it.
         ///
-        /// WHY AN EXPLICIT CHECK RATHER THAN RELYING ON THE INTEGRITY GATE. A drift-stoned weapon carries
-        /// NumTimesTinkered = <see cref="LockedTinkerCount"/> (10) but only <see cref="MinBoosts"/>+1 ..
-        /// <see cref="MaxBoosts"/>+1 = 2..6 log entries, so a "log length must equal NumTimesTinkered" gate
-        /// happens to refuse it today. That is a COINCIDENCE OF THE CURRENT TUNING, not a guarantee: raising
-        /// MaxBoosts to 9 makes the log ten entries long and the gate would wave the weapon straight through.
+        /// WHY AN EXPLICIT CHECK. A drift-stoned weapon carries NumTimesTinkered = <see cref="LockedTinkerCount"/>
+        /// (10) but only <see cref="MinBoosts"/>+1 .. <see cref="MaxBoosts"/>+1 = 2..6 log entries, so a "log
+        /// length must equal NumTimesTinkered" gate used to refuse it by coincidence of the current tuning. Since
+        /// 2026-11-25 no integrity gate refuses a Tourmaline or Amethyst use at all, so this signature check is
+        /// the ONLY seal on either path, whatever the stone's tuning.
         ///
         /// KNOWN LIMITATION - THIS IS A SIGNATURE, NOT A MARKER. The stone writes no dedicated property, so
         /// there is nothing on the weapon that says "a drift stone did this"; the signature below is the closest
@@ -290,9 +290,9 @@ namespace ACE.Server.Entity
                 // (W_DamageType Health) fell through to the CriticalStrike fallback, so weapons
                 // stoned then carry the rend the old mapping produced - Health masked out - with
                 // that rend's material closing the TinkerLog. Accept that stamp too: recomputing
-                // only the new rend would silently unseal every pre-fix life wand, and the Swap
-                // path has no integrity-gate backstop (it is reroll-only by 2026-08-07 policy -
-                // see WeaponModManager.ResolveAction).
+                // only the new rend would silently unseal every pre-fix life wand, and neither the
+                // reroll nor the swap path has an integrity-gate backstop (none since 2026-11-25 -
+                // see WeaponModManager.ResolveDriftStoneRefusal).
                 if ((weapon.W_DamageType & DamageType.Health) == 0)
                     return false;
 

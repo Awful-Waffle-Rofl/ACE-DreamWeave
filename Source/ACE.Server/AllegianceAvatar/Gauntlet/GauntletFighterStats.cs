@@ -8,13 +8,13 @@ using ACE.Server.ThreadDungeons;
 namespace ACE.Server.Avatars.Gauntlet;
 
 /// <summary>
-/// What one restamp writes on the Avatar fighter. Built by <see cref="GauntletFighterStats.Compute"/>; applied by
+/// What one stamp writes on the Avatar fighter: the run-start snapshot (the fighter's power never changes after it). Built by <see cref="GauntletFighterStats.Compute"/>; applied by
 /// GauntletAvatarFighter.ApplyStamp. A skill or attribute target of 0 means "leave it authored", the normalizer's own
 /// convention (an empty band standard, or no median for that axis).
 /// </summary>
 public sealed record GauntletFighterStamp
 {
-    /// <summary>The level shown: L(n), the wave's level.</summary>
+    /// <summary>The level shown: the Avatar's own level A (never the wave level). Compute leaves the wave's level here; the live hooks overwrite it with A.</summary>
     public int Level { get; init; }
 
     /// <summary>The Avatar level A the stamp was computed with.</summary>
@@ -31,6 +31,12 @@ public sealed record GauntletFighterStamp
     /// <summary>The maximum hit its body parts and weapons are set to (0: leave authored).</summary>
     public uint DamageTarget { get; init; }
 
+    /// <summary>
+    /// The body-part base armor its parts are set to: the start plan's band standard MaxBaseArmor at
+    /// <see cref="GauntletFighterStats.ArmorRatio"/> (owner ruling 2026-11-25, real damage with band armor). 0: leave authored.
+    /// </summary>
+    public uint ArmorTarget { get; init; }
+
     public IReadOnlyDictionary<Skill, uint> Skills { get; init; } = new Dictionary<Skill, uint>();
 
     public IReadOnlyDictionary<PropertyAttribute, uint> Attributes { get; init; } = new Dictionary<PropertyAttribute, uint>();
@@ -43,8 +49,8 @@ public sealed record GauntletFighterStamp
 }
 
 /// <summary>
-/// The Avatar fighter's power (pure; spec "The Avatar fights", Power). Every number comes from the wave's plan and the
-/// Avatar's current level A, through <see cref="GauntletTuning"/>:
+/// The Avatar fighter's power (pure; spec "The Avatar fights", Power), computed ONCE at the run's start from wave 1's plan and
+/// the Avatar's level A at that moment (never recomputed by later waves). Every number comes from that plan and A, through <see cref="GauntletTuning"/>:
 /// <list type="bullet">
 /// <item>max health = plan.HealthCurveTarget x (fighter_health_base + fighter_health_per_level x A), held to
 /// allegiance_gauntlet_max_creature_health and to [1, int.MaxValue];</item>
@@ -52,8 +58,10 @@ public sealed record GauntletFighterStamp
 /// (DungeonCombatNormalizer.AttackSkillTarget, DefenseSkillTarget, AttributeTarget) at the offense ratio;</item>
 /// <item>the maximum hit is plan.PerHitMedian x the damage ratio (the band standard's MaxBodyDamage when the plan has no
 /// per-hit median, which is the damage ceiling switched off).</item>
+/// <item>the body-part base armor is the band standard's MaxBaseArmor at <see cref="ArmorRatio"/> (1.0), the
+/// SetBossBodyParts armor axis, so the fighter takes real hits as a monster of the start wave's band would.</item>
 /// </list>
-/// The current health fraction is kept across a restamp (<see cref="KeptHealth"/>).
+/// The current health fraction is kept across a re-apply (<see cref="KeptHealth"/>).
 /// </summary>
 public static class GauntletFighterStats
 {
@@ -65,6 +73,18 @@ public static class GauntletFighterStats
 
     public static double HealthFactor(int avatarLevel, GauntletTuning t) =>
         t.FighterHealthBase + t.FighterHealthPerLevel * Math.Max(0, avatarLevel);
+
+    /// <summary>The band armor ratio (owner ruling 2026-11-25: ratio 1.0, the band's own armor). Not a tunable.</summary>
+    public const double ArmorRatio = 1.0;
+
+    /// <summary>The body-part base armor: the standard's MaxBaseArmor x <see cref="ArmorRatio"/>; 0 (leave authored) for no or an empty standard.</summary>
+    public static uint ArmorTarget(DungeonBandStandard standard)
+    {
+        if (standard == null || standard.IsEmpty || standard.MaxBaseArmor == 0)
+            return 0;
+
+        return (uint)Math.Clamp(Math.Round(standard.MaxBaseArmor * ArmorRatio, MidpointRounding.AwayFromZero), 1.0, int.MaxValue);
+    }
 
     /// <summary>plan.HealthCurveTarget x the health factor, clamped. 0 when the curve gave no target (leave authored).</summary>
     public static uint MaxHealth(double healthCurveTarget, int avatarLevel, GauntletTuning t)
@@ -95,7 +115,7 @@ public static class GauntletFighterStats
         return (uint)Math.Clamp(Math.Round(basis * ratio, MidpointRounding.AwayFromZero), 1.0, int.MaxValue);
     }
 
-    /// <summary>The stamp for one wave. <paramref name="plan"/> null (a refused wave) gives null: the fighter keeps its stats.</summary>
+    /// <summary>The stamp for one plan (the run-start snapshot, from wave 1's). <paramref name="plan"/> null (a refused wave) gives null: the fighter keeps its stats.</summary>
     internal static GauntletFighterStamp Compute(GauntletWavePlan plan, int avatarLevel, GauntletTuning t)
     {
         if (plan == null)
@@ -152,6 +172,7 @@ public static class GauntletFighterStats
             OffenseRatio = offense,
             DamageRatio = DamageRatio(avatarLevel, t),
             DamageTarget = DamageTarget(perHitMedian, standard, avatarLevel, t),
+            ArmorTarget = ArmorTarget(standard),
             Skills = skills,
             Attributes = attributes,
             MinDeathSeconds = t.FighterMinDeathSeconds,

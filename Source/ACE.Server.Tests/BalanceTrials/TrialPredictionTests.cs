@@ -398,7 +398,7 @@ namespace ACE.Server.Tests.BalanceTrials
         public void Spawn_predicts_after_Prepare_before_EnterWorld_and_emits_the_event_only_after_EnterWorld()
         {
             var source = PooledLootSourceText.Read("Source/ACE.Server/BalanceTrials/TrialSpawner.cs");
-            var spawn = PooledLootSourceText.MethodBody(source, "internal static Creature Spawn(DungeonSpawnPlan plan, DungeonSpawnPlanEntry e, uint observedMaxNonBoss, TrialRep rep, Landblock lb, uint instance, string tag)");
+            var spawn = PooledLootSourceText.MethodBody(source, TrialSpawnerTests.SpawnSignature);
 
             var prepare = spawn.IndexOf("Prepare(creature, plan, e, observedMaxNonBoss, rep, tag);", StringComparison.Ordinal);
             var predict = spawn.IndexOf("var pred = Predict(creature, e, rep, tag);", StringComparison.Ordinal);

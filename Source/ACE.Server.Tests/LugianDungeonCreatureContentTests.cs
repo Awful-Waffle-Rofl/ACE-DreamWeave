@@ -108,7 +108,7 @@ namespace ACE.Server.Tests
                     Assert.AreEqual(10, floats[32], 1e-9, $"{w} AuralAwarenessRange");
 
                     var drops = CreateRows(w).Where(r => r.Dest == 9).ToList();
-                    CollectionAssert.AreEqual(new[] { (d.Item, 0.05), (0, 0.95) }, drops.Select(r => (r.Wcid, r.Shade)).ToArray(), $"{w} drops");
+                    CollectionAssert.AreEqual(new[] { (d.Item, 0.075), (0, 0.925) }, drops.Select(r => (r.Wcid, r.Shade)).ToArray(), $"{w} drops");
                 }
             }
         }
@@ -329,9 +329,10 @@ namespace ACE.Server.Tests
                 {
                     foreach (var t in tables)
                     {
-                        // The Hurlers come from two different retail templates (Lackey vs Launcher): the skill set and the
-                        // PhysicsEffectTable DID are template-owned, everything behavioural must still be identical.
-                        if (label == "Hurler" && (t == "skill" || t == "d_i_d"))
+                        // The Hurlers come from two different retail templates (Lackey vs Launcher): the skill set is
+                        // template-owned, everything behavioural must still be identical. The d_i_d type set is compared:
+                        // every lugian carries PhysicsEffectTable 0x3400001E, without which spell effects show no visual.
+                        if (label == "Hurler" && t == "skill")
                             continue;
 
                         CollectionAssert.AreEqual(KeySet(a, t), KeySet(b, t), $"{label} {first.Name} vs {d.Name}: weenie_properties_{t} type set");

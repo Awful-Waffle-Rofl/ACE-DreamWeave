@@ -41,6 +41,24 @@ public static class AvatarCurves
     }
 
     /// <summary>
+    /// The effective account count: R up to T = max(minActiveAccounts, thresholdFraction * S), and T + (R - T)^exponent
+    /// beyond it. The numerator of <see cref="RosterScale"/>, and what the scaled prices multiply their per-account part by.
+    /// A fractional threshold can push the result slightly above R; callers that must not amplify clamp it.
+    /// </summary>
+    public static double EffectiveAccounts(int allegianceActiveAccounts, int serverActiveAccounts, AvatarTuning t)
+    {
+        if (allegianceActiveAccounts <= 0)
+            return 0.0;
+
+        double r = allegianceActiveAccounts;
+        var threshold = Math.Max((double)t.MinActiveAccounts, t.RosterThresholdFraction * Math.Max(0, serverActiveAccounts));
+        if (r <= threshold)
+            return r;
+
+        return threshold + Math.Pow(r - threshold, t.RosterExcessExponent);
+    }
+
+    /// <summary>
     /// effective(R) / R, where effective = R up to T = max(minActiveAccounts, thresholdFraction * S)
     /// and T + (R - T)^exponent beyond it. Returns 1.0 when R is not positive.
     /// </summary>
@@ -49,14 +67,33 @@ public static class AvatarCurves
         if (allegianceActiveAccounts <= 0)
             return 1.0;
 
-        double r = allegianceActiveAccounts;
-        var threshold = Math.Max((double)t.MinActiveAccounts, t.RosterThresholdFraction * Math.Max(0, serverActiveAccounts));
-        if (r <= threshold)
-            return 1.0;
-
-        var effective = threshold + Math.Pow(r - threshold, t.RosterExcessExponent);
+        var effective = EffectiveAccounts(allegianceActiveAccounts, serverActiveAccounts, t);
         // A fractional threshold can push effective slightly above R; the scale never amplifies.
-        return Math.Min(1.0, effective / r);
+        return Math.Min(1.0, effective / allegianceActiveAccounts);
+    }
+
+    /// <summary>
+    /// max(floor, ceil(perAccount * EffectiveAccounts(R, S))), saturating and never negative. A negative floor or
+    /// per-account part counts as 0.
+    /// </summary>
+    public static ulong ScaledPrice(long floor, long perAccount, int allegianceActiveAccounts, int serverActiveAccounts, AvatarTuning t)
+    {
+        var scaled = Math.Max(0L, perAccount) * EffectiveAccounts(allegianceActiveAccounts, serverActiveAccounts, t);
+        var ceiled = SaturatingToUlong(Math.Ceiling(scaled - FloorEpsilon));
+        return Math.Max((ulong)Math.Max(0L, floor), ceiled);
+    }
+
+    /// <summary>
+    /// The per-Avatar Favor cap: max(favorCap, ceil(max(1, priceMultiple) * largestPrice)), saturating. The multiple is floored at 1.0
+    /// (NaN, negative or below 1 read as 1.0) so the cap never sits below the largest price. <paramref name="largestPrice"/>
+    /// is the largest of the Avatar's scaled prices (see <see cref="AvatarPricing"/>).
+    /// </summary>
+    public static ulong FavorCapFor(ulong largestPrice, AvatarTuning t)
+    {
+        var flat = (ulong)Math.Max(0L, t.FavorCap);
+        var multiple = double.IsFinite(t.FavorCapPriceMultiple) ? Math.Max(1.0, t.FavorCapPriceMultiple) : 1.0;
+        var scaled = SaturatingToUlong(Math.Ceiling(largestPrice * multiple - FloorEpsilon));
+        return Math.Max(flat, scaled);
     }
 
     /// <summary>
@@ -93,13 +130,16 @@ public static class AvatarCurves
         return lo;
     }
 
-    /// <summary>min(cap, favor + contribution * favorRate), saturating.</summary>
-    public static ulong AddFavor(ulong favor, ulong contribution, AvatarTuning t)
+    /// <summary>
+    /// max(favor, min(cap, favor + contribution * favorRate)), saturating. <paramref name="cap"/> is the per-Avatar cap (<see cref="FavorCapFor"/>).
+    /// The cap stops growth and never destroys Favor: an Avatar above a cap that shrank (its roster fell) keeps what it has, the same
+    /// never-lower contract as AvatarManager.RefundFavor.
+    /// </summary>
+    public static ulong AddFavor(ulong favor, ulong contribution, ulong cap, AvatarTuning t)
     {
-        var cap = (ulong)Math.Max(0L, t.FavorCap);
         var gained = SaturatingToUlong(Math.Floor(contribution * Math.Max(0.0, t.FavorRate) + FloorEpsilon));
         var total = favor > ulong.MaxValue - gained ? ulong.MaxValue : favor + gained;
-        return Math.Min(cap, total);
+        return Math.Max(favor, Math.Min(cap, total));
     }
 
     /// <summary>

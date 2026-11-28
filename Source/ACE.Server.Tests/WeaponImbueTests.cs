@@ -206,6 +206,16 @@ namespace ACE.Server.Tests
             Assert.AreEqual(WorldObject.MaxRendingMod, WorldObject.GetRendingMod(MakeSkill(Skill.ItemEnchantment, 360)), Epsilon);
         }
 
+        [TestMethod]
+        public void Summoning_SizesWithTheMagicFormulas()
+        {
+            // Character Sheet only: a Summoner focus's Crippling Blow / Critical Strike read Summoning base skill, capped at 360
+            Assert.AreEqual(6.0f, WorldObject.GetCripplingBlowMod(MakeSkill(Skill.Summoning, 360)), Epsilon);
+            Assert.AreEqual(6.0f, WorldObject.GetCripplingBlowMod(MakeSkill(Skill.Summoning, 500)), Epsilon);
+            Assert.AreEqual(0.5f, WorldObject.GetCriticalStrikeMod(MakeSkill(Skill.Summoning, 360)), Epsilon);
+            Assert.AreEqual(0.05f, WorldObject.GetCriticalStrikeMod(MakeSkill(Skill.Summoning, 60)), Epsilon);
+        }
+
         // ---- skill / damage type classification ----
 
         [TestMethod]
@@ -220,11 +230,35 @@ namespace ACE.Server.Tests
 
             // LifeMagic is deliberately Magic here (Martyr's Hecatomb crits), and so is ItemEnchantment
             // (Spellsword class-ability procs read it as their attack skill)
-            foreach (var magic in new[] { Skill.WarMagic, Skill.VoidMagic, Skill.LifeMagic, Skill.ItemEnchantment })
+            // Summoning is Magic for the Character Sheet's Summoner focus sizing (owner ruling 2026-11-24); no combat path passes it
+            foreach (var magic in new[] { Skill.WarMagic, Skill.VoidMagic, Skill.LifeMagic, Skill.ItemEnchantment, Skill.Summoning })
                 Assert.AreEqual(WorldObject.ImbuedSkillType.Magic, WorldObject.GetImbuedSkillType(MakeSkill(magic, 100)), magic.ToString());
 
             Assert.AreEqual(WorldObject.ImbuedSkillType.Undef, WorldObject.GetImbuedSkillType(MakeSkill(Skill.MeleeDefense, 100)));
             Assert.AreEqual(WorldObject.ImbuedSkillType.Undef, WorldObject.GetImbuedSkillType(null));
+        }
+
+        // ---- Shield skill rides the Melee curve (Thorns is the only caller that passes it) ----
+
+        [TestMethod]
+        public void Shield_IsMeleeImbueSkill()
+            => Assert.AreEqual(WorldObject.ImbuedSkillType.Melee, WorldObject.GetImbuedSkillType(MakeSkill(Skill.Shield, 1)));
+
+        [TestMethod]
+        public void CriticalStrike_Shield_UsesTheMeleeCurve()
+        {
+            Assert.AreEqual(0.10f, WorldObject.GetCriticalStrikeMod(MakeSkill(Skill.Shield, 100)), Epsilon);
+            Assert.AreEqual(0.25f, WorldObject.GetCriticalStrikeMod(MakeSkill(Skill.Shield, 250)), Epsilon);
+            Assert.AreEqual(0.50f, WorldObject.GetCriticalStrikeMod(MakeSkill(Skill.Shield, 400)), Epsilon);
+            Assert.AreEqual(0.50f, WorldObject.GetCriticalStrikeMod(MakeSkill(Skill.Shield, 450)), Epsilon); // 400 cap
+        }
+
+        [TestMethod]
+        public void CripplingBlow_Shield_UsesTheMeleeCurve()
+        {
+            Assert.AreEqual(1.0f, WorldObject.GetCripplingBlowMod(MakeSkill(Skill.Shield, 40)), Epsilon);
+            Assert.AreEqual(2.0f, WorldObject.GetCripplingBlowMod(MakeSkill(Skill.Shield, 160)), Epsilon);
+            Assert.AreEqual(6.0f, WorldObject.GetCripplingBlowMod(MakeSkill(Skill.Shield, 400)), Epsilon);
         }
 
         [TestMethod]

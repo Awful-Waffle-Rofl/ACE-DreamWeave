@@ -11,7 +11,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
     /// <summary>
     /// Double Marks windows through the battleground coordinator rig (Docs/Pvp/BATTLEGROUNDS.md "Double Marks windows"): the payout
     /// is decided by when the match went LIVE, and the Crier lines are sent whether or not pvp_arena_crier_enabled is on. The rig's
-    /// dials are the shipped ones (marks 2 / 1 / 1, scale 1.0, bonus 2.0, windows 06:00-07:00 and 18:00-19:00 Pacific). Method names
+    /// dials are the shipped ones (marks 5 / 2 / 2, scale 1.0, bonus 2.0, windows 06:00-07:00 and 18:00-19:00 Pacific). Method names
     /// start with DoubleMarks_ so they can be run on their own. 2026-10-05 is PDT (UTC-7): 06:58 local is 13:58Z.
     /// </summary>
     public partial class BattlegroundCoordinatorTests
@@ -43,7 +43,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
         }
 
         [TestMethod]
-        public void DoubleMarks_LiveAt0658_WinPays4_LossPays2()
+        public void DoubleMarks_LiveAt0658_WinPays10_LossPays4()
         {
             var rig = LiveKothAt(PacificLocal(6, 58), out var match);
 
@@ -52,34 +52,34 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             Assert.AreEqual(4, rig.Gateway.BloodGrants.Count);
 
             foreach (var id in rig.Team(match, 0))
-                Assert.AreEqual(4, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount, "winner: 2 x 2");
+                Assert.AreEqual(10, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount, "winner: 5 x 2");
 
             foreach (var id in rig.Team(match, 1))
-                Assert.AreEqual(2, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount, "loser: 1 x 2");
+                Assert.AreEqual(4, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount, "loser: 2 x 2");
 
             Assert.IsTrue(rig.Gateway.BloodGrants.All(g => g.Grant.DoubleMarks), "every grant carries the Double Marks flag for the pickup line");
             Assert.IsTrue(rig.Gateway.BloodGrants.All(g => g.Grant.Ledger == PvpBloodLedgerKind.Battleground));
         }
 
         [TestMethod]
-        public void DoubleMarks_LiveAt0701_WinPays2_LossPays1_NoFlag()
+        public void DoubleMarks_LiveAt0701_WinPays5_LossPays2_NoFlag()
         {
             var rig = LiveKothAt(PacificLocal(7, 1), out var match);
 
             ResolveWithTeamZeroWin(rig, match);
 
             foreach (var id in rig.Team(match, 0))
-                Assert.AreEqual(2, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount);
+                Assert.AreEqual(5, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount);
 
             foreach (var id in rig.Team(match, 1))
-                Assert.AreEqual(1, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount);
+                Assert.AreEqual(2, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount);
 
             Assert.IsFalse(rig.Gateway.BloodGrants.Any(g => g.Grant.DoubleMarks));
         }
 
         /// <summary>The window is read at LIVE time: a match that goes Live at 06:58 and resolves at 07:06 still pays double.</summary>
         [TestMethod]
-        public void DoubleMarks_LiveAt0658_ResolvedAt0706_StillPays4()
+        public void DoubleMarks_LiveAt0658_ResolvedAt0706_StillPays10()
         {
             var rig = LiveKothAt(PacificLocal(6, 58), out var match);
 
@@ -89,12 +89,12 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             ResolveWithTeamZeroWin(rig, match);
 
             foreach (var id in rig.Team(match, 0))
-                Assert.AreEqual(4, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount);
+                Assert.AreEqual(10, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount);
         }
 
         /// <summary>The mirror: Live at 05:58 (before the window), resolved at 06:06 (inside it), pays the ordinary amount.</summary>
         [TestMethod]
-        public void DoubleMarks_LiveAt0558_ResolvedInsideTheWindow_Pays2()
+        public void DoubleMarks_LiveAt0558_ResolvedInsideTheWindow_Pays5()
         {
             var rig = LiveKothAt(PacificLocal(5, 58), out var match);
 
@@ -103,7 +103,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             ResolveWithTeamZeroWin(rig, match);
 
             foreach (var id in rig.Team(match, 0))
-                Assert.AreEqual(2, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount);
+                Assert.AreEqual(5, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount);
 
             Assert.IsFalse(rig.Gateway.BloodGrants.Any(g => g.Grant.DoubleMarks));
         }
@@ -118,7 +118,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
 
             Assert.AreEqual("draw", rig.Sink.Saves.Single().Match.Outcome);
             Assert.AreEqual(4, rig.Gateway.BloodGrants.Count);
-            Assert.IsTrue(rig.Gateway.BloodGrants.All(g => g.Amount == 2), "draw 1 x 2");
+            Assert.IsTrue(rig.Gateway.BloodGrants.All(g => g.Amount == 4), "draw 2 x 2");
         }
 
         [TestMethod]
@@ -129,10 +129,10 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             ResolveWithTeamZeroWin(rig, match);
 
             foreach (var id in rig.Team(match, 0))
-                Assert.AreEqual(6, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount, "round(2 x 1.5 x 2.0)");
+                Assert.AreEqual(15, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount, "round(5 x 1.5 x 2.0)");
 
             foreach (var id in rig.Team(match, 1))
-                Assert.AreEqual(3, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount, "round(1 x 1.5 x 2.0)");
+                Assert.AreEqual(6, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount, "round(2 x 1.5 x 2.0)");
         }
 
         [TestMethod]
@@ -143,7 +143,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             ResolveWithTeamZeroWin(rig, match);
 
             foreach (var id in rig.Team(match, 0))
-                Assert.AreEqual(2, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount);
+                Assert.AreEqual(5, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount);
 
             Assert.IsFalse(rig.Gateway.BloodGrants.Any(g => g.Grant.DoubleMarks), "a multiplier that sanitizes to 1.0 is not a Double Marks payout");
         }
@@ -156,7 +156,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             ResolveWithTeamZeroWin(rig, match);
 
             foreach (var id in rig.Team(match, 0))
-                Assert.AreEqual(2, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount);
+                Assert.AreEqual(5, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount);
 
             Assert.IsFalse(rig.Gateway.BloodGrants.Any(g => g.Grant.DoubleMarks));
         }
@@ -186,7 +186,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             ResolveWithTeamZeroWin(rig, match);
 
             foreach (var id in rig.Team(match, 0))
-                Assert.AreEqual(2, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount, "13:30Z is outside 20:00-21:00 UTC");
+                Assert.AreEqual(5, rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount, "13:30Z is outside 20:00-21:00 UTC");
         }
 
         // ---------------- the Crier lines through the coordinator ----------------
@@ -210,7 +210,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
 
             CollectionAssert.AreEqual(
                 new[] { BgBonusCrier.WarnLine(15), BgBonusCrier.OpenLine("1h 0m"), BgBonusCrier.EndLine("11h 0m") },
-                crier.Lines.Where(l => l.StartsWith("Battleground Double Marks")).ToArray());
+                crier.Lines.Where(l => l.StartsWith("Double Marks")).ToArray());
         }
 
         /// <summary>
@@ -231,7 +231,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
                 rig.Advance(30);
             }
 
-            Assert.AreEqual(0, crier.Lines.Count(l => l.StartsWith("Battleground Double Marks")), "the arena is off mid-window: no announcement");
+            Assert.AreEqual(0, crier.Lines.Count(l => l.StartsWith("Double Marks")), "the arena is off mid-window: no announcement");
 
             rig.Dials = rig.Dials with { Enabled = true };
 
@@ -241,7 +241,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
                 rig.Advance(30);
             }
 
-            var lines = crier.Lines.Where(l => l.StartsWith("Battleground Double Marks")).ToList();
+            var lines = crier.Lines.Where(l => l.StartsWith("Double Marks")).ToList();
 
             Assert.AreEqual(1, lines.Count, string.Join(" | ", lines));
             StringAssert.Contains(lines[0], "is now live for the next");
@@ -259,7 +259,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
                 rig.Advance(30);
             }
 
-            Assert.AreEqual(0, crier.Lines.Count(l => l.StartsWith("Battleground Double Marks")));
+            Assert.AreEqual(0, crier.Lines.Count(l => l.StartsWith("Double Marks")));
         }
     }
 }

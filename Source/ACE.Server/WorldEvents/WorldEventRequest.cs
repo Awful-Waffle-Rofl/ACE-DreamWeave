@@ -34,6 +34,12 @@ namespace ACE.Server.WorldEvents
         public ulong AvatarFavorPrice { get; set; }
 
         /// <summary>
+        /// The Avatar's bound monarch at purchase (null for an ordinary run). Seeds the run's monarch so a quiet private event can tell
+        /// members from outsiders even if the Avatar is unbound before the first announcement resolves it.
+        /// </summary>
+        public uint? AvatarMonarchGuid { get; set; }
+
+        /// <summary>
         /// The composed families, in slot order (two-family composition, 2026-08-29). One or two ids; the
         /// composer refuses three or more, and refuses a duplicate. Empty means "not pinned" - which is a
         /// refusal on the ordinary path ("missing --family") and the signal to ROLL a pair on the random

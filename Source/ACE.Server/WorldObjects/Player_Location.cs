@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Linq;
+using System.Threading;
 
 using ACE.Common;
 using ACE.Database;
@@ -1251,6 +1252,44 @@ namespace ACE.Server.WorldObjects
         private const double StanceResyncDelaySeconds = 1.5;
 
         /// <summary>
+        /// How long after materializing the first stance re-send fires. Deferred rather than immediate so that a client
+        /// MoveToState sent right after LoginComplete (autorun pressed on arrival) has reached the server and is seen by
+        /// the fire-time guard, instead of the re-send overtaking it and dropping the autorun.
+        /// </summary>
+        private const double ArrivalStanceResyncDelaySeconds = 0.5;
+
+        /// <summary>How often the arrival retry re-checks whether the player is still moving.</summary>
+        private const double ArrivalStanceResyncRetrySeconds = 1.0;
+
+        /// <summary>Seconds after materializing at which the arrival retry gives up without sending (never an unconditional send).</summary>
+        private const double ArrivalStanceResyncGiveUpSeconds = 60.0;
+
+        /// <summary>
+        /// A player whose position moved less than this between two retry ticks is standing still, whatever its last
+        /// MoveToState says (a stuck HasMovement, see the client-release gap described in Player_Tick.UpdatePlayerPhysics).
+        /// </summary>
+        private const double ArrivalStanceResyncStillMeters = 0.1;
+
+        /// <summary>Time.GetUnixTime() of the last ResyncStanceToSelf; 0 until the first. Lets the arrival retry stop once any re-send went out.</summary>
+        private double lastStanceResyncTime;
+
+        /// <summary>
+        /// Consecutive retry ticks under ArrivalStanceResyncStillMeters required before the stillness send. Location is only
+        /// refreshed by client position reports for a non-FastTick player, so a single tick can read an unchanged Location
+        /// while the player is really running; two in a row means about 2 s with no displacement.
+        /// </summary>
+        private const int ArrivalStanceResyncStillTicksRequired = 2;
+
+        /// <summary>
+        /// The teleport window (LastTeleportStartTimestamp) whose arrival resync was deferred because the player was moving
+        /// and has not gone out yet; 0 when none is owed. Set by ScheduleArrivalStanceResync on a skip, cleared by
+        /// ResyncStanceToSelf. The stop-report fast path (CheckPendingArrivalStanceResync, on the network thread) and the
+        /// retry (on the player's action queue) each claim it with an Interlocked compare-exchange to 0 before sending, so
+        /// at most one of them sends for a window (<see cref="TryClaimPendingArrivalStanceResync"/>).
+        /// </summary>
+        private double pendingArrivalStanceResyncStamp;
+
+        /// <summary>
         /// Re-sends the server's CURRENT stance and CombatMode to this player's own client only. Changes no server
         /// state, broadcasts to nobody, starts no animation and does not touch NextUseTime. Sent in every mode,
         /// NonCombat included: a peace-stance motion plus CombatMode=NonCombat is how the server pulls a client out
@@ -1270,13 +1309,164 @@ namespace ACE.Server.WorldObjects
             else if (log.IsDebugEnabled)
                 log.Debug(line);
 
+            lastStanceResyncTime = Time.GetUnixTime();
+            Interlocked.Exchange(ref pendingArrivalStanceResyncStamp, 0);
+
             // animOnly=true: do not write CombatMode back, the server value is the source of truth here
             ResendStanceToSelf(this, mode, stance, true);
         }
 
         /// <summary>
-        /// One delayed <see cref="ResyncStanceToSelf"/>. Re-reads current state at fire time and is skipped if the
-        /// player is teleporting again, has no network, or is logging out.
+        /// The first post-teleport stance re-send, ArrivalStanceResyncDelaySeconds after materializing. The guard runs at
+        /// fire time: skipped while the player is moving (<see cref="IsMovingForArrivalStanceResync"/>). A skip marks the
+        /// resync pending for this window, which the stop-report fast path (<see cref="CheckPendingArrivalStanceResync"/>)
+        /// and the stillness retry (<see cref="ScheduleArrivalStanceResyncRetry"/>) then settle. Dropped when the window is
+        /// gone: teleporting again, a newer teleport, no network, logging out or dead.
+        /// </summary>
+        private void ScheduleArrivalStanceResync()
+        {
+            var stamp = LastTeleportStartTimestamp;
+            var arrivedAt = Time.GetUnixTime();
+
+            var chain = new ActionChain();
+            chain.AddDelaySeconds(ArrivalStanceResyncDelaySeconds);
+            chain.AddAction(this, () =>
+            {
+                if (!ArrivalStanceResyncWindowCurrent(stamp))
+                    return;
+
+                if (!IsMovingForArrivalStanceResync(stamp))
+                {
+                    ResyncStanceToSelf("teleport-complete");
+                    return;
+                }
+
+                if (log.IsDebugEnabled)
+                    log.Debug($"[STANCE_RESYNC] {Name} (0x{Guid}) deferred reason=teleport-complete moving");
+
+                Interlocked.Exchange(ref pendingArrivalStanceResyncStamp, stamp ?? 0);
+                ScheduleArrivalStanceResyncRetry(stamp, arrivedAt, Location == null ? null : new Position(Location), 0);
+            });
+            chain.EnqueueChain();
+        }
+
+        /// <summary>
+        /// The retry behind a skipped <see cref="ScheduleArrivalStanceResync"/>: every ArrivalStanceResyncRetrySeconds,
+        /// CombatStanceSync.DecideArrivalResyncRetry stops (window gone, a resync already went out, or the give-up time
+        /// passed), sends (no longer moving, or standing still since the previous tick despite a stuck movement flag), or
+        /// waits. There is no unconditional send: a player who keeps running is never interrupted.
+        /// </summary>
+        private void ScheduleArrivalStanceResyncRetry(double? stamp, double arrivedAt, Position previous, int stillTicks)
+        {
+            var chain = new ActionChain();
+            chain.AddDelaySeconds(ArrivalStanceResyncRetrySeconds);
+            chain.AddAction(this, () =>
+            {
+                var current = Location == null ? null : new Position(Location);
+                double? moved = previous == null || current == null ? (double?)null : current.DistanceTo(previous);
+                var consecutiveStill = CombatStanceSync.NextStillTicks(stillTicks, moved, ArrivalStanceResyncStillMeters);
+
+                var step = CombatStanceSync.DecideArrivalResyncRetry(
+                    ArrivalStanceResyncWindowCurrent(stamp),
+                    lastStanceResyncTime >= arrivedAt,
+                    IsMovingForArrivalStanceResync(stamp),
+                    IsActingForStanceResync(),
+                    consecutiveStill,
+                    ArrivalStanceResyncStillTicksRequired,
+                    Time.GetUnixTime() - arrivedAt,
+                    ArrivalStanceResyncGiveUpSeconds);
+
+                switch (step)
+                {
+                    case CombatStanceSync.ArrivalResyncStep.Send:
+                        if (TryClaimPendingArrivalStanceResync(stamp))
+                            ResyncStanceToSelf("teleport-complete-retry");
+                        break;
+
+                    case CombatStanceSync.ArrivalResyncStep.Wait:
+                        ScheduleArrivalStanceResyncRetry(stamp, arrivedAt, current, consecutiveStill);
+                        break;
+
+                    default:
+                        TryClaimPendingArrivalStanceResync(stamp);
+                        break;
+                }
+            });
+            chain.EnqueueChain();
+        }
+
+        /// <summary>
+        /// Atomically takes this window's pending arrival resync (compare-exchange to 0). True for exactly one caller per
+        /// pending window; false when it was already taken or sent, or a newer window replaced it, or stamp is null.
+        /// </summary>
+        private bool TryClaimPendingArrivalStanceResync(double? stamp)
+        {
+            return stamp.HasValue && stamp.Value != 0
+                && Interlocked.CompareExchange(ref pendingArrivalStanceResyncStamp, 0, stamp.Value) == stamp.Value;
+        }
+
+        /// <summary>
+        /// GameActionMoveToState, for every client report: the event-driven fast path. When this window's arrival resync is
+        /// still pending, the first report with no movement commands (the player stopped) sends it at once, unless the player
+        /// is mid-action (then the retry covers it); the send claims the pending state first, and
+        /// ResyncStanceToSelf clears the pending state, so it fires at most once per window.
+        /// </summary>
+        public void CheckPendingArrivalStanceResync(ACE.Server.Network.Structure.MoveToState moveToState)
+        {
+            var stamp = Volatile.Read(ref pendingArrivalStanceResyncStamp);
+            if (stamp == 0)
+                return;
+
+            if (!ArrivalStanceResyncWindowCurrent(stamp))
+            {
+                TryClaimPendingArrivalStanceResync(stamp);
+                return;
+            }
+
+            // mid-action (casting, attacking, NextUseTime): leave it pending, the retry sends once the action is over
+            if (!CombatStanceSync.ShouldSendPendingResyncOnReport(true,
+                    moveToState?.RawMotionState?.HasMovement() == true, MoveToParams != null || IsPlayerMovingTo, IsActingForStanceResync()))
+                return;
+
+            if (TryClaimPendingArrivalStanceResync(stamp))
+                ResyncStanceToSelf("teleport-complete-stopped");
+        }
+
+        /// <summary>CombatStanceSync.IsMovingForArrivalResync for this player and window: a pre-window report counts as idle.</summary>
+        private bool IsMovingForArrivalStanceResync(double? stamp)
+        {
+            return CombatStanceSync.IsMovingForArrivalResync(
+                CombatStanceSync.ClientReportedThisWindow(LastMoveToStateTime, stamp),
+                LastMoveToState?.RawMotionState?.HasMovement() == true,
+                MoveToParams != null || IsPlayerMovingTo);
+        }
+
+        /// <summary>
+        /// The arrival this re-send belongs to is still the player's current state: not teleporting again, no newer teleport
+        /// started, connected, not logging out, and not dead (a death ends in its own teleport, with its own resync).
+        /// </summary>
+        private bool ArrivalStanceResyncWindowCurrent(double? stamp)
+        {
+            return !Teleporting && LastTeleportStartTimestamp == stamp && Session?.Network != null && !IsLoggingOut
+                && !IsDead && !IsInDeathProcess;
+        }
+
+        /// <summary>
+        /// An action whose animation a stance motion could cut short: within NextUseTime, casting or attacking. The retry
+        /// waits it out (the same checks the delayed re-send applies); it is not a movement signal.
+        /// </summary>
+        private bool IsActingForStanceResync()
+        {
+            return DateTime.UtcNow < NextUseTime || MagicState.IsCasting || Attacking;
+        }
+
+        /// <summary>
+        /// One best-effort delayed <see cref="ResyncStanceToSelf"/>, StanceResyncDelaySeconds after materializing. Re-reads
+        /// current state at fire time and is skipped if the player is teleporting again, has no network or is logging out,
+        /// and ALSO whenever the player is busy (dead, within NextUseTime, casting, attacking, auto-moving or holding a
+        /// movement key). It never retries, so on its own it does not guarantee a resync; a player who is moving on arrival
+        /// is covered by the stop-report fast path and the stillness retry behind <see cref="ScheduleArrivalStanceResync"/>,
+        /// which send once the player stops and give up (without sending) if they never do.
         /// </summary>
         private void ScheduleDelayedStanceResync()
         {
@@ -1388,9 +1578,13 @@ namespace ACE.Server.WorldObjects
 
             // Re-send the server's current stance + CombatMode to our own client. A client that lost the stance
             // motion in portal space can show the missile bar while its character stands in peace stance, and
-            // cannot break out of that on its own. Once now, and once more shortly after in case we arrived
-            // while still falling (the client may refuse the motion until it has ground contact).
-            ResyncStanceToSelf("teleport-complete");
+            // cannot break out of that on its own. The re-send is a server-initiated motion with ForwardCommand=Ready,
+            // which on the player's own client drops autorun and stops a run, so it never goes out while the player is
+            // moving (Discord report: autorun self-disables right after a thread/portal):
+            // - ScheduleArrivalStanceResync: a short deferred send, guarded at fire time; if it skips, the resync stays
+            //   pending and goes out on the first stop report or the first still retry tick, never while really running;
+            // - ScheduleDelayedStanceResync: the best-effort second send, in case we arrived while still falling.
+            ScheduleArrivalStanceResync();
             ScheduleDelayedStanceResync();
 
             // survival challenge (WaffleACE): reconcile the run flag if a teleport moved us out of the arena

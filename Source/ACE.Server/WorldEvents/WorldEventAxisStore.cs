@@ -1416,7 +1416,20 @@ namespace ACE.Server.WorldEvents
 
                 reward.CacheDecor = ValidateCacheDecor(reward, diagnostics);
                 reward.CacheWcids = ValidateCacheWcids(reward, diagnostics);
+                if (reward.Draws.HasValue && (reward.Draws.Value < 1 || reward.Draws.Value > 10))
+                {
+                    diagnostics.Add($"rewards.json: reward '{reward.Id}' has an invalid draws {reward.Draws.Value} (must be 1 to 10), dropped");
+                    continue;
+                }
+
+                var hadPool = reward.Pool != null && reward.Pool.Count > 0;
                 reward.Pool = ValidatePool(reward, diagnostics);
+
+                if (hadPool && reward.Pool.Count == 0)
+                {
+                    diagnostics.Add($"rewards.json: reward '{reward.Id}' has no valid pool entries left, dropped");
+                    continue;
+                }
 
                 result[reward.Id] = reward;
             }
@@ -2088,12 +2101,26 @@ namespace ACE.Server.WorldEvents
 
                 if (entry == null)
                     problem = "is null";
-                else if (entry.Wcid == 0)
-                    problem = "has a zero wcid";
+                else if (entry.Wcid == 0 && (entry.Wcids == null || entry.Wcids.Count == 0))
+                    problem = "has neither a wcid nor a wcids list";
+                else if (entry.Wcid != 0 && entry.Wcids != null && entry.Wcids.Count > 0)
+                    problem = "sets both wcid and wcids";
+                else if (entry.Wcids != null && entry.Wcids.Contains(0))
+                    problem = "has a zero inside wcids";
+                else if (entry.ItemMaxLevel.HasValue && (entry.ItemMaxLevel.Value < 1 || entry.ItemMaxLevel.Value > 5))
+                    problem = $"has itemMaxLevel {entry.ItemMaxLevel.Value} outside 1 to 5";
                 else if (entry.Qty < 1)
                     problem = "has qty below 1";
                 else if (double.IsNaN(entry.Weight) || double.IsInfinity(entry.Weight) || entry.Weight <= 0)
                     problem = "has a weight that is not above 0";
+                else if (entry.KnotItem != null && entry.KnotItem != RewardPoolEntryDef.KnotPattern && entry.KnotItem != RewardPoolEntryDef.KnotFiber)
+                    problem = $"has an unknown knotItem '{entry.KnotItem}'";
+                else if (entry.KnotItem != null && ((entry.Wcids != null && entry.Wcids.Count > 0) || entry.ItemMaxLevel.HasValue))
+                    problem = "combines knotItem with wcids or itemMaxLevel";
+                else if (entry.KnotItem == RewardPoolEntryDef.KnotPattern && entry.Wcid != ACE.Server.Knots.KnotItems.PatternWcid)
+                    problem = "is knotItem pattern with a wcid that is not the Pattern wcid";
+                else if (entry.KnotItem == RewardPoolEntryDef.KnotFiber && entry.Wcid != ACE.Server.Knots.KnotItems.FiberWcid)
+                    problem = "is knotItem fiber with a wcid that is not the Fiber wcid";
                 else
                 {
                     var scale = entry.Scale?.Trim().ToLowerInvariant();
@@ -2104,7 +2131,11 @@ namespace ACE.Server.WorldEvents
                     {
                         entry.Scale = scale;
 
-                        if (scale == RewardPoolEntryDef.ScaleBags && (entry.BagWcid == null || entry.BagWcid.Value == 0))
+                        if (scale == RewardPoolEntryDef.ScaleBags && entry.KnotItem != null)
+                            problem = "combines knotItem with scale bags";
+                        else if (scale == RewardPoolEntryDef.ScaleBags && entry.Wcids != null && entry.Wcids.Count > 0)
+                            problem = "is scale bags with a wcids list";
+                        else if (scale == RewardPoolEntryDef.ScaleBags && (entry.BagWcid == null || entry.BagWcid.Value == 0))
                             problem = "is scale bags with no bagWcid";
                         else if (scale == RewardPoolEntryDef.ScaleBags && entry.BagsPerUnit < 1)
                             problem = "is scale bags with bagsPerUnit below 1";

@@ -40,20 +40,6 @@ namespace ACE.Server.Entity
                 lines.Add($"- Summoner Focus: your summons deal +{(dealt - 1.0) * 100.0:0.#}% damage while this is wielded");
             lines.Add($"- Your own damage is {(1.0 - SummonerFocus.WielderDamageModSetting()) * 100.0:0.#}% lower while this is wielded");
 
-            // the route table decides which line a mod lands on; combat reads no mod while weapon mods are off
-            if (WeaponModRegistry.Enabled())
-            {
-                var modSuffix = StrengthSuffix(SummonerFocus.PetModTransferPercent());
-
-                var petsOnly = CarriedModNames(wo, SummonerPetRoute.PetsOnly);
-                if (petsOnly.Count > 0)
-                    lines.Add($"- Empowers your summons, not you: {string.Join(", ", petsOnly)}{modSuffix}");
-
-                var shared = CarriedModNames(wo, SummonerPetRoute.Shared);
-                if (shared.Count > 0)
-                    lines.Add($"- Also empowers your summons: {string.Join(", ", shared)}{modSuffix}");
-            }
-
             // an imbue is not a weapon mod, so its transfer (and this line) does not follow the weapon-mod gate
             var imbueSuffix = StrengthSuffix(SummonerFocus.PetImbueTransferPercent());
 
@@ -84,25 +70,35 @@ namespace ACE.Server.Entity
             WorldObject.SumCasterElementalDamageMod(focus, focus.Wielder as Creature);
 
         /// <summary>
-        /// The display names, in registry order, of the mods on <paramref name="route"/> the focus carries, as a record or as
-        /// Paragon gems. Reads the record property straight off the item, the way WeaponModParagonDisplay does, NOT through
-        /// WeaponModCombat.ReadWeaponOnly, which strips the PetsOnly mods on a focus and would always answer 0.
+        /// The route tag a weapon-mod appraisal line carries on a Summoner focus, inserted between the mod's display name
+        /// and its "[NN%]" bracket: " (Summon)" for a mod only the pets read, " (You + Summon)" for one both read. A transfer
+        /// share below 100% (summoner_pet_mod_transfer_percent) folds in as " (Summon 50%)". Empty for a Wielder-route mod,
+        /// for any item that is not a focus, and for a null definition. Gated by the caller's weapon_mods_enabled block,
+        /// the same switch the old route lines rode (WeaponModRegistry.Enabled reads weapon_mods_enabled).
         /// </summary>
-        private static List<string> CarriedModNames(WorldObject focus, SummonerPetRoute route)
+        public static string RouteTag(WorldObject item, WeaponModDefinition definition)
         {
-            var names = new List<string>();
+            if (definition == null || !SummonerFocus.IsSummonerFocus(item))
+                return string.Empty;
 
-            foreach (var definition in WeaponModRegistry.AllMods)
+            string label;
+
+            switch (SummonerFocus.PetRoute(definition))
             {
-                if (SummonerFocus.PetRoute(definition) != route)
-                    continue;
-
-                // a Tourmaline record, or Paragon gems alone (combat transfers both through ReadFocusModForPets)
-                if (focus.GetProperty(definition.Record) != null || WeaponModParagon.ParagonFraction(focus, definition.Id) > 0.0)
-                    names.Add(definition.DisplayName);
+                case SummonerPetRoute.PetsOnly:
+                    label = "Summon";
+                    break;
+                case SummonerPetRoute.Shared:
+                    label = "You + Summon";
+                    break;
+                default:
+                    return string.Empty;
             }
 
-            return names;
+            // decided on the shown whole number, so a share that rounds to 100 never prints " 100%"
+            var percent = Math.Round(SummonerFocus.PetModTransferPercent() * 100.0, MidpointRounding.AwayFromZero);
+
+            return percent < 100.0 ? $" ({label} {percent:0}%)" : $" ({label})";
         }
 
         /// <summary>

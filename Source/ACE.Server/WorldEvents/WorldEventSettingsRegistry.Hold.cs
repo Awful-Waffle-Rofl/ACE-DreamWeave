@@ -141,7 +141,7 @@ namespace ACE.Server.WorldEvents
             yield return Neg(GroupHealing, K.RegenPerSecond, D, 0, 0.1, When.Live, "protect.clearRegenPerSecond", "Share of max health a knight with no monster near regenerates per second (0 = off). Divided by the knight durability multiplier (knight_durability_per_participant / knight_durability_cap), so large groups are not healed more strongly.");
             yield return Neg(GroupHealing, K.RegenClearRadius, D, 0, 50, When.Live, "protect.clearRadius", "A knight regenerates only with no wave monster within this many metres.");
             yield return Val(GroupHealing, K.RegenIntervalSeconds, D, "1", 1, 30, When.Live, "Regeneration is applied every this many seconds (the same amount per second overall).");
-            yield return Flag(GroupHealing, K.PlayerHeal, true, When.Live, "Players may heal knights with heal spells and kits. Off: their heals restore nothing.");
+            yield return Flag(GroupHealing, K.PlayerHeal, true, When.Live, "Players may heal and buff knights with spells and kits. Off: their heals restore nothing and buffs are refused.");
             yield return Neg(GroupHealing, K.PlayerHealCap, D, 0, 1, When.Live, "protect.maxHealPerTenSeconds",
                 "The most player heals restore on one knight per 10 s, as a share of max health (0 = off; goals.json default ProtectDef.DefaultMaxHealPerTenSeconds 0.1).");
             yield return Val(GroupHealing, K.PlayerHealMult, D, "1", 0, 5, When.Live, "Scales what one player heal is worth on a knight, before the cap.");

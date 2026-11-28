@@ -68,16 +68,19 @@ namespace ACE.Server.ClassAbilities
         ///    reach (WorldEventHooks.HoldTransfusionKnights). Another presence fact, so a caster with no fellowship
         ///    and no summon still qualifies beside a hurt envoy. Optional and false by default.
         ///
+        ///  - hasAvatarFighter: the Allegiance Avatar's fighter (a Gauntlet run's or a private event's) that accepts beneficial
+        ///    spells stands in reach (GauntletAvatarFighter.TransfusionFighters). Same shape as hasHoldKnight; optional, false by default.
+        ///
         /// hasSummon must mean the CASTER'S OWN summons only. A fellow's pet is not a recipient - the call
         /// site reads Player.CurrentActivePet / Player.SecondaryActivePet off the caster and nobody else.
         /// </summary>
-        public static bool CasterQualifies(bool casterIsPlayer, bool casterIsTransferDestination, bool targetIsEligibleVictim, int transfusionRank, bool hasFellowship, bool hasSummon, bool hasHoldKnight = false)
+        public static bool CasterQualifies(bool casterIsPlayer, bool casterIsTransferDestination, bool targetIsEligibleVictim, int transfusionRank, bool hasFellowship, bool hasSummon, bool hasHoldKnight = false, bool hasAvatarFighter = false)
         {
             return casterIsPlayer
                 && casterIsTransferDestination
                 && targetIsEligibleVictim
                 && transfusionRank >= 1
-                && (hasFellowship || hasSummon || hasHoldKnight);
+                && (hasFellowship || hasSummon || hasHoldKnight || hasAvatarFighter);
         }
     }
 }

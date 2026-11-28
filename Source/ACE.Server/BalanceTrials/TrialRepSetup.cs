@@ -4,38 +4,46 @@ using System.Collections.Generic;
 
 namespace ACE.Server.BalanceTrials
 {
-    /// <summary>What the pre-spawn rep setup decided. A non-null Refusal or RebuildRequired stops the rep before any spawn.</summary>
-    public readonly record struct TrialRepSetupResult(string Refusal, bool RebuildRequired, TrialDigest Digest, bool Drift, string DriftReason);
+    /// <summary>
+    /// What the pre-spawn rep setup decided. A non-null Refusal or RebuildRequired stops the rep before any spawn. Drift is
+    /// information only. DriftUnknown: the master digest was not in hand, so the rep ran with nothing to compare against
+    /// (Drift is false, DriftReason says why).
+    /// </summary>
+    public readonly record struct TrialRepSetupResult(string Refusal, bool RebuildRequired, TrialDigest Digest, bool Drift, string DriftReason, bool DriftUnknown = false);
 
     /// <summary>
     /// The pre-spawn rep steps for one session, in the Plan C Task 7 order: the HardCopyEvery schedule, then the soft reset,
-    /// then the digest, then the drift check. Drift flags the rep (it still runs) and the session requires a rebuild before
-    /// the next one (TrialSession reads TrialRep.DigestDrift).
+    /// then the digest, then the drift check. Drift is information only (owner ruling 2026-11-24): a rep that differs from its
+    /// master is flagged on its run row and runs, and nothing is refused for it. An unavailable master digest runs the rep too,
+    /// with drift unknown. Only a failed purge and the opt-in hardCopyEvery schedule refuse a rep for a rebuild.
     ///
     /// THE BLOCK. A block is the run of reps on one rep character since its last copy. It is keyed by the rep's guid and
     /// outlives a session, because a rebuild needs the rep logged out, and logging out ends the session: the block, not the
     /// session, is what "since the last copy" counts. A COMPLETED rebuild (TrialRebuild.TryRebuild's DoCopyChar reporting
-    /// success) starts a new block. The block also carries NeedsRebuild: drift, or a purge that failed, sets it, and every
-    /// later rep of that character is refused, in this session or any later one (a relog does not bypass it), until a
-    /// rebuild completes. The ledger is in memory only: a server restart starts every rep on a new block and clears
-    /// NeedsRebuild, so the schedule can under-count across a restart, and a still-drifted rep is flagged again by the
-    /// digest check on its first rep.
+    /// success) starts a new block. The block also carries NeedsRebuild: only a purge that failed sets it (the rep's items are
+    /// half deleted), and every later rep of that character is refused, in this session or any later one (a relog does not
+    /// bypass it), until a rebuild completes. Drift never sets it, and a drift-set mark left over from before that rule is cleared
+    /// at the next rep. The ledger is in memory only: a server restart starts every rep on a new block and clears NeedsRebuild,
+    /// so the schedule can under-count across a restart.
     ///
     /// THE SEED WALK. A Step-mode scenario's gem seed walks by rep index (TrialGemRoller.RepSeed). The index fed to RollLive
     /// is the rep character's next index for this scenario, kept beside the block and outliving the session too, so a
     /// second session (after the relog a rebuild needs) carries on at seed + k instead of starting again at seed. It is
-    /// keyed by the rep guid and remembers the scenario sha: a different scenario starts the walk again at 1, and that is
-    /// the only reset. A completed rebuild (ResetBlock) deliberately does NOT reset it: hardCopyEvery forces a rebuild
-    /// every few reps, and resetting there would repeat the same seeds (final review F5). In memory only, like the block:
+    /// keyed by the rep guid and remembers the scenario sha and the archetype id: a different scenario, or a different
+    /// archetype on the same scenario, starts the walk again at 1, and that is the only reset (so every archetype meets a
+    /// rotation in the same order). A completed rebuild (ResetBlock) deliberately does NOT reset it: hardCopyEvery forces a rebuild
+    /// every few reps, and resetting there would repeat the same seeds (final review F5). One exception: a ROTATION scenario's
+    /// session that reaches Done clears its walk (OnRepEnded's runDone, passed only when the scenario has a rotation), so a fresh
+    /// run of the same archetype starts at entry 1. A scenario without a rotation never does, so its Step seeds stay fresh each run.
+    /// In memory only, like the block:
     /// a server restart starts every walk again at 1.
     ///
     /// THE MASTER DIGEST is computed once per session, off the offline master, through the loader seam
     /// (ProfileBuilder.LoadOfflinePlayerAsync in production, whose callback runs on any thread, possibly synchronously).
-    /// The answer is a <see cref="TrialMasterSnapshot"/>: the digest, plus the master's consumable stacks, which the soft
-    /// reset restores the rep's consumables to. The result is marshalled onto the room's thread before it is stored. Until it arrives, a rep is REFUSED with
-    /// "master digest pending" (the session stays Ready; the operator retries), never run with the core check skipped. A
-    /// null answer (master online, missing or failed to load) or no answer within <see cref="MasterDigestTimeoutSeconds"/>
-    /// (a swallowed shard read never calls back) is asked again on the next rep.
+    /// The answer is a <see cref="TrialMasterSnapshot"/>: the digest. The result is marshalled onto the room's thread before it
+    /// is stored. Until it arrives (or when it cannot, a null answer: master online, missing or failed to load), a rep still RUNS,
+    /// with drift unknown: the digest never blocks a rep. No answer within <see cref="MasterDigestTimeoutSeconds"/> (a swallowed
+    /// shard read never calls back) or a null answer is asked again on the next rep.
     ///
     /// Every member except the block ledger runs on the room's thread.
     /// </summary>
@@ -65,7 +73,8 @@ namespace ACE.Server.BalanceTrials
 
         private sealed class SeedWalk
         {
-            public string ScenarioSha;
+            /// <summary>The scenario sha and the archetype id (WalkKey): a change of either restarts the walk at 1.</summary>
+            public string Key;
             public int Next = 1;
         }
 
@@ -80,10 +89,10 @@ namespace ACE.Server.BalanceTrials
         private readonly Func<Action, bool> _marshal;
         private readonly string _scenarioSha;
         private readonly string _buffProfile;
+        private readonly string _archetypeId;
 
         private MasterState _masterState;
         private string _masterCore;
-        private IReadOnlyDictionary<uint, long> _masterConsumables;
         private double _requestedAt;
         private int _generation;
 
@@ -91,11 +100,13 @@ namespace ACE.Server.BalanceTrials
         /// <param name="marshal">Runs an action on the room's thread; false when nothing was queued (the session is gone).</param>
         /// <param name="scenarioSha">The scenario this session runs; keys the seed walk.</param>
         /// <param name="buffProfile">The effective buff profile this session casts (TrialBuffs.EffectiveProfile); keys the block's first-rep Enchantments.</param>
+        /// <param name="archetypeId">The archetype this session runs; with the scenario sha it keys the seed walk, so each archetype walks the scenario from rep 1.</param>
         public TrialRepSetup(uint repGuid, uint masterGuid, int hardCopyEvery, Func<double> clock, Action<uint, Action<TrialMasterSnapshot>> loadMaster, Func<Action, bool> marshal,
-            string scenarioSha = null, string buffProfile = null)
+            string scenarioSha = null, string buffProfile = null, string archetypeId = null)
         {
             _scenarioSha = scenarioSha ?? "";
             _buffProfile = buffProfile ?? "";
+            _archetypeId = archetypeId ?? "";
             _repGuid = repGuid;
             _masterGuid = masterGuid;
             _hardCopyEvery = hardCopyEvery;
@@ -108,9 +119,6 @@ namespace ACE.Server.BalanceTrials
 
         /// <summary>The master's Core, or null until it has arrived.</summary>
         public string MasterCore => _masterState == MasterState.Ready ? _masterCore : null;
-
-        /// <summary>The master's consumable stacks by wcid, or null until the snapshot has arrived. Ready before Before runs the soft reset.</summary>
-        public IReadOnlyDictionary<uint, long> MasterConsumables => _masterState == MasterState.Ready ? _masterConsumables : null;
 
         /// <summary>
         /// Asks for the master digest. State is published BEFORE the loader is called, because the loader may call back
@@ -138,7 +146,6 @@ namespace ACE.Server.BalanceTrials
             {
                 // Any answer for this master is good, even one from an earlier request that came back late.
                 _masterCore = snapshot.Digest.Core;
-                _masterConsumables = snapshot.Consumables ?? new Dictionary<uint, long>();
                 _masterState = MasterState.Ready;
             }
             else if (generation == _generation)
@@ -156,6 +163,13 @@ namespace ACE.Server.BalanceTrials
             int repsSinceCopy;
             lock (block)
             {
+                // A mark that did not come from a failed purge is a leftover of the old drift rule: drift no longer blocks.
+                if (block.NeedsRebuild && !block.PurgeFailed)
+                {
+                    block.NeedsRebuild = false;
+                    block.NeedsRebuildReason = null;
+                }
+
                 if (block.NeedsRebuild)
                     return new TrialRepSetupResult($"rebuild required: {block.NeedsRebuildReason}; run @trial rebuild", true, null, false, null);
 
@@ -166,23 +180,22 @@ namespace ACE.Server.BalanceTrials
             if (_hardCopyEvery > 0 && repsSinceCopy >= _hardCopyEvery)
                 return new TrialRepSetupResult($"hard copy due: {repsSinceCopy} rep(s) since the last copy (hardCopyEvery {_hardCopyEvery}); run @trial rebuild", true, null, false, null);
 
-            // The master digest must be in hand before anything changes the rep.
-            if (_masterState != MasterState.Ready)
+            // The master digest is wanted for the drift comparison but never blocks a rep: with none in hand the rep runs with drift
+            // unknown. Waiting for a pending answer would hold the room thread (the answer is marshalled onto it), so a pending
+            // digest is not waited for; a dead or failed load is asked for again, so a later rep compares.
+            var masterReady = _masterState == MasterState.Ready;
+            string unknownReason = null;
+
+            if (!masterReady)
             {
-                var timedOut = _masterState == MasterState.Pending && _clock() - _requestedAt > MasterDigestTimeoutSeconds;
-                var failed = _masterState == MasterState.Failed || _masterState == MasterState.NotRequested;
+                var pendingInTime = _masterState == MasterState.Pending && _clock() - _requestedAt <= MasterDigestTimeoutSeconds;
 
-                if (failed || timedOut)
-                {
-                    var why = failed
-                        ? $"master digest unavailable (master 0x{_masterGuid:X8} online, missing or failed to load)"
-                        : $"master digest pending for over {MasterDigestTimeoutSeconds:0} s (master 0x{_masterGuid:X8})";
+                unknownReason = _masterState == MasterState.Pending
+                    ? (pendingInTime ? "master digest still pending" : $"master digest pending for over {MasterDigestTimeoutSeconds:0} s")
+                    : "master digest unavailable (master online, missing or failed to load)";
 
+                if (!pendingInTime)
                     RequestMasterDigest();
-                    return new TrialRepSetupResult($"{why}; asked again, retry @trial next", false, null, false, null);
-                }
-
-                return new TrialRepSetupResult($"master digest pending (master 0x{_masterGuid:X8}); retry @trial next", false, null, false, null);
             }
 
             // 2. The soft reset, then 3. the digest.
@@ -206,17 +219,18 @@ namespace ACE.Server.BalanceTrials
                 first = block.FirstEnchantments;
             }
 
-            var drift = TrialDigest.IsDrift(digest, _masterCore, first, out var reason);
+            if (!masterReady)
+                return new TrialRepSetupResult(null, false, digest, false, "drift unknown: " + unknownReason, DriftUnknown: true);
 
-            // Drift flags this rep (it runs) and owes a rebuild before the next, for this rep character, across sessions.
-            if (drift)
-                MarkRebuildRequired(_repGuid, "state digest drift (" + reason + ")");
+            // Drift is information only: it flags this rep's row, and nothing is owed for it.
+            var drift = TrialDigest.IsDrift(digest, _masterCore, first, out var reason);
 
             return new TrialRepSetupResult(null, false, digest, drift, reason);
         }
 
         /// <summary>A rep of this session ended (TrialSession.RepEnded): one more rep in the block, and the seed walk steps on.</summary>
-        public void OnRepEnded()
+        /// <param name="runDone">True when this rep finished a ROTATION scenario's run (TrialPhase.Done with a rotation): the walk key is cleared, so a fresh run of the same archetype and scenario starts at 1. The caller passes false for a scenario without a rotation.</param>
+        public void OnRepEnded(bool runDone = false)
         {
             var block = blocks.GetOrAdd(_repGuid, _ => new Block());
 
@@ -229,6 +243,12 @@ namespace ACE.Server.BalanceTrials
             {
                 SyncScenario(walk);
                 walk.Next++;
+
+                if (runDone)
+                {
+                    walk.Key = null;
+                    walk.Next = 1;
+                }
             }
         }
 
@@ -244,12 +264,29 @@ namespace ACE.Server.BalanceTrials
             }
         }
 
-        /// <summary>A different scenario starts the walk again at 1 (the only reset).</summary>
+        /// <summary>
+        /// The walk index the next rep of <paramref name="repGuid"/> would use under this scenario and archetype, without creating or
+        /// moving a walk (1 when there is none or it belongs to another scenario or archetype). Any thread. For @trial status.
+        /// </summary>
+        public static int PeekSeedRep(uint repGuid, string scenarioSha, string archetypeId)
+        {
+            if (!seedWalks.TryGetValue(repGuid, out var walk))
+                return 1;
+
+            lock (walk)
+                return string.Equals(walk.Key, WalkKey(scenarioSha, archetypeId), StringComparison.Ordinal) ? walk.Next : 1;
+        }
+
+        private static string WalkKey(string scenarioSha, string archetypeId) => (scenarioSha ?? "") + "|" + (archetypeId ?? "");
+
+        /// <summary>A different scenario, or a different archetype on the same scenario, starts the walk again at 1 (the only reset).</summary>
         private void SyncScenario(SeedWalk walk)
         {
-            if (!string.Equals(walk.ScenarioSha, _scenarioSha, StringComparison.Ordinal))
+            var key = WalkKey(_scenarioSha, _archetypeId);
+
+            if (!string.Equals(walk.Key, key, StringComparison.Ordinal))
             {
-                walk.ScenarioSha = _scenarioSha;
+                walk.Key = key;
                 walk.Next = 1;
             }
         }

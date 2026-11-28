@@ -6,7 +6,8 @@ namespace ACE.Database.Models.Shard
 {
     // Allegiance Avatar: hand-written partial, following RewardClaimPartial.cs.
     // Tables created by Database/Updates/Shard/2026-11-20-01-Add-Allegiance-Avatar.sql; look_Json added by
-    // 2026-11-21-01-Add-Allegiance-Avatar-Look.sql; level_Xp by 2026-11-23-01-Add-Allegiance-Avatar-Level-Xp.sql.
+    // 2026-11-21-01-Add-Allegiance-Avatar-Look.sql; level_Xp by 2026-11-23-01-Add-Allegiance-Avatar-Level-Xp.sql;
+    // blessing_Bought_At, last_Event_At and events_On_Day by 2026-11-25-02-Add-Allegiance-Avatar-Daily-Purchases.sql.
 
     /// <summary>One Allegiance Avatar. One row per Avatar ever founded; rows are never deleted.</summary>
     public partial class AllegianceAvatar
@@ -55,6 +56,15 @@ namespace ACE.Database.Models.Shard
         /// NULL means the default look. Stored and read back verbatim; nothing in this layer parses it.
         /// </summary>
         public string LookJson { get; set; }
+
+        /// <summary>UTC instant the Allegiance Blessing was last bought (2026-11-25-02). NULL = never.</summary>
+        public DateTime? BlessingBoughtAt { get; set; }
+
+        /// <summary>UTC instant a private World Event last reached Active (2026-11-25-02). NULL = never.</summary>
+        public DateTime? LastEventAt { get; set; }
+
+        /// <summary>Private World Events that reached Active on the Avatar day of <see cref="LastEventAt"/> (2026-11-25-02).</summary>
+        public byte EventsOnDay { get; set; }
 
         public DateTime CreatedAt { get; set; }
 
@@ -118,6 +128,9 @@ namespace ACE.Database.Models.Shard
                 entity.Property(e => e.LastContributionAt).HasColumnName("last_Contribution_At").HasColumnType("datetime");
                 entity.Property(e => e.LastDecayDay).HasColumnName("last_Decay_Day").HasColumnType("date");
                 entity.Property(e => e.LookJson).HasColumnName("look_Json").HasColumnType("mediumtext");
+                entity.Property(e => e.BlessingBoughtAt).HasColumnName("blessing_Bought_At").HasColumnType("datetime");
+                entity.Property(e => e.LastEventAt).HasColumnName("last_Event_At").HasColumnType("datetime");
+                entity.Property(e => e.EventsOnDay).HasColumnName("events_On_Day");
                 entity.Property(e => e.CreatedAt).HasColumnName("created_At").HasColumnType("datetime").HasDefaultValueSql("CURRENT_TIMESTAMP");
                 entity.Property(e => e.UpdatedAt).HasColumnName("updated_At").HasColumnType("datetime").HasDefaultValueSql("CURRENT_TIMESTAMP");
             });

@@ -1190,7 +1190,10 @@ namespace ACE.Entity.Enum.Properties
         ParagonModGemModifier                     = 9109,
         // Paragon weapon mods: on a Paragon gem weenie, its token price.
         ParagonModGemTokenCost                    = 9110,
-        // (next free id is 9111)
+        // Perennial dyes (Docs/Pvp/DYES.md): on a fork Perennial dye weenie, its kind. 1 = primary (sets colour template and tone),
+        // 2 = shell (sets only the second colour layer, DyeShellShade). Routes the dye in RecipeManager_New.GetNewRecipe.
+        PerennialDyeKind                          = 9111,
+        // (next free id is 9112)
     }
 
     public static class PropertyIntExtensions

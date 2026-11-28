@@ -46,6 +46,10 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             public uint RunKey { get; init; } = 7;
             public uint Instance { get; init; } = Arena;
             public bool IsTerminal { get; set; }
+            public bool FightOver => FightOverReads.Count > 0 ? FightOverReads.Dequeue() : FightOverValue;
+            public bool FightOverValue { get; set; }
+            public readonly Queue<bool> FightOverReads = new Queue<bool>();
+            public Position CachesPosition => At(100, 96, Instance);
             public long DeathHoldSeconds { get; init; } = 60;
             public double CentreGx { get; init; } = OutdoorSiteGeometry.ToGlobalX(Lb, 100);
             public double CentreGy { get; init; } = OutdoorSiteGeometry.ToGlobalY(Lb, 96);
@@ -72,6 +76,12 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
 
             public void SnapBack(Player player, Position pen, int secondsLeft) => Snaps.Add((player, pen, secondsLeft));
             public void Release(Player player, Position entry) => Releases.Add((player, entry));
+
+            public readonly List<(Player Who, Position Caches)> CacheReleases = new List<(Player, Position)>();
+            public void ReleaseToCaches(Player player, Position caches) => CacheReleases.Add((player, caches));
+
+            public readonly List<(Player Who, Position Caches)> Deferred = new List<(Player, Position)>();
+            public void DeferToCaches(Player player, Position caches) => Deferred.Add((player, caches));
         }
 
         private static Position At(float x, float y, uint instance)
@@ -149,6 +159,118 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
 
             Assert.AreEqual(0.0, hooks.Holds.SecondsLeft(new FakeHoldRun(), MemberGuid), "a hold belongs to its own run only");
             Assert.AreEqual(0.0, hooks.Holds.SecondsLeft(run, MemberGuid + 1), "and to its own character only");
+        }
+
+        /// <summary>
+        /// The fight is over (Rewarding began): a held member who is online in the arena goes to a landing point beside the cache
+        /// area at once and their hold ends; one who is offline, or standing outside the copy, is dropped with no teleport; the
+        /// player is resolved LIVE (a stale Player for the guid is never used); and the 1 Hz check finds nothing afterwards.
+        /// </summary>
+        [TestMethod]
+        public void RewardingBegins_ReleasesHeldPlayersToTheCaches_DropsOthers_AndTheTickDoesNothingAfter()
+        {
+            const uint Offline = MemberGuid + 1;
+            const uint Outside = MemberGuid + 2;
+
+            var stale = Member(MemberGuid);
+            stale.Location = InPen;
+            var live = Member(MemberGuid);   // the same character after a relog: a different object
+            live.Location = InPen;
+            var outside = Member(Outside);
+            outside.Location = At(100, 96, OtherArena);
+
+            hooks.Snap = _ => { };   // no landscape in a unit test
+            hooks.ResolvePlayer = g => g == MemberGuid ? live : g == Outside ? outside : null;
+
+            hooks.Holds.Begin(run, MemberGuid);
+            hooks.Holds.Begin(run, Offline);
+            hooks.Holds.Begin(run, Outside);
+
+            var caches = At(100, 96, Arena);
+            var moved = hooks.ReleaseToCaches(run, caches);
+
+            CollectionAssert.AreEqual(new[] { MemberGuid }, new List<uint>(moved), "only the online member in the arena is moved");
+            Assert.AreEqual(1, effects.CacheReleases.Count, "one teleport");
+            Assert.AreSame(live, effects.CacheReleases[0].Who, "the LIVE player, not the stale object");
+            var landing = effects.CacheReleases[0].Caches;
+            Assert.AreEqual(Arena, landing.Instance, "inside the arena copy");
+            Assert.AreEqual(LiveGauntletDeathHooks.LandingRadius, Math.Sqrt(Math.Pow(landing.PositionX - 100, 2) + Math.Pow(landing.PositionY - 96, 2)), 0.1, "a few metres off the cache area's centre, not on it");
+            Assert.AreEqual(0, effects.Releases.Count, "the normal entry-point release is not used");
+            Assert.AreEqual(0, hooks.Holds.Count, "every hold ended, the offline and outside ones included");
+
+            now = now.AddSeconds(120);
+            Assert.AreEqual(GauntletHoldStep.None, hooks.TickPlayer(live, MemberGuid, InPen, false), "the moved player is not acted on again");
+            Assert.AreEqual(GauntletHoldStep.None, hooks.TickPlayer(outside, Outside, outside.Location, false));
+            Assert.AreEqual(0, effects.Releases.Count);
+            Assert.AreEqual(0, effects.Snaps.Count);
+            Assert.AreEqual(1, effects.CacheReleases.Count, "never teleported twice");
+        }
+
+        /// <summary>
+        /// A death after the fight ended (Rewarding): no hold is begun and no death is counted; the death chain is told to send
+        /// the player to the caches landing (the same point a release would use). A death while the fight is live is unchanged.
+        /// </summary>
+        [TestMethod]
+        public void DeathDuringRewarding_GoesToTheCachesLanding_AndLeavesNoHold()
+        {
+            hooks.Snap = _ => { };
+            var p = Member();
+
+            run.FightOverValue = true;
+            Assert.AreSame(run, hooks.LatchDeath(p, MemberGuid, Arena), "still latched as a Gauntlet death (no corpse, no vitae)");
+
+            Assert.AreEqual(0, hooks.Holds.Count, "no hold entry is created");
+            Assert.AreEqual(0, run.DeathReports, "not counted as a wave death");
+            Assert.AreEqual(1, effects.Deferred.Count, "the death chain is told where to send the player");
+            Assert.AreSame(p, effects.Deferred[0].Who);
+            Assert.AreEqual(Arena, effects.Deferred[0].Caches.Instance);
+            Assert.AreEqual(LiveGauntletDeathHooks.LandingRadius, Math.Sqrt(Math.Pow(effects.Deferred[0].Caches.PositionX - 100, 2) + Math.Pow(effects.Deferred[0].Caches.PositionY - 96, 2)), 0.1, "the landing beside the caches, as a release uses");
+            Assert.IsNull(hooks.PenFor(MemberGuid), "nothing sends them to the pen");
+
+            // control: the same death while the fight is live is held in the pen as before
+            run.FightOverValue = false;
+            hooks.LatchDeath(p, MemberGuid, Arena);
+            Assert.AreEqual(1, hooks.Holds.Count, "a live-fight death is still held");
+            Assert.AreEqual(1, run.DeathReports);
+            Assert.AreEqual(1, effects.Deferred.Count, "and not deferred to the caches");
+        }
+
+        /// <summary>
+        /// The race: the fight is live when the latch reads it and over when it is re-read after the hold began (the release ran
+        /// in between and missed the new entry). The hold is taken back and the death goes to the caches.
+        /// </summary>
+        [TestMethod]
+        public void DeathRacingTheEndOfTheFight_TakesTheHoldBack_AndGoesToTheCaches()
+        {
+            hooks.Snap = _ => { };
+            var p = Member();
+
+            run.FightOverReads.Enqueue(false);   // the first read: still fighting
+            run.FightOverReads.Enqueue(true);    // the re-read after Holds.Begin: over
+            hooks.LatchDeath(p, MemberGuid, Arena);
+
+            Assert.AreEqual(0, hooks.Holds.Count, "the hold begun in the race is ended");
+            Assert.AreEqual(1, effects.Deferred.Count, "and the death goes to the caches");
+            Assert.AreEqual(0, run.DeathReports, "not counted as a wave death");
+        }
+
+        /// <summary>The landing offset: deterministic per guid, LandingRadius out, different guids on different points.</summary>
+        [TestMethod]
+        public void LandingOffset_IsDeterministic_AtTheRadius_AndSpreadsGuids()
+        {
+            var a = LiveGauntletDeathHooks.LandingOffset(0x50000001);
+            Assert.AreEqual(a, LiveGauntletDeathHooks.LandingOffset(0x50000001), "same guid, same point");
+            Assert.AreEqual(LiveGauntletDeathHooks.LandingRadius, a.Length(), 0.001f);
+            Assert.AreEqual(0f, a.Z);
+
+            var distinct = new HashSet<(float, float)>();
+            for (uint g = 0x50000001; g < 0x50000001 + 8; g++)
+            {
+                var o = LiveGauntletDeathHooks.LandingOffset(g);
+                Assert.AreNotEqual(System.Numerics.Vector3.Zero, o, "never exactly on the centre (a lone cache)");
+                distinct.Add((MathF.Round(o.X, 2), MathF.Round(o.Y, 2)));
+            }
+            Assert.AreEqual(8, distinct.Count, "eight neighbouring guids land on eight points");
         }
 
         /// <summary>

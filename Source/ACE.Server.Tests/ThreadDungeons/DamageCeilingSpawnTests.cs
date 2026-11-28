@@ -501,9 +501,13 @@ namespace ACE.Server.Tests.ThreadDungeons
                 Assert.IsTrue(at < call, $"'{writer}' must come before the ceiling");
             }
 
+            // "// ---- rewards ----" is a section marker comment, so it is located in the raw body. Stripping keeps
+            // every offset, so a raw index compares directly with the stripped-body `call` index.
+            var rawBody = PooledLootSourceText.MethodBodyBoth(Spawner, Signature).Raw;
+
             foreach (var later in new[] { "ApplyWeakPoint(", "// ---- rewards ----", "creature.XpOverride = " })
             {
-                var at = body.IndexOf(later, StringComparison.Ordinal);
+                var at = (later.StartsWith("//") ? rawBody : body).IndexOf(later, StringComparison.Ordinal);
                 Assert.IsTrue(at >= 0, $"PrepareForPlacement no longer contains: {later}");
                 Assert.IsTrue(at > call, $"'{later}' must come after the ceiling");
             }

@@ -184,6 +184,12 @@ public static class AvatarFeed
         }
     }
 
+    /// <summary>
+    /// The Favor feed hook, called once from GrantXP per receiving member, after the fellowship split. The amount is what
+    /// the member receives INCLUDING their offline bonus (the offline bank's bonus XP counts toward Favor, owner ruling
+    /// 2026-11-25) and EXCLUDING the alt-character bonus and the Thread boon, which are applied after this call. Pinned by
+    /// AvatarFeedHookSiteTests. Never throws; ends in a lock-free enqueue.
+    /// </summary>
     public static void Capture(Player player, long receivedAmount, XpType xpType)
     {
         // Allegiance pass-up, proficiency, admin and emote XP never count: keep them off the path entirely.

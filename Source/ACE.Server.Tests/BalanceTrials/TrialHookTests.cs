@@ -833,7 +833,7 @@ namespace ACE.Server.Tests.BalanceTrials
         [TestMethod]
         public void TrialStarter_attaches_the_run_log_to_every_live_session()
         {
-            var body = Body(StarterPath, "public static bool TryStart(Player player, string scenarioId, string archetypeId, out string refusal)");
+            var body = Body(StarterPath, "public static bool TryStart(Player player, string scenarioId, string archetypeId, out string refusal, TrialCampaignStart campaign = null)");
             var attach = body.IndexOf("TrialRunLog.Attach(session);", StringComparison.Ordinal);
             Assert.IsTrue(attach > body.IndexOf("session = new TrialSession(", StringComparison.Ordinal), "after the session is built");
             Assert.IsTrue(attach < body.IndexOf("TrialManager.Register(session, landblock);", StringComparison.Ordinal), "before it is registered");

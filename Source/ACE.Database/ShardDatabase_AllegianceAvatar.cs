@@ -82,6 +82,9 @@ namespace ACE.Database
             "`last_Contribution_At` = @lastContributionAt, " +
             "`last_Decay_Day` = @lastDecayDay, " +
             "`look_Json` = @lookJson, " +
+            "`blessing_Bought_At` = @blessingBoughtAt, " +
+            "`last_Event_At` = @lastEventAt, " +
+            "`events_On_Day` = @eventsOnDay, " +
             "`updated_At` = @updatedAt " +
             "WHERE `avatar_Id` = @avatarId";
 
@@ -365,6 +368,9 @@ namespace ACE.Database
             LastContributionAt = ToUtcOrNull(row.LastContributionAt),
             LastDecayDay = row.LastDecayDay.HasValue ? ToUtcDay(row.LastDecayDay.Value) : (DateTime?)null,
             LookJson = row.LookJson,
+            BlessingBoughtAt = ToUtcOrNull(row.BlessingBoughtAt),
+            LastEventAt = ToUtcOrNull(row.LastEventAt),
+            EventsOnDay = row.EventsOnDay,
             CreatedAt = row.CreatedAt == default ? now : ShardDatabase.ToUtc(row.CreatedAt),
             UpdatedAt = now,
         };
@@ -397,6 +403,9 @@ namespace ACE.Database
                 new MySqlParameter("@lastContributionAt", DbValue(a.LastContributionAt)),
                 new MySqlParameter("@lastDecayDay", DbValue(a.LastDecayDay)),
                 new MySqlParameter("@lookJson", DbValue(a.LookJson)),
+                new MySqlParameter("@blessingBoughtAt", DbValue(a.BlessingBoughtAt)),
+                new MySqlParameter("@lastEventAt", DbValue(a.LastEventAt)),
+                new MySqlParameter("@eventsOnDay", a.EventsOnDay),
                 new MySqlParameter("@updatedAt", a.UpdatedAt),
             };
         }

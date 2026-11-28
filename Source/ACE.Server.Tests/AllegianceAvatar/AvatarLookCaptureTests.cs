@@ -68,6 +68,28 @@ namespace ACE.Server.Tests.Avatars
         }
 
         [TestMethod]
+        public void Capture_piece_round_trips_DyeShellShade_through_the_json()
+        {
+            var item = MakeItem(i => i[PropertyInt.PaletteTemplate] = 21);
+            item.Shade = 1.0;
+            item.SetProperty(PropertyFloat.DyeShellShade, 0.0);   // Bone: a real value of zero, not absent
+
+            var piece = AvatarLookCapture.CapturePiece(item);
+
+            Assert.AreEqual(0.0, piece.Floats[PropertyFloat.DyeShellShade]);
+            Assert.IsTrue(AvatarLookCapture.PieceFloats.Contains(PropertyFloat.DyeShellShade));
+
+            var look = new AvatarLook(AvatarLookJson.CurrentVersion, DateTime.UtcNow, AvatarLookCapture.CaptureBody(MakeBody(i => i[PropertyInt.Gender] = 1), null, null), new List<AvatarLookPiece> { piece });
+            var parsed = AvatarLookJson.Parse(AvatarLookJson.Serialize(look));
+
+            Assert.AreEqual(0.0, parsed.Pieces[0].Floats[PropertyFloat.DyeShellShade]);
+            Assert.AreEqual(look, parsed);
+
+            var plain = AvatarLookCapture.CapturePiece(MakeItem());
+            Assert.IsFalse(plain.Floats.ContainsKey(PropertyFloat.DyeShellShade), "an absent shell shade is not invented");
+        }
+
+        [TestMethod]
         public void Capture_piece_copies_worn_model_strings_and_palette_rows()
         {
             var item = MakeItem();

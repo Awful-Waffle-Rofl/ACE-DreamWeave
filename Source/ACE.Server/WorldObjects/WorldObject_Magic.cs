@@ -917,7 +917,7 @@ namespace ACE.Server.WorldObjects
                         // must never leech off damage dealt to a person.
                         if (this is Pet damagingPet)
                         {
-                            damagingPet.NotifyOwnerOfDamage(targetCreature, -boost);
+                            damagingPet.NotifyOwnerOfDamage(targetCreature, -boost, lifeCritMultiplier > 1.0f);
 
                             if (targetCreature is not Player)
                             {
@@ -1236,7 +1236,9 @@ namespace ACE.Server.WorldObjects
         ///
         /// A recipient is eligible when they are in the caster's fellowship OR are one of the caster's own
         /// summons, are not the caster, are alive, are on the CASTER'S OWN LANDBLOCK, and are within
-        /// <see cref="DrainSurplusRange"/> of the caster.
+        /// <see cref="DrainSurplusRange"/> of the caster. Two more recipient kinds follow, each with its own scan: World Events Hold
+        /// envoys, then the Allegiance Avatar's fighter (a Gauntlet run's or a private event's, any Blood Mage in reach; its share is
+        /// raw heal points through the shared kit heal bucket).
         ///
         /// THE LANDBLOCK FILTER IS A DELIBERATE APPROXIMATION, NOT A BUG (user-accepted, 2026-08-03). A
         /// fellow standing 5m away but across a landblock boundary is excluded. It is filtered FIRST, before
@@ -1284,6 +1286,12 @@ namespace ACE.Server.WorldObjects
                 && targetCreature != null && targetCreature is not Player && transfusionRank >= 1
                 ? ACE.Server.WorldEvents.WorldEventHooks.HoldTransfusionKnights(caster) : null;
 
+            // The Allegiance Avatar's fighter (a Gauntlet run's or a private event's) in reach: fed like an envoy, through the kit heal
+            // bucket (see GauntletHooks.TransfusionFighters). Same gates, same primary-strike-only rule.
+            var avatarFighters = !isSecondaryStrike && caster != null && destination == caster
+                && targetCreature != null && targetCreature is not Player && transfusionRank >= 1
+                ? ACE.Server.Avatars.Gauntlet.GauntletHooks.TransfusionFighters(caster) : null;
+
             // hasFellowship OR hasSummon: a solo Blood Mage with a hurt pet beside them is a real cascade
             // target, so a fellowship is no longer required (user, 2026-08-03). Both are PRESENCE checks -
             // the alive/landblock/range/missing filters run below on fellows and summons alike.
@@ -1294,7 +1302,8 @@ namespace ACE.Server.WorldObjects
                     transfusionRank: transfusionRank,
                     hasFellowship: caster?.Fellowship != null,
                     hasSummon: caster?.CurrentActivePet != null || caster?.SecondaryActivePet != null,
-                    hasHoldKnight: holdKnights != null))
+                    hasHoldKnight: holdKnights != null,
+                    hasAvatarFighter: avatarFighters != null))
                 return null;
 
             // How much of the surplus is DELIVERED. Rank sets the base fraction (40/70/100%); the Healing
@@ -1380,6 +1389,29 @@ namespace ACE.Server.WorldObjects
                     missingByRecipient ??= new List<uint>();
 
                     results.Add(knight);
+                    missingByRecipient.Add(demand);
+
+                    missingTotal += demand;
+                }
+            }
+
+            // The Avatar fighter, last. Its "missing" is the raw heal points its kit bucket would accept right now
+            // (TransfusionDemand), so the split stays in one unit and surplus is not spent on a heal the bucket refuses.
+            if (avatarFighters != null)
+            {
+                var now = ACE.Common.Time.GetUnixTime();
+
+                foreach (var fighter in avatarFighters)
+                {
+                    var demand = ACE.Server.Avatars.Gauntlet.GauntletHooks.TransfusionDemand(fighter, now);
+
+                    if (demand == 0 || (results != null && results.Contains(fighter)))
+                        continue;
+
+                    results ??= new List<Creature>();
+                    missingByRecipient ??= new List<uint>();
+
+                    results.Add(fighter);
                     missingByRecipient.Add(demand);
 
                     missingTotal += demand;
@@ -1844,7 +1876,7 @@ namespace ACE.Server.WorldObjects
                     // off damage dealt to a person.
                     if (this is Pet drainingPet)
                     {
-                        drainingPet.NotifyOwnerOfDamage(transferSource, (int)srcVitalChange);
+                        drainingPet.NotifyOwnerOfDamage(transferSource, (int)srcVitalChange, drainCritCapMod > 1.0f);
 
                         if (transferSource is not Player)
                         {
@@ -1954,6 +1986,14 @@ namespace ACE.Server.WorldObjects
                     if (ACE.Server.WorldEvents.WorldEventHooks.IsHoldKnight(fellow))
                     {
                         ACE.Server.WorldEvents.WorldEventHooks.TryQueuePlayerHeal(this as Player, fellow, fellowShares[i], false, null, ChatMessageType.Magic);
+                        continue;
+                    }
+
+                    // Allegiance Avatar fighter: the share is raw heal points, queued on the fighter's landblock through the kit heal
+                    // (the shared bucket, the ledger and the caster's result line). Never written here.
+                    if (ACE.Server.Avatars.Gauntlet.GauntletHooks.IsAvatarFighter(fellow))
+                    {
+                        ACE.Server.Avatars.Gauntlet.GauntletHooks.TryQueueTransfusionShare(this as Player, fellow, fellowShares[i]);
                         continue;
                     }
 
@@ -3618,8 +3658,12 @@ namespace ACE.Server.WorldObjects
         /// Calculates the StatModVal x buffs to enter into the enchantment registry
         /// </summary>
         /// <param name="spell">A spell with a DotDuration</param>
-        public float CalculateDotEnchantment_StatModValue(Spell spell, WorldObject target, WorldObject weapon, float statModVal)
+        /// <param name="netherWielderCut">The Summoner wielder cut baked into a void curse (nether DoT) value, 1.0 for every
+        /// other DoT: EnchantmentManager.BuildEntry records it (NetherDotWielderCuts) so the curse's debuff can divide it back out.</param>
+        public float CalculateDotEnchantment_StatModValue(Spell spell, WorldObject target, WorldObject weapon, float statModVal, out float netherWielderCut)
         {
+            netherWielderCut = 1.0f;
+
             // here are all the dots with current content:
 
             // - 3 void dots (2 projectiles, 1 direct enchantment)
@@ -3720,6 +3764,9 @@ namespace ACE.Server.WorldObjects
                 }
             }
             enchantment_statModVal *= skillMod * elementalDamageMod * damageRatingMod * summonerWielderMod;
+
+            // the cut stays in the damage; the nether debuff (GetNetherDotDamageRating) divides it back out
+            netherWielderCut = summonerWielderMod;
 
             return enchantment_statModVal;
         }

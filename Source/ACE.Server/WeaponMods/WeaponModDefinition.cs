@@ -212,7 +212,7 @@ namespace ACE.Server.WeaponMods
         /// <summary>Composite format string, applied to (magnitude x <see cref="DisplayScale"/>).</summary>
         public string DisplayFormat;
 
-        /// <summary>Multiplier taking a magnitude into display units. 1 everywhere except Shield Bypass, which reads as a percentage.</summary>
+        /// <summary>Multiplier taking a magnitude into display units: 100 on every row whose magnitude is a fraction shown as a percentage, 1 on a flat row.</summary>
         public double DisplayScale = 1.0;
 
         /// <summary>

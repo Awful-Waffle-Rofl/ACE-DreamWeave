@@ -137,12 +137,6 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
-            // Allegiance Avatar feed: what THIS member receives from their own kill or quest, including a fellow's share
-            // (which re-enters here as Kill + combatShare or Fellowship). Before the offline and alt bonuses and the Thread
-            // boon so none of them is counted; allegiance pass-up arrives as XpType.Allegiance and is ignored by the rules.
-            // Lock free and store free: it only enqueues.
-            AvatarFeed.Capture(this, amount, xpType);
-
             // Boost this player's own combat XP by their offline bonus, if any. This runs after the fellowship
             // split, so it only ever scales what THIS player receives - their own kill (XpType.Kill) or their
             // share of a fellow's kill (combatShare) - and never the shares distributed to other fellows. The
@@ -153,6 +147,13 @@ namespace ACE.Server.WorldObjects
             var levelAmount = amount;
             if (xpType == XpType.Kill || combatShare)
                 levelAmount = ApplyOfflineExperienceBonus(amount);
+
+            // Allegiance Avatar feed: what THIS member receives from their own kill or quest, including a fellow's share
+            // (which re-enters here as Kill + combatShare or Fellowship). AFTER the offline bonus, so bonus XP from the
+            // offline bank counts toward Favor (owner ruling 2026-11-25, for every player, not only Blessing recipients),
+            // and BEFORE the alt bonus and the Thread boon, which are not counted. Allegiance pass-up arrives as
+            // XpType.Allegiance and is ignored by the rules. Lock free and store free: it only enqueues.
+            AvatarFeed.Capture(this, levelAmount, xpType);
 
             // Item XP takes the offline bonus but not the alt bonus below, so it is captured in between.
             var itemAmount = levelAmount;

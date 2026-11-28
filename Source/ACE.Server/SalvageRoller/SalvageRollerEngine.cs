@@ -251,14 +251,22 @@ namespace ACE.Server.SalvageRoller
             var scale = WeaponModValue.MagnitudeScale();
 
             var lines = WeaponModTinkerSet.ReadSpecials(weapon)
+                .OrderBy(s => s.Definition, WeaponModParagonDisplay.ByName)
                 .Select(s => WeaponModDisplay.Describe(s.Definition, s.Magnitude, scale, weapon))
                 .ToList();
 
             if (lines.Count == 0)
                 lines.Add("No special modifier took hold.");
 
-            return new SalvageRollerSummary { Tier = (int)WeaponQualityTiers.FromTotal(total), Total = total, Lines = lines };
+            return new SalvageRollerSummary { Tier = (int)TierFor(weapon, total), Total = total, Lines = lines };
         }
+
+        /// <summary>
+        /// The candidate's quality tier, by the same rule as WeaponQualityTiers.Evaluate: a shield never earns one (no
+        /// aura), so its candidates rank and read by their summed intensity alone.
+        /// </summary>
+        private static WeaponQualityTier TierFor(WorldObject weapon, int total) =>
+            WeaponClassifier.Classify(weapon) == WeaponClass.Shield ? WeaponQualityTier.None : WeaponQualityTiers.FromTotal(total);
 
         /// <summary>
         /// A Green Jade candidate: Tier is the highest single-type count and Total the second-highest count (so the
@@ -280,7 +288,7 @@ namespace ACE.Server.SalvageRoller
         /// <summary>An Obsidian candidate: tier 0, the summed mod fractions, one line per mod (EquipmentModDisplay.Describe).</summary>
         internal static SalvageRollerSummary ObsidianSummary(WorldObject item)
         {
-            var mods = EquipmentModDisplay.GetMods(item);
+            var mods = EquipmentModDisplay.GetModsByName(item);
 
             return new SalvageRollerSummary
             {

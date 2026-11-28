@@ -134,8 +134,9 @@ namespace ACE.Server.WeaponMods
         ///
         /// A reversal is floored at 0 for every material - no native this table touches has a meaningful negative
         /// value, and a negative would be written straight onto the item. Hitting the floor is logged, because it
-        /// can only happen when the tinker log claims more applications than the item actually carries; the
-        /// integrity gate exists to keep that from reaching here.
+        /// can only happen when the tinker log claims more applications than the item actually carries.
+        /// (The integrity gate that used to guard the reroll against that no longer refuses anything since
+        /// 2026-11-25, and the reroll no longer reverses tinkers.)
         /// </summary>
         public double? ReverseValue(double? current, int count)
         {

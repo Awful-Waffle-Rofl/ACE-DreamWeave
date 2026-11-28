@@ -657,9 +657,9 @@ namespace ACE.Server.Tests
             Assert.IsTrue(WorldEventHooks.IsInvalidHoldSpellTarget(HoldFixtures.Tagged(HealRun(9), HoldUnitKind.Knight), null, out invalid), "positive control: a knight is decided here");
             Assert.IsTrue(invalid, "no spell is not a heal");
 
-            Assert.IsFalse(WorldEventHooks.IsInvalidHoldKnightSpell(true, true), "a health heal while player_heal is on is the one valid spell");
-            Assert.IsTrue(WorldEventHooks.IsInvalidHoldKnightSpell(false, true));
-            Assert.IsTrue(WorldEventHooks.IsInvalidHoldKnightSpell(true, false));
+            Assert.IsFalse(WorldEventHooks.IsInvalidHoldKnightSpell(true, true, true, false), "a health heal while player_heal is on is valid");
+            Assert.IsTrue(WorldEventHooks.IsInvalidHoldKnightSpell(false, true, true, true), "a heal while player_heal is off is refused");
+            Assert.IsTrue(WorldEventHooks.IsInvalidHoldKnightSpell(true, false, true, false), "a spell that is neither heal nor buff is refused");
         }
 
         [TestMethod]
@@ -806,8 +806,8 @@ namespace ACE.Server.Tests
         [DataRow("public static bool KeepsHoldSeekerLock(", "return monster.TryKeepHoldSeekerLock(disturbedBy);")]
         [DataRow("public static void NoteHoldBossDamage(", "victim.NoteHoldBossDamage(attacker, amount, ACE.Common.Time.GetUnixTime());")]
         [DataRow("public static bool TryQueuePlayerHeal(", "if (!WorldEventHoldHeals.QueuePlayerHeal(target, raw, Reply))")]
-        [DataRow("public static bool IsInvalidHoldKnightSpell(", "!(acceptsPlayerHeal && isHealSpell);")]
-        [DataRow("public static bool IsInvalidHoldSpellTarget(", "invalid = IsInvalidHoldKnightSpell(target.AcceptsHoldPlayerHeal, isHeal);")]
+        [DataRow("public static bool IsInvalidHoldKnightSpell(", "isHealSpell ? !acceptsPlayerHeal : !(acceptsBuff && isBuffSpell);")]
+        [DataRow("public static bool IsInvalidHoldSpellTarget(", "invalid = IsInvalidHoldKnightSpell(target.AcceptsHoldPlayerHeal, isHeal, target.AcceptsHoldBuff, spell != null && WorldEventHoldRules.IsKnightBuffSpell(spell.IsBeneficial, spell.MetaSpellType, spell.IsDamageOverTime, spell.StatModType, spell.StatModKey));")]
         [DataRow("public static bool HoldAcceptsPlayerHeal(", "target?.WorldEventHold != null && target.AcceptsHoldPlayerHeal;")]
         [DataRow("public static bool IsHoldKnightHealTarget(", "target is Creature c && IsHoldKnight(c);")]
         [DataRow("public static bool TryUseHoldShrine(", "hold.Run.TryUseShrine(shrine, player, ACE.Common.Time.GetUnixTime(), out var reply)")]

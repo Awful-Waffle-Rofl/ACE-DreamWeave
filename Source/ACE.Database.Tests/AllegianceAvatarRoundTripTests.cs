@@ -18,7 +18,8 @@ namespace ACE.Database.Tests
     ///
     /// THIS WRITES ROWS. It runs ONLY when <see cref="PvpArenaRoundTripTests.OptInVariable"/> is 1, a promise that
     /// Config.js's Shard block points at a DISPOSABLE database with
-    /// Database/Updates/Shard/2026-11-20-01-Add-Allegiance-Avatar.sql and 2026-11-21-01-Add-Allegiance-Avatar-Look.sql applied.
+    /// Database/Updates/Shard/2026-11-20-01-Add-Allegiance-Avatar.sql and 2026-11-21-01-Add-Allegiance-Avatar-Look.sql applied
+    /// (and, for the daily-column round trip, 2026-11-25-02-Add-Allegiance-Avatar-Daily-Purchases.sql).
     /// Every Avatar a test needs comes from
     /// InsertAvatar (so its avatar_Id is unique to the test and the AUTO_INCREMENT counter is never pushed up by a
     /// hand-picked id), every account id and monarch guid is random per test, and every row a test writes is
@@ -644,6 +645,71 @@ namespace ACE.Database.Tests
             Assert.AreEqual(ulong.MaxValue, bound["@levelXp"]);
             Assert.AreEqual(5UL, bound["@lifetimeXp"]);
             StringAssert.Contains(ShardDatabase.UpdateAvatarSql, "`level_Xp` = @levelXp");
+        }
+
+        /// <summary>The three daily columns are bound as their own parameters; a never-stamped instant binds DBNull, never MinValue.</summary>
+        [TestMethod]
+        public void AvatarParameters_BindsTheDailyColumns()
+        {
+            var bought = new DateTime(2026, 11, 25, 17, 30, 5, DateTimeKind.Utc);
+            var called = new DateTime(2026, 11, 25, 18, 0, 0, DateTimeKind.Utc);
+            var bound = ShardDatabase.AvatarParameters(new AllegianceAvatar { AvatarId = 1, BlessingBoughtAt = bought, LastEventAt = called, EventsOnDay = 2 }, DateTime.UtcNow)
+                .Cast<MySqlParameter>().ToDictionary(p => p.ParameterName, p => p.Value);
+
+            Assert.AreEqual(bought, bound["@blessingBoughtAt"]);
+            Assert.AreEqual(called, bound["@lastEventAt"]);
+            Assert.AreEqual((byte)2, bound["@eventsOnDay"]);
+
+            var never = ShardDatabase.AvatarParameters(new AllegianceAvatar { AvatarId = 1 }, DateTime.UtcNow)
+                .Cast<MySqlParameter>().ToDictionary(p => p.ParameterName, p => p.Value);
+            Assert.AreEqual(DBNull.Value, never["@blessingBoughtAt"]);
+            Assert.AreEqual(DBNull.Value, never["@lastEventAt"]);
+            Assert.AreEqual((byte)0, never["@eventsOnDay"]);
+        }
+
+        /// <summary>
+        /// The daily columns ride both write paths (InsertAvatar through EF, SaveAvatarBatch through the raw UpdateAvatarSql),
+        /// and a save with them cleared writes NULL back. Requires 2026-11-25-02-Add-Allegiance-Avatar-Daily-Purchases.sql applied.
+        /// </summary>
+        [TestMethod]
+        [TestCategory("RequiresMySql")]
+        public void RoundTrip_DailyColumns_survive_insert_and_save()
+        {
+            var db = RequireDisposableShard();
+            var guid = NewGuid();
+            var bought = new DateTime(2026, 11, 25, 17, 30, 5, DateTimeKind.Utc);
+            var called = new DateTime(2026, 11, 25, 18, 0, 0, DateTimeKind.Utc);
+
+            Assert.IsTrue(db.InsertAvatar(new AllegianceAvatar { MonarchGuid = guid, BlessingBoughtAt = bought }, out var id), "InsertAvatar");
+
+            try
+            {
+                var inserted = AvatarRow(id);
+                Assert.AreEqual(bought, inserted.BlessingBoughtAt, "InsertAvatar writes blessing_Bought_At");
+                Assert.IsNull(inserted.LastEventAt);
+                Assert.AreEqual((byte)0, inserted.EventsOnDay, "events_On_Day defaults to 0");
+
+                var snapshot = Snapshot(id, guid, 10);
+                snapshot.BlessingBoughtAt = bought;
+                snapshot.LastEventAt = called;
+                snapshot.EventsOnDay = 3;
+                Assert.IsTrue(db.SaveAvatarBatch(new[] { snapshot }, NoRows));
+
+                var loaded = db.GetAllAvatars().Single(a => a.AvatarId == id);
+                Assert.AreEqual(bought, loaded.BlessingBoughtAt, "SaveAvatarBatch keeps blessing_Bought_At");
+                Assert.AreEqual(called, loaded.LastEventAt, "SaveAvatarBatch writes last_Event_At");
+                Assert.AreEqual((byte)3, loaded.EventsOnDay, "SaveAvatarBatch writes events_On_Day");
+
+                Assert.IsTrue(db.SaveAvatarBatch(new[] { Snapshot(id, guid, 11) }, NoRows));
+                var cleared = AvatarRow(id);
+                Assert.IsNull(cleared.BlessingBoughtAt, "a save without a stamp writes NULL");
+                Assert.IsNull(cleared.LastEventAt);
+                Assert.AreEqual((byte)0, cleared.EventsOnDay);
+            }
+            finally
+            {
+                Cleanup(id);
+            }
         }
 
         [TestMethod]

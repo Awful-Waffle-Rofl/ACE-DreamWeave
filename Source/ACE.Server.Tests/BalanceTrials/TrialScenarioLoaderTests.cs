@@ -117,6 +117,46 @@ namespace ACE.Server.Tests.BalanceTrials
             Assert.AreEqual(3, s.HardCopyEvery);
         }
 
+        private const string RotationBlock = @"""rotation"": [ { ""family"": ""virindi"" }, { ""family"": ""olthoi"", ""dungeon"": ""filos_doom"" }, { ""family"": ""lugian"" } ]";
+
+        private static string WithRotation(string rotationJson) => With(@"""timeoutSecs"": 600", @"""timeoutSecs"": 600, ""rotation"": " + rotationJson);
+
+        [TestMethod]
+        public void Rotation_is_optional_and_parses_in_order_with_an_optional_dungeon()
+        {
+            Assert.IsNull(TrialScenarioLoader.Parse(Example).Rotation, "absent: no rotation");
+
+            var s = TrialScenarioLoader.Parse(With(@"""timeoutSecs"": 600", @"""timeoutSecs"": 600, " + RotationBlock));
+            CollectionAssert.AreEqual(
+                new[] { new TrialRotationEntry("virindi", null), new TrialRotationEntry("olthoi", "filos_doom"), new TrialRotationEntry("lugian", null) },
+                s.Rotation.ToArray());
+        }
+
+        [TestMethod]
+        public void Rotation_rejects_the_shapes_the_schema_closes()
+        {
+            Rejects(WithRotation("[]"), "rotation must not be empty");
+            Rejects(WithRotation(@"{ ""family"": ""virindi"" }"), "'rotation' must be an array");
+            Rejects(WithRotation(@"[ { ""family"": ""virindi"" }, { ""family"": ""virindi"" } ]"), "appears twice");
+            Rejects(WithRotation(@"[ { ""family"": ""any"" } ]"), "concrete family");
+            Rejects(WithRotation(@"[ { ""family"": ""ANY"" } ]"), "concrete family");
+            Rejects(WithRotation(@"[ { ""family"": """" } ]"), "concrete family");
+            Rejects(WithRotation(@"[ { ""family"": ""virindi"", ""level"": 300 } ]"), "unknown key 'level'");
+            Rejects(WithRotation(@"[ { ""dungeon"": ""filos_doom"" } ]"), "missing 'family'");
+            Rejects(WithRotation(@"[ { ""family"": ""virindi"", ""dungeon"": ""any"" } ]"), "dungeon");
+            Rejects(WithRotation(@"[ { ""family"": ""virindi"", ""dungeon"": """" } ]"), "dungeon");
+        }
+
+        [TestMethod]
+        public void Rotation_needs_the_gem_family_to_be_any()
+        {
+            var pinned = With(@"""family"": ""any""", @"""family"": ""virindi""").Replace(@"""timeoutSecs"": 600", @"""timeoutSecs"": 600, " + RotationBlock);
+            Rejects(pinned, "gem family \"any\"");
+
+            // Control: the same pinned family without a rotation is a valid scenario.
+            Assert.AreEqual("virindi", TrialScenarioLoader.Parse(With(@"""family"": ""any""", @"""family"": ""virindi""")).Gem.Family);
+        }
+
         [TestMethod] public void Rejects_a_group_scenario() => Rejects(With(@"""group"": 1", @"""group"": 2"), "Plan D");
         [TestMethod] public void Rejects_hazards_that_are_not_off() => Rejects(With(@"""hazards"": ""off""", @"""hazards"": ""on"""), "hazards");
         [TestMethod] public void Rejects_an_empty_dungeon() => Rejects(With(@"""dungeon"": ""artifex_collegium""", @"""dungeon"": """""), "dungeon");
@@ -127,6 +167,26 @@ namespace ACE.Server.Tests.BalanceTrials
         [TestMethod] public void Rejects_tier_above_the_max() => Rejects(With(@"""tier"": 8", @"""tier"": 9"), "tier");
         [TestMethod] public void Rejects_zero_reps() => Rejects(With(@"""reps"": 10", @"""reps"": 0"), "reps");
         [TestMethod] public void Rejects_too_many_reps() => Rejects(With(@"""reps"": 10", @"""reps"": 1001"), "reps");
+        private static string WithGrace(int secs) => With(@"""timeoutSecs"": 600", @"""timeoutSecs"": 600, ""startGraceSecs"": " + secs);
+
+        [TestMethod]
+        public void Start_grace_defaults_to_six_when_absent()
+        {
+            Assert.AreEqual(6, TrialScenarioLoader.Parse(Example).StartGraceSecs);
+            Assert.AreEqual(TrialScenarioLoader.DefaultStartGraceSecs, TrialScenarioLoader.Parse(Example).StartGraceSecs);
+        }
+
+        [TestMethod]
+        public void Start_grace_accepts_the_bounds()
+        {
+            Assert.AreEqual(0, TrialScenarioLoader.Parse(WithGrace(0)).StartGraceSecs, "0 turns the grace off");
+            Assert.AreEqual(30, TrialScenarioLoader.Parse(WithGrace(30)).StartGraceSecs);
+            Assert.AreEqual(12, TrialScenarioLoader.Parse(WithGrace(12)).StartGraceSecs);
+        }
+
+        [TestMethod] public void Rejects_a_negative_start_grace() => Rejects(WithGrace(-1), "startGraceSecs");
+        [TestMethod] public void Rejects_a_start_grace_over_thirty() => Rejects(WithGrace(31), "startGraceSecs");
+
         [TestMethod] public void Rejects_a_short_timeout() => Rejects(With(@"""timeoutSecs"": 600", @"""timeoutSecs"": 29"), "timeoutSecs");
         [TestMethod] public void Rejects_a_long_timeout() => Rejects(With(@"""timeoutSecs"": 600", @"""timeoutSecs"": 7201"), "timeoutSecs");
         [TestMethod] public void Rejects_a_zero_wave_count() => Rejects(With(@"""role"": ""Elite"", ""count"": 2", @"""role"": ""Elite"", ""count"": 0"), "count");

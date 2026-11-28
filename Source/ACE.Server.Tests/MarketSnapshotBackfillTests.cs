@@ -1106,10 +1106,10 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void CurrentVersion_IsEight_TheEquipmentModRequirement()
+        public void CurrentVersion_IsNine_AlphabeticalModRows()
         {
-            Assert.AreEqual(8, MarketSnapshot.CurrentVersion,
-                            "equipment mod rows carry requirement from projection version 8 (Paragon rows in 7, cloak/jewelry in 6, suit in 5, mods in 4)");
+            Assert.AreEqual(9, MarketSnapshot.CurrentVersion,
+                            "mod rows alphabetical from projection version 9 (requirement in 8, Paragon rows in 7, cloak/jewelry in 6, suit in 5, mods in 4)");
         }
 
         [TestMethod]

@@ -1256,6 +1256,128 @@ namespace ACE.Server.Tests
 
             Assert.AreEqual(0, store.Rewards["r"].Pool.Count);
         }
+        // ---- draws / wcids / itemMaxLevel validation ----
+
+        private const string GoodEntry = @"{ ""wcid"": 10, ""qty"": 1, ""weight"": 5, ""scale"": ""stack"" }";
+
+        private static WorldEventAxisStore ParsePool(string badEntry)
+            => WorldEventAxisStore.Parse(null, null, null, RewardWithPool("[" + GoodEntry + "," + badEntry + "]"), null);
+
+        private static void AssertEntryDropped(string badEntry, string expectedInDiagnostic)
+        {
+            var store = ParsePool(badEntry);
+
+            Assert.IsTrue(store.Rewards.ContainsKey("r"), "the reward is kept");
+            CollectionAssert.AreEqual(new uint[] { 10 }, store.Rewards["r"].Pool.Select(e => e.Wcid).ToArray(), "the valid sibling survives, the bad entry is gone");
+            Assert.AreEqual(1, store.Diagnostics.Count(d => d.Contains("'r'") && d.Contains("pool entry 1") && d.Contains(expectedInDiagnostic)), string.Join("; ", store.Diagnostics));
+        }
+
+        [TestMethod]
+        public void RewardPool_WcidsEntry_IsKeptWithItsMembersAndLevel()
+        {
+            var store = ParsePool(@"{ ""wcids"": [1, 2, 3], ""qty"": 1, ""weight"": 2, ""scale"": ""chance"", ""itemMaxLevel"": 5 }");
+
+            Assert.AreEqual(0, store.Diagnostics.Count, string.Join("; ", store.Diagnostics));
+            Assert.AreEqual(2, store.Rewards["r"].Pool.Count);
+            CollectionAssert.AreEqual(new uint[] { 1, 2, 3 }, store.Rewards["r"].Pool[1].Wcids);
+            Assert.AreEqual(5, store.Rewards["r"].Pool[1].ItemMaxLevel);
+        }
+
+        [TestMethod]
+        public void RewardPool_NeitherWcidNorWcids_IsDropped() => AssertEntryDropped(@"{ ""qty"": 1, ""weight"": 5, ""scale"": ""stack"" }", "neither");
+
+        [TestMethod]
+        public void RewardPool_EmptyWcids_IsDropped() => AssertEntryDropped(@"{ ""wcids"": [], ""qty"": 1, ""weight"": 5, ""scale"": ""stack"" }", "neither");
+
+        [TestMethod]
+        public void RewardPool_ZeroInsideWcids_IsDropped() => AssertEntryDropped(@"{ ""wcids"": [4, 0], ""qty"": 1, ""weight"": 5, ""scale"": ""stack"" }", "zero inside wcids");
+
+        [TestMethod]
+        public void RewardPool_BothWcidAndWcids_IsDropped() => AssertEntryDropped(@"{ ""wcid"": 7, ""wcids"": [4], ""qty"": 1, ""weight"": 5, ""scale"": ""stack"" }", "both");
+
+        [TestMethod]
+        public void RewardPool_WcidsWithBags_IsDropped() => AssertEntryDropped(@"{ ""wcids"": [4, 5], ""qty"": 1, ""weight"": 5, ""scale"": ""bags"", ""bagWcid"": 9 }", "wcids");
+
+        [TestMethod]
+        public void RewardPool_ItemMaxLevelZero_IsDropped() => AssertEntryDropped(@"{ ""wcid"": 7, ""qty"": 1, ""weight"": 5, ""scale"": ""stack"", ""itemMaxLevel"": 0 }", "itemMaxLevel");
+
+        [TestMethod]
+        public void RewardPool_ItemMaxLevelSix_IsDropped() => AssertEntryDropped(@"{ ""wcid"": 7, ""qty"": 1, ""weight"": 5, ""scale"": ""stack"", ""itemMaxLevel"": 6 }", "itemMaxLevel");
+
+        [TestMethod]
+        public void RewardPool_NonPositiveWeight_IsDropped() => AssertEntryDropped(@"{ ""wcid"": 7, ""qty"": 1, ""weight"": -1, ""scale"": ""stack"" }", "weight");
+
+        [TestMethod]
+        public void RewardPool_QtyBelowOne_IsDropped() => AssertEntryDropped(@"{ ""wcid"": 7, ""qty"": 0, ""weight"": 5, ""scale"": ""stack"" }", "qty");
+
+        [TestMethod]
+        public void RewardPool_UnknownScale_IsDropped() => AssertEntryDropped(@"{ ""wcid"": 7, ""qty"": 1, ""weight"": 5, ""scale"": ""nope"" }", "scale");
+
+        [TestMethod]
+        public void RewardPool_BagsWithoutBagWcid_IsDropped() => AssertEntryDropped(@"{ ""wcid"": 7, ""qty"": 1, ""weight"": 5, ""scale"": ""bags"" }", "bagWcid");
+
+        [TestMethod]
+        public void RewardPool_EveryEntryInvalid_DropsTheReward()
+        {
+            var store = WorldEventAxisStore.Parse(null, null, null, RewardWithPool(@"[ { ""wcid"": 7, ""qty"": 0, ""weight"": 5, ""scale"": ""stack"" } ]"), null);
+
+            Assert.IsFalse(store.Rewards.ContainsKey("r"));
+            Assert.AreEqual(1, store.Diagnostics.Count(d => d.Contains("'r'") && d.Contains("no valid pool entries")), string.Join("; ", store.Diagnostics));
+        }
+
+        [TestMethod]
+        public void RewardPool_KnotItems_KeptWhenWcidMatches()
+        {
+            var store = ParsePool(@"{ ""wcid"": " + ACE.Server.Knots.KnotItems.PatternWcid + @", ""qty"": 1, ""weight"": 1, ""scale"": ""chance"", ""knotItem"": ""pattern"" },
+                { ""wcid"": " + ACE.Server.Knots.KnotItems.FiberWcid + @", ""qty"": 1, ""weight"": 1, ""scale"": ""chance"", ""knotItem"": ""fiber"" }");
+
+            Assert.AreEqual(0, store.Diagnostics.Count, string.Join("; ", store.Diagnostics));
+            CollectionAssert.AreEqual(new[] { null, "pattern", "fiber" }, store.Rewards["r"].Pool.Select(e => e.KnotItem).ToArray());
+        }
+
+        [TestMethod]
+        public void RewardPool_KnotItemUnknownValue_IsDropped() => AssertEntryDropped(@"{ ""wcid"": 7, ""qty"": 1, ""weight"": 5, ""scale"": ""stack"", ""knotItem"": ""spool"" }", "knotItem");
+
+        [TestMethod]
+        public void RewardPool_KnotPatternWithWrongWcid_IsDropped() => AssertEntryDropped(@"{ ""wcid"": " + ACE.Server.Knots.KnotItems.FiberWcid + @", ""qty"": 1, ""weight"": 5, ""scale"": ""stack"", ""knotItem"": ""pattern"" }", "Pattern wcid");
+
+        [TestMethod]
+        public void RewardPool_KnotFiberWithWrongWcid_IsDropped() => AssertEntryDropped(@"{ ""wcid"": " + ACE.Server.Knots.KnotItems.PatternWcid + @", ""qty"": 1, ""weight"": 5, ""scale"": ""stack"", ""knotItem"": ""fiber"" }", "Fiber wcid");
+
+        [TestMethod]
+        public void RewardPool_KnotItemWithItemMaxLevel_IsDropped() => AssertEntryDropped(@"{ ""wcid"": " + ACE.Server.Knots.KnotItems.FiberWcid + @", ""qty"": 1, ""weight"": 5, ""scale"": ""stack"", ""knotItem"": ""fiber"", ""itemMaxLevel"": 3 }", "combines");
+
+        [TestMethod]
+        public void RewardPool_KnotItemWithBags_IsDropped() => AssertEntryDropped(@"{ ""wcid"": " + ACE.Server.Knots.KnotItems.FiberWcid + @", ""qty"": 1, ""weight"": 5, ""scale"": ""bags"", ""bagWcid"": 9, ""knotItem"": ""fiber"" }", "scale bags");
+
+        [TestMethod]
+        public void RewardPool_KnotItemWithWcids_IsDropped() => AssertEntryDropped(@"{ ""wcids"": [" + ACE.Server.Knots.KnotItems.FiberWcid + @"], ""qty"": 1, ""weight"": 5, ""scale"": ""stack"", ""knotItem"": ""fiber"" }", "combines");
+
+        private static WorldEventAxisStore ParseDraws(string draws)
+            => WorldEventAxisStore.Parse(null, null, null, @"{ ""rewards"": [ {
+                ""id"": ""r"", ""displayName"": ""R"", ""successCrateWcid"": 1, ""consolationCrateWcid"": 2, ""cacheWcid"": 3,
+                ""participantsPerCache"": 5, ""claimWindowSeconds"": 60, " + draws + @" ""pool"": [" + GoodEntry + @"] } ] }", null);
+
+        [TestMethod]
+        public void RewardDraws_ValidAndAbsent_AreKept()
+        {
+            Assert.IsNull(ParseDraws("").Rewards["r"].Draws);
+            Assert.AreEqual(1, ParseDraws(@"""draws"": 1,").Rewards["r"].Draws);
+            Assert.AreEqual(10, ParseDraws(@"""draws"": 10,").Rewards["r"].Draws);
+        }
+
+        [TestMethod]
+        public void RewardDraws_OutOfRange_DropsTheReward()
+        {
+            foreach (var bad in new[] { "0", "11", "-3" })
+            {
+                var store = ParseDraws(@"""draws"": " + bad + ",");
+
+                Assert.IsFalse(store.Rewards.ContainsKey("r"), bad);
+                Assert.AreEqual(1, store.Diagnostics.Count(d => d.Contains("'r'") && d.Contains("draws")), bad);
+            }
+        }
+
         [TestMethod]
         public void ResolveFolder_ExpandsLeadingDotContentFolder()
         {

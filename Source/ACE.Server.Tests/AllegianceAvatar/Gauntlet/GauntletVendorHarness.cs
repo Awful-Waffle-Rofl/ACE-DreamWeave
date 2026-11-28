@@ -63,6 +63,8 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             AvatarVendor.Tuning = () => AT;
             AvatarVendor.ListingBuilder = () => MakeDisplay(AvatarVendor.EventListingWcid);
             AvatarVendor.GauntletListingBuilder = () => MakeDisplay(AvatarVendor.GauntletListingWcid);
+            AvatarVendor.BlessingListingBuilder = () => MakeDisplay(AvatarVendor.BlessingListingWcid);
+            AvatarBlessing.AllOnline = () => Array.Empty<Player>();
             AvatarAnnouncer.Sink = (m, text) => { };
             AvatarStatusText.KeeperName = g => g == Monarch ? "Varric" : null;
             GauntletPurchase.Tuning = () => GT;
@@ -84,6 +86,7 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             PropertyManager.ModifyBool(ShopGeneratorKey, DefaultPropertyManager.DefaultBooleanProperties[ShopGeneratorKey].Item);
             AvatarTestChart.Reset();
             AvatarVendor.ResetSeams();
+            AvatarBlessing.ResetSeams();
             AvatarRights.ResetSeams();
             GauntletPurchase.ResetSeams();
             GauntletRunStarter.Current = null;
@@ -92,20 +95,14 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
         }
 
         /// <summary>Avatar 7 bound to monarch 1000, Active after one tick.</summary>
-        public AvatarState InitActive(ulong favor = 5000, ulong lifetime = 10_000)
+        public AvatarState InitActive(ulong favor = 5000, ulong lifetime = 10_000, int r = 2, int s = 2)
         {
             store.Avatars.Add(new AllegianceAvatar
             {
                 AvatarId = AvatarId, MonarchGuid = Monarch, State = (byte)AvatarBindState.Bound,
                 Favor = favor, LifetimeXp = lifetime, LevelXp = lifetime, LastDecayDay = Today,
             });
-            rosters.Add(new AvatarRoster(Monarch, MonarchAcct, false, new List<KeeperCandidate>
-            {
-                new KeeperCandidate(Monarch, MonarchAcct, 1, 0, 0),
-                new KeeperCandidate(VassalGuid, VassalAcct, 1, 0, 1),
-            }));
-            activity.Touch(MonarchAcct, Start);
-            activity.Touch(VassalAcct, Start);
+            rosters.Add(AvatarScaleFixture.Roster(activity, r, s, Monarch, MonarchAcct, VassalGuid, VassalAcct, Start));
 
             AvatarManager.Initialize(store, () => AT, () => Start, () => activity, () => rosters, m => rosters.FirstOrDefault(r => r.MonarchGuid == m));
             AvatarManager.Tick();

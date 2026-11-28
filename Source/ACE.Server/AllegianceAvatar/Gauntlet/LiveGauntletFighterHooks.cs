@@ -23,10 +23,12 @@ namespace ACE.Server.Avatars.Gauntlet;
 /// LiveGauntletEnvironment.Build. One slot per run holds its fighter and the last stamp:
 /// <list type="bullet">
 /// <item>Spawn (Staging): build the fighter from wcid 1008504, dress it, and place it at the centre; it follows the highest-level living member.</item>
-/// <item>Restamp (each wave start): read the Avatar's live level A (AvatarState.Level), compute the stamp from that wave's
-/// plan (GauntletFighterStats) on the world thread, apply it on the arena landblock's thread. A level-up during a run takes
-/// effect here, at the next restamp.</item>
-/// <item>Respawn (after the respawn timer): a fresh fighter at the centre at full health with the last stamp.</item>
+/// <item>Restamp: the fighter's power is fixed ONCE, at the run's start (owner ruling 2026-11-25): the first restamp that
+/// carries a plan (wave 1, at the end of Staging) reads the Avatar's live level A (AvatarState.Level), computes the stamp
+/// from that plan (GauntletFighterStats) and keeps it as the slot's start stamp. Later restamps never recompute health,
+/// skills, attributes, damage or the intake cap; they only clear the members' buffs when asked, and the level SHOWN is the
+/// Avatar's own level A as read then (never the wave level), so it follows A while the stats stay put.</item>
+/// <item>Respawn (after the respawn timer): a fresh fighter at the centre at full health with the start stamp.</item>
 /// <item>Remove (Ending or close): take it out of the world, unbound first so the removal is never read as a death.</item>
 /// </list>
 /// A fighter's death reaches GauntletRun.OnFighterDied through its slot. Every hook is called on the world thread and does
@@ -79,7 +81,12 @@ internal sealed class LiveGauntletFighterHooks : IGauntletFighterHooks
     {
         public readonly GauntletRun Run;
         public volatile GauntletAvatarFighter Fighter;
+
+        /// <summary>The stamp placements and restamps apply: the start snapshot once <see cref="StatsFrozen"/>, with only its shown level following A.</summary>
         public volatile GauntletFighterStamp LastStamp;
+
+        /// <summary>True once the start snapshot is taken (the first restamp that carried a plan). Never cleared.</summary>
+        public volatile bool StatsFrozen;
         public volatile bool Removed;
 
         /// <summary>A Spawn or Respawn placement that has not yet succeeded: <see cref="Ensure"/> retries it.</summary>
@@ -126,13 +133,13 @@ internal sealed class LiveGauntletFighterHooks : IGauntletFighterHooks
 
         var slot = slots.GetOrAdd(run.RunKey, _ => new Slot(run));
 
-        // Before the first wave the fighter shows L(1) and keeps its weenie's health, with the cap on from the start.
+        // Before the first wave the fighter shows the Avatar's level A and keeps its weenie's health, with the cap on from the start.
         var t = run.Tuning ?? GauntletTuning.Defaults;
-        var level = new GauntletRules(t).LevelOf(1);
+        var avatarLevel = SafeAvatarLevel(run.AvatarId);
         slot.LastStamp ??= new GauntletFighterStamp
         {
-            Level = level,
-            AvatarLevel = SafeAvatarLevel(run.AvatarId),
+            Level = Math.Max(1, avatarLevel),
+            AvatarLevel = avatarLevel,
             MinDeathSeconds = t.FighterMinDeathSeconds,
             BurstSeconds = t.FighterBurstSeconds,
         };
@@ -148,19 +155,38 @@ internal sealed class LiveGauntletFighterHooks : IGauntletFighterHooks
         if (slot == null || slot.Removed)
             return;
 
+        var avatarLevel = SafeAvatarLevel(run.AvatarId);
         GauntletFighterStamp stamp = null;
 
         try
         {
-            stamp = GauntletFighterStats.Compute(wave, SafeAvatarLevel(run.AvatarId), run.Tuning ?? GauntletTuning.Defaults);
+            if (!slot.StatsFrozen)
+            {
+                // The start snapshot: the first plan we are given (wave 1), with A as read now. A null plan (refused) leaves it
+                // untaken, so the next wave that arrives with a plan takes it.
+                stamp = GauntletFighterStats.Compute(wave, avatarLevel, run.Tuning ?? GauntletTuning.Defaults);
+
+                if (stamp != null)
+                    slot.StatsFrozen = true;
+            }
+            else
+            {
+                stamp = slot.LastStamp;
+            }
         }
         catch (Exception ex)
         {
             log.Error($"[GAUNTLET] {run} fighter stamp threw for wave {wave?.Wave}", ex);
         }
 
+        // The level shown is A, never the wave's level; the rest of the stamp is the start snapshot, unchanged. When A could not
+        // be read (the read threw, or the Avatar is gone: 0) the previous shown level stays rather than dropping to 1.
         if (stamp != null)
+        {
+            var shown = avatarLevel > 0 ? avatarLevel : Math.Max(1, slot.LastStamp?.Level ?? 1);
+            stamp = stamp with { Level = Math.Max(1, shown) };
             slot.LastStamp = stamp;
+        }
 
         SafeEnqueue(run, "restamp", () =>
         {
@@ -175,7 +201,7 @@ internal sealed class LiveGauntletFighterHooks : IGauntletFighterHooks
             f.ApplyStamp(stamp, clearBuffs: clearBuffs);
 
             if (stamp != null)
-                log.Info($"[GAUNTLET] {run} fighter restamped for wave {wave?.Wave}: L{stamp.Level} A{stamp.AvatarLevel} health {f.Health.Current}/{f.Health.MaxValue}, hit {stamp.DamageTarget}, {stamp.Skills.Count} skill(s)");
+                log.Info($"[GAUNTLET] {run} fighter restamp at wave {wave?.Wave} (stats frozen: {slot.StatsFrozen}): L{stamp.Level} A{stamp.AvatarLevel} health {f.Health.Current}/{f.Health.MaxValue}, hit {stamp.DamageTarget}, {stamp.Skills.Count} skill(s)");
         });
     }
 
@@ -249,6 +275,7 @@ internal sealed class LiveGauntletFighterHooks : IGauntletFighterHooks
 
         log.Warn($"[GAUNTLET] {slot.Run} fighter 0x{f.Guid} left the world without dying; placing a new one");
         f.Owner = null;
+        GauntletAura.ClearFrom(f);
 
         // The lost fighter stays in the slot until a new one is placed, so a failed placement is tried again at the next Ensure.
         return PlaceNew(slot) != null;
@@ -268,6 +295,10 @@ internal sealed class LiveGauntletFighterHooks : IGauntletFighterHooks
             return;
 
         slot.Removed = true;
+
+        // the aura ends with the run, at once
+        GauntletAura.ClearRun(run.RunKey);
+
         var f = slot.Fighter;
 
         if (f == null)
@@ -325,6 +356,16 @@ internal sealed class LiveGauntletFighterHooks : IGauntletFighterHooks
         fighter.Owner = slot;
         fighter.ApplyStamp(slot.LastStamp, fullHealth: true);
 
+        var tuning = run.Tuning ?? GauntletTuning.Defaults;
+
+        // The Warden's taunt pulse (owner ruling 2026-11-25), over this run's creatures only, at the run's tuned interval.
+        fighter.ArmTauntPulse(run, tuning.FighterTauntSeconds);
+
+        // The aura (members near the living fighter), the heal bucket and the telemetry tallies, all from this run.
+        fighter.ArmAura(run.RunKey, tuning.FighterAuraRadius, tuning.FighterAuraDamageRating, tuning.FighterAuraResistRating);
+        fighter.KitHealSharePerTenSeconds = tuning.FighterHealSharePerTenSeconds;
+        fighter.Ledger = run.FighterLedger;
+
         // A hand-placed object with a dynamic guid and no generator rots on the landblock heartbeat (IsDecayable), and a rot
         // is a bare Destroy with no death and so no respawn: never rot, as ThreadDungeonSpawner and Pet do.
         fighter.TimeToRot = -1;
@@ -361,7 +402,27 @@ internal sealed class LiveGauntletFighterHooks : IGauntletFighterHooks
         AvatarFighterVoice.Say(fighter, slot.EverPlaced ? FighterVoiceTrigger.Return : FighterVoiceTrigger.Spawn);
         slot.EverPlaced = true;
 
+        // the aura's line, to the same audience, at the first spawn and every return (only while the aura gives something)
+        if (fighter.AuraArmed)
+            SayAura(fighter, run);
+
         return fighter;
+    }
+
+    /// <summary>The aura's placement line (GauntletAura.PlacedLine) to the fighter's audience, from the tuning it was armed with. Never throws.</summary>
+    private static void SayAura(GauntletAvatarFighter fighter, GauntletRun run)
+    {
+        try
+        {
+            var audience = fighter.Audience?.Invoke();
+
+            if (audience != null)
+                AvatarFighterVoice.Send(audience, GauntletAura.PlacedLine(fighter.AuraRadius, fighter.AuraDamageRating, fighter.AuraResistRating));
+        }
+        catch (Exception ex)
+        {
+            log.Error($"[GAUNTLET] {run} fighter aura line threw", ex);
+        }
     }
 
     /// <summary>The look and scale, before placement. A throw is logged and the fighter is placed in its weenie outfit.</summary>

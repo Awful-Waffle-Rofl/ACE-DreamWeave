@@ -53,9 +53,16 @@ namespace ACE.Server.Tests
             ThornsCloseRangeTests.EnsurePlayerTypeInitializable();
         }
 
+        private Func<double> savedCritDraw;
+
         [TestInitialize]
         public void SeedTunables()
         {
+            // every Thorns reflect now rolls a crit (10% base); the Thorns cases assert exact amounts, so the draw is
+            // pinned to 1.0 (never a crit) and restored in cleanup
+            savedCritDraw = ThornsAbility.CritDraw;
+            ThornsAbility.CritDraw = () => 1.0;
+
             RestoreTunables();
 
             PropertyManager.ModifyBool("weapon_mods_enabled", true);
@@ -63,6 +70,13 @@ namespace ACE.Server.Tests
         }
 
         [TestCleanup]
+        public void RestoreCritDrawAndTunables()
+        {
+            ThornsAbility.CritDraw = savedCritDraw;
+
+            RestoreTunables();
+        }
+
         public void RestoreTunables()
         {
             foreach (var key in SeededBools)
@@ -408,6 +422,15 @@ namespace ACE.Server.Tests
             SetField(typeof(WorldObject), player, "BiotaDatabaseLock", new ReaderWriterLockSlim());
             SetField(typeof(Player), player, "classAbilityCache", new Dictionary<ClassAbilityId, int>());
             SetField(typeof(Creature), player, "<EquippedObjects>k__BackingField", equipped.ToDictionary(e => e.Guid, e => e));
+
+            // the reflect reads the total Damage Rating through the enchantment manager and rolls its crit with the
+            // Shield skill (shield weapon mods, 2026-11-25); same seeding as ThornsCloseRangeTests.SeededThornsModPlayer
+            player.Biota.PropertiesEnchantmentRegistry = new List<PropertiesEnchantmentRegistry>();
+            SetField(typeof(WorldObject), player, "EnchantmentManager", new ACE.Server.WorldObjects.Managers.EnchantmentManagerWithCaching(player));
+            SetField(typeof(Creature), player, nameof(Creature.Skills), new Dictionary<Skill, ACE.Server.WorldObjects.Entity.CreatureSkill>
+            {
+                { Skill.Shield, new ACE.Server.WorldObjects.Entity.CreatureSkill(player, Skill.Shield, new PropertiesSkill { InitLevel = 400, SAC = SkillAdvancementClass.Inactive }) },
+            });
 
             if (mode != null)
                 typeof(Creature).GetProperty(nameof(Creature.CombatMode)).GetSetMethod(true).Invoke(player, new object[] { mode.Value });

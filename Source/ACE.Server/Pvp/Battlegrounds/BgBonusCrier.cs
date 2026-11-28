@@ -6,7 +6,7 @@ using ACE.Server.ThreadDungeons;
 namespace ACE.Server.Pvp.Battlegrounds
 {
     /// <summary>
-    /// The Arena Crier's Double Marks announcements (Docs/Pvp/BATTLEGROUNDS.md "Double Marks windows"): a heads-up before a
+    /// The Arena Crier's Double Marks announcements for battlegrounds and every arena mode (Docs/Pvp/BATTLEGROUNDS.md "Double Marks windows"): a heads-up before a
     /// window opens, a line when it opens, and a line when it ends. PURE and stateful: time, schedule and the warn lead in,
     /// finished chat lines out, so it is unit-testable with a fake clock. One instance lives for the coordinator's lifetime
     /// and is ticked on the world thread.
@@ -30,19 +30,19 @@ namespace ACE.Server.Pvp.Battlegrounds
         private Phase lastPhase;
         private DateTime? lastId;
 
-        /// <summary>The queue command appended to the Open line (the same one the Crier's queue lines name).</summary>
-        public const string QueueHint = " Use /arena join bg.";
+        /// <summary>The queue commands appended to the Open line (the same ones the Crier's queue lines name): the windows cover battlegrounds and every arena mode (1v1, 2v2, Tugak Brawl).</summary>
+        public const string QueueHint = " Use /arena join bg, /arena join 1v1, /arena join 2v2 or /arena join tugak.";
 
         public static string WarnLine(int minutes) =>
-            $"Battleground Double Marks begins in {minutes} {(minutes == 1 ? "minute" : "minutes")}! Every battleground match that starts during the window pays double Marks of the Hopeslayer.";
+            $"Double Marks begins in {minutes} {(minutes == 1 ? "minute" : "minutes")}! Every Battleground and Arena match (1v1, 2v2 and Tugak Brawl) that starts during the window pays double Marks of the Hopeslayer.";
 
         public static string OpenLine(string remaining) =>
-            $"Battleground Double Marks is now live for the next {remaining}! Queue for battlegrounds now.{QueueHint}";
+            $"Double Marks is now live for the next {remaining} for Battlegrounds and Arena (all modes)!{QueueHint}";
 
         public static string EndLine(string untilNext) =>
             untilNext == null
-                ? "Battleground Double Marks has ended."
-                : $"Battleground Double Marks has ended. The next window opens in {untilNext}.";
+                ? "Double Marks has ended."
+                : $"Double Marks has ended. The next window opens in {untilNext}.";
 
         private static string Signature(IReadOnlyList<BgBonusSpan> spans, TimeZoneInfo zone, int warnMinutes)
         {

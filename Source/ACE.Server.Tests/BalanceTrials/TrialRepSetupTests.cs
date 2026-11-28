@@ -40,7 +40,11 @@ namespace ACE.Server.Tests.BalanceTrials
         public void Init() => TrialRepSetup.ResetAllBlocksForTests();
 
         [TestCleanup]
-        public void Cleanup() => TrialRepSetup.ResetAllBlocksForTests();
+        public void Cleanup()
+        {
+            TrialRepSetup.ResetAllBlocksForTests();
+            ResetSeams();
+        }
 
         // ================================================================ rebuild
 
@@ -143,12 +147,12 @@ namespace ACE.Server.Tests.BalanceTrials
             Assert.IsTrue(TrialRepSetup.NeedsRebuild(rep.Guid), "a failed purge owes a rebuild across sessions");
             TrialRepSetup.ResetAllBlocksForTests();
 
-            // Rep index outside 1..8.
-            foreach (var bad in new[] { 0, 9 })
+            // Rep index outside 1..12.
+            foreach (var bad in new[] { 0, 13 })
             {
                 var f = Healthy(repIndex);
                 Assert.IsFalse(TrialRebuild.TryRebuild(null, Archetype, ArchSha, bad, f.Build(), out refusal));
-                StringAssert.Contains(refusal, "1..8");
+                StringAssert.Contains(refusal, "1..12");
             }
         }
 
@@ -418,7 +422,7 @@ namespace ACE.Server.Tests.BalanceTrials
 
         // ================================================================ drift and schedule
 
-        private static TrialMasterSnapshot Snapshot(TrialDigest d) => new TrialMasterSnapshot(d, new Dictionary<uint, long>());
+        private static TrialMasterSnapshot Snapshot(TrialDigest d) => new TrialMasterSnapshot(d);
 
         private static TrialRepSetup NewSetup(uint repGuid, int hardCopyEvery, string masterCore)
         {
@@ -545,17 +549,22 @@ namespace ACE.Server.Tests.BalanceTrials
             var r3 = setup.Before(() => { }, () => new TrialDigest("M", "E2"));
             Assert.IsTrue(r3.Drift);
             Assert.IsNull(r3.Refusal);
-            Assert.IsFalse(r3.RebuildRequired, "drift flags this rep; the rebuild is for the NEXT one");
+            Assert.IsFalse(r3.RebuildRequired, "drift flags this rep and owes nothing");
+            Assert.IsFalse(TrialRepSetup.NeedsRebuild(repGuid), "drift never sets the rebuild flag");
 
-            // r3's drift owes a rebuild: the next rep is refused until one completes, then a new block starts.
-            Assert.IsTrue(setup.Before(() => { }, () => new TrialDigest("M", "E1")).RebuildRequired);
-            TrialRepSetup.ResetBlock(repGuid);
+            // The next rep is NOT refused: drift is information only.
+            setup.OnRepEnded();
+            var r3b = setup.Before(() => { }, () => new TrialDigest("M", "E1"));
+            Assert.IsNull(r3b.Refusal);
+            Assert.IsFalse(r3b.RebuildRequired);
 
-            // Core differs from the master: drift.
+            // Core differs from the master: drift, and the rep still runs.
             var r4 = setup.Before(() => { }, () => new TrialDigest("X", "E1"));
             Assert.IsTrue(r4.Drift);
+            Assert.IsNull(r4.Refusal);
+            Assert.IsFalse(TrialRepSetup.NeedsRebuild(repGuid));
 
-            // A drift rep runs flagged, and the session refuses the next rep until a rebuild.
+            // A drifting rep 1 runs flagged, and the session does NOT refuse rep 2.
             var w = new TrialSessionWorld();
             var drift = true;
             var session = new TrialSession("u", new TrialScenario("s", "r", null, 1, null, null, 3, 60, 0), "sha", null, "asha", null, 1u, w,
@@ -563,17 +572,15 @@ namespace ACE.Server.Tests.BalanceTrials
             session.Tick(0);
             Assert.IsTrue(session.TryNext(1, out var refusal), refusal);
             Assert.IsTrue(session.CurrentRep.DigestDrift);
-            Assert.IsTrue(session.RebuildRequired);
+            Assert.IsFalse(session.RebuildRequired, "a drifting rep owes no rebuild");
             foreach (var g in w.Spawned) w.Dead.Add(g);
             session.OnCreatureDied(0, 2);
             Assert.AreEqual(TrialPhase.Ready, session.Phase);
-            drift = false;
-            Assert.IsFalse(session.TryNext(3, out refusal));
-            StringAssert.Contains(refusal, "rebuild");
+            Assert.IsTrue(session.TryNext(3, out refusal), "rep 2 is not refused after a drifting rep 1: " + refusal);
         }
 
         [TestMethod]
-        public void Pending_or_failed_master_digest_refuses_the_rep_before_any_reset()
+        public void Pending_or_failed_master_digest_runs_the_rep_with_drift_unknown()
         {
             var repGuid = TrialRoster.RepSlots[1].Guid;
             var now = 0.0;
@@ -586,33 +593,41 @@ namespace ACE.Server.Tests.BalanceTrials
             setup.RequestMasterDigest();
             Assert.AreEqual(1, requests);
 
+            // Pending inside the timeout: the rep runs (the soft reset happens), drift unknown, no second request.
             var resets = 0;
             var r = setup.Before(() => resets++, () => new TrialDigest("M", "E"));
-            StringAssert.Contains(r.Refusal, "master digest pending");
-            Assert.AreEqual(0, resets, "a pending master refuses before the soft reset");
+            Assert.IsNull(r.Refusal);
+            Assert.IsFalse(r.RebuildRequired);
+            Assert.IsTrue(r.DriftUnknown);
+            Assert.IsFalse(r.Drift);
+            StringAssert.Contains(r.DriftReason, "unknown");
+            Assert.AreEqual(1, resets, "the rep is reset and runs");
             Assert.AreEqual(1, requests, "inside the timeout, no second request");
+            Assert.IsFalse(TrialRepSetup.NeedsRebuild(repGuid));
 
-            // No callback at all (a swallowed shard read): after the timeout the next rep asks again.
+            // No callback at all (a swallowed shard read): after the timeout the next rep runs and asks again.
             now = TrialRepSetup.MasterDigestTimeoutSeconds + 1;
             r = setup.Before(() => resets++, () => new TrialDigest("M", "E"));
-            StringAssert.Contains(r.Refusal, "master digest");
+            Assert.IsNull(r.Refusal);
+            Assert.IsTrue(r.DriftUnknown);
             Assert.AreEqual(2, requests);
 
-            // A null answer (master online or missing) is unavailable, and asks again next rep.
+            // A null answer (master online or missing) is unavailable: the rep runs, and the next asks again.
             pendingCallback(null);
             r = setup.Before(() => resets++, () => new TrialDigest("M", "E"));
-            StringAssert.Contains(r.Refusal, "master digest unavailable");
+            Assert.IsNull(r.Refusal);
+            Assert.IsTrue(r.DriftUnknown);
+            StringAssert.Contains(r.DriftReason, "unavailable");
             Assert.AreEqual(3, requests);
 
-            // The answer arrives: the rep runs.
-            Assert.IsNull(setup.MasterConsumables, "no master consumables before the snapshot");
-            pendingCallback(new TrialMasterSnapshot(new TrialDigest("M", "master"), new Dictionary<uint, long> { [691] = 50 }));
-            IReadOnlyDictionary<uint, long> seenAtReset = null;
-            r = setup.Before(() => { resets++; seenAtReset = setup.MasterConsumables; }, () => new TrialDigest("M", "E"));
+            // The answer arrives: the rep compares again.
+            Assert.IsNull(setup.MasterCore, "no master core before the snapshot");
+            pendingCallback(new TrialMasterSnapshot(new TrialDigest("M", "master")));
+            r = setup.Before(() => resets++, () => new TrialDigest("M", "E"));
             Assert.IsNull(r.Refusal);
-            Assert.AreEqual(1, resets);
+            Assert.IsFalse(r.DriftUnknown);
             Assert.IsFalse(r.Drift, r.DriftReason);
-            Assert.AreEqual(50, seenAtReset[691], "the soft reset sees the master's consumable counts");
+            Assert.AreEqual("M", setup.MasterCore);
         }
 
         [TestMethod]
@@ -719,7 +734,7 @@ namespace ACE.Server.Tests.BalanceTrials
             const int repIndex = 6;
             var rep = TrialRoster.RepSlots[repIndex - 1];
 
-            TrialRepSetup.MarkRebuildRequired(rep.Guid, "drift");
+            TrialRepSetup.MarkRebuildRequired(rep.Guid, "the last rebuild's purge failed", purgeFailed: true);
             var setup = NewSetup(rep.Guid, hardCopyEvery: 0, masterCore: "M");
             setup.OnRepEnded();
             Assert.AreEqual((1, (string)null), TrialRepSetup.BlockState(rep.Guid));
@@ -746,7 +761,31 @@ namespace ACE.Server.Tests.BalanceTrials
         }
 
         [TestMethod]
-        public void Drift_owes_a_rebuild_that_a_new_session_cannot_bypass()
+        public void A_failed_copy_after_a_good_purge_blocks_the_rep_until_a_rebuild_completes()
+        {
+            const int repIndex = 7;
+            var rep = TrialRoster.RepSlots[repIndex - 1];
+            Assert.IsFalse(TrialRepSetup.NeedsRebuild(rep.Guid), "control: nothing owed before");
+
+            var failing = Healthy(repIndex);
+            failing.CopyResult = false;
+            Assert.IsTrue(TrialRebuild.TryRebuild(null, Archetype, ArchSha, repIndex, failing.Build(), out var refusal), refusal);
+
+            Assert.IsTrue(TrialRepSetup.NeedsRebuild(rep.Guid), "the copy failed after the purge: the rep is empty or partial");
+            Assert.IsTrue(TrialRepSetup.PurgeFailed(rep.Guid));
+
+            var resets = 0;
+            var r = NewSetup(rep.Guid, hardCopyEvery: 0, masterCore: "M").Before(() => resets++, () => new TrialDigest("M", "E"));
+            Assert.IsTrue(r.RebuildRequired);
+            StringAssert.Contains(r.Refusal, "copy failed");
+            Assert.AreEqual(0, resets);
+
+            Assert.IsTrue(TrialRebuild.TryRebuild(null, Archetype, ArchSha, repIndex, Healthy(repIndex).Build(), out refusal), refusal);
+            Assert.IsFalse(TrialRepSetup.NeedsRebuild(rep.Guid), "a completed rebuild clears it");
+        }
+
+        [TestMethod]
+        public void Drift_owes_nothing_in_this_session_or_a_new_one()
         {
             var repGuid = TrialRoster.RepSlots[4].Guid;
 
@@ -756,21 +795,89 @@ namespace ACE.Server.Tests.BalanceTrials
             Assert.IsNull(r.Refusal, "the drifted rep itself runs, flagged");
             first.OnRepEnded();
 
-            // The rep relogs: a new session for the same rep guid. Its rep 1 is refused, before any reset.
+            // The rep relogs: a new session for the same rep guid runs its rep 1 normally.
             var resets = 0;
             var second = NewSetup(repGuid, hardCopyEvery: 0, masterCore: "M");
-            r = second.Before(() => resets++, () => new TrialDigest("M", "E"));
-            Assert.IsTrue(r.RebuildRequired);
-            StringAssert.Contains(r.Refusal, "rebuild required");
-            StringAssert.Contains(r.Refusal, "drift");
-            Assert.AreEqual(0, resets);
-
-            // Only a completed rebuild (ResetBlock) clears it.
-            TrialRepSetup.ResetBlock(repGuid);
-            r = second.Before(() => resets++, () => new TrialDigest("M", "E"));
+            r = second.Before(() => resets++, () => new TrialDigest("X", "E"));
             Assert.IsFalse(r.RebuildRequired);
             Assert.IsNull(r.Refusal);
+            Assert.IsTrue(r.Drift, "still flagged on the row");
             Assert.AreEqual(1, resets);
+        }
+
+        [TestMethod]
+        public void A_drift_set_rebuild_mark_left_in_memory_is_cleared_at_the_next_rep()
+        {
+            var repGuid = TrialRoster.RepSlots[5].Guid;
+
+            // The old rule's mark (no purge failure behind it): a rep stuck as rebuild=true frees up.
+            TrialRepSetup.MarkRebuildRequired(repGuid, "state digest drift (x)");
+            Assert.IsTrue(TrialRepSetup.NeedsRebuild(repGuid));
+
+            var setup = NewSetup(repGuid, hardCopyEvery: 0, masterCore: "M");
+            var r = setup.Before(() => { }, () => new TrialDigest("M", "E"));
+            Assert.IsNull(r.Refusal);
+            Assert.IsFalse(r.RebuildRequired);
+            Assert.IsFalse(TrialRepSetup.NeedsRebuild(repGuid));
+        }
+
+        [TestMethod]
+        public void A_failed_purge_still_refuses_every_rep_until_a_rebuild_completes()
+        {
+            var repGuid = TrialRoster.RepSlots[6].Guid;
+            TrialRepSetup.MarkRebuildRequired(repGuid, "the last rebuild's purge failed", purgeFailed: true);
+
+            var resets = 0;
+            var setup = NewSetup(repGuid, hardCopyEvery: 0, masterCore: "M");
+            var r = setup.Before(() => resets++, () => new TrialDigest("M", "E"));
+            Assert.IsTrue(r.RebuildRequired);
+            StringAssert.Contains(r.Refusal, "rebuild required");
+            StringAssert.Contains(r.Refusal, "purge failed");
+            Assert.AreEqual(0, resets, "refused before any reset");
+            Assert.IsTrue(TrialRepSetup.NeedsRebuild(repGuid), "the next rep's leftover check does not clear a purge failure");
+
+            TrialRepSetup.ResetBlock(repGuid);
+            Assert.IsNull(setup.Before(() => resets++, () => new TrialDigest("M", "E")).Refusal);
+        }
+
+        [TestMethod]
+        public void The_drift_note_is_short_and_free_of_guids()
+        {
+            var core = "core 0123456789ab differs from the master's fedcba987654";
+            var ench = "enchantments 0123456789ab differ from the block's first rep fedcba987654";
+
+            foreach (var reason in new[] { core, ench, core + "; " + ench, null, new string('x', 400) })
+            {
+                var note = TrialStarter.DriftNote(reason);
+                Assert.IsTrue(note.Length < 200, note.Length.ToString());
+                StringAssert.Contains(note, "differs from its master");
+                StringAssert.Contains(note, "recorded as custom");
+                Assert.IsFalse(System.Text.RegularExpressions.Regex.IsMatch(note, "[0-9a-f]{8}"), "no hash text in chat: " + note);
+            }
+
+            StringAssert.Contains(TrialStarter.DriftNote(core), "gear, pack or class abilities differ from the master");
+            Assert.IsFalse(TrialStarter.DriftNote(core).Contains("buffs", StringComparison.Ordinal));
+            StringAssert.Contains(TrialStarter.DriftNote(ench), "buffs differ from the first rep");
+            Assert.IsFalse(TrialStarter.DriftNote(ench).Contains("gear", StringComparison.Ordinal));
+
+            var both = TrialStarter.DriftNote(core + "; " + ench);
+            StringAssert.Contains(both, "gear, pack or class abilities differ from the master and buffs differ from the first rep");
+            StringAssert.Contains(TrialStarter.DriftNote(null), "state differs");
+        }
+
+        [TestMethod]
+        public void The_drift_note_goes_out_once_per_session_and_the_log_says_not_blocking()
+        {
+            var pre = Body(StarterPath, PreSpawnSig);
+            StringAssert.Contains(pre, "if (result.Drift && !session.DriftNoted) { session.DriftNoted = true;");
+
+            var prep = Body(StarterPath, PrepareRepSig);
+            StringAssert.Contains(prep, "differs from the master ({setup.DriftReason}); recorded, not blocking");
+            Assert.IsFalse(prep.Contains("needs @trial rebuild", StringComparison.Ordinal));
+
+            // Drift reaches neither the setup's mark nor the session's flag.
+            Assert.IsFalse(Norm(PooledLootSourceText.Read("Source/ACE.Server/BalanceTrials/TrialRepSetup.cs")).Contains("MarkRebuildRequired(_repGuid", StringComparison.Ordinal));
+            Assert.IsFalse(Norm(PooledLootSourceText.Read("Source/ACE.Server/BalanceTrials/TrialSession.cs")).Contains("if (rep.DigestDrift)", StringComparison.Ordinal));
         }
 
         [TestMethod]
@@ -883,7 +990,7 @@ namespace ACE.Server.Tests.BalanceTrials
                 Assert.IsFalse(TrialDigest.IsDrift(d, masterDigest.Core, d.Enchantments, out var reason), $"{name}: {reason}");
             }
 
-            // The master's consumable counts ride beside the digest, for the soft reset to restore to.
+            // Consumable counts ride beside the digest input (the soft reset's baseline is read off the rep, not the master).
             Assert.AreEqual(50, master.Consumables[CompWcid]);
             Assert.AreEqual(200, master.Consumables[ArrowWcid]);
             Assert.AreEqual(50, restocked.Consumables[CompWcid], "stacks are summed by wcid");
@@ -994,6 +1101,354 @@ namespace ACE.Server.Tests.BalanceTrials
             Assert.IsFalse(TrialDigest.IsConsumable(LiftWcid, WeenieType.Generic, TrialDigest.ConsumableWcids(Archetype)));
         }
 
+        // ---- the consumable baseline: the rep's own counts, captured once per session, never the master's
+
+        private static (Player Player, TrialSession Session, TrialRepSetup Setup) BaselineRig(uint repGuid, bool digestInHand)
+        {
+            var player = (Player)RuntimeHelpers.GetUninitializedObject(typeof(Player));
+            GuidField(player) = new ObjectGuid(repGuid);
+            BiotaField(player) = new Biota { PropertiesBool = new Dictionary<PropertyBool, bool> { [PropertyBool.Attackable] = true } };
+            LockField(player) = new System.Threading.ReaderWriterLockSlim();
+
+            var session = new TrialSession("u", new TrialScenario("s", "r", null, 1, null, null, 3, 60, 0), "sha", null, "asha", null, repGuid,
+                new TrialSessionWorld(), _ => null);
+            player.TrialSession = session;
+
+            var setup = new TrialRepSetup(repGuid, 0x59000003, 0, () => 0.0,
+                (g, cb) => { if (digestInHand) cb(new TrialMasterSnapshot(new TrialDigest("M", "master"))); },
+                a => { a(); return true; }, "S1", null, "archmage-400");
+            setup.RequestMasterDigest();
+
+            TrialManager.OnlinePlayer = g => g == repGuid ? player : null;
+            TrialStarter.DigestOf = (p, w) => new TrialDigest("M", "E");
+            return (player, session, setup);
+        }
+
+        private static void ResetSeams()
+        {
+            TrialStarter.ClosingConsumableReset = TrialReset.RestoreConsumables;
+            TrialStarter.EnqueueOnPlayer = (p, work) => p.EnqueueAction(new ACE.Server.Entity.Actions.ActionEventDelegate(work));
+            TrialStarter.SoftReset = TrialReset.Soft;
+            TrialStarter.DigestOf = TrialDigest.Compute;
+            TrialStarter.OwnConsumablesReader = TrialStarter.OwnConsumables;
+            TrialManager.ResetForTests();
+        }
+
+        [TestMethod]
+        public void The_soft_reset_baseline_is_the_reps_own_counts_whatever_the_master_holds()
+        {
+            const uint arrows = 100, food = 200, kit = 300;
+            var results = new List<IReadOnlyDictionary<uint, long>>();
+
+            foreach (var digestInHand in new[] { true, false })
+            {
+                var guid = TrialRoster.RepSlots[digestInHand ? 0 : 1].Guid;
+                var (player, session, setup) = BaselineRig(guid, digestInHand);
+                var own = new Dictionary<uint, long> { [arrows] = 300, [food] = 40 };
+                var seen = new List<IReadOnlyDictionary<uint, long>>();
+
+                try
+                {
+                    TrialStarter.OwnConsumablesReader = (p, w) => new Dictionary<uint, long>(own);
+                    TrialStarter.SoftReset = (p, a, c, b) => { seen.Add(c); return null; };
+
+                    Assert.IsNull(TrialStarter.PreSpawn(session, setup, Archetype).Refusal);
+                    Assert.AreEqual(digestInHand, setup.MasterCore != null, "control: the digest is in hand only in the first arm");
+
+                    // Burn during rep 1, and a pick-up the rep did not start with.
+                    own[arrows] = 120;
+                    own[food] = 0;
+                    own[kit] = 7;
+                    setup.OnRepEnded();
+                    Assert.IsNull(TrialStarter.PreSpawn(session, setup, Archetype).Refusal);
+                }
+                finally
+                {
+                    ResetSeams();
+                    player.TrialSession = null;
+                }
+
+                Assert.AreEqual(2, seen.Count);
+                Assert.AreSame(seen[0], seen[1], "one baseline per session");
+                Assert.AreEqual(300, seen[1][arrows], "burn is restocked back to the baseline at rep 2");
+                Assert.AreEqual(40, seen[1][food], "a consumable the master lacks is kept");
+                Assert.IsFalse(seen[1].ContainsKey(kit), "loot picked up in a rep is not baseline");
+
+                // The plan the soft reset builds from it: nothing the rep started with is trimmed, the pick-up goes.
+                var plan = TrialReset.ConsumableTargets(null, seen[1], new[] { arrows, food, kit });
+                CollectionAssert.AreEqual(new[]
+                {
+                    new TrialConsumableTarget(arrows, 300, true), new TrialConsumableTarget(food, 40, true), new TrialConsumableTarget(kit, 0, true),
+                }, plan.ToArray());
+
+                results.Add(seen[1]);
+            }
+
+            CollectionAssert.AreEquivalent(results[0].ToList(), results[1].ToList(), "identical with the digest present and absent");
+        }
+
+        // ---- the closing reset: an ended session leaves the rep as it started, so the next baseline is clean
+
+        private static readonly uint[] BurnWcids = { 100, 200 };
+
+        /// <summary>One session on <paramref name="repGuid"/>: PreSpawn once (captures the baseline from <paramref name="own"/>), then burn.</summary>
+        private static TrialSession SessionThatBurns(uint repGuid, Player player, Dictionary<uint, long> own, TrialScenario scenario = null, Func<int, TrialRep> prepare = null, ITrialWorld world = null)
+        {
+            var session = new TrialSession("u", scenario ?? new TrialScenario("s", "r", null, 1, null, null, 3, 60, 0), "sha", null, "asha", null, repGuid, world ?? new TrialSessionWorld(), prepare ?? (_ => null));
+            player.TrialSession = session;
+
+            var setup = new TrialRepSetup(repGuid, 0x59000003, 0, () => 0.0, (g, cb) => cb(new TrialMasterSnapshot(new TrialDigest("M", "master"))), a => { a(); return true; }, "S1", null, "archmage-400");
+            setup.RequestMasterDigest();
+            session.Ended += _ => TrialStarter.ClosingReset(session, Archetype, player);
+
+            Assert.IsNull(TrialStarter.PreSpawn(session, setup, Archetype).Refusal);
+            own[BurnWcids[0]] = 120;    // burned in the rep
+            own[BurnWcids[1]] = 0;
+            return session;
+        }
+
+        private static (Player Player, Dictionary<uint, long> Own, List<(string Kind, IReadOnlyDictionary<uint, long> Baseline)> Calls) ClosingRig(uint repGuid)
+        {
+            var (player, _, _) = BaselineRig(repGuid, true);
+            var own = new Dictionary<uint, long> { [BurnWcids[0]] = 300, [BurnWcids[1]] = 40 };
+            var calls = new List<(string, IReadOnlyDictionary<uint, long>)>();
+
+            TrialStarter.OwnConsumablesReader = (p, w) => new Dictionary<uint, long>(own);
+            TrialStarter.SoftReset = (p, a, c, b) => { calls.Add(("soft", c)); return null; };
+            TrialStarter.EnqueueOnPlayer = (p, work) => work();     // the player's own queue, run at once
+
+            // The closing reset restores the player's counts to the baseline it is handed, as RestoreConsumables does.
+            TrialStarter.ClosingConsumableReset = (p, a, c) =>
+            {
+                calls.Add(("closing", c));
+                own.Clear();
+                foreach (var kv in c) own[kv.Key] = kv.Value;
+                return (1, 0);
+            };
+
+            return (player, own, calls);
+        }
+
+        [TestMethod]
+        public void A_session_that_ends_done_restores_the_baseline_so_the_next_session_starts_clean()
+        {
+            var guid = TrialRoster.RepSlots[2].Guid;
+            var (player, own, calls) = ClosingRig(guid);
+
+            try
+            {
+                var world = new TrialSessionWorld();
+                var one = SessionThatBurns(guid, player, own, new TrialScenario("s", "r", null, 1, null, null, 1, 60, 0),
+                    n => new TrialRep { Waves = new[] { (IReadOnlyList<DungeonSpawnPlanEntry>)new List<DungeonSpawnPlanEntry>() }, StateDigest = "M" }, world);
+                var baseline1 = one.ConsumableBaseline;
+                Assert.AreEqual(300, baseline1[BurnWcids[0]]);
+
+                one.Tick(0);
+                Assert.IsTrue(one.TryNext(1, out var refusal), refusal);
+                foreach (var g in world.Spawned) world.Dead.Add(g);
+                one.OnCreatureDied(0, 2);
+                Assert.AreEqual(TrialPhase.Done, one.Phase);
+
+                Assert.AreEqual(1, calls.Count(c => c.Kind == "closing"), "Done runs the closing reset once");
+                Assert.AreEqual(300, own[BurnWcids[0]], "the rep is back to what it started with");
+
+                // Session 2 on the same rep captures the same baseline, not session 1's residue.
+                var two = SessionThatBurns(guid, player, own);
+                CollectionAssert.AreEquivalent(baseline1.ToList(), two.ConsumableBaseline.ToList());
+            }
+            finally
+            {
+                ResetSeams();
+                player.TrialSession = null;
+            }
+        }
+
+        [TestMethod]
+        public void A_session_that_is_aborted_while_the_rep_is_online_restores_the_baseline_too()
+        {
+            var guid = TrialRoster.RepSlots[3].Guid;
+            var (player, own, calls) = ClosingRig(guid);
+
+            try
+            {
+                var one = SessionThatBurns(guid, player, own);
+                var baseline1 = one.ConsumableBaseline;
+
+                one.Abort("aborted", 1);
+                one.Abort("again", 2);
+
+                Assert.AreEqual(1, calls.Count(c => c.Kind == "closing"), "one closing reset, however many times the abort is asked");
+                Assert.AreEqual(300, own[BurnWcids[0]]);
+
+                var two = SessionThatBurns(guid, player, own);
+                CollectionAssert.AreEquivalent(baseline1.ToList(), two.ConsumableBaseline.ToList());
+            }
+            finally
+            {
+                ResetSeams();
+                player.TrialSession = null;
+            }
+        }
+
+        [TestMethod]
+        public void A_session_that_ends_with_the_rep_offline_skips_the_closing_reset()
+        {
+            var guid = TrialRoster.RepSlots[4].Guid;
+            var (player, own, calls) = ClosingRig(guid);
+
+            try
+            {
+                var one = SessionThatBurns(guid, player, own);
+                TrialManager.OnlinePlayer = g => null;     // the rep logged out
+
+                one.Abort("player went offline", 1);
+
+                Assert.AreEqual(0, calls.Count(c => c.Kind == "closing"));
+                Assert.AreEqual(120, own[BurnWcids[0]], "an offline rep keeps its residue (the runbook notes the edge)");
+            }
+            finally
+            {
+                ResetSeams();
+                player.TrialSession = null;
+            }
+        }
+
+        [TestMethod]
+        public void The_closing_reset_always_runs_through_the_players_own_queue()
+        {
+            var guid = TrialRoster.RepSlots[6].Guid;
+            var (player, own, calls) = ClosingRig(guid);
+            var queued = new List<Action>();
+
+            try
+            {
+                TrialStarter.EnqueueOnPlayer = (p, work) => { Assert.AreSame(player, p); queued.Add(work); };
+
+                var one = SessionThatBurns(guid, player, own);
+                one.Abort("aborted", 1);
+
+                Assert.AreEqual(0, calls.Count(c => c.Kind == "closing"), "nothing touches the player on the ending thread");
+                Assert.AreEqual(120, own[BurnWcids[0]]);
+                Assert.AreEqual(1, queued.Count, "the reset is queued onto the player's own landblock");
+
+                queued[0]();
+                Assert.AreEqual(1, calls.Count(c => c.Kind == "closing"), "and runs there");
+                Assert.AreEqual(300, own[BurnWcids[0]]);
+
+                // The same queued work, run again after the rep logged off: nothing is touched.
+                own[BurnWcids[0]] = 120;
+                TrialManager.OnlinePlayer = g => null;
+                queued[0]();
+                Assert.AreEqual(1, calls.Count(c => c.Kind == "closing"));
+                Assert.AreEqual(120, own[BurnWcids[0]]);
+            }
+            finally
+            {
+                ResetSeams();
+                player.TrialSession = null;
+            }
+        }
+
+        [TestMethod]
+        public void A_different_player_object_or_a_logging_out_rep_at_end_time_skips_the_reset()
+        {
+            foreach (var arm in new[] { "replaced", "logging-out", "replaced-before-the-queued-work-runs" })
+            {
+                var guid = TrialRoster.RepSlots[arm == "replaced" ? 6 : arm == "logging-out" ? 7 : 5].Guid;
+                var (player, own, calls) = ClosingRig(guid);
+                var queued = new List<Action>();
+
+                try
+                {
+                    var one = SessionThatBurns(guid, player, own);
+                    var stranger = (Player)RuntimeHelpers.GetUninitializedObject(typeof(Player));
+
+                    if (arm == "replaced-before-the-queued-work-runs")
+                        TrialStarter.EnqueueOnPlayer = (p, work) => queued.Add(work);
+                    else if (arm == "replaced")
+                        TrialManager.OnlinePlayer = g => stranger;          // the rep relogged: another Player object now answers
+                    else
+                        player.IsLoggingOut = true;
+
+                    one.Abort("ended", 1);
+
+                    if (arm == "replaced-before-the-queued-work-runs")
+                    {
+                        Assert.AreEqual(1, queued.Count, "control: it was queued while the bound player was still the rep");
+                        TrialManager.OnlinePlayer = g => stranger;
+                        queued[0]();
+                    }
+
+                    Assert.AreEqual(0, calls.Count(c => c.Kind == "closing"), arm);
+                    Assert.AreEqual(120, own[BurnWcids[0]], arm);
+                }
+                finally
+                {
+                    ResetSeams();
+                    player.IsLoggingOut = false;
+                    player.TrialSession = null;
+                }
+            }
+        }
+
+        [TestMethod]
+        public void The_closing_reset_always_marshals_and_is_bound_to_the_original_player()
+        {
+            var closing = Body(StarterPath, "internal static void ClosingReset(TrialSession session, TrialArchetype archetype, Player boundPlayer)");
+            StringAssert.Contains(closing, "EnqueueOnPlayer(boundPlayer, Restore);");
+            Assert.AreEqual(2, System.Text.RegularExpressions.Regex.Matches(closing, System.Text.RegularExpressions.Regex.Escape("IsBoundPlayerOnline(session, boundPlayer)")).Count, "checked at the end and again inside the queued work");
+            Assert.IsFalse(closing.Contains("PlayerInRoom", StringComparison.Ordinal), "no direct branch");
+
+            var check = Norm(PooledLootSourceText.ExpressionBody(PooledLootSourceText.Read(StarterPath), "internal static bool IsBoundPlayerOnline(TrialSession session, Player bound)"));
+            StringAssert.Contains(check, "ReferenceEquals(TrialManager.OnlinePlayer(session.PlayerGuid), bound) && !bound.IsLoggingOut");
+
+            StringAssert.Contains(Norm(PooledLootSourceText.Read(StarterPath)), "internal static Action<Player, Action> EnqueueOnPlayer = (p, work) => p.EnqueueAction(new ActionEventDelegate(work));");
+            Assert.IsFalse(Norm(PooledLootSourceText.Read("Source/ACE.Server/BalanceTrials/TrialSession.cs")).Contains("RoomGone", StringComparison.Ordinal));
+        }
+
+        [TestMethod]
+        public void A_session_that_never_reset_the_rep_has_nothing_to_close()
+        {
+            var guid = TrialRoster.RepSlots[5].Guid;
+            var (player, own, calls) = ClosingRig(guid);
+
+            try
+            {
+                var session = new TrialSession("u", new TrialScenario("s", "r", null, 1, null, null, 3, 60, 0), "sha", null, "asha", null, guid, new TrialSessionWorld(), _ => null);
+                session.Ended += _ => TrialStarter.ClosingReset(session, Archetype, player);
+                session.Abort("never started a rep", 1);
+
+                Assert.AreEqual(0, calls.Count);
+            }
+            finally
+            {
+                ResetSeams();
+                player.TrialSession = null;
+            }
+        }
+
+        [TestMethod]
+        public void The_closing_reset_is_wired_to_the_session_end_and_is_consumables_only()
+        {
+            StringAssert.Contains(Body(StarterPath, TryStartSig), "session.Ended += _ => ClosingReset(session, archetype, player);");
+
+            var closing = Body(StarterPath, "internal static void ClosingReset(TrialSession session, TrialArchetype archetype, Player boundPlayer)");
+            StringAssert.Contains(closing, "var (restocked, trimmed) = ClosingConsumableReset(boundPlayer, archetype, baseline);");
+            Assert.IsFalse(closing.Contains("SoftReset(", StringComparison.Ordinal), "no buffs, no recharge: the closing reset is not the soft reset");
+        }
+
+        [TestMethod]
+        public void A_rebuild_marks_a_failed_copy_before_it_frees_the_gate()
+        {
+            var body = Body("Source/ACE.Server/BalanceTrials/TrialRebuild.cs", "internal static bool TryRebuild(Session admin, TrialArchetype a, string archetypeSha, int repIndex, Lookups lookups, out string refusal, out string note)");
+            var mark = body.IndexOf("TrialRepSetup.MarkRebuildRequired(rep.Guid, \"the last rebuild's copy failed\", purgeFailed: true);", StringComparison.Ordinal);
+            var reset = body.IndexOf("TrialRepSetup.ResetBlock(rep.Guid);", StringComparison.Ordinal);
+            var release = body.IndexOf("finally { gate.Release(token); }", StringComparison.Ordinal);
+
+            Assert.IsTrue(mark > 0 && reset > 0, "positive control: both outcomes are recorded");
+            Assert.IsTrue(release > mark && release > reset, "the gate frees only after the outcome is recorded");
+        }
+
         [TestMethod]
         public void Consumable_targets_restore_to_the_master_and_lift_up_wins()
         {
@@ -1048,10 +1503,11 @@ namespace ACE.Server.Tests.BalanceTrials
 
         private const string StarterPath = "Source/ACE.Server/BalanceTrials/TrialStarter.cs";
         private const string ResetPath = "Source/ACE.Server/BalanceTrials/TrialReset.cs";
-        private const string TryStartSig = "public static bool TryStart(Player player, string scenarioId, string archetypeId, out string refusal)";
+        private const string TryStartSig = "public static bool TryStart(Player player, string scenarioId, string archetypeId, out string refusal, TrialCampaignStart campaign = null)";
         private const string PrepareRepSig = "internal static TrialRep PrepareRep(TrialScenario scenario, TrialRoom room, int n, string tag, Func<TrialRepSetupResult> preSpawn = null, int? seedRep = null)";
         private const string PreSpawnSig = "internal static TrialRepSetupResult PreSpawn(TrialSession session, TrialRepSetup setup, TrialArchetype archetype)";
-        private const string SoftSig = "public static TrialSoftResetSummary Soft(Player p, TrialArchetype a, IReadOnlyDictionary<uint, long> masterConsumables, string buffProfile)";
+        private const string SoftSig = "public static TrialSoftResetSummary Soft(Player p, TrialArchetype a, IReadOnlyDictionary<uint, long> baseline, string buffProfile)";
+        private const string RestoreSig = "public static (int Restocked, int Trimmed) RestoreConsumables(Player p, TrialArchetype a, IReadOnlyDictionary<uint, long> baseline)";
 
         [TestMethod]
         public void Room_exclude_rows_reach_the_private_copy()
@@ -1062,20 +1518,148 @@ namespace ACE.Server.Tests.BalanceTrials
         public void Scenario_hard_copy_every_and_seed_walk_reach_the_rep_setup()
         {
             var start = Body(StarterPath, TryStartSig);
-            StringAssert.Contains(start, "var consumableWcids = TrialDigest.ConsumableWcids(archetype); var repSetup = new TrialRepSetup(player.Guid.Full, TrialRoster.MasterSlot(archetype.Slot), scenario.HardCopyEvery, TrialManager.Now, (master, callback) => MasterSnapshotLoader(master, consumableWcids, callback), action => TrialManager.Enqueue(session, action), scenarioSha, buffProfile);");
+            StringAssert.Contains(start, "var consumableWcids = TrialDigest.ConsumableWcids(archetype); var repSetup = new TrialRepSetup(player.Guid.Full, TrialRoster.MasterSlot(archetype.Slot), scenario.HardCopyEvery, TrialManager.Now, (master, callback) => MasterSnapshotLoader(master, consumableWcids, callback), action => TrialManager.Enqueue(session, action), scenarioSha, buffProfile, archetype.Id);");
             StringAssert.Contains(start, "n => PrepareRep(scenario, room, n, tag, () => PreSpawn(session, repSetup, archetype), repSetup.SeedRep()));");
-            StringAssert.Contains(Body(StarterPath, PrepareRepSig), "var gem = TrialGemRoller.RollLive(scenario.Gem, seedRep ?? n);");
+            StringAssert.Contains(Body(StarterPath, PrepareRepSig), "var repIndex = seedRep ?? n; var gem = TrialGemRoller.RollLive(TrialRotation.GemFor(scenario.Gem, scenario.Rotation, repIndex), repIndex);");
+        }
+
+        [TestMethod]
+        public void Rotation_precheck_runs_before_the_private_copy_is_created()
+        {
+            var start = Body(StarterPath, TryStartSig);
+            var check = start.IndexOf("var rotationRefusal = TrialRotation.Precheck(scenario, (g, k) => RotationShortfalls(scenario, g, k), out var rotationFull, TrialRepSetup.PeekSeedRep(player.Guid.Full, scenarioSha, archetype.Id)); if (rotationRefusal != null) { log.Warn($\"[TRIAL] start refused: {rotationFull}\"); return Refuse(rotationRefusal, out refusal); }", StringComparison.Ordinal);
+            var create = start.IndexOf("RealmManager.GetNewEphemeralLandblock(", StringComparison.Ordinal);
+
+            Assert.IsTrue(create > 0, "positive control: the create is found");
+            Assert.IsTrue(check > 0 && check < create, "the rotation check refuses before anything is created");
+        }
+
+        [TestMethod]
+        public void A_session_that_reaches_done_tells_the_walk_the_run_is_over()
+            => StringAssert.Contains(Body(StarterPath, TryStartSig), "session.RepEnded += (_, _) => repSetup.OnRepEnded(session.Phase == TrialPhase.Done && scenario.Rotation != null);");
+
+        [TestMethod]
+        public void Status_asks_the_seed_walk_for_the_rotations_next_entry()
+        {
+            var text = Norm(PooledLootSourceText.Read("Source/ACE.Server/Command/Handlers/TrialCommands.cs"));
+            StringAssert.Contains(text, "TrialRotation.NextLabel(trial.Scenario.Rotation, TrialRotation.NextRepIndex(TrialRepSetup.PeekSeedRep(trial.PlayerGuid, trial.ScenarioSha, trial.Archetype?.Id), trial.Phase))");
+        }
+
+        // ---- the rotation walk: keyed by scenario sha AND archetype id
+
+        private static TrialRepSetup WalkSession(uint repGuid, string sha, string archetypeId)
+            => new TrialRepSetup(repGuid, 0x59000003, 0, () => 0.0, (g, cb) => { }, a => { a(); return true; }, sha, null, archetypeId);
+
+        private static int[] WalkEntries(TrialRepSetup setup, IReadOnlyList<TrialRotationEntry> rotation, int reps)
+        {
+            var seq = new List<int>();
+
+            for (var i = 0; i < reps; i++)
+            {
+                seq.Add(TrialRotation.EntryIndex(rotation, setup.SeedRep()) + 1);
+                setup.OnRepEnded();
+            }
+
+            return seq.ToArray();
+        }
+
+        private static readonly TrialRotationEntry[] FourEntries =
+        {
+            new TrialRotationEntry("virindi"), new TrialRotationEntry("olthoi"), new TrialRotationEntry("lugian"), new TrialRotationEntry("undead"),
+        };
+
+        [TestMethod]
+        public void Two_archetypes_on_one_rep_guid_get_identical_rotation_sequences()
+        {
+            var repGuid = TrialRoster.RepSlots[1].Guid;
+            var expected = new[] { 1, 2, 3, 4, 1, 2, 3, 4, 1, 2 };
+
+            CollectionAssert.AreEqual(expected, WalkEntries(WalkSession(repGuid, "S1", "archmage-400"), FourEntries, 10));
+
+            // The same rep character, the same scenario, another archetype: it starts the walk at 1, not where the first stopped.
+            CollectionAssert.AreEqual(expected, WalkEntries(WalkSession(repGuid, "S1", "rogue-400"), FourEntries, 10));
+        }
+
+        [TestMethod]
+        public void A_rebuild_and_a_second_session_do_not_reset_the_rotation_walk()
+        {
+            var repGuid = TrialRoster.RepSlots[2].Guid;
+
+            CollectionAssert.AreEqual(new[] { 1, 2, 3 }, WalkEntries(WalkSession(repGuid, "S1", "archmage-400"), FourEntries, 3));
+
+            TrialRepSetup.ResetBlock(repGuid);
+
+            CollectionAssert.AreEqual(new[] { 4, 1, 2 }, WalkEntries(WalkSession(repGuid, "S1", "archmage-400"), FourEntries, 3), "the walk carries on past the rebuild");
+        }
+
+        [TestMethod]
+        public void A_finished_run_clears_the_walk_so_a_fresh_run_starts_at_entry_one()
+        {
+            var repGuid = TrialRoster.RepSlots[5].Guid;
+            var first = WalkSession(repGuid, "S1", "archmage-400");
+
+            for (var i = 0; i < 3; i++)
+                first.OnRepEnded(runDone: i == 2);
+
+            Assert.AreEqual(1, WalkSession(repGuid, "S1", "archmage-400").SeedRep(), "a new run of the same archetype and scenario starts again at 1");
+            Assert.AreEqual(1, TrialRepSetup.PeekSeedRep(repGuid, "S1", "archmage-400"));
+        }
+
+        [TestMethod]
+        public void A_run_without_a_rotation_keeps_its_walk_at_done_so_step_seeds_stay_fresh()
+        {
+            var repGuid = TrialRoster.RepSlots[3].Guid;
+            var first = WalkSession(repGuid, "S1", "archmage-400");
+
+            // TryStart passes runDone = (Done && scenario.Rotation != null): false for a scenario without a rotation.
+            for (var i = 0; i < 3; i++)
+                first.OnRepEnded(runDone: false);
+
+            Assert.AreEqual(4, WalkSession(repGuid, "S1", "archmage-400").SeedRep(), "the next run carries on at seed + 3");
+        }
+
+        [TestMethod]
+        public void An_unfinished_run_keeps_the_walk_for_the_relog()
+        {
+            var repGuid = TrialRoster.RepSlots[6].Guid;
+            var first = WalkSession(repGuid, "S1", "archmage-400");
+
+            first.OnRepEnded();
+            first.OnRepEnded();
+
+            Assert.AreEqual(3, WalkSession(repGuid, "S1", "archmage-400").SeedRep(), "control: an abort or relog carries on");
+        }
+
+        [TestMethod]
+        public void Peek_reads_the_walk_without_moving_it()
+        {
+            var repGuid = TrialRoster.RepSlots[4].Guid;
+
+            Assert.AreEqual(1, TrialRepSetup.PeekSeedRep(repGuid, "S1", "a"), "no walk yet");
+
+            var setup = WalkSession(repGuid, "S1", "a");
+            setup.OnRepEnded();
+            setup.OnRepEnded();
+
+            Assert.AreEqual(3, TrialRepSetup.PeekSeedRep(repGuid, "S1", "a"));
+            Assert.AreEqual(3, TrialRepSetup.PeekSeedRep(repGuid, "S1", "a"), "peeking does not step it");
+            Assert.AreEqual(1, TrialRepSetup.PeekSeedRep(repGuid, "S1", "b"), "another archetype would start at 1");
+            Assert.AreEqual(1, TrialRepSetup.PeekSeedRep(repGuid, "S2", "a"), "another scenario would start at 1");
+            Assert.AreEqual(3, setup.SeedRep(), "the walk itself was not moved by the peeks");
         }
 
         [TestMethod]
         public void Archetype_consumables_and_master_counts_reach_the_soft_reset_and_digest()
         {
             StringAssert.Contains(Body(StarterPath, PreSpawnSig),
-                "var consumableWcids = TrialDigest.ConsumableWcids(archetype); return setup.Before(() => TrialReset.Soft(player, archetype, setup.MasterConsumables, buffProfile), () => TrialDigest.Compute(player, consumableWcids));");
+                "var consumableWcids = TrialDigest.ConsumableWcids(archetype); var result = setup.Before(() => SoftReset(player, archetype, BaselineConsumables(session, () => OwnConsumablesReader(player, consumableWcids)), buffProfile), () => DigestOf(player, consumableWcids));");
 
             var soft = Body(ResetPath, SoftSig);
-            StringAssert.Contains(soft, "var consumableWcids = TrialDigest.ConsumableWcids(a); var held = p.GetAllPossessions().Where(i => TrialDigest.IsConsumable(i.WeenieClassId, i.WeenieType, consumableWcids)).Select(i => i.WeenieClassId);");
-            StringAssert.Contains(soft, "foreach (var t in ConsumableTargets(a.LiftUp?.Consumables, masterConsumables, held)) { var (added, removed) = p.RestoreTrialConsumable(t.Wcid, t.Target, t.Trim);");
+            StringAssert.Contains(soft, "var (restocked, trimmed) = RestoreConsumables(p, a, baseline);");
+
+            var restore = Body(ResetPath, RestoreSig);
+            StringAssert.Contains(restore, "var consumableWcids = TrialDigest.ConsumableWcids(a); var held = p.GetAllPossessions().Where(i => TrialDigest.IsConsumable(i.WeenieClassId, i.WeenieType, consumableWcids)).Select(i => i.WeenieClassId);");
+            StringAssert.Contains(restore, "foreach (var t in ConsumableTargets(a.LiftUp?.Consumables, baseline, held)) { var (added, removed) = p.RestoreTrialConsumable(t.Wcid, t.Target, t.Trim);");
         }
 
         [TestMethod]
@@ -1112,7 +1696,8 @@ namespace ACE.Server.Tests.BalanceTrials
                 new TrialSessionWorld(), _ => null);
             player.TrialSession = session;
 
-            // The master digest never answers, so the step refuses before the soft reset (which needs a full Player).
+            // The master digest never answers. That no longer refuses the rep (drift is unknown), so the step goes on to the soft reset:
+            // the seam stands in for it (the real one needs a full Player), and the test asserts the seam was reached.
             var setup = new TrialRepSetup(guid, 0x59000003, 0, () => 0.0, (g, cb) => { }, a => { a(); return true; });
             setup.RequestMasterDigest();
 
@@ -1120,17 +1705,27 @@ namespace ACE.Server.Tests.BalanceTrials
             {
                 TrialManager.OnlinePlayer = g => g == guid ? player : null;
 
+                var softCalls = 0;
+                TrialStarter.OwnConsumablesReader = (p, w) => new Dictionary<uint, long>();
+                TrialStarter.DigestOf = (p, w) => new TrialDigest("M", "E");
+                TrialStarter.SoftReset = (p, a, c, b) => { softCalls++; return null; };
+
                 var r = TrialStarter.PreSpawn(session, setup, Archetype);
-                StringAssert.Contains(r.Refusal, "master digest pending");
+                Assert.IsNull(r.Refusal, "a pending master digest no longer refuses");
+                Assert.IsTrue(r.DriftUnknown);
+                Assert.AreEqual(1, softCalls, "the soft reset seam was reached");
                 Assert.IsTrue(player.Attackable, "the pre-spawn step forces the rep attackable");
 
                 // Trial start forces it too.
                 var start = Code(PooledLootSourceText.MethodBody(PooledLootSourceText.Read("Source/ACE.Server/BalanceTrials/TrialStarter.cs"),
-                    "public static bool TryStart(Player player, string scenarioId, string archetypeId, out string refusal)"));
+                    "public static bool TryStart(Player player, string scenarioId, string archetypeId, out string refusal, TrialCampaignStart campaign = null)"));
                 StringAssert.Contains(start, "TrialReset.EnsureAttackable(player);");
             }
             finally
             {
+                TrialStarter.SoftReset = TrialReset.Soft;
+                TrialStarter.DigestOf = TrialDigest.Compute;
+                TrialStarter.OwnConsumablesReader = TrialStarter.OwnConsumables;
                 TrialManager.ResetForTests();
                 player.TrialSession = null;
             }
@@ -1146,7 +1741,8 @@ namespace ACE.Server.Tests.BalanceTrials
         {
             public bool RoomLoaded => true;
             public bool PlayerOnline => true;
-            public bool PlayerInRoom => true;
+            public bool InRoom = true;
+            public bool PlayerInRoom => InRoom;
             public HashSet<uint> Dead = new HashSet<uint>();
             public List<uint> Spawned = new List<uint>();
             private uint _next = 500;

@@ -105,6 +105,13 @@ namespace ACE.Server.WorldEvents.Defs
         public List<RewardPoolEntryDef> Pool { get; set; } = new List<RewardPoolEntryDef>();
 
         /// <summary>
+        /// Optional 1..10 roll count for a crate: effective rolls = draws - 1 + m (WorldEventRewardCrate.EffectiveRolls),
+        /// so a higher tier never pays fewer rolls. Null, the default, rolls m as-is (World Events).
+        /// </summary>
+        [JsonPropertyName("draws")]
+        public int? Draws { get; set; }
+
+        /// <summary>
         /// Bonus crates handed to a crate claimant AFTER the primary crate, inside the same claim lock
         /// (WorldEventClaimRules.ResolveExtras). A coal claimant never gets them. The claim needs 1 + N free pack
         /// slots up front; without them nothing is given and the claim stays retryable. Empty, the default,

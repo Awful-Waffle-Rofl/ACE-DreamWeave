@@ -253,7 +253,7 @@ namespace ACE.Server.Tests
         {
             var snapshot = MarketSnapshot.FromItem(Ring(attack: 1, defense: 0, utility: 0));
 
-            Assert.AreEqual(8, MarketSnapshot.CurrentVersion);
+            Assert.AreEqual(9, MarketSnapshot.CurrentVersion);
             Assert.AreEqual(MarketSnapshot.CurrentVersion, snapshot.SnapshotVersion);
             Assert.AreEqual("Attack (Penetration)", snapshot.Mods.Single().Name);
         }

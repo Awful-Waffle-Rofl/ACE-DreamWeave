@@ -427,7 +427,7 @@ namespace ACE.Server.WorldObjects
 
             if (damageEvent.HasDamage)
             {
-                target.TakeDamage(this, damageEvent.DamageType, damageEvent.Damage, false, IncomingDamageOrigin.DirectHit);
+                target.TakeDamage(this, damageEvent.DamageType, damageEvent.Damage, damageEvent.IsCritical, IncomingDamageOrigin.DirectHit);
 
                 if (GetCreatureSkill(Skill.DirtyFighting).AdvancementClass >= SkillAdvancementClass.Trained)
                     FightDirty(target, damageEvent.Weapon);

@@ -164,6 +164,7 @@ namespace ACE.Server.Tests
 
                     var expected = WeaponModRegistry.AllMods
                         .Where(d => Ruling[wcid].Contains(d.Id))
+                        .OrderBy(d => d.DisplayName, StringComparer.OrdinalIgnoreCase)
                         .Select(d => $"- {d.DisplayName} [100%]: {d.Format(WeaponModValue.MaxMagnitude(d, 1.0))}")
                         .ToList();
 

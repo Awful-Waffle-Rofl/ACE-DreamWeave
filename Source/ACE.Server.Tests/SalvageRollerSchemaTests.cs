@@ -232,10 +232,15 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void OrphanPurge_KeepTestExemptsEverySalvageBatchItem()
         {
+            // The block is anchored on two section comments, so the anchors are found in the raw text; the block
+            // itself is cut from the comment-stripped text at the same offsets (stripping preserves length).
+            var rawFile = PooledLootSourceText.ReadRaw("Source/ACE.Database/ShardDatabaseOfflineTools.cs");
             var file = PooledLootSourceText.Read("Source/ACE.Database/ShardDatabaseOfflineTools.cs");
 
-            var blockStart = file.IndexOf("// Purge biotas that don't have a parent Container, Wielder or Location", StringComparison.Ordinal);
-            var blockEnd = file.IndexOf("// Purge allegiances biotas", StringComparison.Ordinal);
+            Assert.AreEqual(rawFile.Length, file.Length);
+
+            var blockStart = rawFile.IndexOf("// Purge biotas that don't have a parent Container, Wielder or Location", StringComparison.Ordinal);
+            var blockEnd = rawFile.IndexOf("// Purge allegiances biotas", StringComparison.Ordinal);
 
             Assert.IsTrue(blockStart >= 0 && blockEnd > blockStart, "the no-parent purge block moved; re-anchor this test");
 

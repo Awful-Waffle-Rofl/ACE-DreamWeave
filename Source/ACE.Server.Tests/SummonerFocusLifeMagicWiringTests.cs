@@ -23,6 +23,10 @@ namespace ACE.Server.Tests
         private static string Body(string signature) =>
             PooledLootSourceText.MethodBody(PooledLootSourceText.Read(MagicFile), signature);
 
+        // The site marker is itself a comment, so its count is read from the raw (comment-bearing) body.
+        private static string BodyRaw(string signature) =>
+            PooledLootSourceText.MethodBodyBoth(MagicFile, signature).Raw;
+
         private static string Boost() => Body("private void HandleCastSpell_Boost(");
 
         private static string Transfer() => Body("private void HandleCastSpell_Transfer(");
@@ -60,7 +64,7 @@ namespace ACE.Server.Tests
             var flat = Flat(boost);
 
             Assert.AreEqual(1, CountOf(boost, "SummonerFocus."), "exactly one focus read in Harm");
-            Assert.AreEqual(1, CountOf(boost, SiteComment));
+            Assert.AreEqual(1, CountOf(BodyRaw("private void HandleCastSpell_Boost("), SiteComment));
             Assert.AreEqual(1, CountOf(flat,
                 "if (spell.VitalDamageType == DamageType.Health && tryBoost < 0) { var summonerMod = SummonerFocus.HitMod(this, targetCreature); "
                 + "if (summonerMod != 1.0f) tryBoost = boost = -(int)Math.Round(-tryBoost * summonerMod); }"),
@@ -91,7 +95,7 @@ namespace ACE.Server.Tests
             var flat = Flat(transfer);
 
             Assert.AreEqual(1, CountOf(transfer, "SummonerFocus."), "exactly one focus read in Drain");
-            Assert.AreEqual(1, CountOf(transfer, SiteComment));
+            Assert.AreEqual(1, CountOf(BodyRaw("private void HandleCastSpell_Transfer("), SiteComment));
 
             // The gain goes through RecomputeDrainGain, which returns min(recomputed, prior): a pet bonus that raises the
             // loss leaves the drainer's heal where it was, and a cut lowers it. Spelled with the named boostMod argument
@@ -128,8 +132,8 @@ namespace ACE.Server.Tests
             Assert.AreEqual(1, CountOf(dot, "SummonerFocus.WielderDamageMod(this, creatureTarget)"));
             Assert.AreEqual(1, CountOf(dot, "SummonerFocus."), "the wielder cut is the only focus read");
             Assert.AreEqual(0, CountOf(dot, "SummonerFocus.HitMod("), "pet DoT dealt side is out of scope");
-            Assert.AreEqual(1, CountOf(dot, SiteComment));
-            Assert.AreEqual(4, CountOf(dot, "summonerWielderMod"), "one declaration and the three damage returns");
+            Assert.AreEqual(1, CountOf(BodyRaw("public float CalculateDotEnchantment_StatModValue("), SiteComment));
+            Assert.AreEqual(5, CountOf(dot, "summonerWielderMod"), "one declaration, the three damage returns, and the nether record of the cut (NetherDotWielderCuts)");
 
             AssertBefore(dot, "var creatureTarget = target as Creature;", "SummonerFocus.WielderDamageMod(", "after the target cast");
             AssertBefore(dot, "SummonerFocus.WielderDamageMod(", "SpellCategory.AetheriaProcHealthOverTimeRaising", "before the first early return");

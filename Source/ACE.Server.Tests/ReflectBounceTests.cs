@@ -52,10 +52,29 @@ namespace ACE.Server.Tests
             ThornsCloseRangeTests.EnsurePlayerTypeInitializable();
         }
 
+        private Func<double> savedCritDraw;
+
+        /// <summary>
+        /// Every Thorns reflect now rolls a crit (10% base); the bounce cases assert exact Thorns amounts, so the draw is
+        /// pinned to 1.0 (never a crit) and restored after each test.
+        /// </summary>
         [TestInitialize]
-        public void SeedTunables() => RestoreTunables();
+        public void SeedTunables()
+        {
+            savedCritDraw = ACE.Server.ClassAbilities.Abilities.ThornsAbility.CritDraw;
+            ACE.Server.ClassAbilities.Abilities.ThornsAbility.CritDraw = () => 1.0;
+
+            RestoreTunables();
+        }
 
         [TestCleanup]
+        public void RestoreCritDrawAndTunables()
+        {
+            ACE.Server.ClassAbilities.Abilities.ThornsAbility.CritDraw = savedCritDraw;
+
+            RestoreTunables();
+        }
+
         public void RestoreTunables()
         {
             foreach (var key in SeededDoubles)

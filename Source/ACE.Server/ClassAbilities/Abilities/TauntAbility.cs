@@ -28,8 +28,19 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// implementor of IItemProcAbility. Since 2026-11-10 Hunter's Echo (Archer T3) is the second one, and it
     /// rides EXACTLY these two sources by calling <see cref="TriggersOn"/> itself, so the filter here is now
     /// the shared allowlist for both handlers: widening it widens Hunter's Echo too.
+    ///
+    /// ON-HIT TAUNT ADDED 2026-11-25. Independently of the AoE above, every monster the owner lands a melee/missile
+    /// hit on (IOutgoingDamageAbility) or hits with a damaging spell projectile (ISpellHitAbility) is taunted onto
+    /// them for class_ability_taunt_on_hit_duration seconds (flat, no Provoke term, 0 disables). It uses
+    /// ApplyTaunt's extendOnly mode so it never shortens a longer hold (an AoE taunt with Provoke gear), and
+    /// another taunter's live hold still wins. It sends no chat line, since it would fire on every swing.
+    /// The owner's on-hit hold blocks their own Tank pet pulse from taking that monster (ApplyTaunt refuses a
+    /// different taunter's live hold, the anti ping-pong rule); the owner accepted that on 2026-11-25. The hold
+    /// is tracked through Creature.TauntNonOnHitExpiry so Opportunist does not count it as a mark, and the on-hit taunt skips any
+    /// monster carrying a World Events Hold tag (WorldEventHooks.HasHoldObjective), whose targeting FindNextTarget hands to
+    /// WorldEventHooks.TrySelectHoldTarget. The AoE proc is unchanged by both.
     /// </summary>
-    public class TauntAbility : IItemProcAbility, ITestableClassAbility, IAbilityReadout
+    public class TauntAbility : IItemProcAbility, IOutgoingDamageAbility, ISpellHitAbility, ITestableClassAbility, IAbilityReadout
     {
         /// <summary>
         /// The top rank. Named so the Custom Summons Tank pulse (CombatPet.TickTauntPulse) can ask for the
@@ -49,7 +60,8 @@ namespace ACE.Server.ClassAbilities.Abilities
             // (the 0.5 default) before, a word that went stale on a retune.
             DescriptionTemplate = "When one of your Aetheria surges or your cloak fires its spell proc, monsters near you are " +
                           "taunted into attacking you for a short time, and are only {fn:cast_chance@max|pct}% as likely to cast " +
-                          "spells while taunted.",
+                          "spells while taunted. Every enemy you hit with an attack or damaging spell projectile is also " +
+                          "taunted into attacking you for {v:class_ability_taunt_on_hit_duration|num} seconds.",
             // cast_chance is TauntAbility.CastChanceMultiplier, the clamp to [0, 1] Monster.PassesTauntCastGate applies to the tunable.
             TextFormulas = new Dictionary<string, TextFormula>
             {
@@ -65,6 +77,39 @@ namespace ACE.Server.ClassAbilities.Abilities
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
         };
+
+        public void ModifyOutgoingDamage(Player attacker, int rank, Creature target, DamageEvent damageEvent) =>
+            TauntOnHit(attacker, target);
+
+        public void OnSpellHit(Player caster, int rank, Creature primaryTarget, SpellProjectile projectile) =>
+            TauntOnHit(caster, primaryTarget);
+
+        /// <summary>The on-hit hold in seconds, from class_ability_taunt_on_hit_duration. 0 or less turns the on-hit taunt off.</summary>
+        public static double OnHitDuration() =>
+            PropertyManager.GetDouble("class_ability_taunt_on_hit_duration").Item;
+
+        /// <summary>
+        /// Taunts <paramref name="target"/> onto <paramref name="owner"/> for <see cref="OnHitDuration"/>, never
+        /// shortening a hold the owner already has. Defensive: a null, dead, Player or CombatPet target is
+        /// skipped, as is a non-positive duration. Returns whether the monster is now held by the owner.
+        /// </summary>
+        public static bool TauntOnHit(Player owner, Creature target) => TauntOnHit(owner, target, OnHitDuration());
+
+        /// <summary><see cref="TauntOnHit(Player, Creature)"/> with an explicit duration; the taunter is any Creature so tests need no Player.</summary>
+        public static bool TauntOnHit(Creature owner, Creature target, double duration)
+        {
+            if (owner == null || target == null || duration <= 0.0)
+                return false;
+
+            if (target is Player || target is CombatPet || target.IsDead)
+                return false;
+
+            // World Events Hold seekers/hunters/knights keep their own targeting; the on-hit taunt leaves them alone.
+            if (ACE.Server.WorldEvents.WorldEventHooks.HasHoldObjective(target))
+                return false;
+
+            return target.ApplyTaunt(owner, duration, extendOnly: true, onHit: true);
+        }
 
         public void OnItemProc(Player wielder, int rank, WorldObject procSource)
         {

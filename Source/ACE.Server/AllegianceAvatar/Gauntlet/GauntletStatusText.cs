@@ -49,6 +49,15 @@ public static class GauntletStatusText
                 lines.Add($"{run.Fought} fought. {TimeLeftText(run)}");
             }
 
+            // the Avatar fighter's aura, while the run is live (Staging, Active, Intermission)
+            if (run.State is GauntletState.Staging or GauntletState.Active or GauntletState.Intermission)
+            {
+                var aura = GauntletAura.StatusLine(run.Aura);
+
+                if (aura != null)
+                    lines.Add(aura);
+            }
+
             if (holdSecondsLeft > 0)
                 lines.Add($"You are held for {(int)Math.Ceiling(holdSecondsLeft)} more seconds.");
         }

@@ -15,6 +15,9 @@ public sealed record GauntletTuning
 {
     public bool Enabled { get; init; }
     public long Price { get; init; }
+
+    /// <summary>Favor per effective account in a run's price: price = max(Price, ceil(this x effective accounts)). See AvatarPricing.</summary>
+    public long PricePerAccount { get; init; }
     public long MinAvatarLevel { get; init; }
     public long CooldownHours { get; init; }
     public long MaxConcurrent { get; init; }
@@ -36,6 +39,10 @@ public sealed record GauntletTuning
     public long MaxCreatureHealth { get; init; }
     public long DeathHoldSeconds { get; init; }
     public long FighterRespawnSeconds { get; init; }
+    public long FighterRespawnStepSeconds { get; init; }
+    public long FighterRespawnMaxSeconds { get; init; }
+    public long FighterAuraDamageRating { get; init; }
+    public long FighterAuraResistRating { get; init; }
     public long MinContactWaves { get; init; }
     public long CrateMaxTier { get; init; }
     public double WaveCountPerPlayer { get; init; }
@@ -54,6 +61,9 @@ public sealed record GauntletTuning
     public double FighterDamagePerLevel { get; init; }
     public double FighterMinDeathSeconds { get; init; }
     public double FighterBurstSeconds { get; init; }
+    public double FighterTauntSeconds { get; init; }
+    public double FighterHealSharePerTenSeconds { get; init; }
+    public double FighterAuraRadius { get; init; }
     public string Sites { get; init; } = "";
 
     /// <summary>The highest crate tier: rewards.json ships gauntlet_t0 to gauntlet_t6 (Task 12).</summary>
@@ -62,11 +72,15 @@ public sealed record GauntletTuning
     /// <summary>The most trash a wave may ask for. GroupScaling caps live monsters at 180, so this is only a guard against garbage.</summary>
     public const long MaxAliveCeiling = 10000;
 
+    /// <summary>The most rating either aura key may give: far above any sane value, so it only stops a garbled row overflowing the rating sum.</summary>
+    public const long AuraRatingCeiling = 1000;
+
     /// <summary>The shipped defaults. Must equal the PropertyManager default dictionaries.</summary>
     public static GauntletTuning Defaults { get; } = new()
     {
         Enabled = true,
-        Price = 3000,
+        Price = 1000,
+        PricePerAccount = 300,
         MinAvatarLevel = 75,
         CooldownHours = 24,
         MaxConcurrent = 2,
@@ -88,6 +102,10 @@ public sealed record GauntletTuning
         MaxCreatureHealth = 2000000000,
         DeathHoldSeconds = 60,
         FighterRespawnSeconds = 60,
+        FighterRespawnStepSeconds = 20,
+        FighterRespawnMaxSeconds = 120,
+        FighterAuraDamageRating = 10,
+        FighterAuraResistRating = 10,
         MinContactWaves = 3,
         CrateMaxTier = 6,
         WaveCountPerPlayer = 2.0,
@@ -98,14 +116,17 @@ public sealed record GauntletTuning
         StaggerMaxSeconds = 2.0,
         KillXpScale = 1.0,
         PenMinDistance = 100.0,
-        FighterHealthBase = 10.0,
-        FighterHealthPerLevel = 0.04,
+        FighterHealthBase = 6.0,
+        FighterHealthPerLevel = 0.02,
         FighterOffenseBase = 1.0,
         FighterOffensePerLevel = 0.0004,
         FighterDamageBase = 1.0,
         FighterDamagePerLevel = 0.004,
         FighterMinDeathSeconds = 20.0,
         FighterBurstSeconds = 5.0,
+        FighterTauntSeconds = 5.0,
+        FighterHealSharePerTenSeconds = 0.25,
+        FighterAuraRadius = 30.0,
         Sites = "",
     };
 
@@ -117,6 +138,7 @@ public sealed record GauntletTuning
     {
         Enabled = PropertyManager.GetBool("allegiance_gauntlet_enabled").Item,
         Price = PropertyManager.GetLong("allegiance_gauntlet_price").Item,
+        PricePerAccount = PropertyManager.GetLong("allegiance_gauntlet_price_per_account").Item,
         MinAvatarLevel = PropertyManager.GetLong("allegiance_gauntlet_min_avatar_level").Item,
         CooldownHours = PropertyManager.GetLong("allegiance_gauntlet_cooldown_hours").Item,
         MaxConcurrent = PropertyManager.GetLong("allegiance_gauntlet_max_concurrent").Item,
@@ -138,6 +160,10 @@ public sealed record GauntletTuning
         MaxCreatureHealth = PropertyManager.GetLong("allegiance_gauntlet_max_creature_health").Item,
         DeathHoldSeconds = PropertyManager.GetLong("allegiance_gauntlet_death_hold_seconds").Item,
         FighterRespawnSeconds = PropertyManager.GetLong("allegiance_gauntlet_fighter_respawn_seconds").Item,
+        FighterRespawnStepSeconds = PropertyManager.GetLong("allegiance_gauntlet_fighter_respawn_step_seconds").Item,
+        FighterRespawnMaxSeconds = PropertyManager.GetLong("allegiance_gauntlet_fighter_respawn_max_seconds").Item,
+        FighterAuraDamageRating = PropertyManager.GetLong("allegiance_gauntlet_fighter_aura_damage_rating").Item,
+        FighterAuraResistRating = PropertyManager.GetLong("allegiance_gauntlet_fighter_aura_resist_rating").Item,
         MinContactWaves = PropertyManager.GetLong("allegiance_gauntlet_min_contact_waves").Item,
         CrateMaxTier = PropertyManager.GetLong("allegiance_gauntlet_crate_max_tier").Item,
         WaveCountPerPlayer = PropertyManager.GetDouble("allegiance_gauntlet_wave_count_per_player").Item,
@@ -156,6 +182,9 @@ public sealed record GauntletTuning
         FighterDamagePerLevel = PropertyManager.GetDouble("allegiance_gauntlet_fighter_damage_per_level").Item,
         FighterMinDeathSeconds = PropertyManager.GetDouble("allegiance_gauntlet_fighter_min_death_seconds").Item,
         FighterBurstSeconds = PropertyManager.GetDouble("allegiance_gauntlet_fighter_burst_seconds").Item,
+        FighterTauntSeconds = PropertyManager.GetDouble("allegiance_gauntlet_fighter_taunt_seconds").Item,
+        FighterHealSharePerTenSeconds = PropertyManager.GetDouble("allegiance_gauntlet_fighter_heal_share_per_ten_seconds").Item,
+        FighterAuraRadius = PropertyManager.GetDouble("allegiance_gauntlet_fighter_aura_radius").Item,
         Sites = PropertyManager.GetString("allegiance_gauntlet_sites").Item,
     });
 
@@ -163,7 +192,8 @@ public sealed record GauntletTuning
     /// Clamps a garbled value into the range the rules can use. Counts and durations are at least 0 (a few at least 1, where
     /// 0 would divide by zero or make a wave end before it starts), the headcount cap is held to
     /// [1, GroupScaling.MaxRosterSize], the start level and level step to [1 or 0, int.MaxValue] (so the level arithmetic cannot wrap), max_alive to [1, <see cref="MaxAliveCeiling"/>], the max creature health to [1, int.MaxValue], the crate tier to
-    /// [0, <see cref="CrateMaxTierCeiling"/>], a trash fraction to [0, 1], and every paired min/max is ordered. A non-finite
+    /// [0, <see cref="CrateMaxTierCeiling"/>], the aura ratings to [0, <see cref="AuraRatingCeiling"/>], a trash fraction to
+    /// [0, 1], and every paired min/max is ordered (the respawn ceiling is never below the base respawn). A non-finite
     /// double falls back to its default.
     /// </summary>
     public static GauntletTuning Sanitized(GauntletTuning t)
@@ -175,10 +205,12 @@ public sealed record GauntletTuning
         var portalsMin = Math.Max(1L, t.PortalsMin);
         var portalMinDistance = Finite(t.PortalMinDistance, d.PortalMinDistance);
         var staggerMin = Finite(t.StaggerMinSeconds, d.StaggerMinSeconds);
+        var respawn = Math.Max(0L, t.FighterRespawnSeconds);
 
         return t with
         {
             Price = Math.Max(0L, t.Price),
+            PricePerAccount = Math.Max(0L, t.PricePerAccount),
             MinAvatarLevel = Math.Max(0L, t.MinAvatarLevel),
             CooldownHours = Math.Max(0L, t.CooldownHours),
             MaxConcurrent = Math.Max(0L, t.MaxConcurrent),
@@ -199,7 +231,11 @@ public sealed record GauntletTuning
             HealthCurveTopLevel = Math.Max(1L, t.HealthCurveTopLevel),
             MaxCreatureHealth = Math.Clamp(t.MaxCreatureHealth, 1L, int.MaxValue),
             DeathHoldSeconds = Math.Max(0L, t.DeathHoldSeconds),
-            FighterRespawnSeconds = Math.Max(0L, t.FighterRespawnSeconds),
+            FighterRespawnSeconds = respawn,
+            FighterRespawnStepSeconds = Math.Max(0L, t.FighterRespawnStepSeconds),
+            FighterRespawnMaxSeconds = Math.Max(respawn, t.FighterRespawnMaxSeconds),
+            FighterAuraDamageRating = Math.Clamp(t.FighterAuraDamageRating, 0L, AuraRatingCeiling),
+            FighterAuraResistRating = Math.Clamp(t.FighterAuraResistRating, 0L, AuraRatingCeiling),
             MinContactWaves = Math.Max(1L, t.MinContactWaves),
             CrateMaxTier = Math.Clamp(t.CrateMaxTier, 0L, CrateMaxTierCeiling),
 
@@ -219,6 +255,9 @@ public sealed record GauntletTuning
             FighterDamagePerLevel = Finite(t.FighterDamagePerLevel, d.FighterDamagePerLevel),
             FighterMinDeathSeconds = Finite(t.FighterMinDeathSeconds, d.FighterMinDeathSeconds, min: 1.0),
             FighterBurstSeconds = Finite(t.FighterBurstSeconds, d.FighterBurstSeconds),
+            FighterTauntSeconds = Finite(t.FighterTauntSeconds, d.FighterTauntSeconds),
+            FighterHealSharePerTenSeconds = Finite(t.FighterHealSharePerTenSeconds, d.FighterHealSharePerTenSeconds),
+            FighterAuraRadius = Finite(t.FighterAuraRadius, d.FighterAuraRadius),
 
             Sites = t.Sites ?? "",
         };

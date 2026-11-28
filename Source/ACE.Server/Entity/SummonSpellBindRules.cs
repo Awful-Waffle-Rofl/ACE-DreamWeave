@@ -232,7 +232,7 @@ namespace ACE.Server.Entity
         /// <summary>
         /// A blank caster summon carries no SharedCooldown (an unbound blank must not look like a summon to VTank, which
         /// detects one by SharedCooldown 213); binding completes it into a real summon, so this writes the retail summon
-        /// cooldown id and duration (the same constants the Duo Summon Gem writes). Memory only - the caller saves.
+        /// cooldown id and duration (the same constants the Duo Summon Essence writes). Memory only - the caller saves.
         /// </summary>
         public static void ApplySummonCooldown(WorldObject device)
         {

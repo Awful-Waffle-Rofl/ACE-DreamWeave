@@ -30,15 +30,39 @@ public static class AvatarRosters
     /// </summary>
     public static IReadOnlyList<AvatarRoster> FromAllegianceManager(Func<IPlayer, bool> isDeleted = null)
     {
-        isDeleted ??= InMemoryIsDeleted;
-        var rosters = new List<AvatarRoster>();
-
+        var candidates = new List<(object Allegiance, AllegianceNode Monarch, IEnumerable<AllegianceNode> Members)>();
         foreach (var allegiance in AllegianceManager.Allegiances.Values)
         {
             if (allegiance.Monarch == null || allegiance.Members == null)
                 continue;
+            candidates.Add((allegiance, allegiance.Monarch, allegiance.Members.Values));
+        }
 
-            var roster = BuildRoster(allegiance.Monarch, allegiance.Members.Values, n => n.Player, isDeleted);
+        return FromAllegiances(candidates,
+            monarchGuid => AllegianceManager.Players.TryGetValue(new ObjectGuid(monarchGuid), out var node) ? node?.Allegiance : null,
+            isDeleted);
+    }
+
+    /// <summary>
+    /// The filter behind FromAllegianceManager. An allegiance is emitted only when it is still its monarch's CURRENT
+    /// allegiance: <paramref name="currentAllegianceOf"/> (monarch guid to the allegiance that player's node points at)
+    /// must return the same object. A former monarch who swore to another allegiance leaves a stale entry in
+    /// AllegianceManager.Allegiances; without this guard it would found an Avatar that reconcile then absorbs, forever.
+    /// </summary>
+    internal static IReadOnlyList<AvatarRoster> FromAllegiances(
+        IEnumerable<(object Allegiance, AllegianceNode Monarch, IEnumerable<AllegianceNode> Members)> allegiances,
+        Func<uint, object> currentAllegianceOf, Func<IPlayer, bool> isDeleted = null, Func<AllegianceNode, IPlayer> playerOf = null)
+    {
+        isDeleted ??= InMemoryIsDeleted;
+        playerOf ??= n => n.Player;
+        var rosters = new List<AvatarRoster>();
+
+        foreach (var (allegiance, monarch, members) in allegiances)
+        {
+            if (!ReferenceEquals(currentAllegianceOf(monarch.PlayerGuid.Full), allegiance))
+                continue;
+
+            var roster = BuildRoster(monarch, members, playerOf, isDeleted);
             if (roster != null)
                 rosters.Add(roster);
         }

@@ -19,6 +19,7 @@ namespace ACE.Server.Tests
 
         private const string LookMigrationFile = "2026-11-21-01-Add-Allegiance-Avatar-Look.sql";
         private const string LevelMigrationFile = "2026-11-23-01-Add-Allegiance-Avatar-Level-Xp.sql";
+        private const string DailyMigrationFile = "2026-11-25-02-Add-Allegiance-Avatar-Daily-Purchases.sql";
 
         // Copied from RewardClaimSchemaTests.RepoRoot: walk up from the test output to the repo root.
         private static string RepoRoot()
@@ -118,6 +119,7 @@ namespace ACE.Server.Tests
                 ("SeatedAt", "seated_At"), ("AbsorbedIntoId", "absorbed_Into_Id"),
                 ("LastContributionAt", "last_Contribution_At"), ("LastDecayDay", "last_Decay_Day"),
                 ("LookJson", "look_Json"),
+                ("BlessingBoughtAt", "blessing_Bought_At"), ("LastEventAt", "last_Event_At"), ("EventsOnDay", "events_On_Day"),
                 ("CreatedAt", "created_At"), ("UpdatedAt", "updated_At"),
             };
 
@@ -133,6 +135,11 @@ namespace ACE.Server.Tests
             Assert.AreEqual("date", a.FindProperty("LastDecayDay").GetColumnType());
             Assert.AreEqual("mediumtext", a.FindProperty("LookJson").GetColumnType());
             Assert.IsTrue(a.FindProperty("LookJson").IsNullable, "look_Json is NULL for the default look");
+            Assert.AreEqual("datetime", a.FindProperty("BlessingBoughtAt").GetColumnType());
+            Assert.AreEqual("datetime", a.FindProperty("LastEventAt").GetColumnType());
+            Assert.IsTrue(a.FindProperty("BlessingBoughtAt").IsNullable, "blessing_Bought_At is NULL until the first purchase");
+            Assert.IsTrue(a.FindProperty("LastEventAt").IsNullable, "last_Event_At is NULL until the first private event");
+            Assert.IsFalse(a.FindProperty("EventsOnDay").IsNullable, "events_On_Day is NOT NULL DEFAULT 0");
 
             var c = ctx.Model.FindEntityType(typeof(AllegianceAvatarContribution));
 
@@ -229,6 +236,66 @@ namespace ACE.Server.Tests
             var unset = ShardAvatarStore.FromEntity(new AllegianceAvatar { AvatarId = 8 });
             Assert.IsNull(unset.LookJson, "a NULL column is the default look, not an empty document");
             Assert.IsNull(ShardAvatarStore.ToEntity(unset).LookJson, "the default look writes NULL back");
+        }
+
+        /// <summary>
+        /// The daily-purchase migration: three guarded, re-runnable adds, in order after look_Json, with the types the entity maps.
+        /// CATCHES: a guard dropped (the second boot throws), a NOT NULL datetime (every existing Avatar would read as stamped),
+        /// a nullable count, or the file sorting before the table exists.
+        /// </summary>
+        [TestMethod]
+        public void DailyMigration_AddsTheThreeColumns_Rerunnably()
+        {
+            var sql = File.ReadAllText(Path.Combine(RepoRoot(), "Database", "Updates", "Shard", DailyMigrationFile));
+
+            StringAssert.Contains(sql, "ADD COLUMN `blessing_Bought_At` datetime NULL ");
+            StringAssert.Contains(sql, "ADD COLUMN `last_Event_At` datetime NULL ");
+            StringAssert.Contains(sql, "ADD COLUMN `events_On_Day` tinyint unsigned NOT NULL DEFAULT 0 ");
+            StringAssert.Contains(sql, "AFTER `look_Json`");
+            StringAssert.Contains(sql, "AFTER `blessing_Bought_At`");
+            StringAssert.Contains(sql, "AFTER `last_Event_At`");
+
+            foreach (var column in new[] { "blessing_Bought_At", "last_Event_At", "events_On_Day" })
+                StringAssert.Contains(sql, $"TABLE_NAME = 'allegiance_avatar' AND COLUMN_NAME = '{column}'", $"{column} needs its own existence guard");
+
+            Assert.AreEqual(3, Regex.Matches(sql, @"PREPARE stmt FROM @sql;").Count, "one guarded statement per column");
+            Assert.AreEqual(3, Regex.Matches(sql, @"EXECUTE stmt;").Count);
+            Assert.AreEqual(3, Regex.Matches(sql, @"DEALLOCATE PREPARE stmt;").Count);
+            Assert.AreEqual(3, Regex.Matches(sql, @"IF\(@col = 0,").Count, "every ALTER sits behind its count");
+
+            Assert.IsFalse(Regex.IsMatch(sql, @"^\s*ALTER TABLE", RegexOptions.Multiline), "an unguarded top-level ALTER TABLE throws on the second run");
+            Assert.IsFalse(sql.Contains("DELIMITER"), "no stored procedure: the applier's mysql CLI cannot parse it");
+            Assert.IsFalse(sql.Contains("DROP"), "a shard migration must never DROP");
+            Assert.IsTrue(sql.All(c => c < 128), "ASCII only");
+            Assert.IsTrue(string.CompareOrdinal(DailyMigrationFile, LevelMigrationFile) > 0, "the daily migration must sort after the level migration");
+        }
+
+        /// <summary>The three daily columns travel between the entity and AvatarState both ways; the instants come back as UTC.</summary>
+        [TestMethod]
+        public void ShardAvatarStore_maps_the_daily_columns_both_ways()
+        {
+            var bought = new DateTime(2026, 11, 25, 17, 30, 5, DateTimeKind.Unspecified);
+            var called = new DateTime(2026, 11, 25, 18, 0, 0, DateTimeKind.Unspecified);
+
+            var state = ShardAvatarStore.FromEntity(new AllegianceAvatar { AvatarId = 7, BlessingBoughtAt = bought, LastEventAt = called, EventsOnDay = 3 });
+
+            Assert.AreEqual(bought, state.BlessingBoughtUtc);
+            Assert.AreEqual(DateTimeKind.Utc, state.BlessingBoughtUtc.Value.Kind, "EF reads datetime as Unspecified; the store marks it UTC");
+            Assert.AreEqual(called, state.LastEventUtc);
+            Assert.AreEqual(DateTimeKind.Utc, state.LastEventUtc.Value.Kind);
+            Assert.AreEqual((byte)3, state.EventsOnDay);
+
+            var back = ShardAvatarStore.ToEntity(state);
+            Assert.AreEqual(bought, back.BlessingBoughtAt, "ToEntity carries blessing_Bought_At");
+            Assert.AreEqual(called, back.LastEventAt, "ToEntity carries last_Event_At");
+            Assert.AreEqual((byte)3, back.EventsOnDay, "ToEntity carries events_On_Day");
+
+            var never = ShardAvatarStore.FromEntity(new AllegianceAvatar { AvatarId = 8 });
+            Assert.IsNull(never.BlessingBoughtUtc);
+            Assert.IsNull(never.LastEventUtc);
+            Assert.AreEqual((byte)0, never.EventsOnDay);
+            Assert.IsNull(ShardAvatarStore.ToEntity(never).BlessingBoughtAt, "never bought writes NULL back");
+            Assert.IsNull(ShardAvatarStore.ToEntity(never).LastEventAt);
         }
     }
 }

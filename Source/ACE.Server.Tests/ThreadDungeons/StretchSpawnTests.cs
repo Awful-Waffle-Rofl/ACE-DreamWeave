@@ -651,9 +651,13 @@ namespace ACE.Server.Tests.ThreadDungeons
         [TestMethod]
         public void Pin_no_non_boss_uplift_site_reads_the_run_standard()
         {
+            // The two section markers are comments, so they are located in the raw lines; the readers are scanned in
+            // the comment-stripped lines (same line count, stripping keeps every line break).
             var lines = Lines();
-            var from = Enumerable.Range(0, lines.Length).First(i => lines[i].TrimStart().StartsWith("// 4a.", StringComparison.Ordinal));
-            var to = ExactLine(lines, "// ---- boss normalization: offense and defense (spec B) ----");
+            var rawLines = PooledLootSourceText.ReadRaw(Spawner).Split('\n');
+            Assert.AreEqual(rawLines.Length, lines.Length);
+            var from = Enumerable.Range(0, rawLines.Length).First(i => rawLines[i].TrimStart().StartsWith("// 4a.", StringComparison.Ordinal));
+            var to = ExactLine(rawLines, "// ---- boss normalization: offense and defense (spec B) ----");
             Assert.IsTrue(from < to, "the 4a marker precedes the boss normalization marker");
 
             var readers = Enumerable.Range(from, to - from).Where(i => !IsComment(lines[i]) && lines[i].Contains("plan.BandStandard")).ToList();

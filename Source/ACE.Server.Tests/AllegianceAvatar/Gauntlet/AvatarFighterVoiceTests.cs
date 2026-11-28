@@ -338,7 +338,12 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             var h = new FighterRunHarness();
             var run = h.StartActive();
 
-            Assert.AreEqual(AvatarFighterVoice.Lines[FighterVoiceTrigger.Spawn][0], sent.Single().Text, "the first placement is the spawn line");
+            // each placement is followed by the aura line (GauntletAuraTextTests pins its text)
+            var aura = GauntletAura.PlacedLine(h.Tuning.FighterAuraRadius, h.Tuning.FighterAuraDamageRating, h.Tuning.FighterAuraResistRating);
+
+            Assert.AreEqual(2, sent.Count, "the spawn line and the aura line");
+            Assert.AreEqual(AvatarFighterVoice.Lines[FighterVoiceTrigger.Spawn][0], sent[0].Text, "the first placement is the spawn line");
+            Assert.AreEqual(aura, sent[1].Text);
 
             h.Hooks.WaveCleared(run, 1);
             Assert.AreEqual(AvatarFighterVoice.Lines[FighterVoiceTrigger.WaveClear][0], sent.Last().Text);
@@ -347,8 +352,9 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
             h.Advance(h.Tuning.FighterRespawnSeconds + 1);
 
             Assert.AreEqual(2, h.Placed.Count, "fixture: respawned");
-            Assert.AreEqual(AvatarFighterVoice.Lines[FighterVoiceTrigger.Death][0], sent[2].Text);
-            Assert.AreEqual(AvatarFighterVoice.Lines[FighterVoiceTrigger.Return][0], sent[3].Text, "a later placement is the return line");
+            Assert.AreEqual(AvatarFighterVoice.Lines[FighterVoiceTrigger.Death][0], sent[3].Text);
+            Assert.AreEqual(AvatarFighterVoice.Lines[FighterVoiceTrigger.Return][0], sent[4].Text, "a later placement is the return line");
+            Assert.AreEqual(aura, sent[5].Text, "and the aura line again");
         }
 
         [TestMethod]

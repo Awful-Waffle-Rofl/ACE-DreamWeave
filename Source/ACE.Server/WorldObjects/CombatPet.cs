@@ -544,9 +544,10 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// Custom Summons Tank (PropertyFloat 9021): seconds between taunt pulses, 0 for every other pet. Cached
-        /// from the weenie at construction (SetEphemeralValues).
+        /// from the weenie at construction (SetEphemeralValues). The Allegiance Gauntlet's Avatar fighter, whose weenie
+        /// carries none, has it set from its run's tuning at placement (GauntletAvatarFighter.ArmTauntPulse).
         /// </summary>
-        public double SummonTauntInterval { get; private set; }
+        public double SummonTauntInterval { get; protected set; }
 
         /// <summary>
         /// The whole target rule for this pet: IsPetTargetCandidate (alive, attackable, not ignored as
@@ -616,6 +617,7 @@ namespace ACE.Server.WorldObjects
         /// the player Taunt's radius tunables), for the player Taunt's base hold, holding at most
         /// MaxTauntTargets (3) at once: monsters it already holds are refreshed first, then the nearest new
         /// ones fill the free slots. Never wakes an idle monster. A pet without the property never pulses.
+        /// "The owner's side" is TauntPulseSide, which the Allegiance Gauntlet's Avatar fighter replaces with its run's side.
         ///
         /// THREADING: runs on this pet's landblock tick. Each candidate is only WRITTEN (ApplyTaunt) when it is
         /// in this pet's own landblock group - the same cross-group guard Monster_Magic.TryRollSpell uses - and
@@ -636,9 +638,10 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         internal int ApplyTauntPulse(IEnumerable<Creature> candidates, Func<Creature, bool> canReach)
         {
-            var owner = P_PetOwner;
+            // the side this pulse defends, resolved once per pulse; null (no owner, for a pet) pulses nothing
+            var engaged = TauntPulseSide();
 
-            if (owner == null || Location == null)
+            if (engaged == null || Location == null)
                 return 0;
 
             var radius = TauntPulseRadius;
@@ -654,7 +657,7 @@ namespace ACE.Server.WorldObjects
 
                 var distance = Location.DistanceTo(monster.Location);
 
-                if (!PetEngagement.IsTauntPulseCandidate(monster, owner, distance, radius))
+                if (!PetEngagement.IsTauntPulseShape(monster, distance, radius) || !engaged(monster))
                     continue;
 
                 if (!canReach(monster))
@@ -704,6 +707,22 @@ namespace ACE.Server.WorldObjects
             }
 
             return taunted;
+        }
+
+        /// <summary>
+        /// The engagement half of the pulse's candidate rule (PetEngagement.IsTauntPulseCandidate): for a pet, a monster
+        /// engaged with its owner's side (PetEngagement.IsEngagedWithOwner, the owner read once per pulse). Null when there
+        /// is no side to defend (a pet with no owner): the pulse then taunts nothing. The Allegiance Gauntlet's Avatar
+        /// fighter overrides it with its run's side.
+        /// </summary>
+        protected virtual Func<Creature, bool> TauntPulseSide()
+        {
+            var owner = P_PetOwner;
+
+            if (owner == null)
+                return null;
+
+            return monster => PetEngagement.IsEngagedWithOwner(monster, owner);
         }
 
         /// <summary>The most monsters one Tank pet holds under its taunt at once. Fixed, not a server tunable.</summary>

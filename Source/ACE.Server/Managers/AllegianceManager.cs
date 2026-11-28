@@ -197,6 +197,23 @@ namespace ACE.Server.Managers
         public const double GrandPatronPassupRate = 0.02;
 
         /// <summary>
+        /// DreamWeave: a patron ABOVE this level receives passup from every vassal, ignoring the
+        /// retail level gate. Retail (the ExistedBeforeAllegianceXpChanges flag) stops a vassal who
+        /// swore while out-leveling their patron from passing anything until the patron catches up;
+        /// that gate still applies to patrons at or below this level.
+        /// </summary>
+        public const int PassupLevelGateExemptAboveLevel = 200;
+
+        /// <summary>
+        /// DreamWeave: whether a vassal passes XP up the chain. True when the vassal is not held by
+        /// the retail level gate, or when their patron is above PassupLevelGateExemptAboveLevel.
+        /// </summary>
+        public static bool VassalPassesUp(bool vassalNotLevelGated, int? patronLevel)
+        {
+            return vassalNotLevelGated || (patronLevel ?? 1) > PassupLevelGateExemptAboveLevel;
+        }
+
+        /// <summary>
         /// Clamps an admin-set passup rate to [0.0, 1.0], treating NaN/infinity as the given
         /// fallback. A typo must not be able to hand a patron more XP than the vassal actually
         /// earned - the ulong cast in DoPassXP saturates rather than throwing, so an unclamped
@@ -270,7 +287,7 @@ namespace ACE.Server.Managers
 
             var vassal = vassalNode.Player;
 
-            if (!vassal.ExistedBeforeAllegianceXpChanges)
+            if (!VassalPassesUp(vassal.ExistedBeforeAllegianceXpChanges, patronNode.Player?.Level))
                 return;
 
             var patronRate = GetPatronPassupRate();
@@ -321,7 +338,13 @@ namespace ACE.Server.Managers
 
             // was this vassal previously a Monarch?
             if (vassal.Allegiance != null)
+            {
                 RemoveCache(vassal.Allegiance);
+
+                // RemoveCache only drops the Players lookups; drop the stale entry too, or AvatarRosters keeps seeing a roster for a monarch who is now a vassal
+                if (Allegiances.TryGetValue(vassal.Allegiance.Guid, out var stale) && ReferenceEquals(stale, vassal.Allegiance))
+                    Allegiances.Remove(vassal.Allegiance.Guid);
+            }
 
             // rebuild the new combined structure
             var allegiance = GetAllegiance(vassal);

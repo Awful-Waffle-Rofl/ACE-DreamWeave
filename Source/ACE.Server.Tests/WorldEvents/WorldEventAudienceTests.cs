@@ -217,6 +217,32 @@ namespace ACE.Server.Tests.WorldEvents
             CollectionAssert.AreEqual(new[] { (AvatarId, 2000UL, true) }, c.Settled);
         });
 
+        /// <summary>
+        /// A private event priced at 0 still settles: the sink also settles the daily claim (AvatarEventPurchase.Settle), so a
+        /// free event that skipped it would hold the day's slot until a restart.
+        /// </summary>
+        [TestMethod]
+        public void Settle_PriceZero_StillCommitsAtActive() => WithSinks(c =>
+        {
+            var run = Run(AvatarId, serverWide: false, price: 0);
+
+            GoActive(run);
+            run.Finish(WorldEventOutcome.AbortedAdmin);
+
+            CollectionAssert.AreEqual(new[] { (AvatarId, 0UL, true) }, c.Settled, "committed exactly once at price 0");
+        });
+
+        [TestMethod]
+        public void Settle_PriceZero_AbortedBeforeActive_StillReleases() => WithSinks(c =>
+        {
+            var run = Run(AvatarId, serverWide: false, price: 0);
+            Assert.IsTrue(Transition(run, WorldEventState.Staged, "t"));
+
+            run.Finish(WorldEventOutcome.AbortedAdmin);
+
+            CollectionAssert.AreEqual(new[] { (AvatarId, 0UL, false) }, c.Settled, "released exactly once at price 0");
+        });
+
         [TestMethod]
         public void Settle_OrdinaryRun_NeverTouchesFavor() => WithSinks(c =>
         {
@@ -446,6 +472,290 @@ namespace ACE.Server.Tests.WorldEvents
 
             Assert.AreEqual(0, offenders.Count, "route these through WorldEvent.AnnounceLocal: " + string.Join(", ", offenders));
             Assert.IsTrue(File.ReadAllText(Path.Combine(WorldEventsDir(), "WorldEvent.Audience.cs")).Contains("WorldEventAnnouncer.LocalAnnounceSink("));
+        }
+
+        // ---- rewards: a quiet private event pays its allegiance's members only (owner ruling 2026-11-26) ---------
+        //
+        // Membership is frozen once at Rewarding entry (SnapshotRewardMembers) from WorldEventHooks.CharacterMonarchSource and
+        // AllegianceMemberSource; the claim gate and the pooled-loot seats both read only that snapshot.
+
+        private const uint Vassal = 1001;
+        private const uint Outsider = 2000;
+
+        private static uint DefaultMonarchOf(uint guid) => guid == Monarch || guid == Vassal ? Monarch : guid;
+
+        private static void WithMembership(Func<uint, uint> monarchOf, Action body)
+        {
+            var c = WorldEventHooks.CharacterMonarchSource;
+            var r = WorldEventHooks.AllegianceMemberSource;
+
+            try
+            {
+                WorldEventHooks.CharacterMonarchSource = monarchOf;
+                WorldEventHooks.AllegianceMemberSource = m => new uint[] { Vassal };
+                body();
+            }
+            finally
+            {
+                WorldEventHooks.CharacterMonarchSource = c;
+                WorldEventHooks.AllegianceMemberSource = r;
+            }
+        }
+
+        private static WorldEvent RunWith(uint? avatarId, bool serverWide, uint? monarch = null, bool pool = false)
+        {
+            var run = new WorldEvent(1, null, new WorldEventRequest { AvatarId = avatarId, AnnounceServerWide = serverWide, AvatarMonarchGuid = monarch }, null, clock: () => 1234d);
+
+            if (pool)
+                run.LatchPooledLoot(true);
+
+            foreach (var guid in new[] { Monarch, Vassal, Outsider })
+                Assert.IsTrue(run.Participation.CreditCombatContact(guid, guid + 1, null, "P" + guid));
+
+            return run;
+        }
+
+        [TestMethod]
+        public void QuietPrivateEvent_Snapshot_ExcludesAnOutsider_NotAMember() => WithSinks(c => WithMembership(DefaultMonarchOf, () =>
+        {
+            InitAvatar();
+            var run = RunWith(AvatarId, serverWide: false);
+            run.SnapshotRewardMembers();
+
+            Assert.IsFalse(run.ExcludesFromRewards(Monarch), "the monarch is a member");
+            Assert.IsFalse(run.ExcludesFromRewards(Vassal), "a vassal is a member");
+            Assert.IsTrue(run.ExcludesFromRewards(Outsider), "a character of another allegiance, or none, is excluded");
+            Assert.IsTrue(run.ExcludesFromRewards(9999), "and so is a character the run never saw");
+        }));
+
+        [TestMethod]
+        public void QuietPrivateEvent_Snapshot_IsFrozen_JoiningOrLeavingAfterItChangesNothing() => WithSinks(c =>
+        {
+            InitAvatar();
+            var run = RunWith(AvatarId, serverWide: false);
+
+            WithMembership(DefaultMonarchOf, () => run.SnapshotRewardMembers());
+
+            // After the snapshot the outsider swears in and the vassal leaves.
+            WithMembership(g => g == Outsider ? Monarch : g == Vassal ? 5555u : DefaultMonarchOf(g), () =>
+            {
+                run.SnapshotRewardMembers(); // a second call is a no-op
+
+                Assert.IsTrue(run.ExcludesFromRewards(Outsider), "swearing in during the claim window does not make a member");
+                Assert.IsFalse(run.ExcludesFromRewards(Vassal), "leaving after the snapshot does not take a member out");
+            });
+        });
+
+        [TestMethod]
+        public void QuietPrivateEvent_WithoutASnapshot_FailsClosed() => WithSinks(c =>
+        {
+            InitAvatar();
+            var run = RunWith(AvatarId, serverWide: false);
+
+            Assert.IsTrue(run.ExcludesFromRewards(Monarch), "no snapshot, no confirmed member");
+        });
+
+        [TestMethod]
+        public void AnnouncedPrivateEvent_AndPublicRun_ExcludeNobody() => WithSinks(c => WithMembership(DefaultMonarchOf, () =>
+        {
+            InitAvatar();
+
+            foreach (var run in new[] { RunWith(AvatarId, serverWide: true), RunWith(null, serverWide: true), RunWith(null, serverWide: false) })
+            {
+                run.SnapshotRewardMembers();
+
+                foreach (var guid in new[] { Monarch, Vassal, Outsider })
+                    Assert.IsFalse(run.ExcludesFromRewards(guid), $"{guid}: announced and public runs withhold from nobody");
+            }
+        }));
+
+        [TestMethod]
+        public void QuietPrivateEvent_MonarchFromTheRequest_WorksWhenTheAvatarWasNeverBound() => WithSinks(c => WithMembership(DefaultMonarchOf, () =>
+        {
+            // No Avatar in the manager at all (MonarchGuid null from the start): the purchase's monarch is what names the members.
+            AvatarManager.Initialize(new Store(), () => T, () => Start, () => new AccountActivityIndex(), () => new List<AvatarRoster>());
+            var run = RunWith(AvatarId, serverWide: false, monarch: Monarch);
+            run.SnapshotRewardMembers();
+
+            Assert.IsFalse(run.ExcludesFromRewards(Monarch));
+            Assert.IsFalse(run.ExcludesFromRewards(Vassal));
+            Assert.IsTrue(run.ExcludesFromRewards(Outsider));
+        }));
+
+        [TestMethod]
+        public void QuietPrivateEvent_MonarchUnknownEverywhere_AndNoCommonParticipantMonarch_FailsClosed() => WithSinks(c => WithMembership(g => g, () =>
+        {
+            AvatarManager.Initialize(new Store(), () => T, () => Start, () => new AccountActivityIndex(), () => new List<AvatarRoster>());
+            var run = RunWith(AvatarId, serverWide: false);
+            run.SnapshotRewardMembers();
+
+            foreach (var guid in new[] { Monarch, Vassal, Outsider })
+                Assert.IsTrue(run.ExcludesFromRewards(guid), $"{guid}: nobody is confirmed");
+        }));
+
+        [TestMethod]
+        public void QuietPrivateEvent_AnUnboundAvatarBeforeTheSnapshot_KeepsTheRequestsMonarch() => WithSinks(c => WithMembership(DefaultMonarchOf, () =>
+        {
+            var state = InitAvatar();
+            var run = RunWith(AvatarId, serverWide: false, monarch: Monarch);
+
+            state.MonarchGuid = null; // absorbed or retired mid-run
+            run.SnapshotRewardMembers();
+
+            Assert.IsFalse(run.ExcludesFromRewards(Vassal));
+            Assert.IsTrue(run.ExcludesFromRewards(Outsider));
+        }));
+
+        [TestMethod]
+        public void QuietPrivateEvent_ANewMonarchMidRun_IsTheOneFrozenAtRewardTime() => WithSinks(c => WithMembership(g => g == 5000 ? 3000u : DefaultMonarchOf(g), () =>
+        {
+            var state = InitAvatar();
+            var run = RunWith(AvatarId, serverWide: false, monarch: Monarch);
+            run.Participation.CreditCombatContact(5000, 5001, null, "New");
+
+            state.MonarchGuid = 3000;
+            run.SnapshotRewardMembers();
+
+            Assert.IsTrue(run.ExcludesFromRewards(Monarch), "the old monarch's allegiance is no longer the Avatar's");
+            Assert.IsFalse(run.ExcludesFromRewards(5000), "the current monarch's is");
+        }));
+
+        [TestMethod]
+        public void QuietPrivateEvent_MonarchSucceededMidEvent_ManagerNotRebound_MembersOfTheNewMonarchGetSeats() => WithSinks(c =>
+        {
+            InitAvatar(); // the manager still holds the OLD monarch (1000)
+            var run = RunWith(AvatarId, serverWide: false, pool: true);
+            const uint NewMonarch = 4000;
+            var roster = new List<uint>();
+
+            var oldC = WorldEventHooks.CharacterMonarchSource;
+            var oldR = WorldEventHooks.AllegianceMemberSource;
+
+            try
+            {
+                // The succession is already live: everyone reports the new monarch, and the old monarch has no roster.
+                WorldEventHooks.CharacterMonarchSource = g => g == Outsider ? Outsider : NewMonarch;
+                WorldEventHooks.AllegianceMemberSource = m => m == NewMonarch ? roster : Array.Empty<uint>();
+
+                run.DealLootPool();
+            }
+            finally
+            {
+                WorldEventHooks.CharacterMonarchSource = oldC;
+                WorldEventHooks.AllegianceMemberSource = oldR;
+            }
+
+            CollectionAssert.AreEquivalent(new[] { Monarch, Vassal }, run.LootPool.SharesForTest().Keys.ToArray(), "the successor's allegiance is paid, the outsider is not");
+            Assert.IsFalse(run.ExcludesFromRewards(Vassal));
+            Assert.IsTrue(run.ExcludesFromRewards(Outsider));
+        });
+
+        [TestMethod]
+        public void QuietPrivateEvent_NoMembersFoundAnywhere_StaysClosed() => WithSinks(c =>
+        {
+            AvatarManager.Initialize(new Store(), () => T, () => Start, () => new AccountActivityIndex(), () => new List<AvatarRoster>());
+            var run = RunWith(AvatarId, serverWide: false, monarch: 7777); // a monarch nobody is sworn to
+            var oldC = WorldEventHooks.CharacterMonarchSource;
+
+            try
+            {
+                WorldEventHooks.CharacterMonarchSource = g => g; // nobody is sworn to anybody
+                run.SnapshotRewardMembers();
+            }
+            finally
+            {
+                WorldEventHooks.CharacterMonarchSource = oldC;
+            }
+
+            foreach (var guid in new[] { Monarch, Vassal, Outsider })
+                Assert.IsTrue(run.ExcludesFromRewards(guid), "no retry candidate: fail closed");
+        });
+
+        [TestMethod]
+        public void LootPoolSeats_QuietPrivate_DealOnlyToMembers() => WithSinks(c => WithMembership(DefaultMonarchOf, () =>
+        {
+            InitAvatar();
+            var run = RunWith(AvatarId, serverWide: false, pool: true);
+
+            run.DealLootPool();
+
+            CollectionAssert.AreEquivalent(new[] { Monarch, Vassal }, run.LootPool.SharesForTest().Keys.ToArray(), "the outsider is dealt no seat");
+        }));
+
+        [TestMethod]
+        public void LootPoolSeats_AnnouncedAndPublic_DealToEveryParticipant() => WithSinks(c => WithMembership(DefaultMonarchOf, () =>
+        {
+            InitAvatar();
+
+            foreach (var run in new[] { RunWith(AvatarId, serverWide: true, pool: true), RunWith(null, serverWide: true, pool: true) })
+            {
+                run.DealLootPool();
+
+                CollectionAssert.AreEquivalent(new[] { Monarch, Vassal, Outsider }, run.LootPool.SharesForTest().Keys.ToArray());
+            }
+        }));
+
+        [TestMethod]
+        public void TryWithhold_WithholdsFromAnOutsider_SendsTheLineOnce_AndNeverBotherAMember() => WithSinks(c => WithMembership(DefaultMonarchOf, () =>
+        {
+            InitAvatar();
+            var run = RunWith(AvatarId, serverWide: false);
+            run.SnapshotRewardMembers();
+            var sent = new List<string>();
+
+            Assert.IsTrue(WorldEventCacheHandler.TryWithhold(run, Outsider, sent.Add));
+            Assert.IsTrue(WorldEventCacheHandler.TryWithhold(run, Outsider, sent.Add), "still withheld on the second click");
+            CollectionAssert.AreEqual(new[] { "This was a private allegiance event. Only its members receive the spoils." }, sent, "the line goes once");
+
+            Assert.IsFalse(WorldEventCacheHandler.TryWithhold(run, Monarch, sent.Add));
+            Assert.AreEqual(1, sent.Count, "a member is told nothing");
+
+            var announced = RunWith(AvatarId, serverWide: true);
+            Assert.IsFalse(WorldEventCacheHandler.TryWithhold(announced, Outsider, sent.Add));
+            Assert.IsFalse(WorldEventCacheHandler.TryWithhold(null, Outsider, sent.Add));
+            Assert.AreEqual(1, sent.Count);
+        }));
+
+        [TestMethod]
+        public void RewardExclusionLine_IsTheOwnerWording()
+        {
+            Assert.AreEqual("This was a private allegiance event. Only its members receive the spoils.", WorldEventCacheHandler.PrivateEventExclusionLine);
+        }
+
+        // Secondary pins: the call sites exist, in the right order. The runtime tests above own the behavior; these only catch a
+        // deleted or reordered call, since the handler needs a live Player and cache.
+        [TestMethod]
+        public void ClaimHandler_CallsTheGate_AfterTheWindow_BeforeAnythingIsGivenOrMarked()
+        {
+            var body = ThreadDungeons.PooledLootSourceText.MethodBody(
+                ThreadDungeons.PooledLootSourceText.Read("Source/ACE.Server/WorldEvents/WorldEventCacheHandler.cs"),
+                "private static bool Handle(WorldObject cache, Player player)");
+
+            var window = body.IndexOf("ClaimDenial.NotRewarding", StringComparison.Ordinal);
+            var gate = body.IndexOf("if (TryWithhold(evt, characterGuid,", StringComparison.Ordinal);
+            var firstGate = body.IndexOf("var gateByCharacter", StringComparison.Ordinal);
+            var claimLock = body.IndexOf("lock (evt.ClaimedCharacters)", StringComparison.Ordinal);
+            var create = body.IndexOf("WorldObjectFactory.CreateNewWorldObject(", StringComparison.Ordinal);
+            var share = body.IndexOf("WorldEventShareDelivery.TryDeliver(evt, cache, player);", StringComparison.Ordinal);
+
+            Assert.IsTrue(window >= 0 && gate > window, "the gate sits after the claim-window check");
+            Assert.IsTrue(gate < firstGate && gate < claimLock && gate < create && gate < share, "before any gate, lock, crate or pooled share");
+            Assert.IsTrue(body.Substring(gate, firstGate - gate).Contains("return true;"), "an excluded claim ends the handler");
+        }
+
+        [TestMethod]
+        public void Finish_FreezesTheMembers_BeforeDealingTheLootPool()
+        {
+            var finish = ThreadDungeons.PooledLootSourceText.Read("Source/ACE.Server/WorldEvents/WorldEvent.cs");
+            Assert.IsTrue(System.Text.RegularExpressions.Regex.IsMatch(finish, @"SnapshotRewardMembers\(\);\s*DealLootPool\(\);"),
+                "Finish snapshots the members right before DealLootPool");
+        }
+
+        [TestMethod]
+        public void MonarchSeams_DefaultToTheAdmissionReader()
+        {
+            Assert.AreSame(typeof(AvatarRights).GetMethod("AdmissionMonarchGuidOf", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static),
+                WorldEventHooks.CharacterMonarchSource.Method);
         }
 
         private sealed class Store : IAvatarStore

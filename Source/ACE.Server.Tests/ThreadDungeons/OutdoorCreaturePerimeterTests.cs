@@ -569,10 +569,11 @@ namespace ACE.Server.Tests.ThreadDungeons
                 return "R11b: a tactic pick outside the filtered list is not snapped back";
 
             var sleep = PooledLootSourceText.MethodBody(awareness, "public virtual void Sleep()");
-            if (!sleep.Contains("if (MonsterState == State.Return && P_OutdoorPerimeter != null)\n                OnOutdoorPerimeterHomeArrival();", StringComparison.Ordinal))
-                return "R11c: arrival home does not restore health";
-            if (sleep.IndexOf("OnOutdoorPerimeterHomeArrival", StringComparison.Ordinal) > sleep.IndexOf("SetCombatMode(", StringComparison.Ordinal))
-                return "R11c: the home check must read MonsterState before Sleep resets it";
+            // R11c is retired: a run creature must NOT heal when it arrives home.
+            if (sleep.Contains("OnOutdoorPerimeterHomeArrival", StringComparison.Ordinal) || sleep.Contains("UpdateVitalDelta(Health", StringComparison.Ordinal))
+                return "R11c retired: Sleep must not run an outdoor-run home-arrival hook";
+            if (partial.Contains("OnOutdoorPerimeterHomeArrival", StringComparison.Ordinal) || partial.Contains("UpdateVitalDelta(Health", StringComparison.Ordinal))
+                return "R11c retired: the outdoor perimeter partial must not heal a run creature";
 
             var alert = PooledLootSourceText.MethodBody(combat, "public bool AlertMonster(Creature monster)");
             if (!alert.Contains("if (monster.P_OutdoorPerimeter != null && !monster.AcceptsOutdoorPerimeterAlert(this))", StringComparison.Ordinal))
@@ -594,10 +595,6 @@ namespace ACE.Server.Tests.ThreadDungeons
             if (home < 0 || taunt < 0 || drop < 0 || retarget < 0 || !(home < taunt && taunt < drop && drop < retarget))
                 return "OutdoorPerimeterTick: containment, then the taunt and attack target drop, then the retarget";
 
-            var arrival = PooledLootSourceText.MethodBody(partial, "internal void OnOutdoorPerimeterHomeArrival()");
-            if (!arrival.Contains("UpdateVitalDelta(Health, missing)", StringComparison.Ordinal))
-                return "R11c: arrival does not heal to full";
-
             return null;
         }
 
@@ -617,7 +614,8 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             Assert.IsNotNull(HookFault(nav.Replace("OutdoorPerimeterTick())", "false)"), aw, co, pa));
             Assert.IsNotNull(HookFault(nav, aw.Replace("FilterOutdoorPerimeterTargets(FilterTetheredTargets(GetAttackTargets()))", "FilterTetheredTargets(GetAttackTargets())"), co, pa));
-            Assert.IsNotNull(HookFault(nav, aw.Replace("OnOutdoorPerimeterHomeArrival();", ";"), co, pa));
+            Assert.IsNotNull(HookFault(nav, aw.Replace("SetCombatMode(CombatMode.NonCombat);", "if (MonsterState == State.Return && P_OutdoorPerimeter != null) OnOutdoorPerimeterHomeArrival();\n            SetCombatMode(CombatMode.NonCombat);"), co, pa));
+            Assert.IsNotNull(HookFault(nav, aw, co, pa.Replace("public OutdoorCreaturePerimeter P_OutdoorPerimeter;", "public OutdoorCreaturePerimeter P_OutdoorPerimeter; void H() { UpdateVitalDelta(Health, 1); }")));
             Assert.IsNotNull(HookFault(nav, aw, co.Replace("!monster.AcceptsOutdoorPerimeterAlert(this)", "false"), pa));
             Assert.IsNotNull(HookFault(nav, aw, co, pa.Replace("TauntTarget = null;", ";")));
             Assert.IsNotNull(HookFault(nav, aw, co, pa.Replace("t => ReferenceEquals(t, attackTarget), t =>", "t => false, t =>")));

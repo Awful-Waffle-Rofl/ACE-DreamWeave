@@ -28,9 +28,10 @@ namespace ACE.Server.Realms
 
         /// <summary>
         /// 23032 (portalmarketplace, the retail Marketplace portal) and 1001007 (the Drift Network's "The
-        /// Marketplace of Dereth" return portal).
+        /// Marketplace of Dereth" return portal), plus 1008466 and 1008467 (the Hills Citadel and Lugian Excavations
+        /// entry portals, owner 2026-11-26).
         /// </summary>
-        public const string DefaultAllowlist = "23032,1001007";
+        public const string DefaultAllowlist = "23032,1001007,1008466,1008467";
 
         public static Func<IReadOnlySet<uint>> AllowlistSource = ReadFromProperties;
 

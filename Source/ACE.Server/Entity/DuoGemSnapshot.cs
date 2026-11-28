@@ -14,7 +14,7 @@ using ACE.Server.WorldObjects;
 namespace ACE.Server.Entity
 {
     /// <summary>
-    /// One summon item absorbed into a Duo Summon Gem (Custom Summons Task 7), stored as versioned JSON in
+    /// One summon item absorbed into a Duo Summon Essence (Custom Summons Task 7), stored as versioned JSON in
     /// PropertyString.DuoSummonSlotA / DuoSummonSlotB:
     ///
     ///   {"v":1,"src":&lt;guid of the absorbed item&gt;,"scribe":&lt;inscriber guid or null&gt;,"item":{...}}

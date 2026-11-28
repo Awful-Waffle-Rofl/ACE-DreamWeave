@@ -526,6 +526,30 @@ namespace ACE.Server.Tests.Pvp
         private static LookFields Palette(PvpTemplateKitItem kit) => PvpTeamHue.LookOf(kit);
 
         [TestMethod]
+        public void Apply_TeamColoursWinOverAStaleShellDye_TheKitItemEndsWithNoDyeShellShade()
+        {
+            var shelled = Worn(CbA, 0x200, 100, "Chest");
+            shelled.Floats[(int)PropertyFloat.DyeShellShade] = 0.4;
+
+            var result = PvpTeamHue.Apply(Definition(shelled), KitHue.Red, Dials(), Valid, TableIcon);
+            var item = result.Definition.Kit[0];
+
+            Assert.AreEqual(1, result.AppliedCount, "positive control: the team look was written");
+            Assert.AreEqual(85, item.Ints[PaletteKey]);
+            Assert.IsFalse(item.Floats.ContainsKey((int)PropertyFloat.DyeShellShade), "a shell dye left on the kit item would colour the second layer over the team colour");
+        }
+
+        [TestMethod]
+        public void LookOf_ReadsDyeShellShade_IncludingZero()
+        {
+            var item = Worn(CbA);
+            Assert.IsNull(PvpTeamHue.LookOf(item).DyeShellShade);
+
+            item.Floats[(int)PropertyFloat.DyeShellShade] = 0.0;
+            Assert.AreEqual(0.0, PvpTeamHue.LookOf(item).DyeShellShade);
+        }
+
+        [TestMethod]
         public void LookOf_ReadsTheLookFieldsOfAKitItem()
         {
             var item = Worn(CbA);

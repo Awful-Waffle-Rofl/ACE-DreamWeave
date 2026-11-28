@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
@@ -9,6 +10,7 @@ using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.Entity;
 using ACE.Server.Managers;
+using ACE.Server.Network.Structure;
 using ACE.Server.WeaponMods;
 using ACE.Server.WorldObjects;
 
@@ -24,8 +26,6 @@ namespace ACE.Server.Tests
     {
         private const string PetLine = "- Summoner Focus: your summons deal +70% damage and take 35% less damage while this is wielded";
         private const string WielderLine = "- Your own damage is 75% lower while this is wielded";
-        private const string PetsOnlyPrefix = "- Empowers your summons, not you: ";
-        private const string SharedPrefix = "- Also empowers your summons: ";
         private const string ImbuePrefix = "- Your summons share this focus's ";
 
         private static readonly string[] DoubleKeys =
@@ -143,65 +143,134 @@ namespace ACE.Server.Tests
             Assert.AreEqual("- Summoner Focus: your summons deal +250% damage and take 75% less damage while this is wielded", lines[0]);
         }
 
-        [TestMethod]
-        public void Mod_line_appears_with_a_pet_transferred_record_and_not_without()
-        {
-            var plain = SummonerFocusTests.Wand(true, 1.14);
-            Assert.AreEqual(2, SummonerFocusDisplay.GetAppraisalLines(plain).Count());
+        /// <summary>Weapon-mod appraisal lines for an item, the surface the route tag lives on.</summary>
+        private static List<string> ModLines(WorldObject wo) => WeaponModDisplay.GetAppraisalLines(wo);
 
+        private static void AssertNoRouteLines(IEnumerable<string> lines)
+        {
+            Assert.IsFalse(lines.Any(l => l.StartsWith("- Empowers your summons") || l.StartsWith("- Also empowers your summons")), "the old route lines are gone");
+        }
+
+        [TestMethod]
+        public void A_pet_transferred_record_adds_no_route_line_to_the_focus_lines()
+        {
             var bloodthirst = SummonerFocusTests.Wand(true, 1.14);
             bloodthirst.SetProperty(PropertyFloat.WeaponModBloodthirst, 1.0);
-            var lines = SummonerFocusDisplay.GetAppraisalLines(bloodthirst).ToList();
-            Assert.AreEqual(3, lines.Count);
-            Assert.AreEqual(PetsOnlyPrefix + "Bloodthirst", lines[2]);
+
+            CollectionAssert.AreEqual(new[] { PetLine, WielderLine }, SummonerFocusDisplay.GetAppraisalLines(bloodthirst).ToList());
         }
 
         [TestMethod]
-        public void Mod_line_appears_for_paragon_gems_alone()
+        public void Weapon_mod_line_is_tagged_with_the_route_between_name_and_bracket()
         {
             var wand = SummonerFocusTests.Wand(true, 1.14);
-            Assert.AreEqual(2, SummonerFocusDisplay.GetAppraisalLines(wand).Count());
+            wand.SetProperty(PropertyFloat.WeaponModBloodthirst, 1.0);
+            wand.SetProperty(PropertyFloat.WeaponModDefensiveWeapon, 1.0);
 
-            wand.SetProperty(PropertyInt.ParagonModSlot1, (int)WeaponModId.Devastation);
-            Assert.IsNull(wand.GetProperty(PropertyFloat.WeaponModDevastation), "no Tourmaline record: gems only");
-            Assert.IsTrue(SummonerFocusDisplay.GetAppraisalLines(wand).Contains(PetsOnlyPrefix + "Devastation"));
+            var lines = ModLines(wand);
+
+            Assert.AreEqual(2, lines.Count, string.Join(" | ", lines));
+            Assert.IsTrue(Regex.IsMatch(lines[0], @"^- Bloodthirst \(Summon\) \[\d+%\]: "), lines[0]);
+            Assert.IsTrue(Regex.IsMatch(lines[1], @"^- Defensive Weapon \(You \+ Summon\) \[\d+%\]: "), lines[1]);
         }
 
         [TestMethod]
-        public void Mod_line_is_off_while_weapon_mods_are_disabled()
+        public void Tag_applies_to_paragon_only_and_rolled_plus_paragon_lines()
+        {
+            var wand = SummonerFocusTests.Wand(true, 1.14);
+            wand.SetProperty(PropertyInt.ParagonModSlot1, (int)WeaponModId.Devastation);
+            Assert.IsNull(wand.GetProperty(PropertyFloat.WeaponModDevastation), "no Tourmaline record: gems only");
+
+            var paragonOnly = ModLines(wand).Single(l => l.StartsWith("- Devastation"));
+            Assert.IsTrue(paragonOnly.StartsWith("- Devastation (Summon) ["), paragonOnly);
+            Assert.IsTrue(paragonOnly.Contains("(Paragon)"), paragonOnly);
+
+            wand.SetProperty(PropertyFloat.WeaponModDevastation, 1.0);
+            var both = ModLines(wand).Single(l => l.StartsWith("- Devastation"));
+            Assert.IsTrue(both.StartsWith("- Devastation (Summon) ["), both);
+            Assert.IsTrue(both.Contains("(rolled"), both);
+        }
+
+        [TestMethod]
+        public void A_non_focus_carrying_the_same_mods_gets_no_tag()
+        {
+            var wand = SummonerFocusTests.Wand(false, 1.14);
+            wand.SetProperty(PropertyFloat.WeaponModBloodthirst, 1.0);
+            wand.SetProperty(PropertyFloat.WeaponModDefensiveWeapon, 1.0);
+
+            var lines = ModLines(wand);
+
+            Assert.AreEqual(2, lines.Count);
+            Assert.IsFalse(lines.Any(l => l.Contains("(Summon") || l.Contains("(You + Summon")), string.Join(" | ", lines));
+            Assert.IsTrue(lines[0].StartsWith("- Bloodthirst ["), lines[0]);
+            Assert.IsTrue(lines[1].StartsWith("- Defensive Weapon ["), lines[1]);
+        }
+
+        /// <summary>The weapon-mod section, and so every route tag, is behind weapon_mods_enabled in the built profile.</summary>
+        [TestMethod]
+        public void Weapon_mod_section_and_tags_are_off_while_weapon_mods_are_disabled()
         {
             var wand = SummonerFocusTests.Wand(true, 1.14);
             wand.SetProperty(PropertyFloat.WeaponModBloodthirst, 1.0);
             wand.SetProperty(PropertyInt.ParagonModSlot1, (int)WeaponModId.Devastation);
 
+            // positive control: gate on, the section and the tag are there
+            var on = new AppraiseInfo(wand, null).PropertiesString[PropertyString.Use];
+            Assert.IsTrue(on.Contains("Weapon Mods:") && on.Contains("(Summon"), on);
+
             PropertyManager.ModifyBool("weapon_mods_enabled", false);
+            Assert.IsFalse(WeaponModRegistry.Enabled());
 
-            wand.SetProperty(PropertyFloat.WeaponModSiphon, 1.0);
+            new AppraiseInfo(wand, null).PropertiesString.TryGetValue(PropertyString.Use, out var off);
+            off ??= string.Empty;
 
-            var lines = SummonerFocusDisplay.GetAppraisalLines(wand).ToList();
-            Assert.AreEqual(2, lines.Count, string.Join(" | ", lines));
-            Assert.IsFalse(lines.Any(l => l.StartsWith(PetsOnlyPrefix) || l.StartsWith(SharedPrefix)));
+            Assert.IsFalse(off.Contains("Weapon Mods:"), off);
+            Assert.IsFalse(off.Contains("(Summon"), off);
+            Assert.IsTrue(off.Contains(PetLine), "the focus lines still render with the gate off");
         }
 
-        /// <summary>The route table sorts the carried mods onto the two lines, in registry order; a Wielder-route mod shows on neither.</summary>
+        /// <summary>The route table sorts each mod onto its tag, lines alphabetical by mod name; a Wielder-route mod carries none.</summary>
         [TestMethod]
-        public void Route_lines_name_the_carried_mods_in_registry_order()
+        public void Route_tags_follow_the_route_table_in_alphabetical_order()
         {
             var wand = SummonerFocusTests.Wand(true, 1.14);
             foreach (var record in new[] { PropertyFloat.WeaponModExecution, PropertyFloat.WeaponModBloodthirst, PropertyFloat.WeaponModFocus,
                 PropertyFloat.WeaponModDefensiveWeapon, PropertyFloat.WeaponModSiphon, PropertyFloat.WeaponModEfficiency })
                 wand.SetProperty(record, 1.0);
 
-            CollectionAssert.AreEqual(new[]
-            {
-                PetLine, WielderLine,
-                PetsOnlyPrefix + "Bloodthirst, Precision, Execution",
-                SharedPrefix + "Siphon, Defensive Weapon",
-            }, SummonerFocusDisplay.GetAppraisalLines(wand).ToList());
+            var names = ModLines(wand).Select(l => l.Substring(2, l.IndexOf(" [", StringComparison.Ordinal) - 2)).ToList();
 
-            var efficiencyOnly = SummonerFocusTests.Wand(true, 1.14);
-            efficiencyOnly.SetProperty(PropertyFloat.WeaponModEfficiency, 1.0);
-            Assert.AreEqual(2, SummonerFocusDisplay.GetAppraisalLines(efficiencyOnly).Count(), "a Wielder-route mod (Efficiency) gets no line");
+            Assert.AreEqual(string.Join(" | ", new[]
+            {
+                "Bloodthirst (Summon)", "Defensive Weapon (You + Summon)", "Efficiency", "Execution (Summon)", "Precision (Summon)", "Siphon (You + Summon)",
+            }), string.Join(" | ", names));
+        }
+
+        /// <summary>The built profile of a focus: the two focus lines under Property Details, then a blank line, then the tagged mods under Weapon Mods.</summary>
+        [TestMethod]
+        public void Built_profile_of_a_focus_renders_two_sections()
+        {
+            var wand = SummonerFocusTests.Wand(true, 1.14);
+            wand.SetProperty(PropertyFloat.WeaponModBloodthirst, 1.0);
+
+            var use = new AppraiseInfo(wand, null).PropertiesString[PropertyString.Use];
+
+            Assert.AreEqual(PetLine + "\n" + WielderLine, use.Split("\n\nWeapon Mods:\n")[0].Substring("Property Details:\n".Length));
+            Assert.IsTrue(use.StartsWith("Property Details:\n"), use);
+            Assert.IsTrue(Regex.IsMatch(use, @"\n\nWeapon Mods:\n- Bloodthirst \(Summon\) \[\d+%\]: [^\n]+$"), use);
+        }
+
+        [TestMethod]
+        public void Siphon_is_shared_and_attunement_is_untagged()
+        {
+            var wand = SummonerFocusTests.Wand(true, 1.14);
+            wand.SetProperty(PropertyFloat.WeaponModSiphon, 1.0);
+            wand.SetProperty(PropertyFloat.WeaponModAttunement, 1.0);
+
+            var lines = ModLines(wand);
+
+            Assert.IsTrue(lines.Any(l => l.StartsWith("- Siphon (You + Summon) [")), string.Join(" | ", lines));
+            Assert.IsTrue(lines.Any(l => l.StartsWith("- Attunement [")), "Attunement is Wielder-route: no tag");
         }
 
         [TestMethod]
@@ -240,26 +309,39 @@ namespace ACE.Server.Tests
             CollectionAssert.AreEqual(new[]
             {
                 PetLine, WielderLine,
-                PetsOnlyPrefix + "Execution (at 50% strength)",
-                SharedPrefix + "Defensive Weapon (at 50% strength)",
                 ImbuePrefix + "Crippling Blow",
-            }, SummonerFocusDisplay.GetAppraisalLines(wand).ToList(), "only the mod lines follow the mod share");
+            }, SummonerFocusDisplay.GetAppraisalLines(wand).ToList(), "only the mod tags follow the mod share; the focus lines carry no route text");
+
+            var modLines = ModLines(wand);
+            Assert.IsTrue(modLines.Any(l => l.StartsWith("- Execution (Summon 50%) [")), string.Join(" | ", modLines));
+            Assert.IsTrue(modLines.Any(l => l.StartsWith("- Defensive Weapon (You + Summon 50%) [")), string.Join(" | ", modLines));
 
             PropertyManager.ModifyDouble(SummonerFocus.PetModTransferPercentKey, 1.0);
             PropertyManager.ModifyDouble(SummonerFocus.PetImbueTransferPercentKey, 0.333);
             CollectionAssert.AreEqual(new[]
             {
                 PetLine, WielderLine,
-                PetsOnlyPrefix + "Execution",
-                SharedPrefix + "Defensive Weapon",
                 ImbuePrefix + "Crippling Blow (at 33% strength)",
             }, SummonerFocusDisplay.GetAppraisalLines(wand).ToList(), "only the imbue line follows the imbue share, rounded");
+            Assert.IsTrue(ModLines(wand).Any(l => l.StartsWith("- Execution (Summon) [")), "full mod share: no number in the tag");
 
+            Assert.AreEqual(" (Summon 68%)", RouteTagAt(0.675, "Execution"), "whole number, half away from zero");
+            Assert.AreEqual(" (Summon)", RouteTagAt(0.996, "Execution"), "rounds to 100: no number");
+            Assert.AreEqual(" (You + Summon 99%)", RouteTagAt(0.994, "Defensive Weapon"), "rounds to 99");
+
+            PropertyManager.ModifyDouble(SummonerFocus.PetModTransferPercentKey, 1.0);
             Assert.AreEqual(" (at 68% strength)", SummonerFocusDisplay.StrengthSuffix(0.675), "whole number, half away from zero");
             Assert.AreEqual("", SummonerFocusDisplay.StrengthSuffix(1.0));
             Assert.AreEqual("", SummonerFocusDisplay.StrengthSuffix(0.996), "rounds to 100: no suffix");
             Assert.AreEqual(" (at 99% strength)", SummonerFocusDisplay.StrengthSuffix(0.994), "rounds to 99");
             Assert.AreEqual(" (at 0% strength)", SummonerFocusDisplay.StrengthSuffix(0.0));
+        }
+
+        private static string RouteTagAt(double share, string modName)
+        {
+            PropertyManager.ModifyDouble(SummonerFocus.PetModTransferPercentKey, share);
+
+            return SummonerFocusDisplay.RouteTag(SummonerFocusTests.Wand(true, 1.14), WeaponModRegistry.AllMods.Single(d => d.DisplayName == modName));
         }
 
         [TestMethod]
@@ -293,19 +375,6 @@ namespace ACE.Server.Tests
             // wielded by a seeded owner
             var owner = SummonerFocusTests.OwnerWielding(wand);
             Assert.AreEqual((double)WorldObject.SumCasterElementalDamageMod(wand, wand.Wielder as Creature ?? owner), SummonerFocusDisplay.DisplayElementalDamageMod(wand), 1e-9);
-        }
-
-        /// <summary>Attunement feeds the damage mod (Wielder route) and gets no mod line; Siphon is Shared since the route table, so it shows on the Shared line only.</summary>
-        [TestMethod]
-        public void Mod_lines_skip_attunement_and_put_siphon_on_the_shared_line()
-        {
-            var wand = SummonerFocusTests.Wand(true, 1.14);
-            wand.SetProperty(PropertyFloat.WeaponModSiphon, 1.0);
-            wand.SetProperty(PropertyFloat.WeaponModAttunement, 1.0);
-
-            var lines = SummonerFocusDisplay.GetAppraisalLines(wand).ToList();
-            Assert.IsFalse(lines.Any(l => l.StartsWith(PetsOnlyPrefix)), "no PetsOnly line");
-            Assert.AreEqual(SharedPrefix + "Siphon", lines.Last());
         }
 
         [TestMethod]

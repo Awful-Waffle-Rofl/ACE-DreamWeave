@@ -346,12 +346,26 @@ namespace ACE.Server.Tests.ThreadDungeons
                 "guard: that rating is max(mods, pack + floor)");
             Assert.AreEqual(solo.DamageRating, duo.DamageRating, "the bonus is never folded into the pack rating");
             Assert.AreEqual(15, duo.GroupDamageRatingBonus);
+            Assert.AreEqual(15, duo.AbilityGroupRatingBonus, "the ability budget's own G (15 per extra member by default) rides the plan");
+            Assert.AreEqual(0, solo.AbilityGroupRatingBonus);
 
             Assert.AreEqual(duo.BossDamageRating + 15, ThreadDungeonSpawner.StampedDamageRating(duo, isBoss: true));
             Assert.AreEqual(duo.DamageRating + 15, ThreadDungeonSpawner.StampedDamageRating(duo, isBoss: false));
 
             Assert.AreEqual(solo.BossDamageRating, ThreadDungeonSpawner.StampedDamageRating(solo, isBoss: true), "solo stamps exactly the plan rating");
             Assert.AreEqual(solo.DamageRating, ThreadDungeonSpawner.StampedDamageRating(solo, isBoss: false));
+        }
+
+        [TestMethod]
+        public void The_damage_path_keeps_the_damage_dials_while_the_ability_budget_keeps_its_own()
+        {
+            // The shipped tunables (damage 5 per member cap 100, ability 15 per member cap 300) through the real builder.
+            var group = GroupScaling.Compute(6, 1.0, 0.5, 180, GroupScaling.DefaultDamageRatingPerMember, GroupScaling.DefaultDamageRatingCap, 0.05, 1.5, 0.0);
+            var plan = BuildPlan(Limits(group));
+
+            Assert.AreEqual(25, plan.GroupDamageRatingBonus, "six players: the stamped damage rating is 5 x 5");
+            Assert.AreEqual(75, plan.AbilityGroupRatingBonus, "six players: the ability budget's G is 15 x 5");
+            Assert.AreEqual(plan.DamageRating + 25, ThreadDungeonSpawner.StampedDamageRating(plan, isBoss: false), "the stamp adds the damage G only");
         }
 
         [TestMethod]

@@ -119,10 +119,13 @@ namespace ACE.Server.Tests.Avatars.Gauntlet
         [TestMethod]
         public void SpellHeal_BoostSite_SkipsTheDirectWrite_MutationProved()
         {
-            var src = PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/WorldObject_Magic.cs").Replace("\r\n", "\n");
+            // Comments are blanked to spaces by Read; trailing blanks are dropped so a code line that used to carry a
+            // trailing comment (`default:   // Health`) pins as plain code.
+            var src = System.Text.RegularExpressions.Regex.Replace(
+                PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/WorldObject_Magic.cs").Replace("\r\n", "\n"), @"[ \t]+\n", "\n");
 
             const string queue = "var gauntletHealQueued = !holdHealQueued && spell.VitalDamageType == DamageType.Health && tryBoost > 0 && player != null\n                && ACE.Server.Avatars.Gauntlet.GauntletHooks.TryQueueFighterSpellHeal(player, targetCreature, tryBoost);";
-            const string skip = "                default:   // Health\n                    if (holdHealQueued || gauntletHealQueued)\n                    {\n                        boost = 0;";
+            const string skip = "                default:\n                    if (holdHealQueued || gauntletHealQueued)\n                    {\n                        boost = 0;";
             const string line = "if (player != null && !holdHealQueued && !gauntletHealQueued)";
 
             static string Fault(string s, string q, string k, string l)
